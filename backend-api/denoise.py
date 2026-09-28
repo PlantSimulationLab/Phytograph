@@ -16,7 +16,7 @@ evenly-spaced index grid, so the same input always yields the same mask.
 
 Why the default method is `ror` and not `sor`
 ---------------------------------------------
-SOR thresholds each point's mean distance to its k nearest neighbours against
+SOR thresholds each point's mean distance to its k nearest neighbors against
 ``mean + std_ratio * std`` taken over the WHOLE cloud. Both of those statistics
 are set by whatever the most extreme population in the cloud happens to be, so
 the threshold moves depending on what else is present. That makes SOR's effect
@@ -37,7 +37,7 @@ clump):
       sor std_ratio=6.0                   0       0       0
       ror (defaults)                      0       0       0
 
-On pass 1 the flyers (mean_d of metres) inflate the std so much that the
+On pass 1 the flyers (mean_d of meters) inflate the std so much that the
 threshold clears the twigs comfortably. Remove them — which is exactly what a
 successful denoise does — and the threshold collapses onto the fine structure.
 So running SOR twice destroys the twigs that the first run correctly kept, and
@@ -48,18 +48,18 @@ before it eats a dense trunk). That is not a safe default for a plant app, where
 the fine peripheral structure IS the signal.
 
 ROR asks a local, physical question instead — "does this point have at least N
-other returns within r metres" — which is density- and translation-invariant,
+other returns within r meters" — which is density- and translation-invariant,
 independent of the rest of the cloud, idempotent, and reasonable about a radius
 the user can check against their own scan resolution.
 
-So: `ror` is the default, `sor` ships third and labelled advanced with
+So: `ror` is the default, `sor` ships third and labeled advanced with
 ``DEFAULT_SOR_STD_RATIO = 4.0``. **Do not "restore the open3d default" of 2.0.**
 ``tests/test_denoise.py::test_sor_second_pass_eats_fine_structure`` pins the
 table above.
 
 SOR does have one genuine advantage worth keeping it for: it flags the
 self-supporting 8-point clump that ROR and the voxel rule both miss, because
-that clump's k-th neighbour is still metres away. Small-cluster removal is the
+that clump's k-th neighbor is still meters away. Small-cluster removal is the
 principled fix for that case; until it exists, SOR is the only method here that
 catches it.
 
@@ -88,7 +88,7 @@ NOISE_NOISE = 2
 METHODS = ("ror", "voxel_count", "sor")
 
 # --- auto-parameter multiples -------------------------------------------------
-# Applied to the p95 nearest-neighbour distance (NOT the median -- see
+# Applied to the p95 nearest-neighbor distance (NOT the median -- see
 # `nn_distance_percentile`). Clamped into [_AUTO_MIN_M, _AUTO_MAX_M] so a
 # pathological spacing estimate can't produce a radius that swallows the plot or
 # one so small every point is an outlier.
@@ -115,7 +115,7 @@ MIN_POINTS = 1000
 # user confirm before the destructive commit. Detect itself never refuses.
 OVER_REMOVAL_FRACTION = 0.20
 # Past this, the KD-tree methods get slow enough to be worth a warning. Not a cap:
-# the compute is cancellable and memory is O(N) once chunked.
+# the compute is cancelable and memory is O(N) once chunked.
 LARGE_CLOUD_HINT = 30_000_000
 
 _QUERY_CHUNK = 1_000_000
@@ -130,7 +130,7 @@ def _chunk_rows(chunk: int, k: int) -> int:
     `tree.query` allocates an (rows, k) distance array AND an (rows, k) index
     array -- 16 bytes a cell -- so `chunk` bounds the peak only for a FIXED k.
     Both callers take k from a user parameter with no upper bound (ROR's "min
-    neighbours", SOR's "neighbours"), which multiplies straight into the chunk:
+    neighbors", SOR's "neighbors"), which multiplies straight into the chunk:
     at nb_points=1000 the 1 M-row chunk asks for a 16 GB allocation. Denoise
     runs in a worker subprocess, so that peak is what the parent pays for.
 
@@ -143,7 +143,7 @@ def _chunk_rows(chunk: int, k: int) -> int:
 
 def _nn_distances(points: np.ndarray, sample: int = 200_000,
                   tree: "Optional[cKDTree]" = None) -> np.ndarray:
-    """Nearest-neighbour distances over an evenly-spaced index sample of
+    """Nearest-neighbor distances over an evenly-spaced index sample of
     `points`, which must be finite. `tree` must have been built on exactly
     `points`; it is built here when not supplied.
 
@@ -176,7 +176,7 @@ def _percentile_or_none(nn: np.ndarray, q: float) -> Optional[float]:
 
 def nn_distance_percentile(points: np.ndarray, q: float = 95.0,
                            sample: int = 200_000) -> Optional[float]:
-    """Percentile of the nearest-neighbour distance, or None if unmeasurable.
+    """Percentile of the nearest-neighbor distance, or None if unmeasurable.
 
     Deterministic: an evenly-spaced index sample, no RNG.
 
@@ -198,11 +198,11 @@ def statistical_outlier_mask(points: np.ndarray, nb_neighbors: int = DEFAULT_SOR
                              workers: int = -1, chunk: int = _QUERY_CHUNK,
                              tree: "Optional[cKDTree]" = None) -> np.ndarray:
     """Keep-mask for SOR: drop points whose mean distance to their `nb_neighbors`
-    nearest neighbours exceeds ``mean + std_ratio * std`` over the whole cloud.
+    nearest neighbors exceeds ``mean + std_ratio * std`` over the whole cloud.
 
     Same criterion as open3d's ``remove_statistical_outlier``, but returns a mask.
 
-    The query is CHUNKED. A one-shot ``tree.query(points, k=nb+1)`` materialises
+    The query is CHUNKED. A one-shot ``tree.query(points, k=nb+1)`` materializes
     both the distances and the indices for every point: at 10 M points and k=21
     that is ~1.7 GB each, and only the per-row mean is ever used. Chunking keeps
     peak memory at O(chunk*k) while the accumulated `mean_d` stays O(N) -- and
@@ -233,13 +233,13 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
     scan resolution, which is why this is the default method: unlike SOR's
     ``std_ratio`` it is density- and translation-invariant, and it fails visibly.
 
-    Asked as a BOUNDED k-NN query, not a neighbour count
+    Asked as a BOUNDED k-NN query, not a neighbor count
     ------------------------------------------------------
     The criterion only needs to know whether the ``nb_points``-th other return
     falls inside `radius`, so it is answered by the distance to the
-    ``nb_points + 1``-th nearest neighbour (column 0 is the point itself). The
+    ``nb_points + 1``-th nearest neighbor (column 0 is the point itself). The
     obvious spelling -- ``query_ball_point(..., return_length=True)`` -- instead
-    COUNTS every neighbour in the ball, and that count is unbounded: the radius
+    COUNTS every neighbor in the ball, and that count is unbounded: the radius
     is derived from the SPARSE tail of the spacing distribution (3 x p95, see
     `nn_distance_percentile`) while the count is paid in the DENSEST region, so
     the cost of the query is set by exactly the population the radius is not
@@ -247,7 +247,7 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
 
     Measured on a real TLS scan (`ScanPos003`, 1.31 M points): p50 spacing
     5.1 mm, p95 spacing 95.7 mm, auto radius 287 mm = 57x the median spacing,
-    giving a MEDIAN of 1,051 neighbours per query and a max of 28,970 -- all
+    giving a MEDIAN of 1,051 neighbors per query and a max of 28,970 -- all
     enumerated to answer "are there at least 2". query_ball_point 6.9 s against
     0.2 s for the bounded k-NN form, a 32x speedup for a bit-identical mask; on
     a 45.7 M-point scan the same query extrapolated to ~147 s, which is what a
@@ -255,7 +255,7 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
 
     The bound is a PRUNING hint only. ``distance_upper_bound`` is strict
     (``<``) whereas ``query_ball_point(r)`` is inclusive (``<=``), which flips
-    every exactly-on-the-radius tie -- routine on lattice/voxel-quantised data,
+    every exactly-on-the-radius tie -- routine on lattice/voxel-quantized data,
     and in the dangerous direction (real structure reported as noise). So the
     bound is nudged one ulp outwards and the inclusive comparison is applied
     explicitly afterwards: nothing at distance <= radius can be pruned, and
@@ -271,7 +271,7 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
     direction this whole module is biased. Pinned, in both halves, by
     `test_ror_matches_query_ball_point_except_on_exact_ties`.
 
-    Nothing proportional to the neighbour lists is ever allocated: the chunked
+    Nothing proportional to the neighbor lists is ever allocated: the chunked
     query holds O(chunk * nb_points) distances, and `_chunk_rows` caps that
     product so a large `nb_points` shrinks the chunk instead of the RAM.
 
@@ -296,7 +296,7 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
         d, _ = tree.query(points[start:stop], k=k,
                           distance_upper_bound=bound, workers=workers)
         # scipy returns (m,) for k == 1 and (m, k) otherwise; the k-th
-        # neighbour is the last column, and is `inf` when it was pruned.
+        # neighbor is the last column, and is `inf` when it was pruned.
         kth = d if d.ndim == 1 else d[:, -1]
         keep[start:stop] = kth <= radius
     return keep
@@ -319,7 +319,7 @@ def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int,
 
     Unlike `_reject_sparse_voxels` this has no "cloud too small / removes too
     much" bail-out: that guard belongs to the registration caller, which needs a
-    filter that can silently no-op. Labelling must report what the rule actually
+    filter that can silently no-op. Labeling must report what the rule actually
     says and let the caller decide.
     """
     n = len(points)
@@ -328,7 +328,7 @@ def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int,
     if voxel <= 0:
         return np.ones(n, dtype=bool)
     # `origin` anchors the grid. The tiled path passes one origin for every
-    # tile so neighbouring tiles bin into the SAME voxels; a per-tile minimum
+    # tile so neighboring tiles bin into the SAME voxels; a per-tile minimum
     # would shift the grid at every seam and change the counts there.
     o = points.min(axis=0) if origin is None else np.asarray(origin, dtype=np.float64)
     key = np.floor((points - o) / voxel).astype(np.int64)
@@ -427,7 +427,7 @@ def denoise_mask(points: np.ndarray, method: str = "ror",
 
     Raises ValueError for an unknown method or a cloud below `MIN_POINTS`; the
     endpoints turn those into 400s. It does NOT refuse on a high flagged
-    fraction -- labelling is non-destructive, so an aggressive result is reported
+    fraction -- labeling is non-destructive, so an aggressive result is reported
     (`over_removal`) and the guard sits on the destructive commit instead.
     """
     if method not in METHODS:
@@ -500,7 +500,7 @@ def _finish(keep, total, n_non_finite, method, params_used, p50, p95,
             f"review the flagged points before removing them.")
     if total > LARGE_CLOUD_HINT and method in ("sor", "ror"):
         warnings.append(
-            f"{total:,} points is large for a neighbour-search method; "
+            f"{total:,} points is large for a neighbor-search method; "
             f"'Sparse voxels' is much faster at this size.")
     if n_non_finite:
         warnings.append(f"{n_non_finite:,} point(s) had non-finite coordinates "
@@ -568,7 +568,7 @@ def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict],
     """ROR / voxel-count per buffered tile. Parameters are resolved ONCE, on a
     spatially contiguous sample (the most populated tile, capped), so every
     tile applies the same radius / voxel - a stride sample would overstate the
-    spacing (thinning a surface by k widens its nearest-neighbour distance by
+    spacing (thinning a surface by k widens its nearest-neighbor distance by
     ~sqrt(k)), and per-tile resolution would let tiles disagree. The voxel grid
     is anchored at the cloud minimum for the same reason (see voxel_count_mask).
     """
@@ -576,7 +576,7 @@ def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict],
 
     params = dict(params or {})
     # Spacing sample: every k-th SMALL cell of a fine probe grid, so the sample
-    # is spatially contiguous inside each cell (true nearest-neighbour
+    # is spatially contiguous inside each cell (true nearest-neighbor
     # distances) while spanning the whole cloud's mix of densities (a single
     # dense tile understates the spacing of the sparse far field, and the
     # untiled run's parameters come from the whole cloud).

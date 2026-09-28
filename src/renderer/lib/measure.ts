@@ -14,11 +14,11 @@
 //
 // ── Units ──────────────────────────────────────────────────────────────────
 //
-// Lengths print in METRES, and say so. That is now a guarantee rather than an
+// Lengths print in METERS, and say so. That is now a guarantee rather than an
 // assumption: a cloud whose source declares another unit (a LAS CRS in US
 // survey feet, say) is scaled at import, and a format that cannot declare one
-// is asked in the import wizard, defaulting to metres. So every coordinate in
-// the app is metres by construction — see backend `_scale_positions_to_metres`
+// is asked in the import wizard, defaulting to meters. So every coordinate in
+// the app is meters by construction — see backend `_scale_positions_to_meters`
 // and `lib/units.ts`.
 //
 // This replaced a deliberate abstention: the readout used to print bare numbers
@@ -26,7 +26,7 @@
 // would have asserted something unverified. The per-scan unit is what made the
 // suffix honest.
 //
-// The precision ladder below is metre-calibrated (100 m is a stand, 1 mm is a
+// The precision ladder below is meter-calibrated (100 m is a stand, 1 mm is a
 // twig) and is now correct by construction for the same reason.
 import { csvCell, formatCoord } from './pointPick';
 import type { Vec3 } from './pointPick';
@@ -152,7 +152,7 @@ export function measurementAngle(m: Measurement): number | null {
 // Where a measurement's label should anchor, in LOCAL space (the frame the
 // scene renders from — see PickedPointLabels on why anchors never use `world`).
 //
-//   distance → the midpoint of the segment, the way a dimension line is labelled
+//   distance → the midpoint of the segment, the way a dimension line is labeled
 //   angle    → the vertex the angle is measured at
 //   polyline → the last vertex, so the label trails the growing line rather
 //              than jumping to a midpoint that moves with every new click
@@ -181,13 +181,13 @@ export function formatLength(v: number): string {
   if (!isFinite(v)) return '—';
   const abs = Math.abs(v);
   if (abs >= 100) return v.toFixed(2);
-  // 3 decimals runs all the way down to a millimetre rather than stopping at 1.
-  // Sub-metre lengths are the common case in plant work, and a 25 cm span reads
+  // 3 decimals runs all the way down to a millimeter rather than stopping at 1.
+  // Sub-meter lengths are the common case in plant work, and a 25 cm span reads
   // as "0.250" — matching the coordinate rows in the same bubble, which are
   // also 3-decimal (formatCoord) — not "0.2500", which is a digit past what a
   // tolerance-limited pick can support.
   if (abs >= 0.001) return v.toFixed(3);
-  // Below a millimetre, fixed notation would print a run of zeros.
+  // Below a millimeter, fixed notation would print a run of zeros.
   return v === 0 ? '0.000' : v.toExponential(3);
 }
 
@@ -234,7 +234,7 @@ export function primaryValue(m: Measurement): string {
   return formatLength(totalLength(m.vertices));
 }
 
-// ── Clipboard serialisation ────────────────────────────────────────────────
+// ── Clipboard serialization ────────────────────────────────────────────────
 
 // `chord_*` rather than `dx/dy/dz`: for a distance the chord IS the
 // measurement, but for a polyline it is the straight line from first vertex to
@@ -322,7 +322,7 @@ export function measurementToText(m: Measurement): string {
 
   const axes = ['X', 'Y', 'Z'];
   m.vertices.forEach((v, i) => {
-    // formatCoord for the same reason as the CSV: coordinates keep millimetre
+    // formatCoord for the same reason as the CSV: coordinates keep millimeter
     // precision regardless of magnitude.
     const coords = axes.map((ax, k) => `${ax} ${formatCoord(v.world[k])}`).join('  ');
     lines.push(`P${i + 1}\t${coords}`);

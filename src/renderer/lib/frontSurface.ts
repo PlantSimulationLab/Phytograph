@@ -86,7 +86,7 @@ export function decodeFloat32(b64: string): Float32Array {
  * automatic allowance of two cells' width at that depth, which lets a surface
  * seen at an angle up to ~60° keep its far side of each cell.
  *
- * Each cell's nearest depth is min-filtered over its 3×3 neighbourhood before
+ * Each cell's nearest depth is min-filtered over its 3×3 neighborhood before
  * the threshold is taken: a coarse LOD tile leaves cells between its points
  * empty, and without the filter a back surface would show through those gaps.
  */

@@ -1,6 +1,6 @@
 // Cross-section slab geometry — the professional LiDAR classification workflow.
 //
-// Every mature package centres editing on a thin vertical slab rather than
+// Every mature package centers editing on a thin vertical slab rather than
 // free 3-D orbiting (TerraScan's Draw Vertical Section + Move Section, ArcGIS
 // Pro's profile view, QGIS, lasview, CloudCompare). It wins for reasons that
 // apply doubly to plant data:
@@ -33,11 +33,11 @@ export interface Vec2 {
  * A vertical cross-section slab.
  *
  * The centerline `a`→`b` is a horizontal segment; the slab is the vertical
- * prism of thickness `depth` centred on it, spanning `[zMin, zMax]`.
+ * prism of thickness `depth` centered on it, spanning `[zMin, zMax]`.
  *
  * `offset` is how far the slab has been STEPPED from where it was drawn,
  * measured along the slab normal. Stepping moves this and never `a`/`b`, so
- * "reset to origin" is free and the centreline keeps expressing the azimuth the
+ * "reset to origin" is free and the centerline keeps expressing the azimuth the
  * user chose.
  */
 export interface SlabRegion {
@@ -51,7 +51,7 @@ export interface SlabRegion {
   offset: number;
 }
 
-/** Unit direction along the centreline — the on-screen horizontal axis. */
+/** Unit direction along the centerline — the on-screen horizontal axis. */
 export function slabTangent(s: SlabRegion): Vec2 {
   const dx = s.b.x - s.a.x;
   const dy = s.b.y - s.a.y;
@@ -66,12 +66,12 @@ export function slabNormal(s: SlabRegion): Vec2 {
   return { x: -t.y, y: t.x };
 }
 
-/** Centreline length. Zero for a degenerate slab. */
+/** Centerline length. Zero for a degenerate slab. */
 export function slabLength(s: SlabRegion): number {
   return Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y);
 }
 
-/** World-space centre of the slab, accounting for the current step offset. */
+/** World-space center of the slab, accounting for the current step offset. */
 export function slabCenter(s: SlabRegion): THREE.Vector3 {
   const n = slabNormal(s);
   const midX = (s.a.x + s.b.x) / 2 + n.x * s.offset;
@@ -82,8 +82,8 @@ export function slabCenter(s: SlabRegion): THREE.Vector3 {
 /**
  * World-space membership test — the exact predicate the backend mirrors.
  *
- * A point is inside when it lies within `depth/2` of the (offset) centreline
- * plane, between the centreline's endpoints along the tangent, and inside the
+ * A point is inside when it lies within `depth/2` of the (offset) centerline
+ * plane, between the centerline's endpoints along the tangent, and inside the
  * vertical extent. Closed form, no camera, so the renderer's preview and the
  * server's apply cannot disagree.
  */
@@ -112,7 +112,7 @@ export function slabPredicate(
  * potree's shader keeps a point only when it is on the POSITIVE side of every
  * plane (`dot(normal, worldPos) + constant >= 0`), and planes AND-intersect —
  * which is exactly a slab. Note this bounds the two thin faces AND the two
- * centreline ends; the vertical extent is left to the cloud's own bounds
+ * centerline ends; the vertical extent is left to the cloud's own bounds
  * because clipping it too would need two more planes and the shader's
  * `max_clip_planes` budget is better spent elsewhere.
  *
@@ -124,7 +124,7 @@ export function slabToPlanes(s: SlabRegion): THREE.Plane[] {
   const n = slabNormal(s);
   const len = slabLength(s);
   const half = s.depth / 2;
-  // A point on the offset centreline.
+  // A point on the offset centerline.
   const cx = s.a.x + n.x * s.offset;
   const cy = s.a.y + n.y * s.offset;
 
@@ -143,9 +143,9 @@ export function slabToPlanes(s: SlabRegion): THREE.Plane[] {
 }
 
 /**
- * The slab as an oriented box: centre + world→box matrix + half-extents.
+ * The slab as an oriented box: center + world→box matrix + half-extents.
  * Drives the wireframe gizmo. The box is a unit cube scaled by
- * (length, depth, height) and rotated so +X runs along the centreline.
+ * (length, depth, height) and rotated so +X runs along the centerline.
  */
 export function slabToBox(s: SlabRegion): {
   center: THREE.Vector3;
@@ -176,7 +176,7 @@ export function slabToBox(s: SlabRegion): {
 }
 
 /**
- * Camera pose that views the slab face-on: eye offset from the slab centre
+ * Camera pose that views the slab face-on: eye offset from the slab center
  * along the normal, looking back at it, +Z up. `side` flips which face.
  *
  * Returns WORLD coordinates; the caller subtracts any display offset.
@@ -227,7 +227,7 @@ export type SlabStepMode = 'half' | 'almost' | 'full' | 'fixed';
  * `half` is the DEFAULT and TerraScan's recommendation: consecutive sections
  * overlap by 50%, so no point can fall between two steps unseen. `almost`
  * (90%) trades a sliver of overlap for fewer steps; `full` tiles exactly and
- * risks a boundary point being visually clipped in both neighbours.
+ * risks a boundary point being visually clipped in both neighbors.
  */
 export function slabStepDistance(
   s: SlabRegion, mode: SlabStepMode, fixed = 0,
@@ -285,7 +285,7 @@ export function slabCoverage(
 }
 
 /**
- * A slab seeded from a cloud's bounds: centred, running along +X, thin enough
+ * A slab seeded from a cloud's bounds: centered, running along +X, thin enough
  * to read. Used when the user asks for a section without drawing one.
  */
 export function defaultSlabForBounds(
@@ -311,11 +311,11 @@ export function defaultSlabForBounds(
 }
 
 /**
- * Thickness for a section drawn as a centreline of `drawnLength`.
+ * Thickness for a section drawn as a centerline of `drawnLength`.
  *
  * Relative to the line the user actually drew, not to a fixed cloud axis:
  * `defaultSlabForBounds` divides the Y extent, which is the ALONG axis for a
- * centreline drawn north-south, and produced a section far too thin (or too
+ * centerline drawn north-south, and produced a section far too thin (or too
  * thick) depending purely on which way they dragged.
  */
 export function drawnSlabDepth(drawnLength: number, fallback: number): number {
@@ -323,7 +323,7 @@ export function drawnSlabDepth(drawnLength: number, fallback: number): number {
 }
 
 /**
- * Build a slab from a centreline plus a cloud's bounds.
+ * Build a slab from a centerline plus a cloud's bounds.
  *
  * Shared by the committed section and the while-you-drag preview so the two
  * cannot drift — a preview that disagreed with what the second click produces
@@ -334,7 +334,7 @@ export function drawnSlabDepth(drawnLength: number, fallback: number): number {
  * the cursor, which is distracting to aim with and teaches the wrong model,
  * since thickness is really an independent parameter tuned in the panel.
  */
-export function slabFromCentreline(
+export function slabFromCenterline(
   a: { x: number; y: number },
   b: { x: number; y: number },
   bounds: { min: THREE.Vector3; max: THREE.Vector3 },
@@ -358,14 +358,14 @@ export function slabFromCentreline(
 }
 
 /**
- * Shortest centreline worth previewing, in world units, scaled to the cloud.
+ * Shortest centerline worth previewing, in world units, scaled to the cloud.
  *
  * Below this the box degenerates: `a` and `b` nearly coincide, the tangent is
- * numerically unstable, and the backend rejects a sub-1e-12 centreline outright.
+ * numerically unstable, and the backend rejects a sub-1e-12 centerline outright.
  * Returning false keeps the preview from flickering a near-zero box at the
  * moment of the first click, before the user has moved anywhere.
  */
-export function centrelineIsPreviewable(
+export function centerlineIsPreviewable(
   a: { x: number; y: number },
   b: { x: number; y: number },
   bounds: { min: THREE.Vector3; max: THREE.Vector3 },

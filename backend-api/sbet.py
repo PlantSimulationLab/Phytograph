@@ -172,7 +172,7 @@ def _decimate_indices(n: int, target: int) -> np.ndarray:
 
 
 def _read_smrmsg_qc(path: str) -> Optional[str]:
-    """Summarise an smrmsg accuracy file as a one-line QC warning (max position RMS),
+    """Summarize an smrmsg accuracy file as a one-line QC warning (max position RMS),
     or None if absent/unreadable. smrmsg records are headerless float64; the first
     field is time and the next three are north/east/down position RMS (meters). This
     is advisory only — never gates the SBET parse."""

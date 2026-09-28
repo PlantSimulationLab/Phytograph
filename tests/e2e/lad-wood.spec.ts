@@ -129,12 +129,12 @@ test('the profile window reports WAI and PAI, and PAI = LAI + WAI', async () => 
   await page.keyboard.press('Escape');
 });
 
-test('the voxels can be coloured by wood, and the legend follows', async () => {
+test('the voxels can be colored by wood, and the legend follows', async () => {
   const { page } = ctx;
   const picker = page.getByTestId('lad-display-field');
   await expect(picker).toBeVisible();
 
-  // Default is leaf — the pre-wood behaviour, so an existing user sees no change.
+  // Default is leaf — the pre-wood behavior, so an existing user sees no change.
   await expect(picker).toHaveValue('lad');
   const legend = page.getByTestId('lad-colorbar');
   await expect(legend).toHaveAttribute('data-colorbar-label', 'LAD [m²/m³]');

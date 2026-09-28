@@ -2,7 +2,7 @@
 
 Two kinds of contract. Structural: every point lands in exactly one core,
 every tile's chunk contains every point within the buffer of its core, and
-the tile size chooser behaves. Behavioural: a whole-cloud algorithm run per
+the tile size chooser behaves. Behavioral: a whole-cloud algorithm run per
 buffered tile agrees with the same algorithm run untiled - checked on the
 cloth filter, the tool the tiling exists for, with the seam band inspected
 separately so a buffer that is too small cannot hide in the average.
@@ -20,12 +20,12 @@ sys.path.insert(0, str(BACKEND_DIR / "tools"))
 
 
 def _cloud(n=50_000, extent=40.0, seed=1):
-    from make_big_cloud import _tree_centres, generate_chunk
+    from make_big_cloud import _tree_centers, generate_chunk
 
     rng = np.random.default_rng(seed)
-    centres = _tree_centres(rng, extent, 9)
+    centers = _tree_centers(rng, extent, 9)
     scanner = np.array([extent / 2, extent / 2, 1.6])
-    cols = generate_chunk(rng, n, extent, centres, 0.5, 0.0, scanner)
+    cols = generate_chunk(rng, n, extent, centers, 0.5, 0.0, scanner)
     return cols["xyz"], cols["ground_truth"]
 
 
@@ -62,7 +62,7 @@ def test_run_tiled_scatters_core_results_and_reports_progress():
     assert len(seen) == len(plan.tiles())
     assert prog[-1] == 1.0 and all(0 < f <= 1 for f in prog)
     # Cancel between tiles.
-    with pytest.raises(tiled.TiledCancelled):
+    with pytest.raises(tiled.TiledCanceled):
         tiled.run_tiled(plan, xyz, fn, should_cancel=lambda: True)
     # A wrong-length result is an error, not silent misalignment.
     with pytest.raises(ValueError):
@@ -170,11 +170,11 @@ def test_split_plan_runs_the_same_through_the_tile_runner():
     xyz = _tls_xy(20_000)
     plan = tiled.TilePlan.build(xyz, tile_m=10.0, buffer_m=0.5, max_tile_points=500)
 
-    def neighbours_within(chunk, core):
+    def neighbors_within(chunk, core):
         from scipy.spatial import cKDTree
         return np.array([len(v) for v in cKDTree(chunk[:, :2]).query_ball_point(chunk[:, :2], 0.5)])
 
-    got = tiled.run_tiled(plan, xyz, neighbours_within)
+    got = tiled.run_tiled(plan, xyz, neighbors_within)
     from scipy.spatial import cKDTree
     ref = np.array([len(v) for v in cKDTree(xyz[:, :2]).query_ball_point(xyz[:, :2], 0.5)])
     assert np.array_equal(got, ref)

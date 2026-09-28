@@ -38,7 +38,7 @@ export function basename(p: string): string {
 }
 
 // Naive join: if `child` is absolute, return it; otherwise concatenate with
-// the parent's separator style. Doesn't normalise `..` segments — the
+// the parent's separator style. Doesn't normalize `..` segments — the
 // downstream fs:exists check will resolve them per the OS.
 export function joinPath(parent: string, child: string): string {
   if (isAbsolute(child)) return child;

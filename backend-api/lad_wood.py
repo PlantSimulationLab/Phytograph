@@ -65,7 +65,7 @@ Two consequences, both of which shaped this module:
 
   * The fixed default sits in the MIDDLE of the achievable range, so a voxel
     that falls back to it is wrong by at most ~13% and is close to optimal under
-    ignorance. This is a much weaker failure than the leaf analogue.
+    ignorance. This is a much weaker failure than the leaf analog.
   * Precision in the wood angle distribution is NOT where the error budget is.
     The wood/leaf classification and the partition-by-count assumption are both
     larger terms. Do not spend heavy machinery here before checking it against
@@ -86,7 +86,7 @@ real endpoint:
     pooled PCA estimate                0.2791    -12.2%
     WOOD_G_DEFAULT                     0.2500    -21.4%
 
-so on the case MOST favourable to it -- a pure-trunk axis population, the
+so on the case MOST favorable to it -- a pure-trunk axis population, the
 furthest any real canopy gets from random -- it recovered about half the
 available error and still missed by more than the bound the constant is
 defended by. It cost 4-6 s per classified run (k=200 KD-tree PCA over up to
@@ -164,7 +164,7 @@ _N_PHI = 512
 _N_THETA_A = 512
 
 # Beam x inclination elements evaluated at once, so a scan with millions of
-# beams does not materialise one huge kernel. Mirrors
+# beams does not materialize one huge kernel. Mirrors
 # `lad_gtheta._KERNEL_BLOCK_ELEMENTS`, scaled down because this kernel carries
 # an extra azimuth axis: one block is _KERNEL_BLOCK_ELEMENTS * _N_PHI floats.
 _KERNEL_BLOCK_ELEMENTS = 1 << 14

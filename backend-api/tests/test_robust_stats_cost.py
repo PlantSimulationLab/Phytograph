@@ -18,7 +18,7 @@ invariant, so `_robust_aabb` may do this; `_robust_attribute_ranges` works on
 float32 columns and deliberately may not.
 
 The copies are elided the same way throughout: probing `np.isfinite(...).all()`
-costs ~10 ms against ~350 ms to materialise the mask-selected copy, and the
+costs ~10 ms against ~350 ms to materialize the mask-selected copy, and the
 arrays an importer produces are all-finite.
 """
 
@@ -163,7 +163,7 @@ def test_the_two_agree_on_random_float64_clouds():
 
 def test_attribute_ranges_are_unchanged_including_on_float32_columns():
     """The columns are float32, which is exactly where the single-call form
-    would shift the answer — so that optimisation stops at the box."""
+    would shift the answer — so that optimization stops at the box."""
     rng = np.random.default_rng(99)
     n = 200_000
     cols = {
@@ -200,7 +200,7 @@ def test_the_float32_hazard_is_real_and_not_theoretical():
 
 
 def test_positions_reaching_the_box_are_float64():
-    """The invariant the single-call optimisation rests on: every production
+    """The invariant the single-call optimization rests on: every production
     caller of `_robust_aabb` passes `sess.positions`, which is float64. Asserted
     against the declaration so a future float32 positions array fails here
     rather than shifting camera framing by a few ULPs in silence."""

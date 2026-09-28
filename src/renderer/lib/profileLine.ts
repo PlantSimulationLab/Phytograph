@@ -73,7 +73,7 @@ export function profileLinePredicate(
 
 /**
  * Where a screen pixel lands in the section: the ray through it, from the
- * frozen camera, meets the slab's centre plane, and that point is expressed as
+ * frozen camera, meets the slab's center plane, and that point is expressed as
  * [along, z]. Null when the ray runs parallel to the plane (an edge-on view)
  * or the plane is behind the camera.
  *

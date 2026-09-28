@@ -162,8 +162,8 @@ def test_e57_zeroed_misses_kept_flagged_not_dropped(tmp_path):
     assert extras["column_index"].tolist() == [0, 1, 2, 0, 1, 2]
 
 
-def test_e57_intensity_normalised_from_valid_range(tmp_path):
-    """E57 intensity is often 0..1 float; it must be normalised to the LAS uint16
+def test_e57_intensity_normalized_from_valid_range(tmp_path):
+    """E57 intensity is often 0..1 float; it must be normalized to the LAS uint16
     range from the VALID cells' span, not flat-clipped to ~0. Misses get 0."""
     src = tmp_path / "scan.e57"
     _write_e57_zeroed_misses(src)  # intensity 0.40..0.70 on valid cells
@@ -264,7 +264,7 @@ async def test_create_session_keeps_misses_out_of_octree(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monkeypatch):
-    """With a scanner origin supplied, misses are projected onto a sphere centred
+    """With a scanner origin supplied, misses are projected onto a sphere centered
     on that origin at radius = 1.4 * far (far = the farthest hit distance) — a
     fixed 40% margin so the sky/miss halo sits clearly outside the cloud as a
     distinct shell. The fixture's hits sit 5.0 from the origin; misses land at
@@ -347,10 +347,10 @@ async def test_unplaceable_misses_warned_and_not_drawn(tmp_path, monkeypatch):
 def test_e57_preview_omits_is_miss_but_shows_intensity(tmp_path):
     """`is_miss` is a system-managed flag, not a user column — the wizard preview
     must NOT present it (showing it implied a rename the import ignores and an
-    all-zero 'scalar' to colour by). Real scalars the file carries (here:
-    intensity) ARE surfaced so the user can see/colour by them."""
+    all-zero 'scalar' to color by). Real scalars the file carries (here:
+    intensity) ARE surfaced so the user can see/color by them."""
     src = tmp_path / "scan.e57"
-    _write_e57_zeroed_misses(src)  # declares intensity, no colour
+    _write_e57_zeroed_misses(src)  # declares intensity, no color
     resp = main._preview_e57(str(src))
     headers = [c.header_name for c in resp.columns]
     assert "is_miss" not in headers
@@ -378,9 +378,9 @@ def _write_e57_with_color(path: Path) -> None:
 
 
 def test_e57_preview_advertises_rgb_when_present(tmp_path):
-    """A colour-bearing E57 surfaces red/green/blue (mapped to the 0-255 RGB
+    """A color-bearing E57 surfaces red/green/blue (mapped to the 0-255 RGB
     roles) in the wizard preview alongside x/y/z."""
-    src = tmp_path / "colour.e57"
+    src = tmp_path / "color.e57"
     _write_e57_with_color(src)
     resp = main._preview_e57(str(src))
     by_name = {c.header_name: c.detected_role for c in resp.columns}
@@ -390,9 +390,9 @@ def test_e57_preview_advertises_rgb_when_present(tmp_path):
 
 
 def test_e57_carries_rgb_into_las_misses_black(tmp_path):
-    """RGB colour is carried into the LAS (8-bit lifted to the uint16 channel,
+    """RGB color is carried into the LAS (8-bit lifted to the uint16 channel,
     matching the PLY/PCD convention); miss cells get black (no real return)."""
-    src = tmp_path / "colour.e57"
+    src = tmp_path / "color.e57"
     _write_e57_with_color(src)
     out = tmp_path / "out.las"
     main._e57_to_las(src, out)
@@ -403,7 +403,7 @@ def test_e57_carries_rgb_into_las_misses_black(tmp_path):
     assert colors is not None
     is_miss = extras[main._MISS_SLUG]
 
-    # Hit colours round-trip: 8-bit value * 256 (e.g. 255 -> 65280, 100 -> 25600).
+    # Hit colors round-trip: 8-bit value * 256 (e.g. 255 -> 65280, 100 -> 25600).
     hit = colors[is_miss == 0]
     assert hit.max() == 255 * 256
     assert set(np.unique(hit).tolist()) <= {0, 100 * 256, 255 * 256}
@@ -412,15 +412,15 @@ def test_e57_carries_rgb_into_las_misses_black(tmp_path):
 
 
 def test_e57_without_color_has_no_rgb(tmp_path):
-    """An E57 with no colour fields produces a cloud with no RGB (the LAS RGB
+    """An E57 with no color fields produces a cloud with no RGB (the LAS RGB
     channels stay zero, so _read_las_into_arrays surfaces all-black, not garbage)."""
-    src = tmp_path / "nocolour.e57"
-    _write_e57(src, with_misses=False)  # cartesian + intensity, no colour
+    src = tmp_path / "nocolor.e57"
+    _write_e57(src, with_misses=False)  # cartesian + intensity, no color
     out = tmp_path / "out.las"
     main._e57_to_las(src, out)
     _r = main._read_las_into_arrays(out)
     colors = _r.colors
-    # RGB channels exist (point format 3) but are all zero — no colour carried.
+    # RGB channels exist (point format 3) but are all zero — no color carried.
     assert colors is None or np.all(colors == 0)
 
 

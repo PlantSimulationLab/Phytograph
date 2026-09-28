@@ -1,7 +1,7 @@
 """Cancellation of long-running streaming ops (synthetic scan / triangulation /
 LAD inversion) — `POST /api/cancel/{run_id}`.
 
-The bug this fixes: cancelling a heavy synthetic scan left a Python process
+The bug this fixes: canceling a heavy synthetic scan left a Python process
 holding tens of GB because the backend never stopped the C++ ray trace — it ran
 to completion holding the live Helios Context/LiDARCloud and the numpy staging
 arrays. The fix is cooperative cancellation: a per-run threading.Event polled at
@@ -12,8 +12,8 @@ These tests assert the real mechanism, not the absence of errors:
   * the C++ ray loop genuinely short-circuits when the flag is set (hit count
     drops to ~0), proving the trace itself stops rather than finishing;
   * the registry + endpoint flip the right Event;
-  * a worker raises ScanCancelled (which the streaming wrapper turns into a
-    `cancelled` marker) when its run is cancelled, instead of returning a frame.
+  * a worker raises ScanCanceled (which the streaming wrapper turns into a
+    `canceled` marker) when its run is canceled, instead of returning a frame.
 """
 
 import ctypes
@@ -60,13 +60,13 @@ def test_registry_token_lifecycle():
 def test_cancel_endpoint_unknown_run(client):
     resp = client.post("/api/cancel/nope")
     assert resp.status_code == 200
-    assert resp.json() == {"cancelled": False, "run_id": "nope"}
+    assert resp.json() == {"canceled": False, "run_id": "nope"}
 
 
 def test_cancel_endpoint_flips_event(client):
     run_id, event = main._new_cancel_token()
     resp = client.post(f"/api/cancel/{run_id}")
-    assert resp.json() == {"cancelled": True, "run_id": run_id}
+    assert resp.json() == {"canceled": True, "run_id": run_id}
     assert event.is_set()
     main._clear_run(run_id)
 
@@ -95,7 +95,7 @@ class TestNativeCancelFlag:
                 lidar.syntheticScan(ctx, record_misses=False, cancel_flag=flag)
                 return lidar.getHitCount()
 
-    def test_uncancelled_scan_hits_the_pyramid(self):
+    def test_uncanceled_scan_hits_the_pyramid(self):
         assert self._run(cancel=False) > 0
 
     def test_preset_cancel_flag_yields_no_hits(self):
@@ -103,25 +103,25 @@ class TestNativeCancelFlag:
         # is the proof the C++ loop actually stops rather than running to
         # completion (which is what leaked the 16GB).
         baseline = self._run(cancel=False)
-        cancelled = self._run(cancel=True)
-        assert cancelled < baseline
-        assert cancelled == 0
+        canceled = self._run(cancel=True)
+        assert canceled < baseline
+        assert canceled == 0
 
 
-# ---- Worker raises ScanCancelled (→ streaming wrapper emits cancel marker) --
+# ---- Worker raises ScanCanceled (→ streaming wrapper emits cancel marker) --
 
 def test_scan_worker_raises_on_preset_cancel():
     pytest.importorskip("pyhelios")
     event = threading.Event()
-    event.set()  # cancelled before the worker even starts
+    event.set()  # canceled before the worker even starts
     reporter = main._ProgressReporter(queue.Queue(), event)
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._do_lidar_scan(_scan_request(), progress=reporter)
 
 
-def test_scan_worker_cancelled_mid_flight_via_flag():
-    """A worker whose run is cancelled while the C++ trace runs raises
-    ScanCancelled (not a frame). Exercises the c_int bridge: the reporter binds
+def test_scan_worker_canceled_mid_flight_via_flag():
+    """A worker whose run is canceled while the C++ trace runs raises
+    ScanCanceled (not a frame). Exercises the c_int bridge: the reporter binds
     a c_int, we flip the Event + mirror it (as the stream loop does), and the
     in-flight trace bails, after which the post-trace checkpoint fires."""
     pytest.importorskip("pyhelios")
@@ -134,8 +134,8 @@ def test_scan_worker_cancelled_mid_flight_via_flag():
         try:
             main._do_lidar_scan(_scan_request(n=600), progress=reporter)
             raised["value"] = None
-        except main.ScanCancelled:
-            raised["value"] = "cancelled"
+        except main.ScanCanceled:
+            raised["value"] = "canceled"
 
     t = threading.Thread(target=go)
     t.start()
@@ -147,17 +147,17 @@ def test_scan_worker_cancelled_mid_flight_via_flag():
     event.set()
     reporter.propagate_cancel()  # mirror Event -> c_int, as the stream loop does
     t.join(timeout=60)
-    assert raised.get("value") == "cancelled"
+    assert raised.get("value") == "canceled"
 
 
-# ---- Streaming wrapper surfaces run_id and the cancelled marker ------------
+# ---- Streaming wrapper surfaces run_id and the canceled marker ------------
 
-def test_stream_emits_run_id_then_cancelled_marker(client):
+def test_stream_emits_run_id_then_canceled_marker(client):
     """End-to-end through the endpoint: the first marker carries the run_id; a
-    cancel mid-stream produces a terminal `cancelled` marker instead of a frame.
+    cancel mid-stream produces a terminal `canceled` marker instead of a frame.
 
     We can't easily race a real scan deterministically from the test client, so
-    this drives the wrapper directly with a worker that blocks until cancelled."""
+    this drives the wrapper directly with a worker that blocks until canceled."""
     from tests.binframe import decode_progress_markers
     import asyncio
 
@@ -166,10 +166,10 @@ def test_stream_emits_run_id_then_cancelled_marker(client):
 
     def build(progress):
         started.set()
-        # Block until the run is cancelled, then raise as a real worker would.
+        # Block until the run is canceled, then raise as a real worker would.
         for _ in range(600):  # ~6s cap so a hung test still fails fast
             if progress.should_cancel():
-                raise main.ScanCancelled()
+                raise main.ScanCanceled()
             threading.Event().wait(0.01)
         return b"PHB1unused"
 
@@ -193,9 +193,9 @@ def test_stream_emits_run_id_then_cancelled_marker(client):
     finally:
         loop.close()
     markers = decode_progress_markers(body)
-    assert markers, "expected at least the run_id + cancelled markers"
+    assert markers, "expected at least the run_id + canceled markers"
     assert markers[0].get("run_id") == run_id
-    assert any(m.get("cancelled") for m in markers), "expected a terminal cancelled marker"
+    assert any(m.get("canceled") for m in markers), "expected a terminal canceled marker"
     # The registry entry is cleared by the wrapper's finally.
     assert main._cancel_run(run_id) is False
 
@@ -205,7 +205,7 @@ def test_stream_emits_run_id_then_cancelled_marker(client):
 # The cancel mechanism is the same registry + a ctypes flag the C++ canopy /
 # advanceTime loops poll. The C++ short-circuit itself is covered by the pyhelios
 # plantarchitecture selfTest; here we assert the endpoint emits the run_id and
-# that a cancel mid-build yields a `cancelled` event (not a result).
+# that a cancel mid-build yields a `canceled` event (not a result).
 
 _pyhelios_available = False
 try:  # native plant build needed for these
@@ -254,8 +254,8 @@ def test_plant_stream_emits_run_id_first(client):
 
 
 @requires_pyhelios
-def test_plant_canopy_cancel_mid_build_yields_cancelled():
-    """A heavy canopy build cancelled mid-stream emits a `cancelled` event and
+def test_plant_canopy_cancel_mid_build_yields_canceled():
+    """A heavy canopy build canceled mid-stream emits a `canceled` event and
     never a `result` — the C++ build loop bails and the worker tears down.
 
     Driven by invoking the endpoint's SSE generator directly: TestClient's
@@ -277,14 +277,14 @@ def test_plant_canopy_cancel_mid_build_yields_cancelled():
     async def drive():
         resp = await main.generate_plant_stream(req, _FakeRequest())
         events = []
-        cancelled_run = False
+        canceled_run = False
         async for chunk in resp.body_iterator:
             text = chunk if isinstance(chunk, str) else chunk.decode("utf-8")
             for raw in text.split("\n"):
                 if raw.startswith("event:"):
                     ev = raw.split(":", 1)[1].strip()
                     events.append(ev)
-                if raw.startswith("data:") and not cancelled_run:
+                if raw.startswith("data:") and not canceled_run:
                     import json as _json
                     try:
                         data = _json.loads(raw.split(":", 1)[1].strip())
@@ -294,8 +294,8 @@ def test_plant_canopy_cancel_mid_build_yields_cancelled():
                     if rid:
                         # run_id just arrived → cancel the in-flight build.
                         main._cancel_run(rid)
-                        cancelled_run = True
-            if events and events[-1] in ("result", "cancelled", "error"):
+                        canceled_run = True
+            if events and events[-1] in ("result", "canceled", "error"):
                 break
         return events
 
@@ -306,5 +306,5 @@ def test_plant_canopy_cancel_mid_build_yields_cancelled():
         loop.close()
 
     assert events[0] == "run_id"
-    assert "cancelled" in events, f"expected a cancelled event, got {events}"
-    assert "result" not in events, "a cancelled build must not emit a result"
+    assert "canceled" in events, f"expected a canceled event, got {events}"
+    assert "result" not in events, "a canceled build must not emit a result"

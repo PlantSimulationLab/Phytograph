@@ -37,13 +37,13 @@ slope, one elevation cuts one stem at its base and the next at its crown.
    radius is 0.02–1.5 m, the fit is not flagged `high_residual`, it has at
    least 15 inliers, and at least 30% of the cluster's points lie on it.
 5. **Same axis twice.** Fit the lower and upper halves of the layer
-   separately. A trunk gives two circles whose centres are within
+   separately. A trunk gives two circles whose centers are within
    `max(0.10 m, r)` of each other. A shrub or a leaning branch does not.
    This test is ours, a direct form of the vertical-continuity assumption.
 6. **One seed per trunk.** Merge seeds closer than `max(0.30 m, r₁ + r₂)`,
    keeping the one with more inliers.
 
-Each seed sits at the circle's centre, at 1.3 m above the ground. The
+Each seed sits at the circle's center, at 1.3 m above the ground. The
 detected seeds fill the panel's seed list for you to review, move or delete
 before segmenting. Detection misses trunks the scan could not see at breast
 height (occluded or cut by the plot edge), and can seed a large dead branch
@@ -55,9 +55,9 @@ Segmentation cost grows with the number of voxels it works on, and one
 stage grows with the square of the number of segments. Holding a whole plot
 to a manageable voxel count forces coarse voxels on every tree. Tiling
 instead cuts the plot into square x, y **tiles**. Each tile is segmented
-together with a **buffer** (collar) of its neighbours' points, and every
+together with a **buffer** (collar) of its neighbors' points, and every
 tree is then kept from exactly one tile. This is the standard way to run a
-neighbourhood algorithm over a large extent: process buffered chunks, keep
+neighborhood algorithm over a large extent: process buffered chunks, keep
 each chunk's own (core) results, and merge (see
 [Large clouds](../developers/architecture/large-clouds.md) for the tile engine).
 For trees, "the core's results" has to mean whole trees, not points,
@@ -71,7 +71,7 @@ because a tree crosses tile lines:
    anchor has exactly one owner. A tree cut off by the edge of a tile's
    buffer is thrown away there and kept whole from its own tile.
 3. **Claims.** A kept tree claims all its points, including those in
-   neighbouring cores. When two kept trees claim one point (two tiles
+   neighboring cores. When two kept trees claim one point (two tiles
    disagreeing about a crown boundary), the point goes to the tree from
    the tile in which it lay **farthest from the buffer's outer edge**.
    There the segmentation saw the most of its surroundings.

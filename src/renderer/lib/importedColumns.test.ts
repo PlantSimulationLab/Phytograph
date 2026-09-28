@@ -27,7 +27,7 @@ const RIEGL_RANGES = {
 describe('importedColumnsFor', () => {
   it('lists every scalar column, including ones Color-by hides', () => {
     // THE GAP THIS CLOSES: the Color-by dropdown was the only way to check an
-    // import, and it hides `intensity` (own colour mode) and every LAS schema
+    // import, and it hides `intensity` (own color mode) and every LAS schema
     // builtin — so a silently-dropped column was indistinguishable from a kept
     // one. This must show them.
     const cols = importedColumnsFor({ data: { octree: { attributeRanges: RIEGL_RANGES } } } as never);
@@ -36,7 +36,7 @@ describe('importedColumnsFor', () => {
     expect(cols).toContain('reflectance');
     expect(cols).toContain('is_miss');
     expect(cols).toContain('echo_type');
-    // Geometry and colour are not scalar fields.
+    // Geometry and color are not scalar fields.
     expect(cols).not.toContain('position');
     expect(cols).not.toContain('rgb');
   });
@@ -112,7 +112,7 @@ describe('partitionImportedColumns', () => {
       },
     } as never);
     // `classification` stays in the primary list even when empty: it is where
-    // segmentation results land, so "you can colour/label by this" is true of it
+    // segmentation results land, so "you can color/label by this" is true of it
     // in a way it is not of `user data`. This matches the same deliberate
     // exception in octreeScalarFieldOptions.
     expect(present).toEqual(['classification', 'deviation', 'target_index', 'timestamp']);

@@ -3,7 +3,7 @@
 A scan is defined by its pose. A multi-block PTX or multi-scan E57 holds several
 genuinely separate acquisitions, and merging them into one cloud leaves a single
 origin standing in for all of them — which silently breaks the LAD inversion (it
-takes ONE scanner origin), centres the sky/miss display shell on the wrong point,
+takes ONE scanner origin), centers the sky/miss display shell on the wrong point,
 and makes the per-scan row/column rasters collide.
 
 `_do_create_multi_cloud_session` fans out instead: each position gets its own
@@ -65,7 +65,7 @@ class TestScanCount:
         assert main._source_scan_count(xyz) == 1
 
     def test_an_unreadable_file_counts_as_one(self, tmp_path):
-        """A file we can't probe must import as a single scan — the behaviour
+        """A file we can't probe must import as a single scan — the behavior
         before multi-scan existed — rather than raising out of the count."""
         bad = tmp_path / "bad.ptx"
         bad.write_text("not a ptx\n")
@@ -272,7 +272,7 @@ class TestMultiSessionEndpoint:
 
 
 class TestE57MultiScan:
-    """E57 had the identical merge-everything behaviour, so it gets the same fix."""
+    """E57 had the identical merge-everything behavior, so it gets the same fix."""
 
     def _write_two_scan_e57(self, path: Path):
         pye57 = pytest.importorskip("pye57")

@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "wood-leaf-pointnext-s-v2",
   "name": "Wood/leaf (PointNeXt-S)",
-  "description": "PointNeXt-S: synthetic pre-training, then fine-tuned on 178 hand-labelled real trees, two dense-crown redbuds, five leaf-off almonds and 76 Helios scenes of every woody library species whose wood is relabelled the way a person would label it. Best of three seeds by validation mIoU. Supersedes v1, which called leaf clumps in dense crowns wood.",
+  "description": "PointNeXt-S: synthetic pre-training, then fine-tuned on 178 hand-labeled real trees, two dense-crown redbuds, five leaf-off almonds and 76 Helios scenes of every woody library species whose wood is relabeled the way a person would label it. Best of three seeds by validation mIoU. Supersedes v1, which called leaf clumps in dense crowns wood.",
   "task": "wood_leaf",
   "arch": "pointnext",
   "hparams": {

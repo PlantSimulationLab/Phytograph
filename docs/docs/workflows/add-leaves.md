@@ -3,7 +3,7 @@
 Turn a bare [QSM](build-qsm.md) into a **foliated reconstruction**: leaves
 are placed on the tree's terminal shoots following its phyllotaxis, using a
 leaf texture (or 3D model) you choose. This is a procedural,
-forward-modelling step — it adds biologically plausible foliage on top of
+forward-modeling step — it adds biologically plausible foliage on top of
 the measured woody structure.
 
 !!! info "Phase 1 — procedural placement"

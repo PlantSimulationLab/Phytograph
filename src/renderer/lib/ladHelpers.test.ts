@@ -106,7 +106,7 @@ describe('buildLADRequest', () => {
     expect(s.origin).toEqual([1, 2, 3]);
   });
 
-  it('serialises points when there is no file path', () => {
+  it('serializes points when there is no file path', () => {
     const req = buildLADRequest([makeScan({ sourcePath: undefined })], GRID, PARAMS);
     const s = req.scans[0];
     expect(s.file_path).toBeUndefined();
@@ -223,7 +223,7 @@ describe('buildLADRequest occlusion screening', () => {
     expect('fill_occluded' in req).toBe(false);
   });
 
-  it('carries an explicit threshold in metres', () => {
+  it('carries an explicit threshold in meters', () => {
     const req = buildLADRequest([makeScan()], GRID, { ...PARAMS, occlusionThresholdM: 30 });
     expect(req.occlusion_threshold_m).toBe(30);
   });

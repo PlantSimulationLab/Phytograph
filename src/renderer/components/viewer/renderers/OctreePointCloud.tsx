@@ -60,7 +60,7 @@ export interface OctreePointCloudProps {
   data: PointCloudData;  // must have data.octree set
   pointSize?: number;
   colorMode?: 'rgb' | 'intensity' | 'height' | 'single' | 'scalar';
-  // When colorMode is 'scalar', the on-disk attribute slug to colour by
+  // When colorMode is 'scalar', the on-disk attribute slug to color by
   // (e.g. 'Reflectance_dB'). Matches a key in data.octree.attributeRanges and
   // a named THREE.Float32 BufferAttribute on each loaded tile geometry.
   selectedScalarField?: string;
@@ -138,7 +138,7 @@ export interface OctreePointCloudProps {
    */
   committedFilters?: CloudFilters | null;
   /**
-   * Live manual-labelling preview, read through a REF.
+   * Live manual-labeling preview, read through a REF.
    *
    * A label change cannot be shown the way a deletion can: deletions are a GPU
    * clip volume, but class values are baked into octree.bin at conversion time,
@@ -160,7 +160,7 @@ export interface OctreePointCloudProps {
    *  with any crop or filter rather than written separately. */
   labelHiddenIndices?: readonly number[] | null;
   /** Categorical scheme for the overlay's dense INDEX values, so the points and
-   *  the legend agree while previewing. Null when not labelling. */
+   *  the legend agree while previewing. Null when not labeling. */
   labelIndexScheme?: { attribute: string; classes: Array<{ value: number; label: string; color: [number, number, number] }> } | null;
   /**
    * Cross-section slab, as world-space half-space planes (see
@@ -177,7 +177,7 @@ export interface OctreePointCloudProps {
   slabBoxMatrix?: THREE.Matrix4 | null;
   /**
    * The same slab box, but GHOSTING instead of clipping: points inside draw in
-   * their own colour and points outside draw grey. Used while a section is
+   * their own color and points outside draw gray. Used while a section is
    * suspended ("Show full cloud"), so the whole cloud is visible for context
    * and the user can still see where the section sits. Ignored when
    * `slabBoxMatrix` is set — a clipping slab wins.
@@ -206,7 +206,7 @@ export interface OctreePointCloudProps {
   displayOffset?: { x: number; y: number; z: number };
   // Fired once, the first time LOD tiles have actually streamed in for this
   // mount. The parent uses it to force a single fresh-material remount so a
-  // cloud that mounted directly into a gradient colour mode recompiles its
+  // cloud that mounted directly into a gradient color mode recompiles its
   // shader with geometry present (see octreePaintGen in PointCloudViewer).
   onFirstTilesReady?: () => void;
   // Hands the live PointCloudOctree to the parent (and null on unmount) so the
@@ -230,7 +230,7 @@ export interface OctreePointCloudProps {
 }
 
 // Point a tile geometry's `intensity` attribute at the named scalar
-// attribute's buffer so the INTENSITY_GRADIENT shader path colours by it.
+// attribute's buffer so the INTENSITY_GRADIENT shader path colors by it.
 // The Potree 2.0 loader decodes every non-builtin octree attribute into a
 // named Float32 BufferAttribute (geometry.attributes[field]); aliasing it
 // into `intensity` is a zero-copy reference swap. Idempotent — re-running on
@@ -257,7 +257,7 @@ function swapScalarIntoIntensity(geometry: any, field: string): boolean {
 
 // `isWideOctreeAttribute` (a `double` gps-time, an int64 …) lives in
 // lib/octreeWideAttributes.ts, shared with the point picker: potree
-// pre-normalises those buffers into 0..1, and every reader has to undo it the
+// pre-normalizes those buffers into 0..1, and every reader has to undo it the
 // same way. See the long note at the intensityRange assignment below.
 
 // Cache-id handover (see the loader effect): a replacement octree is committed
@@ -345,7 +345,7 @@ function cropClipsEverything(
   //
   // The whole value of this function is that its conservativeness is obvious at
   // a glance ("returns true only when emptiness is CERTAIN"), and it is a
-  // LOD-lag optimisation, not a correctness feature — so give up the rare win
+  // LOD-lag optimization, not a correctness feature — so give up the rare win
   // rather than try to reconstruct which part of the pose `bounds` already has.
   const posed = (rotation && (rotation.x !== 0 || rotation.y !== 0 || rotation.z !== 0))
     || translation.x !== 0 || translation.y !== 0 || translation.z !== 0;
@@ -367,11 +367,11 @@ function cropClipsEverything(
 }
 
 /**
- * Rewrites potree's HIGHLIGHT_INSIDE clip mode into "grey out the outside".
+ * Rewrites potree's HIGHLIGHT_INSIDE clip mode into "gray out the outside".
  *
  * potree's own highlight adds red to the points INSIDE the clip volumes, which
  * is the opposite of what a suspended section wants: the slab should keep its
- * real colours and everything around it recede. The line only exists under
+ * real colors and everything around it recede. The line only exists under
  * `#if defined clip_highlight_inside`, so installing this on a material in any
  * other clip mode changes nothing. Module-level on purpose: three.js keys the
  * program cache on `onBeforeCompile.toString()`, so one shared function means
@@ -440,7 +440,7 @@ export function OctreePointCloud({
   const [materialVersion, setMaterialVersion] = useState(0);
   const manager = getPotreeManager();
   const { scene, gl } = useThree();
-  // The class-colour texture this cloud's material samples (see below); kept
+  // The class-color texture this cloud's material samples (see below); kept
   // so a replacement or unmount frees the previous one.
   const categoricalTexRef = useRef<THREE.DataTexture | null>(null);
   useEffect(() => () => { categoricalTexRef.current?.dispose(); }, []);
@@ -522,7 +522,7 @@ export function OctreePointCloud({
   useEffect(() => {
     if (!data.octree) return;
     const url = `app://octree/${data.octree.cacheId}/metadata.json`;
-    let cancelled = false;
+    let canceled = false;
     // A replacement that has loaded but not yet been committed. Disposed here if
     // the cache id moves on again (or the cloud unmounts) before it lands.
     let staged: PointCloudOctree | null = null;
@@ -530,7 +530,7 @@ export function OctreePointCloud({
     manager
       .loadPointCloud(url, OctreeRequestManager)
       .then((pco) => {
-        if (cancelled) {
+        if (canceled) {
           pco.dispose();
           return;
         }
@@ -582,7 +582,7 @@ export function OctreePointCloud({
         unregisterStage = registerOctreeForFrame({
           octree: pco,
           afterUpdate: () => {
-            if (cancelled || staged !== pco) return;
+            if (canceled || staged !== pco) return;
             // Follow a gizmo drag that happens mid-stage, so LOD is chosen for
             // where the cloud will actually be drawn.
             seatPose();
@@ -609,7 +609,7 @@ export function OctreePointCloud({
         });
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (canceled) return;
         console.error(`Octree load failed for ${data.octree?.cacheId}:`, err);
         // A load rejection here means the octree files are unavailable on disk:
         // the app:// protocol handler 404s and potree-core throws (a JSON-parse
@@ -624,7 +624,7 @@ export function OctreePointCloud({
         }
       });
     return () => {
-      cancelled = true;
+      canceled = true;
       // Only a replacement still STAGING is this effect's to dispose. The drawn
       // octree stays on screen until its successor commits (attach effect), or
       // until the component unmounts (unmount effect).
@@ -703,7 +703,7 @@ export function OctreePointCloud({
 
   // Material settings.
   //
-  // Three coordinates have to land together for octree colour to look right:
+  // Three coordinates have to land together for octree color to look right:
   //
   //   1. `newFormat` is mutually exclusive with non-RGB modes. The shader's
   //      POINT COLOR SELECTION starts with `#ifdef new_format → vColor = rgba`,
@@ -719,7 +719,7 @@ export function OctreePointCloud({
   //      `vColor = fromLinear(vColor)` at the bottom of the fragment shader.
   //      That re-encodes the display-encoded uint8 RGB PotreeConverter wrote
   //      into the cloud, collapsing every channel toward grayscale — the
-  //      "mostly white with random colour flecks" symptom. Matching them at
+  //      "mostly white with random color flecks" symptom. Matching them at
   //      LINEAR makes the conditional fall through and vColor flows
   //      untouched.
   //
@@ -765,16 +765,16 @@ export function OctreePointCloud({
     const isRgbMode = colorMode === 'rgb';
     // Scalar mode is active only when a field is selected AND the octree
     // actually carries a range for it (i.e. the attribute survived import).
-    // When inactive, scalar falls back to a solid colour like 'single'.
+    // When inactive, scalar falls back to a solid color like 'single'.
     const scalarRange =
       colorMode === 'scalar' && selectedScalarField
         ? data.octree?.attributeRanges?.[selectedScalarField]
         : undefined;
-    // The labelling overlay supplies its own range (dense palette indices), and
+    // The labeling overlay supplies its own range (dense palette indices), and
     // it must work BEFORE the first commit — at which point the octree carries
     // no `manual_class` attribute at all, so attributeRanges has no entry and
     // the check above would leave scalar mode inactive, silently falling back to
-    // a solid colour with the painted classes invisible.
+    // a solid color with the painted classes invisible.
     const scalarActive = !!scalarRange || !!labelIndexScheme;
     const m = octree.material;
 
@@ -783,7 +783,7 @@ export function OctreePointCloud({
     // so we have to force a shader rebuild after changing it.
     (m as any).newFormat = isRgbMode;
     // Force the shader to do linear→sRGB on its output so the framebuffer
-    // bytes match the user-intended display colour. Three.js's
+    // bytes match the user-intended display color. Three.js's
     // RawShaderMaterial bypasses the renderer's outputColorSpace conversion
     // — whatever the shader writes goes to the framebuffer as raw bytes.
     // potree-core's conditional that calls fromLinear() (linear→sRGB) is
@@ -811,7 +811,7 @@ export function OctreePointCloud({
     // place.
     //
     // When the user has explicitly set Min/Max in the Color By panel
-    // (rangeMin / rangeMax), honour those values directly. Otherwise
+    // (rangeMin / rangeMax), honor those values directly. Otherwise
     // derive from data.bounds.z and pad by 20% on each end so the top
     // and bottom of the cloud aren't pinned exactly at the gradient
     // texture's edge texels (mirrors potree-core's own setter).
@@ -820,7 +820,7 @@ export function OctreePointCloud({
       // shared height domain), but the shader reads the DISPLAY frame — so the
       // offset comes off here exactly as it does in the derived branch below.
       // Without this the gradient shifts by the whole offset on a UTM scene,
-      // painting every cloud one flat end-of-ramp colour.
+      // painting every cloud one flat end-of-ramp color.
       const dz = displayOffset?.z ?? 0;
       (m as any).heightMin = rangeMin - dz;
       (m as any).heightMax = rangeMax - dz;
@@ -828,7 +828,7 @@ export function OctreePointCloud({
       // potree's height shader reads `modelMatrix * position`, i.e. the DISPLAY
       // frame (world − displayOffset) with the pose already applied. `data.bounds`
       // is world, so the offset has to come off or the whole gradient shifts by
-      // it — invisible at the origin, metres out on a UTM scene.
+      // it — invisible at the origin, meters out on a UTM scene.
       const dz = displayOffset?.z ?? 0;
       const zMin = data.bounds.min.z - dz;
       const zMax = data.bounds.max.z - dz;
@@ -846,7 +846,7 @@ export function OctreePointCloud({
     // the actual range PotreeConverter saw is in the metadata.
     // Without setting this, every point maps to roughly w ≈ 0 because
     // [0, 65000] is much wider than typical input, and the cloud
-    // renders as the gradient's "low" texel — a uniform colour.
+    // renders as the gradient's "low" texel — a uniform color.
     // The shader's getIntensity() reads the geometry attribute named
     // `intensity` and maps it through intensityRange → gradient. Scalar mode
     // reuses this exact pipeline by (a) pointing intensityRange at the
@@ -855,7 +855,7 @@ export function OctreePointCloud({
     const gradientRange = scalarActive
       ? scalarRange
       : data.octree?.attributeRanges?.intensity;
-    // The effective [min,max] the SHADER uses to normalise each value into the
+    // The effective [min,max] the SHADER uses to normalize each value into the
     // gradient's 0..1 sample coordinate (t = (value - min) / (max - min)). The
     // categorical step gradient below MUST be built against this SAME range, not
     // the raw attribute range — otherwise the class bands and the sampled t land
@@ -883,7 +883,7 @@ export function OctreePointCloud({
       (m as any).intensityRange = effectiveRange;
     }
 
-    // WIDE (>4-byte) ATTRIBUTES ARRIVE PRE-NORMALISED TO 0..1.
+    // WIDE (>4-byte) ATTRIBUTES ARRIVE PRE-NORMALIZED TO 0..1.
     //
     // potree's binary decoder special-cases any attribute whose type is larger
     // than a float32, because the GPU buffer it fills is always a Float32Array
@@ -899,10 +899,10 @@ export function OctreePointCloud({
     // NOT the raw values — while `effectiveRange` above was taken from the
     // metadata's raw extrema. getIntensity() then computes
     // (0..1 − 85.15) / 148.4 ≈ −0.57 for EVERY point, which clamps to the
-    // gradient's low texel: the cloud renders as one flat colour while the
+    // gradient's low texel: the cloud renders as one flat color while the
     // legend correctly reads 85–233. (4-byte columns skip potree's branch
     // entirely, which is why the same data exported as a float32 extra dim
-    // colours correctly — the bug is the width, not the column.)
+    // colors correctly — the bug is the width, not the column.)
     //
     // The gradient stops are laid out on `effectiveRange`/`bandRange` below, so
     // only the shader's value space is corrected here; the legend and the
@@ -911,12 +911,12 @@ export function OctreePointCloud({
         && isWideOctreeAttribute(octree, selectedScalarField)) {
       (m as any).intensityRange = [0, 1];
     }
-    // The labelling overlay writes DENSE PALETTE INDICES into the intensity
+    // The labeling overlay writes DENSE PALETTE INDICES into the intensity
     // slot, so the shader's value space must be [0, n-1] to match. Without this
     // the stops are laid out over the palette's index range while the shader
     // maps each index against the OCTREE attribute's range — every point then
     // samples the wrong part of the gradient (in practice: the whole cloud
-    // renders as one flat colour, usually the unclassified grey, no matter what
+    // renders as one flat color, usually the unclassified gray, no matter what
     // was painted).
     if (labelIndexScheme) {
       const n = Math.max(1, labelIndexScheme.classes.length - 1);
@@ -942,7 +942,7 @@ export function OctreePointCloud({
           m.pointColorType = PointColorType.INTENSITY_GRADIENT;
         } else {
           // No usable attribute (unknown field, or octree predates this
-          // feature) — render a solid colour like 'single'.
+          // feature) — render a solid color like 'single'.
           m.pointColorType = PointColorType.COLOR;
           m.color = new THREE.Color(singleColor ?? '#a1a1aa').convertLinearToSRGB();
         }
@@ -950,7 +950,7 @@ export function OctreePointCloud({
       case 'single':
         m.pointColorType = PointColorType.COLOR;
         // Pre-encode the swatch as sRGB. THREE.Color('#hex') parses the
-        // hex as sRGB and stores it linearised (ColorManagement default
+        // hex as sRGB and stores it linearized (ColorManagement default
         // since r152). The shader passes uColor straight to the
         // framebuffer (potree-core's RawShaderMaterial bypasses
         // three.js's outputColorSpace conversion), so we have to put
@@ -970,11 +970,11 @@ export function OctreePointCloud({
     // treats them as linear and stores them unchanged. The shader then
     // passes the stop bytes straight to the framebuffer (RawShaderMaterial
     // bypasses the renderer's outputColorSpace conversion), so the
-    // colormap on screen exactly matches what the colourbar overlay
+    // colormap on screen exactly matches what the colorbar overlay
     // shows from the same sampleColormap call.
     if (colorMode === 'height' || colorMode === 'intensity' || scalarActive) {
       // Categorical scalar (e.g. ground_class): build a STEP gradient so each
-      // class renders as a flat distinct colour rather than a position along a
+      // class renders as a flat distinct color rather than a position along a
       // continuous ramp. Reuses the same INTENSITY_GRADIENT pipeline — only the
       // stop array differs — so no shader change. The intensityRange set above
       // (the attribute's [min,max]) is the value space the stops map against.
@@ -983,7 +983,7 @@ export function OctreePointCloud({
       // against `effectiveRange` (the shader's actual t-mapping). They differ
       // only for a constant column, where effectiveRange is widened to avoid a
       // zero divisor; using it here keeps the sampled t inside the right band.
-      // While the labelling overlay is active it OWNS the intensity slot and
+      // While the labeling overlay is active it OWNS the intensity slot and
       // writes dense palette indices, so the gradient must be built from the
       // palette's index scheme over [0, n-1] — not from the octree attribute's
       // own range, which describes the (stale) committed column.
@@ -992,9 +992,9 @@ export function OctreePointCloud({
         ? [0, Math.max(0, labelScheme.classes.length - 1)] as [number, number]
         : effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
       // Resolved per-cloud so a user palette bound to this column supplies the
-      // class colours once the labels are COMMITTED — while the tool is open
+      // class colors once the labels are COMMITTED — while the tool is open
       // `labelScheme` already wins, so without this the cloud would visibly
-      // change colour at commit, from the user's palette back to the by-name
+      // change color at commit, from the user's palette back to the by-name
       // default.
       const categorical = labelScheme ?? (scalarActive && scalarRange
         ? categoricalSchemeForCloud(
@@ -1008,8 +1008,8 @@ export function OctreePointCloud({
         const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);
         (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
         // ...but SAMPLE our own texture. potree-core bakes those stops into a
-        // 64-pixel, linearly filtered canvas, so past ~64 classes neighbours
-        // shared a pixel and drew as one averaged colour (lib/categoricalTexture).
+        // 64-pixel, linearly filtered canvas, so past ~64 classes neighbors
+        // shared a pixel and drew as one averaged color (lib/categoricalTexture).
         const { width, data } = categoricalTexels(
           categorical, [bandRange[0], bandRange[1]], UNKNOWN_CLASS_COLOR,
           gl.capabilities.maxTextureSize);
@@ -1061,7 +1061,7 @@ export function OctreePointCloud({
     }
 
     setMaterialVersion(v => v + 1);
-  // `data.bounds` and `displayOffset` are deps because the height-colour range
+  // `data.bounds` and `displayOffset` are deps because the height-color range
   // is derived from them: a committed transform moves the bounds, and without
   // these the gradient keeps describing the cloud's previous extent.
   }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme,
@@ -1201,7 +1201,7 @@ export function OctreePointCloud({
     }
     if (clipState.mode === 'slab' || clipState.mode === 'slab-ghost') {
       // CLIP_OUTSIDE with the slab box: keep what is inside, cull the rest.
-      // Ghost: HIGHLIGHT_INSIDE, whose highlight is rewritten to grey out the
+      // Ghost: HIGHLIGHT_INSIDE, whose highlight is rewritten to gray out the
       // OUTSIDE instead (see ghostOutsideShader).
       m.onBeforeCompile = ghostOutsideShader;
       m.setClipBoxes(clipState.boxes);
@@ -1221,7 +1221,7 @@ export function OctreePointCloud({
     m.clipMode = clipState.mode === 'crop-box'
       ? (clipState.invert ? ClipMode.CLIP_INSIDE : ClipMode.CLIP_OUTSIDE)
       : ClipMode.CLIP_INSIDE;
-    // materialVersion: the material is recreated on colour/size changes, so the
+    // materialVersion: the material is recreated on color/size changes, so the
     // clip state has to be re-applied to the new one.
   }, [octree, materialVersion, clipState]);
 
@@ -1409,9 +1409,9 @@ export function OctreePointCloud({
         }
         const scalarActive =
           cm === 'scalar' && !!field && !!d.octree?.attributeRanges?.[field];
-        // Manual-labelling overlay. Runs BEFORE the scalar swap decision below
+        // Manual-labeling overlay. Runs BEFORE the scalar swap decision below
         // because while the tool is open the label column OWNS the intensity
-        // slot — you cannot paint classes while colouring by reflectance and
+        // slot — you cannot paint classes while coloring by reflectance and
         // have any idea what you painted. Tiles already built for this stroke
         // key are skipped, so steady state is a string compare per node.
         // Through frameStateRef: this callback is registered ONCE (deps are
@@ -1425,7 +1425,7 @@ export function OctreePointCloud({
           );
         } else if (labelOverlayWasActiveRef.current) {
           // Tool closed / committed: drop the overlay so the octree's own
-          // attribute (or whatever scalar the user picked) colours again.
+          // attribute (or whatever scalar the user picked) colors again.
           clearLabelOverlayFromVisibleNodes(octree, frameStateRef.current.labelStatsId);
         }
         labelOverlayWasActiveRef.current = !!overlay;

@@ -6,7 +6,7 @@ import type { CloudFilters } from './pointCloudTypes';
 
 // A stand-in for potree's parsed attribute table — the same shape
 // octreeWideAttributes.ts reads (`pcoGeometry.pointAttributes.attributes`).
-// `size > 4` is what marks an attribute as pre-normalised into 0..1.
+// `size > 4` is what marks an attribute as pre-normalized into 0..1.
 const octreeWith = (attrs: { name: string; size: number; range?: [number, number] }[]) => ({
   pcoGeometry: {
     pointAttributes: {
@@ -50,7 +50,7 @@ describe('resolveOctreeFilterSpec', () => {
   });
 
   // TRAP 1 --------------------------------------------------------------
-  // potree normalises a >4-byte attribute into 0..1, but the panel's bounds
+  // potree normalizes a >4-byte attribute into 0..1, but the panel's bounds
   // are in FILE units. Testing file units against that buffer hides the cloud.
   describe('wide attributes', () => {
     const octree = octreeWith([{ name: 'gps_time', size: 8, range: [100, 200] }]);
@@ -77,7 +77,7 @@ describe('resolveOctreeFilterSpec', () => {
     });
 
     it('keeps a point sitting exactly ON the bound', () => {
-      // potree normalises in float64 then stores into a Float32Array, so the
+      // potree normalizes in float64 then stores into a Float32Array, so the
       // value read back can round UP past a float64 bound. Measured on the
       // gps_time fixture: t=150 over [100, 247.5] is 0.33898305084745762 exact
       // but 0.33898305892944336 as stored, so the 21st point vanished from a
@@ -161,9 +161,9 @@ describe('resolveOctreeFilterSpec', () => {
   });
 
   // TRAP 2 --------------------------------------------------------------
-  // In scalar colour mode `intensity` is aliased to another field's buffer and
+  // In scalar color mode `intensity` is aliased to another field's buffer and
   // the real one is stashed under ORIG_INTENSITY_ATTRIBUTE. Reading the live
-  // slot would filter by whatever the user is colouring by.
+  // slot would filter by whatever the user is coloring by.
   it('reads intensity from the stashed original, falling back to the live slot', () => {
     const spec = resolveOctreeFilterSpec(
       filters({ intensity: { min: 0.2, max: 0.8, enabled: true } }),

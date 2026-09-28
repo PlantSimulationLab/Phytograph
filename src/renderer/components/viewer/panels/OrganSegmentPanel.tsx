@@ -3,22 +3,22 @@ import { InfoHint } from '../../InfoHint';
 import { MlModelControls } from './MlModelControls';
 import { type OrganUnits } from '../../../utils/backendApi';
 
-// What the result is coloured by once the columns are written. Both columns are
-// always written; this only picks the colour mode the cloud is left in.
-export type OrganColourBy = 'organ' | 'leaflet';
+// What the result is colored by once the columns are written. Both columns are
+// always written; this only picks the color mode the cloud is left in.
+export type OrganColorBy = 'organ' | 'leaflet';
 
 // Presentational tool panel for ML plant-organ segmentation (soil / stem / leaf
 // plus one id per leaflet). State and the `onSegment` handler live in
 // PointCloudViewer; the parent gates on `showOrganSegmentPanel && selectedIds.size === 1`.
 interface OrganSegmentPanelProps {
   units: OrganUnits;
-  colourBy: OrganColourBy;
+  colorBy: OrganColorBy;
   modelId: string | null;
   inProgress: boolean;
   error: string | null;
   onClose: () => void;
   onUnitsChange: (u: OrganUnits) => void;
-  onColourByChange: (c: OrganColourBy) => void;
+  onColorByChange: (c: OrganColorBy) => void;
   onModelIdChange: (id: string | null) => void;
   onSegment: () => void;
   onCancel: () => void;
@@ -26,13 +26,13 @@ interface OrganSegmentPanelProps {
 
 export function OrganSegmentPanel({
   units,
-  colourBy,
+  colorBy,
   modelId,
   inProgress,
   error,
   onClose,
   onUnitsChange,
-  onColourByChange,
+  onColorByChange,
   onModelIdChange,
   onSegment,
   onCancel,
@@ -62,7 +62,7 @@ export function OrganSegmentPanel({
           <InfoHint
             data-testid="organ-units-help"
             label="Units"
-            text="What the cloud's coordinates are in. The model works in metres, and an XYZ file does not say which unit it was written in. Auto reads it from the cloud's size: anything more than 30 units across is taken as millimetres, anything smaller as metres. The result says which it used; if that is wrong, pick the units here and run again."
+            text="What the cloud's coordinates are in. The model works in meters, and an XYZ file does not say which unit it was written in. Auto reads it from the cloud's size: anything more than 30 units across is taken as millimeters, anything smaller as meters. The result says which it used; if that is wrong, pick the units here and run again."
           />
         </label>
         <select
@@ -73,25 +73,25 @@ export function OrganSegmentPanel({
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
         >
           <option value="auto">Auto (from the cloud's size)</option>
-          <option value="m">Metres</option>
-          <option value="cm">Centimetres</option>
-          <option value="mm">Millimetres</option>
+          <option value="m">Meters</option>
+          <option value="cm">Centimeters</option>
+          <option value="mm">Millimeters</option>
         </select>
       </div>
 
       <div className="mb-3">
         <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-          Colour result by
+          Color result by
           <InfoHint
-            data-testid="organ-colour-help"
-            label="Colour result by"
-            text="Both are written to the cloud as attributes (Plant organ and Leaflet), so you can switch between them later in the colour menu. Leaflets are numbered by height, lowest first; soil and stem points are leaflet 0."
+            data-testid="organ-color-help"
+            label="Color result by"
+            text="Both are written to the cloud as attributes (Plant organ and Leaflet), so you can switch between them later in the color menu. Leaflets are numbered by height, lowest first; soil and stem points are leaflet 0."
           />
         </label>
         <select
-          data-testid="organ-colour-by"
-          value={colourBy}
-          onChange={(e) => onColourByChange(e.target.value as OrganColourBy)}
+          data-testid="organ-color-by"
+          value={colorBy}
+          onChange={(e) => onColorByChange(e.target.value as OrganColorBy)}
           disabled={inProgress}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
         >

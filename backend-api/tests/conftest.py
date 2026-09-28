@@ -138,7 +138,7 @@ def make_file_session():
     endpoints therefore need a session, but `/api/cloud/session/create` also runs
     PotreeConverter, which many of these tests deliberately avoid depending on.
 
-    This builds the same session the import would (positions + colours +
+    This builds the same session the import would (positions + colors +
     intensity + extras, read through the SAME `_load_pointcloud_arrays` loader),
     minus the derived octree cache. Sessions are removed again at teardown so
     they don't leak between tests.
@@ -161,7 +161,7 @@ def make_file_session():
             ascii_format=ascii_format,
             column_plan=None,
             positions=np.asarray(positions, dtype=np.float64),
-            # The session stores colours/intensity at LAS uint16 scale; the
+            # The session stores colors/intensity at LAS uint16 scale; the
             # loader returns 0-1 floats, so scale up to match a real import.
             colors=(np.clip(np.asarray(colors), 0, 1) * 65535).astype(np.uint16)
             if colors is not None else None,
@@ -190,7 +190,7 @@ def make_file_session():
 def git_reference_formatter():
     """The `_format_points_as_text` implementation as committed at HEAD.
 
-    Lets a test pin the current (optimised) formatter against the real previous
+    Lets a test pin the current (optimized) formatter against the real previous
     one byte-for-byte, rather than against a hand-rebuilt equivalent that could
     re-derive the same mistake.
 

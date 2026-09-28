@@ -72,7 +72,7 @@ test('exports a scan as PTX with a complete grid and the misses as empty cells',
     // The 24 cells the importer recovered as sky/miss come back as empty cells.
     expect(empty.length).toBe(24);
     expect(body.length - empty.length).toBe(72);
-    // Every data line has the same fixed width (4 or 7 tokens, colour-dependent).
+    // Every data line has the same fixed width (4 or 7 tokens, color-dependent).
     const widths = new Set(body.map(l => l.trim().split(/\s+/).length));
     expect(widths.size).toBe(1);
   } finally {

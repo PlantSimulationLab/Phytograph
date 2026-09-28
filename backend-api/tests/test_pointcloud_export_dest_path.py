@@ -97,7 +97,7 @@ def test_export_response_stays_tiny_regardless_of_cloud_size(client, xyz_session
 
 
 def test_export_las_writes_to_dest_path(client, xyz_session, tmp_path):
-    """The laspy branch honours dest_path too (it used to always temp-file + base64)."""
+    """The laspy branch honors dest_path too (it used to always temp-file + base64)."""
     dest = tmp_path / "out.las"
     resp = client.post("/api/pointcloud/export", json={
         "source": {"session_id": xyz_session},
@@ -219,7 +219,7 @@ def test_chunked_formatting_is_byte_identical_to_monolithic():
 
 
 def test_cancel_during_formatting_stops_before_writing_the_file(make_file_session, tmp_path):
-    """A cancelled export must leave NO partial file.
+    """A canceled export must leave NO partial file.
 
     The subtlety this guards: the progress reporter's __call__ only queues a
     marker — it never raises. So the per-chunk formatting loop has to poll the
@@ -252,10 +252,10 @@ def test_cancel_during_formatting_stops_before_writing_the_file(make_file_sessio
         format="xyz",
         dest_path=str(dest),
     )
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._do_point_cloud_export(request, progress=reporter)
 
-    assert not dest.exists(), "a cancelled export must not leave a partial file"
+    assert not dest.exists(), "a canceled export must not leave a partial file"
     # And it stopped early rather than formatting everything first.
     assert reporter.calls < n // main._TEXT_EXPORT_CHUNK_ROWS + 5
 
@@ -290,7 +290,7 @@ def test_text_formatting_matches_the_previous_implementation(git_reference_forma
 
 
 def test_text_formatting_beats_the_row_by_row_implementation(git_reference_formatter):
-    """Guards the optimisation itself: the fast path must stay faster.
+    """Guards the optimization itself: the fast path must stay faster.
 
     Asserts a RELATIVE speedup against the frozen np.savetxt implementation
     rather than an absolute rows/s figure. An absolute threshold either fails on
@@ -373,9 +373,9 @@ def test_a_failed_stream_leaves_no_file_at_the_destination(tmp_path):
     def exploding_progress(fraction, message):
         calls["n"] += 1
         if calls["n"] >= 2:
-            raise main.ScanCancelled()
+            raise main.ScanCanceled()
 
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._write_points_as_text(dest, "xyz", pts, None, None,
                                    progress=exploding_progress)
 
@@ -419,8 +419,8 @@ def test_las_export_reports_progress_through_its_assembly_stages(client, make_fi
 
     The reported bug: the pill sat at 2% "Reading points" for most of a large
     LAS/LAZ export, then jumped straight to 90% "Writing file". Assembling a LAS
-    is vectorised but NOT free — at 25 M points the header/bounds, the quantising
-    x/y/z assignment and the colour scaling total ~4 s, all of which used to run
+    is vectorized but NOT free — at 25 M points the header/bounds, the quantizing
+    x/y/z assignment and the color scaling total ~4 s, all of which used to run
     between those two markers with nothing emitted. Only `laspy.write()` is a
     genuinely opaque call, and it is a minority of the time.
 
@@ -456,7 +456,7 @@ def test_las_export_reports_progress_through_its_assembly_stages(client, make_fi
         assert fractions == sorted(fractions), f"{fmt}: progress went backwards: {fractions}"
         assert fractions[-1] == pytest.approx(1.0), fractions
 
-        # The old behaviour was a single leap from ~0.02 straight to ~0.9. Assert
+        # The old behavior was a single leap from ~0.02 straight to ~0.9. Assert
         # no gap that large remains, which is what made it read as a hang.
         biggest = max(b - a for a, b in zip(fractions, fractions[1:]))
         assert biggest < 0.5, (

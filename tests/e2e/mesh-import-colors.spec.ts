@@ -3,18 +3,18 @@ import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 
-// Meshes imported ONE AT A TIME must each get their own swatch colour, the same
-// as meshes imported together. The regression: the colour allocator was seeded
+// Meshes imported ONE AT A TIME must each get their own swatch color, the same
+// as meshes imported together. The regression: the color allocator was seeded
 // only from the scene's scans, so none of the meshes already present counted as
 // "used" — every separate import restarted the palette and all of them came in
 // blue. A multi-file import hid it, because one allocator spans the batch.
 //
 // Per CLAUDE.md Testing rules: live backend, real File→Import, assert on the
-// colour each row actually carries.
+// color each row actually carries.
 const QUAD = join(repoRoot, 'tests', 'e2e', 'fixtures', 'quad.obj');
 const TWO_MATERIAL = join(repoRoot, 'tests', 'e2e', 'fixtures', 'two-material.obj');
 
-test('sequentially imported meshes get distinct colours', async () => {
+test('sequentially imported meshes get distinct colors', async () => {
   const { app, page, close } = await launchApp();
 
   try {

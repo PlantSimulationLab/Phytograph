@@ -5,16 +5,16 @@ Why not FPFH
 The obvious move is to reuse Open3D's FPFH + RANSAC pipeline on the anchor
 clouds. It does not work, and the reason is structural rather than a tuning
 problem: FPFH is a *surface* descriptor. It histograms the angles between a
-point's normal and its neighbours' normals, and deliberately discards the
+point's normal and its neighbors' normals, and deliberately discards the
 distances between them, because on a dense surface scan those distances just
-encode sampling density. Feed it a set of ~15 tree positions metres apart and
+encode sampling density. Feed it a set of ~15 tree positions meters apart and
 every descriptor comes out nearly identical (measured: 0.98 mean pairwise
 cosine similarity), so the correspondences it produces are noise. Registration
 then lands 90° or 180° out on a symmetric planting while reporting a healthy
 score.
 
 What a landmark set *does* carry is the geometry between the points: the
-distances from each tree to its neighbours are invariant under rigid motion and
+distances from each tree to its neighbors are invariant under rigid motion and
 are what make one tree distinguishable from another. This is the basis of every
 established marker-free forest registration method — Liang & Hyyppä's inter-stem
 vectors, Kelbe's triplet covariance, GlobalMatch's KNN-triangle edge congruence,
@@ -27,7 +27,7 @@ Approach
 Triangle congruence, which is the smallest structure that pins a 2-D rigid pose:
 
 1. Build candidate triangles from each cloud's landmarks (each landmark with its
-   nearest neighbours, rather than all C(n,3) triples).
+   nearest neighbors, rather than all C(n,3) triples).
 2. Describe each triangle by its sorted side lengths — invariant to rotation,
    translation and point ordering.
 3. Match triangles whose side lengths agree within a tolerance, and whose
@@ -41,7 +41,7 @@ Triangle congruence, which is the smallest structure that pins a 2-D rigid pose:
    the answer cannot be trusted — the one thing an RMSE-based check can never
    see, because a 180°-flipped orchard really is a low-RMSE fit.
 
-Vertical is trusted: both clouds are gravity-aligned (a scanner is levelled, and
+Vertical is trusted: both clouds are gravity-aligned (a scanner is leveled, and
 these come from the same site), so the search is over yaw + translation, not
 full SO(3). That is what makes the triangle vote cheap and unambiguous.
 """
@@ -63,7 +63,7 @@ def _triangle_side_lengths(pts: np.ndarray, tri: np.ndarray) -> np.ndarray:
 
 
 def _candidate_triangles(xyz: np.ndarray, k: int = 6) -> np.ndarray:
-    """Triangles from each landmark and its k nearest neighbours.
+    """Triangles from each landmark and its k nearest neighbors.
 
     All C(n,3) triples is wasteful and, worse, dominated by huge sliver
     triangles spanning the whole plot, which are numerically unstable and match
@@ -111,7 +111,7 @@ def _kabsch_2d(src: np.ndarray, dst: np.ndarray) -> Tuple[float, np.ndarray]:
     Closed form; no iteration. Returns (theta, translation)."""
     sc, dc = src.mean(axis=0), dst.mean(axis=0)
     s, d = src - sc, dst - dc
-    # The rotation that maximises correlation, from the cross/dot sums.
+    # The rotation that maximizes correlation, from the cross/dot sums.
     num = float(np.sum(s[:, 0] * d[:, 1] - s[:, 1] * d[:, 0]))
     den = float(np.sum(s[:, 0] * d[:, 0] + s[:, 1] * d[:, 1]))
     theta = float(np.arctan2(num, den))
@@ -131,7 +131,7 @@ def _pose_matrix(theta: float, t2: np.ndarray, dz: float) -> np.ndarray:
 
 
 def _feature_distance(fa: np.ndarray, fb: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    """Per-landmark feature disagreement, normalised to each feature's range.
+    """Per-landmark feature disagreement, normalized to each feature's range.
 
     `fa`/`fb` are (N, k) and `scale` is (k,), so the division must happen
     per-FEATURE and the max taken over the feature axis afterwards — reducing
@@ -230,7 +230,7 @@ def _corner_alignments(src_xyz, s_idx, tgt_xyz, t_idx, tol):
 
     Sorted side lengths say the triangles are congruent but not which vertex maps
     to which. Order each triangle's vertices by the length of the side opposite
-    them — a labelling both triangles agree on when they really are congruent —
+    them — a labeling both triangles agree on when they really are congruent —
     and also yield the mirrored order, since a reflection is a different pose and
     only the vote clustering can decide between them.
     """

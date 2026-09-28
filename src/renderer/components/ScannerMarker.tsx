@@ -88,7 +88,7 @@ export function TrajectoryPath({ points, color }: {
   return (
     // Decoration only — never a pick target. three.js raycasts lines within
     // `raycaster.params.Line.threshold`, a WORLD-space distance defaulting to
-    // 1 m, so an unguarded path would put a metre-wide hit halo along its whole
+    // 1 m, so an unguarded path would put a meter-wide hit halo along its whole
     // length and shadow the geometry behind it.
     <lineSegments frustumCulled={false} raycast={() => null}>
       <primitive object={geometry} attach="geometry" />
@@ -222,11 +222,11 @@ function TrajectoryPoses({ poses, color }: {
 // as the static marker — so a moving scan's bodies match a static scan's marker.
 //
 // One InstancedMesh over the OBJ's merged geometry, so N poses cost one draw call.
-// The real-world FIT (scale to heightMeters + recentre on the body's bbox centre)
+// The real-world FIT (scale to heightMeters + recenter on the body's bbox center)
 // is baked into the merged geometry once; each instance matrix then only carries
 // the pose's translation, rotation, and the user's size multiplier — so the body
-// rotates and scales about its own centre at the pose point, matching the static
-// marker's centring.
+// rotates and scales about its own center at the pose point, matching the static
+// marker's centering.
 const POSE_MODEL_SCALE = 1; // Full real-world-fitted size (same as the static body).
 
 function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
@@ -243,7 +243,7 @@ function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
   const obj = useLoader(OBJLoader, model.meshUrl);
   const meshRef = useRef<THREE.InstancedMesh | null>(null);
 
-  // Merge every child mesh of the OBJ into a single fitted, body-centred geometry.
+  // Merge every child mesh of the OBJ into a single fitted, body-centered geometry.
   // Keep only position+normal (drop uv/other attrs) so heterogeneous OBJ groups
   // merge cleanly — the standard material needs nothing else. Built once per
   // (obj, model); disposed on unmount.
@@ -258,7 +258,7 @@ function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
       let g = mesh.geometry.clone();
       // Bake the child's own transform so multi-part OBJs assemble correctly.
       g.applyMatrix4(mesh.matrixWorld);
-      // Normalise to NON-indexed + position/normal only, so heterogeneous OBJ
+      // Normalize to NON-indexed + position/normal only, so heterogeneous OBJ
       // groups (some indexed, some not, varying attribute sets) all merge cleanly
       // — mergeGeometries() requires a uniform layout or returns null.
       if (g.index) g = g.toNonIndexed();
@@ -278,7 +278,7 @@ function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
     // Degenerate OBJ (no meshes, or a failed merge): fall back to a tiny sphere so
     // the path still shows keypoints rather than crashing on a null geometry.
     if (!merged) return new THREE.SphereGeometry(0.05, 8, 6);
-    // Fit to real-world height + recentre the body on the origin, exactly as the
+    // Fit to real-world height + recenter the body on the origin, exactly as the
     // static ObjBody does, then bake it into the vertices so the instance matrix
     // only has to carry pose + the 50% factor.
     const box = new THREE.Box3().setFromObject(obj);
@@ -353,7 +353,7 @@ function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
   );
 }
 
-// Build the fitted, body-centred merged geometry for a scanner OBJ, the same way
+// Build the fitted, body-centered merged geometry for a scanner OBJ, the same way
 // TrajectoryPosesObj does. Shared by TrajectoryPosesObj and the editable renderer.
 function useFittedObjGeometry(model: ScannerModel): THREE.BufferGeometry {
   const obj = useLoader(OBJLoader, model.meshUrl);
@@ -788,9 +788,9 @@ export function scanShellOrientation(
   );
 }
 
-// Per-marker MeshStandardMaterial built from the scan's swatch colour. Darken in
+// Per-marker MeshStandardMaterial built from the scan's swatch color. Darken in
 // HSL (cap lightness, keep hue + saturation) rather than RGB scalar so every
-// palette colour lands in the same visibility band against bright foliage; a
+// palette color lands in the same visibility band against bright foliage; a
 // same-hue emissive glow marks selection.
 function makeBodyMaterial(color: string, selected: boolean): THREE.MeshStandardMaterial {
   const hsl = { h: 0, s: 0, l: 0 };
@@ -806,17 +806,17 @@ function makeBodyMaterial(color: string, selected: boolean): THREE.MeshStandardM
 }
 
 // Uniform scale + translation that fits an object of bounding box `box` to the
-// model's real-world height, centred on the scan origin. The bundled meshes are
-// authored in inconsistent units (some metres, the RIEGL mesh millimetres) and
+// model's real-world height, centered on the scan origin. The bundled meshes are
+// authored in inconsistent units (some meters, the RIEGL mesh millimeters) and
 // with varying local origins, so we never trust the raw coordinates: scale by
-// (targetHeight / boxHeight) and then re-centre.
+// (targetHeight / boxHeight) and then re-center.
 //
-// Every model (instrument OR sphere) is centred on the scan point — its bounding
-// box centre maps to the origin. That makes the scan origin the pivot for the
+// Every model (instrument OR sphere) is centered on the scan point — its bounding
+// box center maps to the origin. That makes the scan origin the pivot for the
 // global size multiplier: cranking "Scan marker size" up enlarges the marker
 // symmetrically *in place* about the scan point, rather than growing it upward
-// from a pinned base. (The scan origin is the instrument's optical centre, which
-// sits roughly mid-body, so centring is also the more faithful anchor.)
+// from a pinned base. (The scan origin is the instrument's optical center, which
+// sits roughly mid-body, so centering is also the more faithful anchor.)
 function fitTransform(
   box: THREE.Box3,
   model: ScannerModel,
@@ -827,7 +827,7 @@ function fitTransform(
   box.getCenter(center);
   const srcHeight = size.z > 1e-9 ? size.z : 1;
   const scale = model.heightMeters / srcHeight;
-  // Shift the scaled mesh so its bounding-box centre lands on the origin.
+  // Shift the scaled mesh so its bounding-box center lands on the origin.
   const offset = new THREE.Vector3(
     -center.x * scale,
     -center.y * scale,

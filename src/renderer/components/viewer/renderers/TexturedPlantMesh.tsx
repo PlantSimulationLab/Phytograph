@@ -21,10 +21,10 @@ function useBase64Texture(base64Data: string | undefined): THREE.Texture | null 
       return;
     }
 
-    let cancelled = false;
+    let canceled = false;
     const img = new Image();
     img.onload = () => {
-      if (cancelled) return;
+      if (canceled) return;
       const tex = new THREE.Texture(img);
       // UVs are V-flipped on the backend (Helios is V-down, three.js is V-up),
       // so disable three.js's own image flip to avoid double-flipping.
@@ -39,14 +39,14 @@ function useBase64Texture(base64Data: string | undefined): THREE.Texture | null 
       setTexture(tex);
     };
     img.onerror = (e) => {
-      if (cancelled) return;
+      if (canceled) return;
       console.error('[useBase64Texture] Failed to load texture from base64:', e);
       setTexture(null);
     };
     img.src = `data:image/png;base64,${base64Data}`;
 
     return () => {
-      cancelled = true;
+      canceled = true;
       if (currentRef.current) {
         currentRef.current.dispose();
         currentRef.current = null;

@@ -11,7 +11,7 @@ silently fell back to RAW extrema.
 The user-visible shape: import a plot with one noise point 400 m up and the
 height colorbar correctly spans 0-3 m. Crop something unrelated — or filter, or
 bake a delete — and the colorbar snaps back to 0-400, i.e. the outlier sets the
-ramp again and the whole plot renders one flat colour. The feature looks like it
+ramp again and the whole plot renders one flat color. The feature looks like it
 randomly stopped working, with nothing on screen to explain why.
 
 Recomputing (rather than carrying the import values forward) is also the only
@@ -131,7 +131,7 @@ def test_an_all_deleted_session_reports_nothing_rather_than_raising():
     assert main._session_robust_color_stats_locked(sess) == {}
 
 
-def test_the_miss_column_itself_is_not_offered_as_a_colour_domain():
+def test_the_miss_column_itself_is_not_offered_as_a_color_domain():
     """`is_miss` is a flag, and the octree is hits-only, so its surviving values
     are all 0 — a degenerate column the helper must omit rather than emit as a
     zero-width range."""

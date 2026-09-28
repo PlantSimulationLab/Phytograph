@@ -3,13 +3,13 @@
 // Two competing intents:
 //
 //  1. Content authored around the ORIGIN (a synthetic plant, a Helios scene, a
-//     mesh modelled at 0) should get its grid at exactly 0. Anything else looks
-//     broken: the grid floats a few centimetres off a plant that is visibly
+//     mesh modeled at 0) should get its grid at exactly 0. Anything else looks
+//     broken: the grid floats a few centimeters off a plant that is visibly
 //     standing on zero, because a handful of noise points dipped below it.
 //  2. Content that lives somewhere else entirely — a georeferenced survey in
 //     UTM with ellipsoidal height — must get its grid at the GROUND, because
 //     zero is not a place. On the WGS84 ellipsoid, Z=0 is a datum surface that
-//     can sit tens of metres from the terrain.
+//     can sit tens of meters from the terrain.
 //
 // The rule that shipped resolved this by asking whether the scene's vertical
 // span STRADDLES zero, and then whether zero is within half the scene's 3D

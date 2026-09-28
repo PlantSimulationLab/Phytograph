@@ -150,7 +150,7 @@ def test_skeleton_source_auto_radius(client, tree_session):
 
 def test_skeleton_point_cap_fails_fast(client, tree_points, monkeypatch):
     # Past the cap the endpoint must refuse with an actionable message rather
-    # than building a huge neighbour graph and appearing to hang.
+    # than building a huge neighbor graph and appearing to hang.
     import main
     monkeypatch.setattr(main, "_SKELETON_MAX_POINTS", len(tree_points) - 1)
     resp = client.post("/api/skeleton/extract", json={
@@ -259,7 +259,7 @@ def test_export_session_source_preserves_rgb_and_intensity(client):
     Every other export test here uses `source_path` (the file branch, which
     worked). The app's normal state for an octree import is session-backed, and
     that branch hardcoded `colors = None` / `intensity = None` regardless of
-    `want_colors` — so the LAS writer saw no colours and silently downgraded to
+    `want_colors` — so the LAS writer saw no colors and silently downgraded to
     point format 0, dropping the dimension entirely rather than leaving it blank.
     """
     import time
@@ -282,7 +282,7 @@ def test_export_session_source_preserves_rgb_and_intensity(client):
     )
     main._cloud_sessions[sess.session_id] = sess
     try:
-        # LAS keeps a real colour dimension (format 2, not the colourless 0).
+        # LAS keeps a real color dimension (format 2, not the colorless 0).
         res = decode_streamed_json(client.post("/api/pointcloud/export", json={
             "source": {"session_id": sess.session_id}, "format": "las",
         }).content)
@@ -293,14 +293,14 @@ def test_export_session_source_preserves_rgb_and_intensity(client):
             las_path = fh.name
         try:
             las = laspy.read(las_path)
-            assert las.header.point_format.id != 0, "colourless LAS point format"
+            assert las.header.point_format.id != 0, "colorless LAS point format"
             assert "red" in [d.name for d in las.point_format.dimensions]
             assert int(las.red[0]) == 65535
             assert int(las.blue[0]) in (32767, 32768)   # uint16 round-trip
         finally:
             os.unlink(las_path)
 
-        # Text formats carry the 0-255 colour columns too.
+        # Text formats carry the 0-255 color columns too.
         res = decode_streamed_json(client.post("/api/pointcloud/export", json={
             "source": {"session_id": sess.session_id}, "format": "csv",
         }).content)

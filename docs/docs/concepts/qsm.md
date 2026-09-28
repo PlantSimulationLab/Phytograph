@@ -7,7 +7,7 @@ wood on it: every segment has a measured radius, so the model carries
 volume, surface area, taper, and per-branch diameter — the quantities you
 report when you phenotype a tree.
 
-Phytograph's QSM adds one thing many QSM tools don't emphasise:
+Phytograph's QSM adds one thing many QSM tools don't emphasize:
 **continuous shoots classified by shoot rank**.
 
 ## Cylinders, shoots, and rank
@@ -29,7 +29,7 @@ neither arm is a continuation, so the parent axis **terminates** and
 *both* arms become rank + 1. This is what makes the rank match the way
 the tree was actually trained:
 
-- A **headed** or **open-centre** tree (a topped almond, say) has a short
+- A **headed** or **open-center** tree (a topped almond, say) has a short
   thick trunk cut at 0.5–0.9 m that splits into 3–5 co-dominant
   scaffolds. The trunk is rank 0 up to the heading cut and every scaffold
   is rank 1 — the trunk is not traced up one of them.
@@ -43,7 +43,7 @@ codominant fork, so it never ends the axis.
 
 The **Axis continuation** control in the build dialog sets how evenly two
 arms must match in thickness before a fork counts as codominant. Lower
-ends the trunk more readily (headed / open-centre trees); higher traces it
+ends the trunk more readily (headed / open-center trees); higher traces it
 through more forks (a strong central leader). The default, 0.75, is the
 published threshold for a codominant union.
 

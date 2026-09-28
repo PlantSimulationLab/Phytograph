@@ -7,12 +7,12 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
-// Cancelling an in-flight import.
+// Canceling an in-flight import.
 //
 // The import progress modal used to be a hard-blocking overlay with no way out:
 // if an import hung (or the user picked the wrong 800 MB file) the only escape
 // was killing the app. The fix makes the backend's `/api/cloud/session/create`
-// a streaming, cancellable endpoint — so the cancel actually STOPS the work
+// a streaming, cancelable endpoint — so the cancel actually STOPS the work
 // (killing the PotreeConverter child) rather than dismissing the dialog and
 // letting the import run to completion in the background.
 //
@@ -123,7 +123,7 @@ test.beforeEach(async () => {
 // diffs against the per-test snapshot instead of demanding a globally empty
 // root, so the second test (a full successful import, which installs an entry)
 // can no longer break this one by running first.
-test('cancelling an import stops the backend work and adds no scan', async () => {
+test('canceling an import stops the backend work and adds no scan', async () => {
   test.setTimeout(240_000);
   const { app, page } = session;
 
@@ -187,11 +187,11 @@ test('cancelling an import stops the backend work and adds no scan', async () =>
 
   // Wait for the OCTREE BUILD to settle, rather than sleeping.
   //
-  // This used to be `waitForTimeout(45_000)`, reasoning that an uncancelled
+  // This used to be `waitForTimeout(45_000)`, reasoning that an uncanceled
   // import takes ~10 s so 45 s of quiet proves nothing is still running. That
   // premise is load-dependent by construction — it measures the machine, not the
   // cancel — and it broke under `--workers=2`, where the `heavy` project runs
-  // alongside a `main` spec (the two projects are deliberately NOT serialised;
+  // alongside a `main` spec (the two projects are deliberately NOT serialized;
   // see playwright.config.ts). It also cost 45 s on every green run.
   //
   // The load-independent signal is the cache directory itself. A build writes

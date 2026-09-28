@@ -1,5 +1,5 @@
 /**
- * Instance labelling (F7): an `<name>_instance` column numbers OBJECTS — this
+ * Instance labeling (F7): an `<name>_instance` column numbers OBJECTS — this
  * tree, that leaf — rather than naming classes, so its palette is a growing
  * list of ids and the edits are about ids: add one, merge two, delete one.
  *
@@ -40,7 +40,7 @@ export function instancePrefix(palette: ClassPalette): string {
 /**
  * Add the next free instance id: one past the highest id in use (so a
  * segmentation's numbering continues rather than jumping to the class band),
- * named like its siblings, in the same per-id colour the viewer uses for
+ * named like its siblings, in the same per-id color the viewer uses for
  * `tree_instance`.
  */
 export function withNewInstance(palette: ClassPalette): { palette: ClassPalette; value: number } {

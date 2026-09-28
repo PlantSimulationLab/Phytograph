@@ -85,7 +85,7 @@ def test_dest_dir_laz_files_are_readable_with_all_points(tmp_path):
     for entry in resp["files"]:
         f = laspy.read(str(tmp_path / entry["name"]))
         assert len(f.points) == n
-        # Coordinates survive the round trip within LAS scale quantisation.
+        # Coordinates survive the round trip within LAS scale quantization.
         assert -5.01 <= float(f.x.min()) and float(f.x.max()) <= 5.01
         assert -0.01 <= float(f.z.min()) and float(f.z.max()) <= 4.01
 

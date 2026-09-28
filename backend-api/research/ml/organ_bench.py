@@ -16,7 +16,7 @@ cache's 1 mm resolution, or thinned first with ``--decimate``, and scored for:
   at IoU > 0.5 (F1), best-IoU coverage per true leaflet (mCov) and the leaflet
   count error. On Sugar4D a true instance includes its petiole while a
   predicted one is blade only, so its mCov is a lower bound, and a predicted
-  leaf inside the crown (young leaves the labellers left undivided) is not
+  leaf inside the crown (young leaves the labelers left undivided) is not
   scored.
 
 Results are pooled per ``split:dataset`` and also written per item.

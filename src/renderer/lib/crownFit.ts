@@ -45,7 +45,7 @@ export const CROWN_SHAPES: CrownShape[] = ['ellipsoid', 'prism', 'cone', 'alpha'
 // attempted — below it, PCA / shape fitting is meaningless.
 export const MIN_CROWN_POINTS = 50;
 
-// How tree height is measured. 'ground_class' uses the min-Z of labelled ground
+// How tree height is measured. 'ground_class' uses the min-Z of labeled ground
 // points; 'min_z' falls back to the tree cloud's own lowest point (works when
 // ground was removed manually and no labels remain).
 export type GroundBaseline = 'ground_class' | 'min_z';
@@ -54,7 +54,7 @@ export type GroundBaseline = 'ground_class' | 'min_z';
 export interface CrownFitScanEligibility {
   scanId: string;
   eligible: boolean;
-  // Set when the scan is structurally unusable — the picker greys the row and
+  // Set when the scan is structurally unusable — the picker grays the row and
   // shows this as the reason. Distinct from `warning` (enabled-but-caveated).
   disabledReason?: string;
   // Composed soft warning for the ambiguity cases (missing labels). The scan is
@@ -68,7 +68,7 @@ export interface CrownFitScanEligibility {
   // hasTree; drives 'multiTree' fitting (one crown per id).
   treeInstanceIds?: number[];
   // 'multiTree' when the cloud carries ≥2 distinct trees (one crown each);
-  // 'single' when it's a single tree (labelled or assumed).
+  // 'single' when it's a single tree (labeled or assumed).
   mode: 'single' | 'multiTree';
   // Resolved backend inputs.
   useLeafOnly: boolean;
@@ -239,15 +239,15 @@ export function coerceCrownFitOptions(stored: unknown): CrownFitOptions {
 
 // The tree-instance color for a tree id, matching the `tree_instance` scalar
 // colormap used in the viewer — so anything derived from a segmented cloud (a
-// fitted crown, a cloud split out per tree) reads with the same colour as its
+// fitted crown, a cloud split out per tree) reads with the same color as its
 // tree. Returns null for the sentinel id 0 (whole-cloud single tree) and for
-// unassigned/negative ids, where there is no tree-instance colour to match.
+// unassigned/negative ids, where there is no tree-instance color to match.
 export function crownColorForTreeId(treeId: number): string | null {
   if (treeId <= 0) return null;
   return rgbToHex(treeInstanceColor(treeId));
 }
 
-// A distinct auto-assigned colour for a crown when there's no tree id to match:
+// A distinct auto-assigned color for a crown when there's no tree id to match:
 // the first fixed-palette entry not already taken, cycling once exhausted. Mirrors
 // allocateScanColor so scan and crown palettes read consistently.
 const CROWN_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];

@@ -189,7 +189,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
     return area > 0 ? weighted / area : null;
   }, [inclPdfs, dists]);
 
-  // Format a 3-vector (cell center or dimensions, in metres) as "(x, y, z)" for
+  // Format a 3-vector (cell center or dimensions, in meters) as "(x, y, z)" for
   // a CSV cell — quoting handles the embedded commas. Blank when absent (a
   // non-grid whole-mesh / combined row has no single box).
   const vec3 = (v?: [number, number, number]) =>

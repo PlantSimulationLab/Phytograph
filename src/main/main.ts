@@ -202,7 +202,7 @@ const e2eQuitAnswer = process.env.PHYTOGRAPH_E2E_QUIT_CONFIRM;
 const quitConfirmArmed = !isE2E || !!e2eQuitAnswer;
 
 /** Counts confirmations shown, so an E2E can assert the prompt actually fired
- *  rather than inferring it from the close being cancelled. */
+ *  rather than inferring it from the close being canceled. */
 let quitConfirmShown = 0;
 
 /** The native confirmation, injected into shouldAllowClose so the decision
@@ -285,14 +285,14 @@ function createWindow(): void {
   // 703px column). macOS never saw it because 860 happens to be sufficient
   // there. Measure the frame instead of assuming it: the difference between
   // the outer and content heights is the real chrome on whatever platform this
-  // is running on, so the content budget is honoured everywhere.
+  // is running on, so the content budget is honored everywhere.
   //
   // Capped to the display's work area so small screens (e.g. 1366x768
   // laptops) still get a window that fits on screen; the column falls back to
   // scrolling there.
   //
   // Note the E2E launch size above (1200x800) is now BELOW this minimum, and
-  // deliberately so: Electron honours an explicit initial size, so the suite
+  // deliberately so: Electron honors an explicit initial size, so the suite
   // still gets its stable 1200x800 and the pixel-coordinate specs are
   // unaffected. Only an explicit resize clamps to minHeight — which is exactly
   // what window-resize.spec.ts exercises.
@@ -337,7 +337,7 @@ function createWindow(): void {
   //
   // Only ever RAISE it. setMinimumSize is an explicit resize, and the E2E
   // launch size (1200x800) sits deliberately BELOW this minimum — see the note
-  // above: the suite relies on Electron honouring the initial size so pixel
+  // above: the suite relies on Electron honoring the initial size so pixel
   // coordinates stay stable. Lowering the minimum is never needed (the guess is
   // only ever too small, never too large), but the call itself would drag the
   // 800px-high E2E window up to the new floor and shift every pixel coordinate
@@ -636,7 +636,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  // Confirm BEFORE any teardown: cancelling the quit must leave a fully working
+  // Confirm BEFORE any teardown: canceling the quit must leave a fully working
   // app, and stopBackend() would have killed the sidecar that holds every cloud
   // session. Covers Cmd+Q, the app-menu Quit, and Dock → Quit — none of which
   // pass through the window's 'close' handler on macOS.

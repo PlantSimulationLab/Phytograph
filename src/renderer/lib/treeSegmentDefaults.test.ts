@@ -54,7 +54,7 @@ describe('treeSegmentDefaultsForExtent', () => {
     // Swept on two independent clouds (see the constant's comment): TreeIso's
     // 9-ground-truth-tree demo cloud needs >= 0.55 (0.5 splits it into 10, 0.4
     // into 22), and the Nickels almond scan needs <= 0.75 (1.0 reabsorbs the
-    // neighbouring tree). Only 0.55-0.75 satisfies both. Pinning the band rather
+    // neighboring tree). Only 0.55-0.75 satisfies both. Pinning the band rather
     // than the value keeps this honest if the seeding is retuned.
     for (const ext of [1.5, 8.85, 17.1, 50, 186, 500, 10000]) {
       const d = treeSegmentDefaultsForExtent(ext);

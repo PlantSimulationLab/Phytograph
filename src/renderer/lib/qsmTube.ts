@@ -29,7 +29,7 @@ export type Vec3 = [number, number, number];
 const MIN_RADIUS = 1e-5;
 
 /**
- * Default world-space edge length of one texture tile, in metres. Matches the
+ * Default world-space edge length of one texture tile, in meters. Matches the
  * `texture_repeat_length` Helios' plant-architecture plugin uses for bark
  * (PlantArchitecture.cpp), so a QSM tube tiles at the same physical scale as a
  * Helios-generated plant.
@@ -39,7 +39,7 @@ export const DEFAULT_TEXTURE_TILE_SIZE = 0.25;
 /**
  * How many times the texture wraps around a ring of radius `r`.
  *
- * Both UV axes are measured in the SAME world units (metres / tileSize), which is
+ * Both UV axes are measured in the SAME world units (meters / tileSize), which is
  * what keeps a bark tile roughly SQUARE at every girth. Helios instead wraps
  * exactly ONCE around regardless of radius (Context_object.cpp assigns the
  * circumferential coordinate as j/radial_subdivisions), so its tile aspect scales
@@ -282,7 +282,7 @@ export interface SweptTube {
  * the joint, adding phantom interior surface (and inflating exported surface area).
  * Returns null if the polyline is too short to sweep.
  *
- * `tileSize` is the world-space edge length (metres) of one texture tile, used only
+ * `tileSize` is the world-space edge length (meters) of one texture tile, used only
  * to derive `uvs`. Geometry is unaffected by it.
  */
 export function sweepTube(

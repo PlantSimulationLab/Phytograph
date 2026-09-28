@@ -2,11 +2,11 @@
 
 `segment_wood` classifies each point as wood (1, trunk/branches) or leaf (2)
 from XYZ geometry alone. These tests evaluate it quantitatively against
-labelled fixtures rather than merely asserting "didn't crash".
+labeled fixtures rather than merely asserting "didn't crash".
 
 Fixtures (`tests/fixtures/leafwood/`, column 4 = point_class, 1=wood 2=leaf):
   - weiser_{oak,spruce,beech}_small.xyz — REAL European TLS trees, manually
-    labelled, decimated (5 mm voxel, ~50k pts) from Weiser et al. heiDATA
+    labeled, decimated (5 mm voxel, ~50k pts) from Weiser et al. heiDATA
     doi:10.11588/data/UUMEDI (CC-BY 4.0). Broadleaf (oak, beech) + conifer
     (spruce).
   - lewos_tropical_small.xyz — REAL tropical tree (LeWoS tree 1, Wang et al.
@@ -41,7 +41,7 @@ FIXDIR = Path(__file__).parent / "fixtures" / "leafwood"
 # chosen with margin below observed; oak is the hardest real tree (wood-heavy,
 # OA≈0.80). thin-wood recall (twigs caught as wood) baselines on these decimated
 # fixtures: spruce 0.83 / oak 0.91 / beech 0.85 / lewos 0.80 — floors set ~0.10
-# below. NB decimation distorts neighbourhood density (→sphericity), so this is a
+# below. NB decimation distorts neighborhood density (→sphericity), so this is a
 # coarse REGRESSION TRIPWIRE; the authoritative thin-wood numbers are measured
 # full-resolution in the one-off local validation, not here.
 FIXTURES = [
@@ -75,7 +75,7 @@ def _f1(pred, truth, cls):
 
 
 # Sphericity below this on a ground-truth WOOD point ⇒ a locally 1-D/compact
-# neighbourhood, i.e. a thin branch / twig (λ₃≈0). Trunk points are also low-
+# neighborhood, i.e. a thin branch / twig (λ₃≈0). Trunk points are also low-
 # sphericity, so we additionally exclude the lowest height band (see below) to
 # isolate the *crown* twigs that geometric methods notoriously misclassify.
 _THIN_WOOD_SPH = 0.02
@@ -85,7 +85,7 @@ def _thin_wood_recall(points, pred, truth, sph_thresh=_THIN_WOOD_SPH, trunk_frac
     """Recall over ground-truth WOOD points that are THIN branches/twigs.
 
     Aggregate OA/wood-F1 hide the failure that actually looks bad: thin crown
-    branches getting labelled leaf (documented for geometric methods — Wan 2024
+    branches getting labeled leaf (documented for geometric methods — Wan 2024
     RSE). This metric isolates that. The "thin twig" set is ground-truth wood
     with low sphericity (λ₃/λ₁ small ⇒ locally 1-D), EXCLUDING the bottom
     `trunk_frac` of the height range so the (easy, always-caught) trunk doesn't
@@ -110,7 +110,7 @@ def _thin_wood_recall(points, pred, truth, sph_thresh=_THIN_WOOD_SPH, trunk_frac
 @pytest.mark.parametrize("stem,min_oa,min_wood_f1,min_thin_recall", FIXTURES,
                          ids=[f[0] for f in FIXTURES])
 def test_wood_segment_quantitative(stem, min_oa, min_wood_f1, min_thin_recall):
-    """segment_wood labels vs ground truth on labelled wood/leaf clouds."""
+    """segment_wood labels vs ground truth on labeled wood/leaf clouds."""
     points, truth = _load(stem)
     pred = main.segment_wood(points)
 
@@ -124,7 +124,7 @@ def test_wood_segment_quantitative(stem, min_oa, min_wood_f1, min_thin_recall):
 
     # Confusion matrix + metrics, surfaced under `pytest -s` so a regression is
     # debuggable rather than a bare assertion failure. thin-wood recall is the
-    # metric that tracks the visually-obvious failure (twigs labelled leaf).
+    # metric that tracks the visually-obvious failure (twigs labeled leaf).
     print(
         f"\n{stem}: OA={oa:.4f} F1_wood={f1_wood:.4f} F1_leaf={f1_leaf:.4f} "
         f"thin_wood_recall={thin_recall:.4f} (n_thin={n_thin}) "
@@ -286,7 +286,7 @@ def test_wood_segment_caps_large_cloud(monkeypatch):
 
     labels = main.segment_wood(points)
     # Full-length, aligned, valid labels even though the geometry ran on a
-    # voxel-downsampled subset and propagated back by nearest neighbour.
+    # voxel-downsampled subset and propagated back by nearest neighbor.
     assert labels.shape == (len(points),)
     assert labels.dtype == np.int32
     assert set(np.unique(labels)).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
@@ -346,7 +346,7 @@ def test_wood_segment_reflectance_only_promotes_wood():
     points, truth = _load("weiser_oak_small")
     geom = main.segment_wood(points)
     # Reflectance: brightest on true wood (so the upper tail is genuinely woody),
-    # dim on leaf — the favourable case the assist is designed for.
+    # dim on leaf — the favorable case the assist is designed for.
     rng = np.random.RandomState(0)
     refl = np.where(truth == main.WOOD_CLASS_WOOD,
                     rng.normal(-5.0, 1.0, len(points)),

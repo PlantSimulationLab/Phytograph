@@ -110,7 +110,7 @@ class _StubIfc:
 
 
 # ---------------------------------------------------------------------------
-# read_scan honours its bound exactly
+# read_scan honors its bound exactly
 # ---------------------------------------------------------------------------
 
 
@@ -179,7 +179,7 @@ def test_an_inclinometer_fallback_does_not_end_the_climb(tmp_path):
     assert ifc.rungs == list(R._PROBE_LADDER) + [R._ANCHOR_PROBE_POINTS]
 
 
-def test_a_ceiling_below_the_ladder_is_honoured(tmp_path):
+def test_a_ceiling_below_the_ladder_is_honored(tmp_path):
     """--probe-points must be able to ask for LESS than the first rung."""
     ifc = _StubIfc(_POSE_NAN)
     R.probe_scan(ifc, "s.rxp", str(tmp_path / "hk.txt"), ceiling=1_000)

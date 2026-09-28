@@ -101,12 +101,12 @@ test('derives a field by formula and makes it a first-class scalar field', async
   // ── The real test of "first-class": it must reach all three surfaces ──
   //
   // These are three independent consumers of the session's column list, and
-  // each reads it through different machinery (the colour picker via octree
+  // each reads it through different machinery (the color picker via octree
   // attribute metadata, the filter via filterFieldsFor, the export modal via
   // exportColumns). A derived field that only showed up in one of them would
   // be a second-class citizen, which is precisely what the design forbids.
 
-  // 1. Colour-by dropdown. The Display section is collapsed by default.
+  // 1. Color-by dropdown. The Display section is collapsed by default.
   await page.getByRole('button', { name: 'Display' }).click();
   const colorMode = page.getByTestId('display-color-mode');
   await expect(colorMode).toBeVisible();
@@ -171,7 +171,7 @@ test('re-running a derived field replaces it, without deleting it first', async 
   await expect(page.getByTestId('scalar-compute-run')).toBeDisabled();
 });
 
-test('renames a derived field and keeps the viewer colouring by it', async () => {
+test('renames a derived field and keeps the viewer coloring by it', async () => {
   const { app, page } = session;
   await importFixture(app, page);
   await openScalarPanel(page);
@@ -203,9 +203,9 @@ test('renames a derived field and keeps the viewer colouring by it', async () =>
   await expect(page.locator('[data-testid="scalar-field-row"][data-slug="shifted"]'))
     .toHaveCount(0);
 
-  // ...AND the viewer follows it. Without the slug migration the colour mode
+  // ...AND the viewer follows it. Without the slug migration the color mode
   // would silently fall back to the default and the user would read the rename
-  // as having broken their colouring.
+  // as having broken their coloring.
   await expect(colorMode).toHaveValue('scalar:renamed_field', { timeout: 30_000 });
 });
 
@@ -328,19 +328,19 @@ async function renameField(page: LaunchedApp['page'], slug: string, name: string
     .toHaveCount(1, { timeout: 60_000 });
 }
 
-test('a rename never blanks the cloud, whether or not it is coloured by the field', async () => {
+test('a rename never blanks the cloud, whether or not it is colored by the field', async () => {
   // THE BUG THIS PINS: a rename relabels the octree in milliseconds, but hands
   // back a new cache id, and the viewer disposed the drawn octree the moment the
   // id changed and streamed the new one from nothing — so every renamed cloud
   // blinked out and refilled, although nothing on screen had changed. When the
-  // field was the one being COLOURED it was worse: the octree component is keyed
+  // field was the one being COLORED it was worse: the octree component is keyed
   // on the field name, so the rename remounted it outright. Both are now a
   // handover: the old octree stays drawn until the new one has streamed in.
   const { app, page } = session;
   await importFixture(app, page);
   await openScalarPanel(page);
 
-  // A derived field, which the compute also selects for colouring.
+  // A derived field, which the compute also selects for coloring.
   await page.getByTestId('scalar-fields-tab-compute').click();
   await page.getByTestId('scalar-compute-expression').fill('band * 2');
   await page.getByTestId('scalar-compute-slug').fill('twice');
@@ -354,23 +354,23 @@ test('a rename never blanks the cloud, whether or not it is coloured by the fiel
     () => (window as unknown as { __potreeFrameStats?: { drawnPoints?: number } })
       .__potreeFrameStats?.drawnPoints ?? 0), { timeout: 30_000 }).toBeGreaterThan(0);
 
-  // 1. A field that is NOT being coloured.
+  // 1. A field that is NOT being colored.
   await startDrawnSampler(page);
   await renameField(page, 'band', 'level');
   // Past the handover's own timeout, so the swap has certainly happened.
   await page.waitForTimeout(3_000);
-  const uncoloured = await stopDrawnSampler(page);
-  expect(uncoloured.frames).toBeGreaterThan(10);
-  expect(uncoloured.zeroFrames).toBe(0);
+  const uncolored = await stopDrawnSampler(page);
+  expect(uncolored.frames).toBeGreaterThan(10);
+  expect(uncolored.zeroFrames).toBe(0);
 
-  // 2. The field that IS being coloured — the remount path.
+  // 2. The field that IS being colored — the remount path.
   await startDrawnSampler(page);
   await renameField(page, 'twice', 'doubled');
   await page.waitForTimeout(3_000);
-  const coloured = await stopDrawnSampler(page);
-  expect(coloured.frames).toBeGreaterThan(10);
-  expect(coloured.zeroFrames).toBe(0);
-  // And the colouring followed the rename rather than dropping to a default.
+  const colored = await stopDrawnSampler(page);
+  expect(colored.frames).toBeGreaterThan(10);
+  expect(colored.zeroFrames).toBe(0);
+  // And the coloring followed the rename rather than dropping to a default.
   await expect(colorMode).toHaveValue('scalar:doubled');
 });
 
@@ -404,7 +404,7 @@ test('refuses to delete a field other tools read by name, and deletes an ordinar
 
   await expect(page.locator('[data-testid="scalar-field-row"][data-slug="tripled"]'))
     .toHaveCount(0, { timeout: 60_000 });
-  // And it leaves the colour picker too.
+  // And it leaves the color picker too.
   await page.getByRole('button', { name: 'Display' }).click();
   await expect(page.getByTestId('display-color-mode')).toBeVisible();
   await expect(page.locator('[data-testid="display-color-mode"] option[value="scalar:tripled"]'))

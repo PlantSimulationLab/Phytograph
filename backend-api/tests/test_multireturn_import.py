@@ -111,10 +111,10 @@ def test_column_plan_pins_canonical_multireturn_slugs(tmp_path):
 def test_categorical_override_of_multireturn_column_keeps_class_field():
     """A multi-return column the user explicitly marks categorical (the wizard's
     'Label' role) is a discrete class field BY INTENT — it must NOT be diverted
-    into the LAD canonicalisation that lower-cases the slug and relabels it as a
+    into the LAD canonicalization that lower-cases the slug and relabels it as a
     per-pulse field. It carries as a normal categorical extra-dim under a
-    readable, sanitised slug ('Target_Index'), so the renderer colours it as
-    classes and the colour-mode option matches.
+    readable, sanitized slug ('Target_Index'), so the renderer colors it as
+    classes and the color-mode option matches.
 
     The non-categorical default still pins the canonical lower-case slug so the
     LAD accessor finds it — that path is unchanged.
@@ -292,7 +292,7 @@ def test_las_degenerate_standard_dims_not_mapped(tmp_path):
 def test_las_nonconstant_standard_dims_carried_as_scalars(tmp_path):
     """Standard LAS dims that hold real (non-constant) data — classification,
     point_source_id, scan_angle, … — are carried into the session as scalar
-    fields so they reach the renderer's colour-by picker. The octree is rebuilt
+    fields so they reach the renderer's color-by picker. The octree is rebuilt
     from these arrays, not the source file, so a dropped dim is gone for good."""
     las_path = tmp_path / "rich.las"
     header = laspy.LasHeader(point_format=3, version="1.4")
@@ -325,7 +325,7 @@ def test_las_nonconstant_standard_dims_carried_as_scalars(tmp_path):
     # The label is "LAS <name>", not the bare name: PotreeConverter emits its own
     # built-in `classification` attribute (all zeros, since it never reads our
     # extra dims), so a bare label put two indistinguishable "classification"
-    # entries in the colour-by list. The slug carries the prefix too.
+    # entries in the color-by list. The slug carries the prefix too.
     meta_by_slug = {ed["slug"]: ed["label"] for ed in extra_dims_meta}
     assert meta_by_slug.get("las_classification") == "LAS classification"
     assert meta_by_slug.get("las_point_source_id") == "LAS point_source_id"
@@ -460,8 +460,8 @@ def test_session_to_lad_arrays_forwards_is_miss_even_with_no_misses(tmp_path):
     assert vals[:, labels.index("is_miss")].tolist() == [0.0, 0.0]
 
 
-def test_session_to_lad_arrays_no_is_miss_column_not_synthesised(tmp_path):
-    """A plain cloud with no is_miss column does NOT get one synthesised — those
+def test_session_to_lad_arrays_no_is_miss_column_not_synthesized(tmp_path):
+    """A plain cloud with no is_miss column does NOT get one synthesized — those
     clouds recover misses via gapfillMisses() (which sets the flag C++-side)."""
     positions = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float64)
     sess = _session_from_arrays(positions, None, None, {}, [])

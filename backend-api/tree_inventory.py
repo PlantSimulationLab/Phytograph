@@ -12,7 +12,7 @@ Layout:
     `rht_circle`, and `fit_stem_circle`, which chains search -> Taubin ->
     geometric and reports the quality evidence (`arc_stats`);
   * ground models - `HagGround` (per-point height above ground), `GroundGrid`
-    (ground-labelled points on a coarse grid), `MinZGround` (last resort);
+    (ground-labeled points on a coarse grid), `MinZGround` (last resort);
   * `measure_tree`, which turns one tree's points into one tree-list row plus
     its stem curve.
 
@@ -111,7 +111,7 @@ def circle_through_3_points(points: np.ndarray):
 
 
 def _circles_through_triples(p: np.ndarray, tri: np.ndarray):
-    """Vectorised `circle_through_3_points` over index triples `tri` (K,3).
+    """Vectorized `circle_through_3_points` over index triples `tri` (K,3).
     Returns (cx, cy, r, valid)."""
     a, b, c = p[tri[:, 0]], p[tri[:, 1]], p[tri[:, 2]]
     ax, ay, bx, by, cx, cy = a[:, 0], a[:, 1], b[:, 0], b[:, 1], c[:, 0], c[:, 1]
@@ -159,7 +159,7 @@ def fit_circle_taubin(points: np.ndarray):
 
 
 def fit_circle_geometric(points: np.ndarray, center0, radius0, max_nfev: int = 200):
-    """Geometric (orthogonal-distance) circle fit: minimise
+    """Geometric (orthogonal-distance) circle fit: minimize
     sum((|p - c| - r)^2) by Levenberg-Marquardt from (center0, radius0)
     (Chernov & Lesort 2005). Returns (center (2,), radius, rms) or
     (None, None, None)."""
@@ -358,7 +358,7 @@ class HagGround:
     too few points (or a degenerate footprint) it falls back to the median of
     the 20 nearest points by x, y - but only those within FALLBACK_RADIUS_M.
     Beyond that it returns None, so the ground chain moves on to the ground
-    labels rather than taking the DEM value under a crown metres away (a stem
+    labels rather than taking the DEM value under a crown meters away (a stem
     past the DEM's edge under an overhanging, DEM-covered crown)."""
     FALLBACK_RADIUS_M = 1.0
     source = "height_above_ground"
@@ -392,7 +392,7 @@ class HagGround:
 
 
 class GroundGrid:
-    """Ground-labelled points averaged on a coarse x, y grid, built in chunks
+    """Ground-labeled points averaged on a coarse x, y grid, built in chunks
     so the whole ground class is never held at once. Evaluated by inverse-
     distance weighting over the occupied cells within `radius` of the query."""
     source = "ground_class"
@@ -497,8 +497,8 @@ def _horizontal_pass(pts: np.ndarray, z_sorted: np.ndarray, order: np.ndarray, g
             fits.append(f)
     if not fits:
         return None, None, []
-    centres = np.array([f["center"] for f in fits])
-    seed = np.median(centres, axis=0)
+    centers = np.array([f["center"] for f in fits])
+    seed = np.median(centers, axis=0)
     r_seed = float(np.median([f["radius"] for f in fits]))
 
     accepted = []
@@ -567,7 +567,7 @@ def measure_tree(points: np.ndarray, *, params: InventoryParams,
     order = np.argsort(pts[:, 2], kind="stable")
     z_sorted = pts[order, 2]
 
-    # ---- horizontal pass: seed + tracked centres (twice if the ground under
+    # ---- horizontal pass: seed + tracked centers (twice if the ground under
     # the seed differs from the first guess) ----
     seed, r_seed, accepted = _horizontal_pass(pts, z_sorted, order, g0, params, rng)
     if seed is not None:
@@ -578,7 +578,7 @@ def measure_tree(points: np.ndarray, *, params: InventoryParams,
             if seed2 is not None:
                 seed, r_seed, accepted = seed2, r2, acc2
 
-    # ---- stem axis: x, y regressed on z over the accepted centres ----
+    # ---- stem axis: x, y regressed on z over the accepted centers ----
     anchor_xy = seed if seed is not None else c0
     bx = by = 0.0
     x0, y0 = float(anchor_xy[0]), float(anchor_xy[1])

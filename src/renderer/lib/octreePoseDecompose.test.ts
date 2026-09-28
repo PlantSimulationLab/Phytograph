@@ -119,7 +119,7 @@ describe('renderPivot', () => {
     expect(renderPivot([1, 2, 3], { x: 9, y: 9, z: 9 })).toEqual({ x: 1, y: 2, z: 3 });
   });
 
-  it('falls back to the cloud bbox centre (spin in place)', () => {
+  it('falls back to the cloud bbox center (spin in place)', () => {
     expect(renderPivot(null, { x: 9, y: 8, z: 7 })).toEqual({ x: 9, y: 8, z: 7 });
   });
 });

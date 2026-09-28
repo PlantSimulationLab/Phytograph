@@ -51,7 +51,7 @@ test('octree crop skips LOD streaming when the keep-inside box leaves all points
         Object.values((window as any).__octreeCropHidden ?? {}).some((v) => v === true),
       );
 
-    // Box initialises to the cloud bounds → fully overlapping → NOT hidden.
+    // Box initializes to the cloud bounds → fully overlapping → NOT hidden.
     await expect.poll(anyHidden, { timeout: 10_000 }).toBe(false);
 
     // Move the box well off the cloud on X (tiny.xyz spans x∈[-0.3,0.3]); shrink

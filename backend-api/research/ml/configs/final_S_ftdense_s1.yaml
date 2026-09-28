@@ -1,5 +1,5 @@
 name: final_S_ftdense_s1
-description: "Leaf/wood PointNeXt-S: synthetic pre-training, then fine-tuned on hand-labelled real trees with sparse-input augmentation (seed 1)."
+description: "Leaf/wood PointNeXt-S: synthetic pre-training, then fine-tuned on hand-labeled real trees with sparse-input augmentation (seed 1)."
 task: wood_leaf
 cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
 out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs

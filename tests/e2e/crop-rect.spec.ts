@@ -178,7 +178,7 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
 
 // The strong one: a rectangle over only the LEFT half of the viewport must
 // keep a STRICT SUBSET — neither all 60 nor 0. The cylinder straddles the
-// viewport centre, so a half-cut splits it. This is what would fail if the
+// viewport center, so a half-cut splits it. This is what would fail if the
 // rect's pixel space and the crop projection's pixel space diverged.
 test('rect crop: half-viewport drag keeps a strict subset of points', async () => {
   const { app, page } = session;
@@ -223,7 +223,7 @@ test('rect crop: half-viewport drag keeps a strict subset of points', async () =
   await expect(panel).toHaveCount(0, { timeout: 10_000 });
   await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
 
-  // Strict subset: 0 < kept < 60. A half-plane through a centred cloud
+  // Strict subset: 0 < kept < 60. A half-plane through a centered cloud
   // can't keep everything or nothing unless projection broke.
   await expect
     .poll(async () => {

@@ -48,7 +48,7 @@ export const IPC = {
   RendererReady: 'app:rendererReady',
   // Renderer -> main (one-way): which menu items should currently be clickable.
   // The native menu is built in the main process and cannot see renderer state,
-  // so anything that greys out on a scene condition has to be pushed here. Sent
+  // so anything that grays out on a scene condition has to be pushed here. Sent
   // on change (and coalesced by the sender), not polled.
   MenuState: 'menu:state',
   // Renderer -> main (one-way): does the scene hold work that closing would
@@ -113,7 +113,7 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'verbose' | 'debug';
 
 export interface LogExportResult {
   /** Absolute path of the written combined log file, revealed in the OS file
-   * manager. null if the user cancelled the save dialog. */
+   * manager. null if the user canceled the save dialog. */
   savedPath: string | null;
 }
 
@@ -198,7 +198,7 @@ export type MenuCommandPayload =
  *  Keyed by the registry tool id so main never has to know WHY an item is
  *  disabled — only that the renderer says it is. Absent key → leave enabled,
  *  so a menu item that has never been reported stays clickable (the safe
- *  default: a wrongly-greyed item is unreachable, a wrongly-live one merely
+ *  default: a wrongly-grayed item is unreachable, a wrongly-live one merely
  *  reports why it did nothing). */
 export interface MenuStatePayload {
   /** Registry tool id → whether the item can currently act. */
@@ -213,7 +213,7 @@ export interface MenuStatePayload {
  *  only there until the user exports. So "dirty" is simply "the scene holds
  *  anything", not a modified-since-save flag — there is no save.
  *
- *  `strokes` counts uncommitted labelling strokes, the one item that cannot be
+ *  `strokes` counts uncommitted labeling strokes, the one item that cannot be
  *  recomputed even from the source files, so the dialog can call it out the way
  *  the File → New confirmation already does. */
 export interface SceneDirtyPayload {

@@ -8,7 +8,7 @@ import { GizmoHelper } from '@react-three/drei';
 //
 // We keep drei's GizmoHelper (its per-frame orientation sync from the main
 // camera matrix is up-axis-agnostic and correct), but we DON'T use drei's
-// GizmoViewport click behaviour. drei's tweenCamera (a) hardcodes a Y-up basis
+// GizmoViewport click behavior. drei's tweenCamera (a) hardcodes a Y-up basis
 // while interpolating, which is wrong for this Z-up app — clicking +X landed
 // you in a Y-up view instead of Z-up — and (b) recomputes the orbit radius from
 // distance-to-origin rather than distance-to-target, which yanks the zoom.
@@ -74,7 +74,7 @@ function AxisHead({
     () => makeHeadTexture(color, label, labelColor),
     [color, label, labelColor],
   );
-  // Positive (labelled) heads are solid and a touch larger; negative heads are
+  // Positive (labeled) heads are solid and a touch larger; negative heads are
   // smaller and semi-transparent — matches drei's GizmoViewport styling.
   const baseScale = label ? 1 : 0.75;
   const scale = baseScale * (hovered ? 1.2 : 1);
@@ -154,7 +154,7 @@ function GizmoPicker({
         const dxPx = ((projected.x - ndc.x) / 2) * r.width;
         const dyPx = ((projected.y - ndc.y) / 2) * r.height;
         const px = Math.hypot(dxPx, dyPx);
-        // Prefer the nearest head, and (tie-break) the front-most so a labelled
+        // Prefer the nearest head, and (tie-break) the front-most so a labeled
         // +axis head wins over the −axis head directly behind it.
         if (px < bestPx) {
           bestPx = px;

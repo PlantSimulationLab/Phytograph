@@ -17,20 +17,20 @@ derungen mit terrestrischem Laserscanner*, TU Wien):
     the residual standard deviation is below a tolerance; otherwise split into
     eight and recurse; stop on a valid plane, too few points, or a minimum cube.
 
-Crucially it does NOT ask "is this neighbourhood planar" -- it shrinks the cube
+Crucially it does NOT ask "is this neighborhood planar" -- it shrinks the cube
 until the answer is yes. That is why it yields patches on foliage where a
 fixed-radius planarity test does not: measured on a real olive scan, canopy above
 1.5 m produced 44.6 patches per 1000 points against 38.4 for ground, and their
 normals were genuinely varied (median |n_z| 0.43 against ground's 0.97).
 
-Why plane-to-plane rather than centre-to-centre
+Why plane-to-plane rather than center-to-center
 -----------------------------------------------
-Two scans subdivide independently, so their patch CENTRES rarely coincide --
-matching centre to centre found a partner for only 3.9% of patches at the known
+Two scans subdivide independently, so their patch CENTERS rarely coincide --
+matching center to center found a partner for only 3.9% of patches at the known
 correct pose. The residual that matters is the distance along the normal: a
-patch centre can sit metres from its partner's centre and still lie on the same
+patch center can sit meters from its partner's center and still lie on the same
 surface. Pairing is then gated on orientation as well as proximity, which is the
-part plain nearest-neighbour ICP lacks -- it happily pairs a floor with a wall.
+part plain nearest-neighbor ICP lacks -- it happily pairs a floor with a wall.
 """
 
 import math
@@ -52,7 +52,7 @@ def extract(points: np.ndarray,
             min_points: int = _MIN_POINTS_PER_PLANE,
             min_cube: float = _MIN_CUBE_M,
             max_cube: float = _MAX_CUBE_M) -> Tuple[np.ndarray, np.ndarray]:
-    """(centres Nx3, unit normals Nx3) for a cloud.
+    """(centers Nx3, unit normals Nx3) for a cloud.
 
     Iterative rather than recursive: a scan yields ~10^4 patches and Python's
     recursion limit is a needless failure mode on a deep subdivision.
@@ -61,7 +61,7 @@ def extract(points: np.ndarray,
     if len(points) < min_points:
         return np.empty((0, 3)), np.empty((0, 3))
 
-    centres, normals = [], []
+    centers, normals = [], []
     # Seed the stack with the top-level cubes so the whole plot is never fitted
     # as one plane.
     keys = np.floor(points / max_cube).astype(np.int64)
@@ -74,13 +74,13 @@ def extract(points: np.ndarray,
         cube, size = stack.pop()
         if len(cube) < min_points or size < min_cube:
             continue
-        centre = cube.mean(axis=0)
-        deviations = cube - centre
+        center = cube.mean(axis=0)
+        deviations = cube - center
         # Smallest eigenvalue of the covariance is the squared residual to the
         # best-fit plane; its eigenvector is the normal.
         values, vectors = np.linalg.eigh(deviations.T @ deviations / len(cube))
         if float(np.sqrt(max(values[0], 0.0))) < max_plane_error:
-            centres.append(centre)
+            centers.append(center)
             normals.append(vectors[:, 0])
             continue
         half = size / 2.0
@@ -93,14 +93,14 @@ def extract(points: np.ndarray,
             if len(child) >= min_points:
                 stack.append((child, half))
 
-    if not centres:
+    if not centers:
         return np.empty((0, 3)), np.empty((0, 3))
-    return np.asarray(centres), np.asarray(normals)
+    return np.asarray(centers), np.asarray(normals)
 
 
 # Correspondence gates. A pair must agree in BOTH position and orientation:
 # proximity alone pairs a floor with a wall, which is the failure that makes
-# plain nearest-neighbour ICP fragile on repetitive scenes.
+# plain nearest-neighbor ICP fragile on repetitive scenes.
 _SEARCH_RADIUS_M = 1.0
 _MAX_TILT_DEG = 20.0
 
@@ -136,11 +136,11 @@ def _pairs(target_c, target_n, source_c, source_n, transform,
 
 
 def _solve_step(source_c, target_c, target_n):
-    """One linearised point-to-plane step. Returns a 4x4 increment.
+    """One linearized point-to-plane step. Returns a 4x4 increment.
 
-    Minimises the distance ALONG THE NORMAL, not between centres: two scans
-    subdivide independently so their patch centres rarely coincide, but both
-    lie on the same surface. Small-angle linearisation about the identity,
+    Minimizes the distance ALONG THE NORMAL, not between centers: two scans
+    subdivide independently so their patch centers rarely coincide, but both
+    lie on the same surface. Small-angle linearization about the identity,
     solved by least squares in the standard [rotation | translation] form.
     """
     residual = np.einsum('ij,ij->i', target_n, target_c - source_c)
@@ -149,7 +149,7 @@ def _solve_step(source_c, target_c, target_n):
     rx, ry, rz = solution[:3]
     step = np.eye(4)
     step[:3, :3] = np.array([[1.0, -rz, ry], [rz, 1.0, -rx], [-ry, rx, 1.0]])
-    # Re-orthonormalise: the linearised block is only a rotation to first order,
+    # Re-orthonormalize: the linearized block is only a rotation to first order,
     # and the error compounds over iterations without this.
     u, _, vt = np.linalg.svd(step[:3, :3])
     step[:3, :3] = u @ vt

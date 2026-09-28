@@ -60,7 +60,7 @@ def test_octree_build_is_admitted_at_the_converters_measured_rate(tmp_path, monk
     assert builds == [(1234 * main._POTREE_BYTES_PER_POINT, "octree build 1,234 pts")]
 
 
-def test_three_concurrent_builds_serialise_under_a_small_budget():
+def test_three_concurrent_builds_serialize_under_a_small_budget():
     """The property the 16 GB target needs: with a budget that fits one
     100 M-point convert, three admissions run one after another."""
     import threading

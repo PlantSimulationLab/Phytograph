@@ -90,13 +90,13 @@ pre-alignment.
 
 The difference is what gets matched. Matching raw points fails on a planting,
 because every plant's foliage looks like every other plant's — the match
-happily snaps the source onto a *neighbouring* plant, one row-spacing off,
+happily snaps the source onto a *neighboring* plant, one row-spacing off,
 and still reports a good score.
 
 Auto-Register instead matches the **overall pattern of the planting**: it looks
 down on each cloud from above and finds the rotation and shift that make the two
 patterns line up. Because it uses the whole cloud at once, it does not depend on
-recognising the same individual plants in both scans — which matters, since two
+recognizing the same individual plants in both scans — which matters, since two
 scan positions typically detect only about half the same plants, the rest being
 hidden behind others.
 
@@ -163,7 +163,7 @@ reliable, and it is on by default.
 
 The option is **offered only when every scan in the run recorded a position**.
 On scans imported without one — a plain XYZ or LAS file with no pose — it is
-shown greyed out and the full circle of orientations is searched instead. That
+shown grayed out and the full circle of orientations is searched instead. That
 gate matters more than it looks: the option works by assuming your scans are
 already placed in a common frame and so differ by roughly zero heading, which
 narrows the search to ±30°. Assume that of data which never recorded a pose and
@@ -215,7 +215,7 @@ Three or more overlapping scans break the tie. Going around a closed loop of
 scans has to bring you back where you started, and a row-shifted pose does not
 cancel around that loop even though it fits its own pair well. Measured across
 three orchards: loops whose alignments are all correct close to within about a
-tenth of a metre, while a loop containing a bad one misses by several metres.
+tenth of a meter, while a loop containing a bad one misses by several meters.
 
 Two practical consequences:
 
@@ -242,7 +242,7 @@ On a real vineyard this was the difference between failing completely and
 registering to about 0.1 m — the correct settings were not the ones that scored
 best on any individual pair.
 
-Each scan is matched to the reference scan and to its neighbour in a closing
+Each scan is matched to the reference scan and to its neighbor in a closing
 ring, not to every other scan, so time grows roughly in proportion to the scan
 count. Expect about a minute for four to six full-resolution terrestrial scans
 (10–14 million points each).
@@ -279,7 +279,7 @@ themselves — without the marker there is nothing about the scan afterwards to
 show it was ever moved.
 
 Expand the scan's row for the detail: which scan it was registered onto, how far
-it travelled, and how many registration passes have been applied to it.
+it traveled, and how many registration passes have been applied to it.
 
 The scan you registered *onto* is marked too, but differently — as
 **reference**, in a lighter outline. It did not move, and resetting the
@@ -311,7 +311,7 @@ returning it to where it started.
 
 The command lives in the menu bar only, not the toolbar: it acts on the whole
 project rather than the current selection, and it is a corrective rather than a
-step in a workflow. It is **greyed out** until something has actually been
+step in a workflow. It is **grayed out** until something has actually been
 registered, so the menu tells you whether there is anything to reset without
 your having to open it.
 
@@ -345,7 +345,7 @@ of the data.
 The peach survey's worst scan is the honest caveat: one position of the six
 kept a **0.65° tilt** that the initial pattern match introduced and the
 refinement could not undo. A tilt is invisible near the scanner and grows with
-range — that scan is within a centimetre close in and roughly 20 cm out at the
+range — that scan is within a centimeter close in and roughly 20 cm out at the
 edge of the plot. If a registered scan looks fine near the tripod and drifts
 further out, that is the shape to look for; re-running Auto-Register with a
 different reference scan usually resolves it.
@@ -464,7 +464,7 @@ percentage. Like the other ICP tools, this is **not undoable**.
     **Snap to Fit (ICP)** button that registers the same cloud + mesh you just
     measured — so you can check the fit, then snap, in one place.
 
-!!! note "Progress and cancelling"
+!!! note "Progress and canceling"
     Every registration and the cloud-to-mesh distance run shows a progress pill
     at the top of the viewport while it works. The cloud alignments name the
     scale they are working at ("Aligning at 8 cm detail", then 4 cm, then

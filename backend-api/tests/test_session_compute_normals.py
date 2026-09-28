@@ -4,7 +4,7 @@ The estimator itself is covered by `test_normals.py` and its tiling by
 `test_normals_tiled.py`; this file is about what the ENDPOINT does around them:
 
   (a) misses must never reach the estimator. A miss is projected ~1 km out, so
-      it would unbalance the KD-tree and poison the k-th-neighbour spacing the
+      it would unbalance the KD-tree and poison the k-th-neighbor spacing the
       tile collar is derived from.
   (b) the hit-aligned result must be scattered back over the survivors, or every
       point after the first miss gets another point's normal.
@@ -100,7 +100,7 @@ async def _compute(session, **kw):
 @pytest.mark.asyncio
 async def test_misses_never_reach_the_estimator(session, spy):
     """The 1 km trap: one miss in the KD-tree unbalances it and inflates the
-    k-th-neighbour spacing the tile collar is measured from."""
+    k-th-neighbor spacing the tile collar is measured from."""
     await _compute(session)
     fed = spy["points"]
     assert len(fed) == 1200                   # hits only, all 40 misses dropped
@@ -177,7 +177,7 @@ async def test_centroid_fallback_when_nothing_knows_the_sensor(session, spy):
 
 
 def test_centroid_fallback_faces_inward_like_a_real_sensor():
-    """The centroid fallback treats the cloud's centre as the viewpoint, so
+    """The centroid fallback treats the cloud's center as the viewpoint, so
     normals face INWARD — the same convention as a real sensor origin.
 
     This is the OPPOSITE sign from `_do_open3d_triangulation`'s Ball-Pivoting
@@ -187,7 +187,7 @@ def test_centroid_fallback_faces_inward_like_a_real_sensor():
     rng = np.random.default_rng(1)
     v = rng.normal(size=(8000, 3))
     v /= np.linalg.norm(v, axis=1, keepdims=True)
-    pts = v * 3.0                      # a sphere centred on the origin
+    pts = v * 3.0                      # a sphere centered on the origin
     res = normals_mod.compute_normals(pts, k=30, orientation="origin",
                                       origin=pts.mean(axis=0))
     outward = np.einsum("ij,ij->i", res[:, 0:3].astype(np.float64), v)
@@ -198,7 +198,7 @@ def test_centroid_fallback_faces_inward_like_a_real_sensor():
 async def test_viewpoint_is_shifted_into_the_session_frame(spy):
     """A viewpoint from the renderer is WORLD-frame; the session's positions are
     shifted. Failing to subtract world_shift points the normals at the wrong
-    place, and on a UTM cloud that is a kilometres-wide error."""
+    place, and on a UTM cloud that is a kilometers-wide error."""
     sess = _make_session(session_id="vp_sess")
     sess.world_shift = np.array([1000.0, 2000.0, 0.0])
     try:
@@ -237,7 +237,7 @@ async def test_normals_status_reports_presence_and_staleness(session, spy):
 
 @pytest.mark.asyncio
 async def test_a_deletion_marks_the_normals_stale(session, spy):
-    """A normal is a neighbourhood statistic, so a cut changes the right answer
+    """A normal is a neighborhood statistic, so a cut changes the right answer
     for every surviving point beside it. The column stays correctly INDEXED -
     it just answers a question about a cloud that no longer exists."""
     await _compute(session)
@@ -405,10 +405,10 @@ async def test_expensive_run_answers_409_with_a_cost_warning(session, spy,
 @pytest.mark.asyncio
 async def test_cancel_leaves_the_session_pristine(session, monkeypatch):
     """A cancel during the compute must not half-write the columns."""
-    async def cancelled(*a, **kw):
+    async def canceled(*a, **kw):
         raise main.ClientDisconnected()
 
-    monkeypatch.setattr(main, "_run_killable", cancelled)
+    monkeypatch.setattr(main, "_run_killable", canceled)
     with pytest.raises(main.HTTPException) as e:
         await _compute(session)
     assert e.value.status_code == 499
@@ -419,7 +419,7 @@ async def test_cancel_leaves_the_session_pristine(session, monkeypatch):
 @pytest.mark.asyncio
 async def test_a_wrong_shaped_result_is_rejected_rather_than_scattered(session,
                                                                       monkeypatch):
-    """Defence against worker/protocol drift: scattering a mis-shaped array
+    """Defense against worker/protocol drift: scattering a mis-shaped array
     would corrupt the session silently."""
     async def wrong(*a, **kw):
         return np.zeros((7, normals_mod.N_COLUMNS), dtype=np.float32), {}

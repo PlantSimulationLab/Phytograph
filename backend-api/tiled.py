@@ -1,11 +1,11 @@
 """Buffered XY tiling for whole-cloud algorithms (the lidR / LAStools engine).
 
 Some tools cannot stream point by point because every answer depends on a
-neighbourhood: ground filtering (the cloth spans the terrain), radius
+neighborhood: ground filtering (the cloth spans the terrain), radius
 outlier removal, local PCA features, normals. Mature LiDAR software runs
 them on TILES: cut the XY extent into chunks, load each chunk plus a COLLAR
-(buffer) of neighbouring points so the algorithm sees a complete
-neighbourhood at the chunk's edge, run it, keep only the chunk's own (core)
+(buffer) of neighboring points so the algorithm sees a complete
+neighborhood at the chunk's edge, run it, keep only the chunk's own (core)
 results, merge. lidR's `LAScatalog` engine, LAStools' `lastile -buffer` and
 PDAL's `filters.splitter` all do exactly this; it bounds peak memory by one
 buffered tile and makes the tiles independent, so they can run in parallel.
@@ -80,7 +80,7 @@ class TilePlan:
 
     `order` sorts points by cell; `cell_start[c]:cell_start[c+1]` is cell c's
     range in that order. Tiles are cells; a tile's buffered chunk is the
-    union of its 3x3 neighbourhood's ranges filtered to the buffered box.
+    union of its 3x3 neighborhood's ranges filtered to the buffered box.
 
     `max_tile_points` (opt-in) splits any cell holding more than that many
     points into sub-tiles: the cell is binned once on a fine k x k sub-grid
@@ -110,8 +110,8 @@ class TilePlan:
         if self.buffer_m < 0:
             raise ValueError("buffer_m must be >= 0")
         if self.buffer_m > self.tile_m:
-            # The 3x3 neighbourhood gather assumes the collar fits in one
-            # neighbouring cell; a wider collar needs a wider stencil.
+            # The 3x3 neighborhood gather assumes the collar fits in one
+            # neighboring cell; a wider collar needs a wider stencil.
             raise ValueError("buffer_m must not exceed tile_m")
         if self.n:
             self.origin = np.floor(np.nanmin(xy[:, :2], axis=0)).astype(np.float64)
@@ -137,8 +137,8 @@ class TilePlan:
         self.cell_start = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         # XY in CELL order, so a cell's points are one contiguous slice and a
         # gather never reads at random rows. That matters most for a split
-        # cell's neighbours: each one's neighbourhood includes the dense cell,
-        # and random-row gathers over it measured ~1.4 s per neighbour on a
+        # cell's neighbors: each one's neighborhood includes the dense cell,
+        # and random-row gathers over it measured ~1.4 s per neighbor on a
         # real TLS scan. 16 B/pt, the same as an unsorted copy would cost.
         self._xys = (np.asarray(xy[:, :2], dtype=np.float64)[self.order] if self.n
                      else np.zeros((0, 2), dtype=np.float64))
@@ -237,9 +237,9 @@ class TilePlan:
         out.sort()
         return out
 
-    def _neighbourhood(self, ix: int, iy: int, box=None):
-        """(indices, xy, own) for cell (ix, iy)'s 3x3 neighbourhood, where
-        `own` marks the cell's own points. With `box` = (lo, hi), neighbours'
+    def _neighborhood(self, ix: int, iy: int, box=None):
+        """(indices, xy, own) for cell (ix, iy)'s 3x3 neighborhood, where
+        `own` marks the cell's own points. With `box` = (lo, hi), neighbors'
         points are kept only inside it; the cell's own points always are."""
         parts = []
         for jx in range(max(0, ix - 1), min(self.nx, ix + 2)):
@@ -250,7 +250,7 @@ class TilePlan:
                 idx, xy = self.order[a:b], self._xys[a:b]
                 is_own = jx == ix and jy == iy
                 if box is not None and not is_own:
-                    # A neighbour sharing this cell's column already lies in
+                    # A neighbor sharing this cell's column already lies in
                     # its x range (and likewise for rows), so only the axis it
                     # is offset along needs testing - a third of the work on
                     # the dense cell next to a split one.
@@ -276,7 +276,7 @@ class TilePlan:
 
     def _sub_counts(self, ix: int, iy: int, k: int) -> np.ndarray:
         """k x k core point counts of a split cell, from its own points alone:
-        planning needs only these, so the full neighbourhood index (`_sub`) is
+        planning needs only these, so the full neighborhood index (`_sub`) is
         built later, one cell at a time, as its blocks are gathered."""
         key = (ix, iy, k)
         hit = self._sub_count_cache.get(key)
@@ -288,7 +288,7 @@ class TilePlan:
 
     def _sub(self, ix: int, iy: int, k: int) -> dict:
         """A split cell's sub-grid index, built once: its buffered
-        neighbourhood sorted by k x k sub-cell, with a ring of one sub-cell
+        neighborhood sorted by k x k sub-cell, with a ring of one sub-cell
         around the core for the collar (the sub-cell edge is >= the buffer).
         A core point's sub-cell comes from ITS OWN cell's binning, clipped into
         the core, so the blocks partition the cell's points exactly, including
@@ -299,7 +299,7 @@ class TilePlan:
             return hit
         sub_m = self.tile_m / k
         cmin = self.origin + np.array([ix, iy]) * self.tile_m
-        idx, xy, own = self._neighbourhood(
+        idx, xy, own = self._neighborhood(
             ix, iy, box=(cmin - self.buffer_m, cmin + self.tile_m + self.buffer_m))
         s = np.clip(np.floor((xy - cmin) / sub_m).astype(np.int64), -1, k)
         s[own] = np.clip(s[own], 0, k - 1)
@@ -339,13 +339,13 @@ class TilePlan:
         if self.buffer_m <= 0:
             a, b = self.cell_range(tile.ix, tile.iy)
             return self.order[a:b], np.ones(b - a, dtype=bool)
-        idx, _xy, own = self._neighbourhood(tile.ix, tile.iy, box=(tile.buf_min, tile.buf_max))
+        idx, _xy, own = self._neighborhood(tile.ix, tile.iy, box=(tile.buf_min, tile.buf_max))
         return idx, own
 
     def gathered(self) -> Iterator[Tuple[Tile, np.ndarray, np.ndarray]]:
         """Yield `(tile, indices, core_mask)` for every tile, lazily, dropping
         each split cell's sub-grid index once its last block is gathered (the
-        index is the size of the cell's buffered neighbourhood, which for the
+        index is the size of the cell's buffered neighborhood, which for the
         cell around a TLS scanner is most of the cloud)."""
         prev = None
         for tile in self.tiles():
@@ -388,7 +388,7 @@ def run_tiled(plan: TilePlan, points: np.ndarray,
 
     `fn` gets the buffered chunk (a copy, contiguous) and must return one value
     per chunk row; only rows where `core_mask` is True are kept. Raises
-    `TiledCancelled` when `should_cancel()` turns true between tiles.
+    `TiledCanceled` when `should_cancel()` turns true between tiles.
 
     `ncols > 1` makes the output (N, ncols) and `fn` must return one ROW per
     chunk point — for tools whose per-point answer is a vector rather than a
@@ -402,7 +402,7 @@ def run_tiled(plan: TilePlan, points: np.ndarray,
     total = len(plan.tiles())
     for k, (tile, idx, core) in enumerate(plan.gathered()):
         if should_cancel is not None and should_cancel():
-            raise TiledCancelled()
+            raise TiledCanceled()
         if idx.size == 0:
             continue
         chunk = np.ascontiguousarray(points[idx])
@@ -416,7 +416,7 @@ def run_tiled(plan: TilePlan, points: np.ndarray,
     return out
 
 
-class TiledCancelled(Exception):
+class TiledCanceled(Exception):
     pass
 
 
@@ -432,7 +432,7 @@ def iter_tiles(plan: TilePlan, points: np.ndarray) -> Iterator[Tuple[Tile, np.nd
 #
 # Tiles are independent, so they can run on every core - but only in separate
 # PROCESSES: the whole-cloud algorithms here (CSF, cKDTree queries) hold the
-# GIL or serialise on it, and threads would not help. The pool is `spawn`,
+# GIL or serialize on it, and threads would not help. The pool is `spawn`,
 # never fork: the caller may be the backend's killable worker, which has
 # open3d (and in the backend itself libhelios) loaded, and a forked copy of
 # either crashes in the post-fork window. Spawned children inherit the
@@ -576,7 +576,7 @@ def run_tiled_parallel(plan: TilePlan, points_path: str, job: Tuple[str, str], *
             done += 1
             if should_cancel is not None and should_cancel():
                 pool.terminate()
-                raise TiledCancelled()
+                raise TiledCanceled()
             if progress is not None:
                 progress(done / total, f"Tile {done} of {total}")
     return out

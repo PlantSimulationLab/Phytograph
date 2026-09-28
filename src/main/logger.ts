@@ -14,7 +14,7 @@
 // Lowercase because electron-log names the dir after app.getName(), which
 // returns "phytograph" despite main.ts's app.setName('Phytograph') — Electron
 // doesn't recompute cached paths after setName. Only Linux is case-sensitive
-// enough to care, but the paths above are wrong everywhere if you capitalise
+// enough to care, but the paths above are wrong everywhere if you capitalize
 // them (cf. the octree cache, which really is "Phytograph" — hardcoded by the
 // backend, not derived from the app name).
 // Scopes tag each line by origin: [main], [backend], [renderer], [updater].

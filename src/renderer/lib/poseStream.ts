@@ -310,7 +310,7 @@ export function poseStreamToWire(stream: PoseStream): unknown {
 // imported trajectory into a cloud's stored frame: the import wizard's global
 // shift is subtracted from the point cloud (stored = world − worldShift), so a
 // trajectory attached at import — whose poses are in raw world/UTM coordinates —
-// must have the SAME offset subtracted, or it would render millions of metres away
+// must have the SAME offset subtracted, or it would render millions of meters away
 // from the shifted cloud and the LAD timestamp→origin join would be in the wrong
 // frame. A null/zero shift returns the stream unchanged (no allocation churn).
 export function shiftPoseStream(

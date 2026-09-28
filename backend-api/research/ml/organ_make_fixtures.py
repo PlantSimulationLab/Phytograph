@@ -8,19 +8,19 @@ Neither fixture was trained on:
 - ``potted_tomato_synth.xyz``: Helios synthetic scene herb_potted_v4/scene_00165
   (a 31-day tomato in a pot), from the ``val_synth`` split that training never
   reads. Cropped to the pot and plant, thinned to one point per 2 mm (the
-  model's own voxel). Metres. Columns ``x y z organ leaflet``: organ 1 soil,
+  model's own voxel). Meters. Columns ``x y z organ leaflet``: organ 1 soil,
   2 stem, 3 leaf, 0 unscored (fruit, flowers); leaflet 0 none, else one id per
   leaflet blade.
 - ``sugar_beet_real.xyz``: Sugar4D (CC BY 4.0) plant 029 at 44 days after
-  sowing, a TEST-split plant, thinned to 2 mm and written in MILLIMETRES so the
+  sowing, a TEST-split plant, thinned to 2 mm and written in MILLIMETERS so the
   tests exercise ``units="auto"``. Sugar4D draws no petiole/blade line and has
   no soil, so organ is 0 (unscored) except the leaves' instance ids, which are
-  whole leaves (``leaflet``), and 9 marks the crown (young leaves the labellers
+  whole leaves (``leaflet``), and 9 marks the crown (young leaves the labelers
   never separated; not scored).
 
 Also writes, ``x y z`` only, for the end-to-end test: ``tests/e2e/fixtures/
 potted-tomato.xyz`` (the synthetic tomato at 3 mm with 2 cm of soil around the
-plant, metres) and ``sugar-beet-mm.xyz`` (the beet above, millimetres).
+plant, meters) and ``sugar-beet-mm.xyz`` (the beet above, millimeters).
 """
 
 from __future__ import annotations
@@ -42,12 +42,12 @@ REPO = Path(__file__).resolve().parents[3]
 SUGAR4D_ATTRIBUTION = """# sugar-beet-mm.xyz
 
 One sugar-beet plant (plant 029, 44 days after sowing) from the **Sugar4D**
-dataset, thinned to one point per 2 mm and written as `x y z` in millimetres.
+dataset, thinned to one point per 2 mm and written as `x y z` in millimeters.
 Used by `organ-segment.spec.ts`.
 
-Sugar4D is published under the Creative Commons Attribution 4.0 licence
+Sugar4D is published under the Creative Commons Attribution 4.0 license
 (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/). Changes from the
-original: thinned, labels dropped, coordinates converted to millimetres.
+original: thinned, labels dropped, coordinates converted to millimeters.
 Written by `backend-api/research/ml/organ_make_fixtures.py`.
 """
 OUT = REPO / "backend-api" / "tests" / "fixtures" / "organs"
@@ -79,7 +79,7 @@ def main():
     leaflet = np.where((inst >= 0) & (organ == 3), inst + 1, 0)
     t_xyz, t_organ, t_leaf = _thin(xyz, organ, leaflet, voxel=0.002)
     np.savetxt(OUT / "potted_tomato_synth.xyz", np.column_stack([t_xyz, t_organ, t_leaf]),
-               fmt=["%.4f"] * 3 + ["%d", "%d"], header="x y z organ leaflet (metres)")
+               fmt=["%.4f"] * 3 + ["%d", "%d"], header="x y z organ leaflet (meters)")
     tight = np.all((xyz[:, :2] >= lo[:2] + 0.03) & (xyz[:, :2] <= hi[:2] - 0.03), axis=1)
     e2e, = _thin(xyz[tight], voxel=0.003)
     np.savetxt(REPO / "tests" / "e2e" / "fixtures" / "potted-tomato.xyz", e2e, fmt="%.4f")
@@ -92,7 +92,7 @@ def main():
     leaflet = np.where((sem == SEM_LEAF_WHOLE) & (inst >= 0), inst + 1, 0)
     b_xyz, b_organ, b_leaf = _thin(xyz, organ, leaflet, voxel=0.002)
     np.savetxt(OUT / "sugar_beet_real.xyz", np.column_stack([b_xyz * 1000.0, b_organ, b_leaf]),
-               fmt=["%.2f"] * 3 + ["%d", "%d"], header="x y z organ leaflet (millimetres; Sugar4D, CC BY 4.0)")
+               fmt=["%.2f"] * 3 + ["%d", "%d"], header="x y z organ leaflet (millimeters; Sugar4D, CC BY 4.0)")
     np.savetxt(REPO / "tests" / "e2e" / "fixtures" / "sugar-beet-mm.xyz", b_xyz * 1000.0, fmt="%.2f")
     (REPO / "tests" / "e2e" / "fixtures" / "sugar-beet-mm.README.md").write_text(SUGAR4D_ATTRIBUTION)
     print(f"beet: {len(b_xyz):,} points, {len(np.unique(b_leaf)) - 1} leaves")

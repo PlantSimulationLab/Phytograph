@@ -174,7 +174,7 @@ type WithData = { data?: PointCloudData };
 export function columnSlugs(scan: WithData): Set<string> {
   const slugs = new Set<string>();
   const oct = scan.data?.octree;
-  // Normalise the octree's BUFFER KEYS onto canonical slugs. PotreeConverter
+  // Normalize the octree's BUFFER KEYS onto canonical slugs. PotreeConverter
   // names the time column by its LAS dimension, `gps-time`, but every predicate
   // here (and the backend) keys off `timestamp` — so without this a scan whose
   // timestamps round-tripped through the LAS gps_time field reported no
@@ -214,7 +214,7 @@ export function columnSlugs(scan: WithData): Set<string> {
 // populated, so this is what distinguishes "the column exists in the schema"
 // from "the column carries data". A range with no min/max recorded is NOT
 // degenerate — absence of a range is absence of evidence, and the pre-existing
-// behaviour (trust the key) is the safe default there.
+// behavior (trust the key) is the safe default there.
 function isDegenerateRange(range: unknown): boolean {
   const r = range as { min?: unknown; max?: unknown } | undefined;
   if (!Array.isArray(r?.min) || !Array.isArray(r?.max)) return false;
@@ -279,7 +279,7 @@ const MULTI_RETURN_COLUMNS = ['timestamp', 'target_index', 'target_count'] as co
  * data yet (nothing to detect — e.g. the Add Scan dialog before data is attached).
  *
  * Reads through `columnSlugs`, so it inherits the `gps-time` → `timestamp`
- * normalisation: comparing raw octree buffer keys would miss the timestamp on any
+ * normalization: comparing raw octree buffer keys would miss the timestamp on any
  * cloud that round-tripped through LAS gps_time and report it as single-return.
  */
 export function detectedReturnMode(scan: WithData): 'single' | 'multi' | null {
@@ -323,7 +323,7 @@ export function isBackfillEligible(
 }
 
 // Whether a scan has a KNOWN scanner origin (beam apex) — required to place the
-// sky/miss overlay, which relocates misses onto a sphere centred on that apex.
+// sky/miss overlay, which relocates misses onto a sphere centered on that apex.
 // True when the source recorded one (octree.scanOrigin, e.g. E57 pose / synthetic
 // scan) OR the scan carries scan parameters (from a Helios XML <scan> or a
 // file header), whose `origin` is a real scanner position. A plain XYZ/LAS/PLY
@@ -368,7 +368,7 @@ export function meanScanOrigin(
   // MOVING-PLATFORM SCANS ARE SKIPPED. A drone or vehicle has no "station" to
   // average: `scanOriginOf` reports its trajectory's FIRST POSE, which for an
   // aerial survey is the aircraft at the start of the flight line — tens of
-  // metres up, and routinely outside the mapped footprint altogether (measured
+  // meters up, and routinely outside the mapped footprint altogether (measured
   // on a real MiniVUX poplar survey: 51 m north of the cloud's own north edge,
   // 21 m above the canopy top). Seeding the scene origin from that puts the
   // orbit pivot and default look-at in empty sky beside the data, so orbiting
@@ -419,7 +419,7 @@ export function derivedScanName(
   }
 }
 
-// Unique label for a duplicated scan — the "(copy)" specialisation of
+// Unique label for a duplicated scan — the "(copy)" specialization of
 // {@link derivedScanName}.
 export function duplicateScanName(sourceLabel: string, existing: Iterable<string>): string {
   return derivedScanName(sourceLabel, existing, 'copy');
@@ -430,22 +430,22 @@ export function duplicateScanName(sourceLabel: string, existing: Iterable<string
 // visually distinct. Order: blue, green, amber, red, violet, pink, teal, orange.
 const SCAN_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
 
-// A STATEFUL colour generator over {@link SCAN_PALETTE}: each call claims the
+// A STATEFUL color generator over {@link SCAN_PALETTE}: each call claims the
 // first entry not yet taken, so N successive calls yield N distinct swatches.
 //
 // This exists because a single import can produce SEVERAL scans — a multi-block
 // PTX or a multi-scan E57 fans out into one scan per scanner setup — and those
-// scans are only committed to the scene AFTER all of them are built. A colour
+// scans are only committed to the scene AFTER all of them are built. A color
 // picker that reads the committed scan list therefore sees the same state on
-// every call and hands out the same colour to every position, which is exactly
-// the bug this replaced. Seed it with the colours already on the scene and call
+// every call and hands out the same color to every position, which is exactly
+// the bug this replaced. Seed it with the colors already on the scene and call
 // it once per new scan.
 //
 // Past exhaustion it cycles on a MONOTONIC cursor rather than on `used.size`.
 // That distinction is load-bearing: the set cannot grow beyond the palette, so a
-// size-based fallback freezes on one colour from the 9th allocation onward —
+// size-based fallback freezes on one color from the 9th allocation onward —
 // reintroducing the identical-swatch bug for any source with more than 8
-// positions. The cursor keeps advancing, so colours keep varying.
+// positions. The cursor keeps advancing, so colors keep varying.
 export function createScanColorAllocator(usedColors: Iterable<string> = []): () => string {
   const used = new Set(usedColors);
   let cursor = 0;
@@ -459,10 +459,10 @@ export function createScanColorAllocator(usedColors: Iterable<string> = []): () 
   };
 }
 
-// One-shot form of {@link createScanColorAllocator}: the first palette colour
+// One-shot form of {@link createScanColorAllocator}: the first palette color
 // not already in `usedColors`. Use this only where a SINGLE scan is created (a
 // duplicate, a params-only scan); anything creating several in a row needs the
-// allocator, or they all come out the same colour.
+// allocator, or they all come out the same color.
 export function allocateScanColor(usedColors: Set<string>): string {
   return createScanColorAllocator(usedColors)();
 }

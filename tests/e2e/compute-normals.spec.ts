@@ -29,12 +29,12 @@ test.beforeEach(async () => {
 //   * verticality is exactly 30° everywhere on both faces (measured p5..p95 =
 //     30.00..30.00), so the colorbar's domain is a hard number;
 //   * curvature is ~0 on the faces and non-zero only along the ridge (measured
-//     ratio ~7e5), so a curvature colouring must show a real, non-degenerate
+//     ratio ~7e5), so a curvature coloring must show a real, non-degenerate
 //     range;
 //   * both faces slope the same way, so orientation='up' gives every normal a
 //     positive Z and any sign error is visible.
 
-test('computes normals and colours the cloud by curvature', async () => {
+test('computes normals and colors the cloud by curvature', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
@@ -56,7 +56,7 @@ test('computes normals and colours the cloud by curvature', async () => {
   await expect(runButton).toContainText('Compute Normals');
   await expect(page.getByTestId('compute-normals-stale-warning')).toHaveCount(0);
 
-  // Exercise a non-default option: 24 neighbours rather than the default 30.
+  // Exercise a non-default option: 24 neighbors rather than the default 30.
   const neighbors = page.getByTestId('compute-normals-neighbors');
   await neighbors.fill('24');
   await neighbors.blur();
@@ -64,14 +64,14 @@ test('computes normals and colours the cloud by curvature', async () => {
 
   await runButton.click();
 
-  // The panel closes on success and the cloud is recoloured by curvature.
+  // The panel closes on success and the cloud is recolored by curvature.
   await expect(panel).toHaveCount(0, { timeout: 120_000 });
 
   const colorbar = page.getByTestId('colorbar');
   await expect(colorbar).toBeVisible({ timeout: 60_000 });
   await expect(colorbar).toHaveAttribute('data-colorbar-label', 'Curvature');
   // A real, non-degenerate range — not the [0,1] default that would appear if
-  // the colouring fell back to intensity.
+  // the coloring fell back to intensity.
   const cMin = parseFloat((await colorbar.getAttribute('data-colorbar-min')) ?? 'NaN');
   const cMax = parseFloat((await colorbar.getAttribute('data-colorbar-max')) ?? 'NaN');
   expect(Number.isFinite(cMin) && Number.isFinite(cMax)).toBe(true);
@@ -143,7 +143,7 @@ test('warns that normals are out of date after the cloud is edited', async () =>
   await expect(page.getByTestId('compute-normals-stale-warning')).toHaveCount(0);
   await page.getByTestId('tool-compute-normals').click();   // close
 
-  // Delete part of the cloud. A normal is a neighbourhood statistic, so the cut
+  // Delete part of the cloud. A normal is a neighborhood statistic, so the cut
   // changes the right answer for every surviving point beside it.
   await page.getByTestId('tool-crop').click();
   const cropPanel = page.getByTestId('crop-panel');

@@ -7,7 +7,7 @@ import { completeImportWizard } from './helpers/importWizard';
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars.xyz');
 
 // Imported scalar columns on an octree-backed cloud must be selectable and
-// colour-mappable. scalars.xyz is a comma-headered, space-delimited XYZ with
+// color-mappable. scalars.xyz is a comma-headered, space-delimited XYZ with
 // three named scalar columns (Timestamp[s], Deviation[], Target Index[]) —
 // exactly the shape terrestrial scanners export. On import it routes through
 // convert_to_octree, so the renderer never holds the points; the scalars
@@ -49,9 +49,9 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     // them to those lowercase slugs and canonical labels ('Timestamp',
     // 'Target Index') — dropping the '[s]' unit — so the LAD accessor can
     // recover them by name. 'Deviation[]' isn't a multi-return field, so it
-    // takes the generic sanitised slug 'Deviation'. (When the user instead
+    // takes the generic sanitized slug 'Deviation'. (When the user instead
     // marks Target Index categorical in the wizard, it bypasses this and keeps
-    // the sanitised 'Target_Index' slug — see import-wizard.spec.ts.)
+    // the sanitized 'Target_Index' slug — see import-wizard.spec.ts.)
     const optionValues = await colorMode
       .locator('optgroup[label="Scalar fields"] option')
       .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
@@ -60,7 +60,7 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
       .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).textContent));
     // The time column's option value is its octree BUFFER key — PotreeConverter's
     // `gps-time`, because the import writes it to the LAS standard float64
-    // gps_time field rather than a float32 extra dim (which quantises
+    // gps_time field rather than a float32 extra dim (which quantizes
     // GPS-magnitude times to 32 s). It is offered because it carries REAL data
     // here; a plain XYZ import's all-zero gps-time is filtered out (the
     // degenerate-range rule in octreeScalarFieldOptions), and that is what the

@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { launchApp } from './helpers/launchApp';
 
-// Cancelling a plant/canopy build must actually stop the backend build and free
+// Canceling a plant/canopy build must actually stop the backend build and free
 // its memory — not just hide the popup. This drives the live backend
 // (/api/plant/generate/stream + /api/cancel/{run_id}) through the real DOM:
 // start a HEAVY canopy build (large, aged grid so it runs long enough to
@@ -11,9 +11,9 @@ import { launchApp } from './helpers/launchApp';
 //
 // The C++ build loops actually short-circuiting on the cancel flag is covered by
 // the pyhelios plantarchitecture selfTest + the backend test_cancel.py
-// (cancelled mid-build → `cancelled` event, never a result). This E2E proves the
+// (canceled mid-build → `canceled` event, never a result). This E2E proves the
 // user-facing cancel path end-to-end.
-test('cancelling a heavy canopy build abandons it and leaves the UI usable', async () => {
+test('canceling a heavy canopy build abandons it and leaves the UI usable', async () => {
   // The mesh-row wait below allows 180 s, which is exactly playwright.config.ts's
   // per-test cap — so that inner timeout could never actually fire. The global
   // one always won first, and this test could only ever die as an opaque "Test
@@ -43,7 +43,7 @@ test('cancelling a heavy canopy build abandons it and leaves the UI usable', asy
     //
     // It used to be 8x8 at age 30: 16x the plants of the largest passing canopy
     // spec (plant-generate.spec.ts runs 2x2 at age 15) at double the age. That
-    // cost is not free once cancelled — the SECOND build below starts while the
+    // cost is not free once canceled — the SECOND build below starts while the
     // backend is still unwinding the first, on a runner already shared with a
     // second Playwright worker, and that is what pushed the small follow-up
     // build past its own 180 s wait in CI. 4x4 at age 20 keeps the build
@@ -61,7 +61,7 @@ test('cancelling a heavy canopy build abandons it and leaves the UI usable', asy
     await cancelBtn.click();
 
     // The popup returns to its idle state (generate button back) and NO plant
-    // mesh landed — the cancelled build produced nothing.
+    // mesh landed — the canceled build produced nothing.
     await expect(page.getByTestId('plant-generate-button')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('mesh-row')).toHaveCount(0);
 
@@ -73,7 +73,7 @@ test('cancelling a heavy canopy build abandons it and leaves the UI usable', asy
 
     const meshRow = page.getByTestId('mesh-row').first();
     // 180 s: this small single-plant build is normally seconds, but it runs
-    // right after cancelling a canopy — the backend may still be unwinding that
+    // right after canceling a canopy — the backend may still be unwinding that
     // work — and CI runs two Playwright workers on a shared runner. It timed out
     // at 120 s once in four CI runs, then again at 180 s against the old 8x8
     // age-30 grid, which is why that grid is now 4x4 at age 20 (see above): the

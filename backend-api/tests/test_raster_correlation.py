@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from raster_correlation import (_RANK_ITERATIONS, auto_cell_size, rasterise,
+from raster_correlation import (_RANK_ITERATIONS, auto_cell_size, rasterize,
                                 register_by_correlation)
 
 
@@ -90,9 +90,9 @@ def test_recovers_large_rotations(yaw):
 
 
 def test_translation_composition_is_right():
-    """Regression for a bug that left rotation exact and translation metres out.
+    """Regression for a bug that left rotation exact and translation meters out.
 
-    Each raster is centred on its OWN XY median, so the FFT shift is measured
+    Each raster is centered on its OWN XY median, so the FFT shift is measured
     between grids with different origins and does not include the offset between
     those origins. Forgetting to add it back gave 0.00° rotation with 2-14 m of
     translation error across all three real datasets — a failure that looks like
@@ -107,7 +107,7 @@ def test_translation_composition_is_right():
     assert rot_err < 5.0
     assert trans_err < 2.0, (
         f"translation off by {trans_err:.2f} m while rotation was fine "
-        f"({rot_err:.2f}°) — the raster-centre offset is probably missing again")
+        f"({rot_err:.2f}°) — the raster-center offset is probably missing again")
 
 
 def test_cell_size_is_not_load_bearing():
@@ -129,15 +129,15 @@ def test_cell_size_is_not_load_bearing():
 
 
 def test_reports_ambiguity_on_a_symmetric_scene():
-    """A featureless disc has no unique orientation. The honest outcome is to
+    """A featureless disk has no unique orientation. The honest outcome is to
     say so, not to return a confident arbitrary answer — the same guarantee the
     landmark matcher provided and which must survive the replacement."""
     rng = np.random.default_rng(0)
     th = rng.uniform(0, 2 * np.pi, 40000)
     r = np.sqrt(rng.uniform(0, 1, 40000)) * 20
-    disc = np.column_stack([r * np.cos(th), r * np.sin(th), rng.normal(0, 0.05, 40000)])
+    disk = np.column_stack([r * np.cos(th), r * np.sin(th), rng.normal(0, 0.05, 40000)])
 
-    result = register_by_correlation(disc, _rotate := (disc @ _rigid(40.0, [0, 0, 0])[:3, :3].T))
+    result = register_by_correlation(disk, _rotate := (disk @ _rigid(40.0, [0, 0, 0])[:3, :3].T))
     assert result["ambiguous"] or result["margin"] < 0.2, (
         f"claimed a confident pose on a rotationally symmetric scene "
         f"(margin={result['margin']:.3f})")
@@ -152,7 +152,7 @@ def test_occupancy_resolves_a_row_flip_and_height_admits_it():
     them (margin 0.007) and reports ambiguous=True rather than returning a
     confident wrong answer.
 
-    That is the correct behaviour for both. The test asserts the SAFETY
+    That is the correct behavior for both. The test asserts the SAFETY
     property, not that every raster wins: a method that says "I cannot tell"
     is fine, a method that is confidently 180 degrees wrong is not."""
     scene = _planting(seed=7)
@@ -172,20 +172,20 @@ def test_occupancy_resolves_a_row_flip_and_height_admits_it():
             f"(margin={height['margin']:.3f}) — a confidently wrong answer")
 
 
-def test_rasterise_centres_on_the_median_not_the_bounding_box():
+def test_rasterize_centers_on_the_median_not_the_bounding_box():
     """A terrestrial scan's bbox is dominated by sparse far-field returns, so
-    its centre can sit hundreds of metres from the plot. Centring the raster
+    its center can sit hundreds of meters from the plot. Centering the raster
     there would put the actual data outside the grid entirely — which is exactly
     how an earlier crop silently produced empty clouds."""
     scene = _planting(seed=2)
     far = np.array([[900.0, 900.0, 5.0], [-900.0, -700.0, 5.0]])
     with_outliers = np.vstack([scene, far])
 
-    centre = np.median(with_outliers[:, :2], axis=0)
+    center = np.median(with_outliers[:, :2], axis=0)
     cell, extent = auto_cell_size(scene)
-    grid = rasterise(with_outliers, cell, extent, centre)
+    grid = rasterize(with_outliers, cell, extent, center)
 
-    assert grid.sum() > 0, "raster is empty — centred on the wrong place"
+    assert grid.sum() > 0, "raster is empty — centered on the wrong place"
 
 
 def test_yaw_prior_rejects_rotational_aliases():
@@ -231,7 +231,7 @@ def test_ground_is_stripped_before_correlating():
     The harm is NOT ground's bulk -- a uniform plane correlates identically at
     every shift, so adding one changes nothing (verified: a 42x ground-to-canopy
     ratio still registered exactly). The harm is that real TLS ground carries a
-    RADIAL DENSITY GRADIENT centred on the scanner, and that centre is in a
+    RADIAL DENSITY GRADIENT centered on the scanner, and that center is in a
     different place in every scan. Two such gradients correlate strongly with
     each other at the shift that superimposes the two scanner positions, which
     is not the shift that aligns the plants.
@@ -247,14 +247,14 @@ def test_ground_is_stripped_before_correlating():
         for i in range(6)
     ])
 
-    def scan(centre, shift, seed, n_ground=60_000):
+    def scan(center, shift, seed, n_ground=60_000):
         r = np.random.default_rng(seed)
         # Returns thin out with range from the scanner -- the gradient that
         # makes ground an actively misleading correlation feature.
         rad = np.abs(r.normal(0, 14, size=n_ground))
         ang = r.uniform(0, 2 * np.pi, n_ground)
-        ground = np.column_stack([centre[0] + rad * np.cos(ang),
-                                  centre[1] + rad * np.sin(ang),
+        ground = np.column_stack([center[0] + rad * np.cos(ang),
+                                  center[1] + rad * np.sin(ang),
                                   np.zeros(n_ground)])
         return np.vstack([canopy + shift, ground + shift])
 
@@ -315,7 +315,7 @@ def test_shortlist_beats_the_tallest_peak_on_real_orchard():
 
     The reference is RiSCAN PRO's own registration of this scan, recovered
     exactly by matching per-return gps_time between the unregistered and
-    registered exports (sub-millimetre residual), so this asserts against a real
+    registered exports (sub-millimeter residual), so this asserts against a real
     answer rather than a self-consistent one.
 
     Note the prior is the pair's RELATIVE yaw (-170 deg), not scan 4's absolute
@@ -451,8 +451,8 @@ def test_shortlist_ranking_is_robust_to_its_iteration_budget():
 
     shipped = pose_error(register_by_correlation(target, source))
     # The coarse stage cannot beat its own cell size (~0.87 m); the fine stage
-    # takes this pair to ~1.6 cm. A shortlist that ranked a NEIGHBOURING ROW
-    # first would land metres out, which is the failure this bounds.
+    # takes this pair to ~1.6 cm. A shortlist that ranked a NEIGHBORING ROW
+    # first would land meters out, which is the failure this bounds.
     assert shipped < 1.0, (
         f"coarse pose is {shipped:.2f} m from RiSCAN's -- the shortlist "
         f"ranking picked a genuinely different pose, not just a different index"

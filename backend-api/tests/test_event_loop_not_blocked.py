@@ -121,7 +121,7 @@ def test_the_heavy_handlers_are_threadpooled():
 # The runtime half of this file needs a REAL server. Starlette's TestClient runs
 # each request through its own blocking portal, so two concurrent calls do not
 # share one event loop — under TestClient even a deliberately blocking `async def`
-# handler fails to stall its neighbour, which would make the measurement below
+# handler fails to stall its neighbor, which would make the measurement below
 # pass for the wrong reason. uvicorn in a thread is the actual arrangement we ship.
 
 

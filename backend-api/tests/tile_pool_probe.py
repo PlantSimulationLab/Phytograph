@@ -17,7 +17,7 @@ import sys
 # Pin the OpenMP runtime to ONE thread before anything can import a native
 # extension that starts it. CSF's cloth simulation is raced upstream:
 # `Cloth::timeStep` runs `satisfyConstraintSelf` under `#pragma omp parallel
-# for` (CSF/src/Cloth.cpp), and that function writes its NEIGHBOUR particle
+# for` (CSF/src/Cloth.cpp), and that function writes its NEIGHBOR particle
 # (`p2->offsetPos(...)`) — a particle another iteration owns. So the settled
 # cloth, and the `maxDiff < 0.005` early stop that reads it, both depend on
 # thread interleaving. A point whose height lands within float noise of

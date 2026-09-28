@@ -6,7 +6,7 @@ ABSOLUTE coordinates: `_read_points_from_source` adds `world_shift` back, so a
 projected cloud arrives at real UTM magnitudes.
 
 float32 spacing at a UTM northing of 4,210,000 is 0.5 m. This endpoint reports
-`points_within_1mm`. The quantisation was therefore 500x coarser than the
+`points_within_1mm`. The quantization was therefore 500x coarser than the
 smallest quantity being measured, and nothing raised -- the numbers just came
 back wrong:
 
@@ -14,7 +14,7 @@ back wrong:
       before:  mean 0.012843  rmse 0.061884  max 0.500025   <- 0.5 m = the spacing
       after:   mean 0.005000  rmse 0.005000  max 0.005000
 
-A point-to-mesh distance is translation-invariant, so recentring both the mesh
+A point-to-mesh distance is translation-invariant, so recentering both the mesh
 and the query points on the mesh centroid before the cast leaves every distance
 unchanged while moving the coordinates into float32's precise range (sub-micron
 across a 1 km scene).
@@ -40,7 +40,7 @@ PLANE_Z = 100.0
 
 def _flat_plane_case(ox: float, oy: float, clearance: float = TRUE_CLEARANCE,
                      n: int = 2000):
-    """A 10x10 m flat mesh at z=PLANE_Z centred on (ox, oy), plus `n` points
+    """A 10x10 m flat mesh at z=PLANE_Z centered on (ox, oy), plus `n` points
     exactly `clearance` above it. Every true point-to-mesh distance is exactly
     `clearance`, so any deviation is numerical error."""
     v = np.array([
@@ -79,7 +79,7 @@ def test_distance_is_exact_regardless_of_georeferencing(label, origin):
     assert res["max_distance"] == pytest.approx(TRUE_CLEARANCE, abs=1e-6)
     assert res["min_distance"] == pytest.approx(TRUE_CLEARANCE, abs=1e-6)
     # A flat plane at uniform clearance has no spread; the pre-fix run reported
-    # std 0.06 m from quantisation alone.
+    # std 0.06 m from quantization alone.
     assert res["std_deviation"] == pytest.approx(0.0, abs=1e-6)
 
 
@@ -106,7 +106,7 @@ def test_a_real_gap_is_still_measured_at_utm_magnitude():
 
 
 def test_coverage_percentages_survive_georeferencing():
-    """`points_within_*` are the metrics the 0.5 m quantisation most directly
+    """`points_within_*` are the metrics the 0.5 m quantization most directly
     corrupts -- they compare distances against fractions of the bbox diagonal."""
     local = main._do_c2m_distance(_flat_plane_case(0.0, 0.0))
     utm = main._do_c2m_distance(_flat_plane_case(*UTM_ORIGIN))

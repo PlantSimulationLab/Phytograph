@@ -63,7 +63,7 @@ describe('isCommandAvailable', () => {
 
   it('cloud-or-mesh accepts EITHER selection', () => {
     // The Transform button fronts two panels (cloud draft / mesh TransformPanel).
-    // It used to be `requires: 'cloud'`, which greyed it out for a mesh whose
+    // It used to be `requires: 'cloud'`, which grayed it out for a mesh whose
     // transform panel was fully built — reachable only from the mesh row.
     const c = cmd({ requires: 'cloud-or-mesh' });
     expect(isCommandAvailable(c, EMPTY)).toBe(false);
@@ -86,7 +86,7 @@ describe('isCommandAvailable', () => {
   it('enables multi-input tools without a selection, but only if a scan exists', () => {
     // Multi-input tools (triangulate/stitch/align/LAD) pick inputs in a dialog,
     // so they don't need a *selected* cloud — but an empty scene has nothing to
-    // operate on, so they grey out until at least one scan exists. Param-only
+    // operate on, so they gray out until at least one scan exists. Param-only
     // scanner markers (no point data) still count toward totalScanCount.
     const c = cmd({ multiInput: true, requires: 'multiple-clouds' });
     expect(isCommandAvailable(c, EMPTY)).toBe(false);                          // 0 scans → disabled

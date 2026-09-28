@@ -50,7 +50,7 @@ name: Platform
 #   Linux bundle from the same sources.
 
 on:
-  # Called by release.yml as a PRE-BUILD gate, so a packaging or behavioural
+  # Called by release.yml as a PRE-BUILD gate, so a packaging or behavioral
   # regression on Windows/macOS stops the release before anything is signed,
   # notarized, or published. That ordering is the whole point: release.yml's
   # `build` job runs electron-builder with `--publish always` and package.json
@@ -80,7 +80,7 @@ on:
 # release's gate and a hand-dispatched Platform run on the same tag into one
 # group — and with cancel-in-progress that means dispatching Platform silently
 # kills the gate of an in-flight release (or vice versa). Including the workflow
-# name keeps the two in separate groups while preserving the original behaviour
+# name keeps the two in separate groups while preserving the original behavior
 # of superseding an older run of the SAME kind on the same ref.
 concurrency:
   group: platform-${{ github.workflow }}-${{ github.ref }}
@@ -297,7 +297,7 @@ jobs:
       # This drives the DEV build (dist-main + a supervised backend), which is
       # what launchApp.ts launches — not the packaged .app. The two are
       # complementary: the smoke test above proves the ARTIFACT opens, this
-      # proves the BEHAVIOUR is right on this OS. `npm run build` already ran as
+      # proves the BEHAVIOR is right on this OS. `npm run build` already ran as
       # part of the package step, so dist-main is in place.
       #
       # PHYTOGRAPH_E2E_PLATFORM=1 swaps playwright.config.ts's project list for
@@ -383,7 +383,7 @@ jobs:
       # case check-backend-bundle.mjs already documents as valid.
       #
       # Both v0.82.0 gate failures were on this hit path, which no run had
-      # exercised before the release tag (a failed or cancelled job never saves
+      # exercised before the release tag (a failed or canceled job never saves
       # its cache): first `No module named 'numpy'`, because "Install Python
       # dependencies" is skipped on a hit, then the libhelios mismatch above
       # once main.py's import-time auto-rebuild had compiled a lib mid-pytest.

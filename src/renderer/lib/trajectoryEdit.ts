@@ -256,7 +256,7 @@ export function insertPoseBetween(drafts: PoseDraft[], index: number): PoseDraft
   const midT = (a.t + b.t) / 2;
   const inserted = draftFromPosQuat(midT, midPos, midQuat);
   // Its midpoint time already places it between a and b; sort keeps the invariant
-  // even if the neighbours weren't strictly time-ordered.
+  // even if the neighbors weren't strictly time-ordered.
   return sortDraftsByTime([...drafts.slice(0, index + 1), inserted, ...drafts.slice(index + 1)]);
 }
 

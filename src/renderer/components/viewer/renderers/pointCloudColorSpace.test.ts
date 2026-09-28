@@ -4,15 +4,15 @@ import { srgbToLinear } from './PointCloud';
 import { treeInstanceColor, rgbToHex, categoricalSchemeFor, colorForClassValue, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE } from '../../../lib/classification';
 import { sampleColormap } from '../../../lib/colormaps';
 
-// The bug this pins: a cloud coloured by a scalar/categorical attribute and a
+// The bug this pins: a cloud colored by a scalar/categorical attribute and a
 // per-scan cloud split out of it drew the SAME tree in two different shades —
 // the parent washed out, the child over-saturated. Three code paths have to
 // agree on the bytes that reach the framebuffer:
 //
 //   octree renderer  — bypasses outputColorSpace, writes sRGB display values
 //                      straight out. This is the REFERENCE (it is also what
-//                      the colourbar overlay shows).
-//   flat, parent     — vertex colours, which three.js treats as LINEAR and
+//                      the colorbar overlay shows).
+//   flat, parent     — vertex colors, which three.js treats as LINEAR and
 //                      encodes at output, so they must be stored linear.
 //   flat, child      — material.color = THREE.Color('#hex'), which decodes
 //                      sRGB->linear on input and is encoded at output.
@@ -26,10 +26,10 @@ const toByte = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255);
 const linearToSrgb = (v: number) =>
   v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
 
-/** Bytes the OCTREE renderer emits for an sRGB display colour (the reference). */
+/** Bytes the OCTREE renderer emits for an sRGB display color (the reference). */
 const octreeBytes = (rgb: readonly [number, number, number]) => rgb.map(toByte);
 
-/** Bytes the FLAT renderer emits for a generated vertex colour, after the fix. */
+/** Bytes the FLAT renderer emits for a generated vertex color, after the fix. */
 const flatVertexBytes = (rgb: readonly [number, number, number]) =>
   rgb.map((c) => toByte(linearToSrgb(srgbToLinear(c))));
 
@@ -54,8 +54,8 @@ describe('srgbToLinear', () => {
   });
 });
 
-describe('tree_instance colours agree across render paths', () => {
-  it('parent (flat vertex colours) matches the octree reference', () => {
+describe('tree_instance colors agree across render paths', () => {
+  it('parent (flat vertex colors) matches the octree reference', () => {
     for (const id of [1, 2, 3, 5, 8, 13, 40]) {
       const rgb = treeInstanceColor(id);
       expect(flatVertexBytes(rgb), `tree ${id}`).toEqual(octreeBytes(rgb));
@@ -63,7 +63,7 @@ describe('tree_instance colours agree across render paths', () => {
   });
 
   it('a split-out child swatch matches the tree it came from', () => {
-    // The user-visible invariant: the child cloud's per-scan colour draws as
+    // The user-visible invariant: the child cloud's per-scan color draws as
     // the same pixels as that tree in the parent cloud.
     for (const id of [1, 2, 3, 5, 8, 13, 40]) {
       const rgb = treeInstanceColor(id);

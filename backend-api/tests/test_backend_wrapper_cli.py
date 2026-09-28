@@ -28,7 +28,7 @@ def run_wrapper(args, env_extra=None, timeout=120):
     """Run backend_wrapper.py with `args`, returning the CompletedProcess."""
     env = dict(os.environ)
     # Don't inherit a port from the ambient environment — several cases below
-    # assert on the fallback behaviour when it is absent.
+    # assert on the fallback behavior when it is absent.
     env.pop("PHYTOGRAPH_BACKEND_PORT", None)
     if env_extra:
         env.update(env_extra)

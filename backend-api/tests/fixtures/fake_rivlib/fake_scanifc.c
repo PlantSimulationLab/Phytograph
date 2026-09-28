@@ -153,7 +153,7 @@ FAKE_API int scanifc_get_last_error(char *buf, uint32_t size,
 /*
  * The URI is validated rather than ignored: `_uri()` prefixes "file:" and, on
  * Windows, hands over a native C:\... path. Rejecting anything else is what
- * makes this stub able to catch a "helpful" normalisation to file:/// — which
+ * makes this stub able to catch a "helpful" normalization to file:/// — which
  * real RiVLib rejects, as measured.
  */
 FAKE_API int scanifc_point3dstream_open(const char *uri, int sync_to_pps,
@@ -189,11 +189,11 @@ FAKE_API int scanifc_point3dstream_open(const char *uri, int sync_to_pps,
  * Housekeeping records are a side effect of reading points in real RiVLib.
  * Writing them at add_demultiplexer time instead is a deliberate
  * simplification: the reader only ever parses the file after the read loop
- * finishes, so the observable behaviour is identical, and the GNSS/ENU path
- * gets covered without modelling the interleave.
+ * finishes, so the observable behavior is identical, and the GNSS/ENU path
+ * gets covered without modeling the interleave.
  *
  * Field positions are the reader's contract (lon 5, lat 6, height 7), lon/lat
- * in nanodegrees and height in millimetres.
+ * in nanodegrees and height in millimeters.
  */
 FAKE_API int scanifc_point3dstream_add_demultiplexer(void *handle,
                                                      const char *filename,

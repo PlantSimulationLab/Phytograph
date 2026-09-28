@@ -13,7 +13,7 @@ first — the tests drive the real packaged app.
 
 ## Testing code that needs a proprietary library
 
-RIEGL `.rxp` reading needs RiVLib, which cannot be committed (its licence
+RIEGL `.rxp` reading needs RiVLib, which cannot be committed (its license
 forbids redistribution) and cannot be a CI secret (the useful subset is 55 MB
 against a 64 KB cap). Left alone, that puts the whole reader — the ctypes
 binding, the read loop, pulse grouping, column pruning, miss placement, the
@@ -32,7 +32,7 @@ and **skips** if there is none, so it needs no secrets and runs on fork PRs.
 
 Two limits are worth stating plainly:
 
-- **It proves nothing about RIEGL's behaviour.** If they reorder a struct, the
+- **It proves nothing about RIEGL's behavior.** If they reorder a struct, the
   stub and the reader stay wrong together. It catches *our* regressions, which
   is almost all of them, and a job using the real library has to be separate and
   credentialed.
@@ -67,7 +67,7 @@ what the stub cannot prove.
 The `cloth-simulation-filter` wheel (`import CSF`) is **OpenMP-parallel on
 Linux and single-threaded on macOS**, and upstream CSF has a data race inside
 that parallel region: `Cloth::timeStep` runs `satisfyConstraintSelf` under a
-`#pragma omp parallel for`, and that function writes its *neighbour* particle
+`#pragma omp parallel for`, and that function writes its *neighbor* particle
 (`p2->offsetPos(...)`) — a particle another iteration owns. The settled cloth,
 and the `maxDiff < 0.005` early stop that reads it, therefore both depend on
 thread interleaving.

@@ -36,7 +36,7 @@ export type ScanParametersPopupMode = 'create' | 'attach' | 'edit';
 interface ScanParametersPopupProps {
   isOpen: boolean;
   onClose: () => void;
-  // Called with the (possibly edited) label and finalised parameters. The
+  // Called with the (possibly edited) label and finalized parameters. The
   // caller decides whether to attach to an existing scan or create a new one.
   onSubmit: (label: string, params: ScanParameters) => void;
   // When provided, the form opens pre-filled for editing. Otherwise a new
@@ -204,7 +204,7 @@ export function ScanParametersPopup({
       // Binary SBET is parsed server-side (it needs pyproj for the UTM projection);
       // text trajectories are parsed in the renderer. Both yield the same PoseStream.
       const stream = await pickAndParseTrajectory();
-      if (!stream) return; // user cancelled the file picker
+      if (!stream) return; // user canceled the file picker
       // applyTrajectoryToParams anchors origin to the first pose and zeros the
       // static tilt/heading (a moving scan's attitude comes from the trajectory;
       // the backend's addScanMoving REJECTS a non-zero static tilt).

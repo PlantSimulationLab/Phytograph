@@ -77,7 +77,7 @@ describe('checkExpression', () => {
   it('leaves grammar the backend owns alone', () => {
     // Wrong arity and a misplaced aggregate are both real errors, but they are
     // the AST walker's to report — duplicating its rules here would be a second
-    // source of truth that drifts, and drift shows up as the panel greying out
+    // source of truth that drifts, and drift shows up as the panel graying out
     // a formula that would have worked.
     expect(checkExpression('sqrt(x, y)', VOCAB)).toBeNull();
     expect(checkExpression('mean(3)', VOCAB)).toBeNull();

@@ -54,9 +54,9 @@ export interface SceneState {
   skeletonPositions: Map<string, Vec3>;
   // Cloud edit state (translation + erased indices + pending deletes), keyed by scan id.
   editStates: Map<string, CloudEditState>;
-  // Manual-labelling state (the ordered stroke stack + palette binding), keyed by
+  // Manual-labeling state (the ordered stroke stack + palette binding), keyed by
   // scan id. Separate from editStates because that map is deep-cloned on every
-  // transform drag and a labelling session's stroke list would ride along.
+  // transform drag and a labeling session's stroke list would ride along.
   labelStates: Map<string, LabelEditState>;
   // Undoable per-object display props.
   meshOpacities: Map<string, number>;

@@ -45,7 +45,7 @@ def _write_las_with_origins(path, names, origins, xyz=None):
     ("BeamOriginX", "BeamOriginY", "BeamOriginZ"),
 ])
 def test_beam_origins_detected_by_alias(tmp_path, names):
-    """Each recognised alias triple is read as float64 beam_origins and kept out of
+    """Each recognized alias triple is read as float64 beam_origins and kept out of
     the float32 extras dict."""
     las_path = tmp_path / "origins.las"
     origins = np.array([[100.5, 200.5, 300.5],
@@ -251,7 +251,7 @@ def test_lad_uses_beam_origins_and_bypasses_trajectory(stub_pyhelios):
         ahp = next(c for c in cloud.calls if c[0] == "addHitPointsBulk")
         labels = ahp[3]
         assert {"origin_x", "origin_y", "origin_z"}.issubset(set(labels))
-        # Trajectory was ignored in favour of explicit origins → a warning says so.
+        # Trajectory was ignored in favor of explicit origins → a warning says so.
         assert any("ExtraBytes" in w or "explicit origins" in w
                    for w in result["warnings"])
     finally:
@@ -318,7 +318,7 @@ def test_reconstruct_trajectory_single_pose_returns_none():
 # response surfaces in scan_params must be WORLD-frame, because every renderer
 # consumer — the trajectory marker (ScanMarkerEntry) and buildLADRequest —
 # subtracts worldShift ITSELF to reach the stored frame. Emitting a stored-frame
-# trajectory double-shifted the path ~worldShift metres off-screen (and would
+# trajectory double-shifted the path ~worldShift meters off-screen (and would
 # double-shift the LAD trajectory join). This is the regression guard for that.
 # ---------------------------------------------------------------------------
 
@@ -340,7 +340,7 @@ def _write_las_with_origins_and_time(path, origins, times):
     for nm in ("ox", "oy", "oz"):
         header.add_extra_dim(laspy.ExtraBytesParams(name=nm, type=np.float64))
     las = laspy.LasData(header)
-    # Ground hits offset a few hundred metres below the aerial platform origins.
+    # Ground hits offset a few hundred meters below the aerial platform origins.
     las.x = origins[:, 0]
     las.y = origins[:, 1]
     las.z = origins[:, 2] - 700.0
@@ -391,7 +391,7 @@ def test_create_session_trajectory_is_world_frame_under_shift(client, tmp_path, 
     assert sp["origin"][0] == pytest.approx(origins[0, 0], abs=1e-3)
 
     # And the renderer's own worldShift subtraction lands the path ON the stored
-    # cloud (X/Y near 0), not ~worldShift metres away — the actual bug symptom.
+    # cloud (X/Y near 0), not ~worldShift meters away — the actual bug symptom.
     assert (px - ws[0]).min() == pytest.approx(0.0, abs=1e-3)
     assert (py - ws[1]).min() == pytest.approx(0.0, abs=1e-3)
 

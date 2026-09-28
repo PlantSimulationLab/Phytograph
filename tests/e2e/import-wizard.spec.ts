@@ -63,7 +63,7 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
 
   // Column index 5 is "Target Index[]" — a small-integer class column. It
   // defaults to the 'Scalar' role (continuous); set it to 'Label' so it
-  // colours as discrete classes.
+  // colors as discrete classes.
   const targetCol = page.locator('[data-testid="import-wizard-column"][data-col-index="5"]');
   await expect(targetCol).toBeVisible();
   const role = targetCol.getByTestId('import-wizard-role');
@@ -82,8 +82,8 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   const colorMode = page.getByTestId('display-color-mode');
   await expect(colorMode).toBeVisible();
 
-  // Color by the marked categorical field. "Target Index[]" is a RECOGNISED
-  // multi-return column, so it canonicalises to the slug `target_index` (see
+  // Color by the marked categorical field. "Target Index[]" is a RECOGNIZED
+  // multi-return column, so it canonicalizes to the slug `target_index` (see
   // _CANONICAL_NAME_ALIASES) rather than keeping a header-derived spelling —
   // that is what makes it visible to Backfill Misses and LAD. The other specs
   // (export-scalar-columns, backfill-misses) already assert the canonical
@@ -100,13 +100,13 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
 });
 
 test('mapping columns to Scan Row/Column Index carries the raster grid', async () => {
-  // raster-grid.xyz is a 3x3 rasterised scan whose last two columns (idx_a,
+  // raster-grid.xyz is a 3x3 rasterized scan whose last two columns (idx_a,
   // idx_b) are the integer (row, column) position within the scanner grid. Their
   // headers don't auto-detect as grid roles, so the user must pick "Scan Row
   // Index" / "Scan Column Index" from the dropdown. After import those columns
   // must be carried under the CANONICAL slugs (row_index/column_index) so the
   // gap-filling miss-recovery path finds the raster by name — we assert that by
-  // colouring the scan by each slug.
+  // coloring the scan by each slug.
   const { app, page } = session;
   await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'raster-grid.xyz'));
 
@@ -130,7 +130,7 @@ test('mapping columns to Scan Row/Column Index carries the raster grid', async (
   await expect(row).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(9);
 
-  // Both grid fields are colourable under their canonical slug + label — proof
+  // Both grid fields are colorable under their canonical slug + label — proof
   // the dropdown roles pinned the slugs the recovery path looks up by name.
   await page.getByRole('button', { name: 'Display' }).click();
   const colorMode = page.getByTestId('display-color-mode');
@@ -145,7 +145,7 @@ test('unticking Import drops an ASCII column from the imported cloud', async () 
   // scalars.xyz carries Timestamp (col 3), Deviation (col 4) and Target Index
   // (col 5). Untick Deviation: the points must all still import, but the field
   // must be GONE from the Color-by menu — the ASCII skip travels as role 'skip'
-  // inside the column plan, and the backend never materialises the column.
+  // inside the column plan, and the backend never materializes the column.
   const { app, page } = session;
   await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
 
@@ -180,12 +180,12 @@ test('unticking Import drops an ASCII column from the imported cloud', async () 
     (els) => els.map((e) => (e as HTMLOptionElement).value));
   // The dropped field is gone…
   expect(options).not.toContain('scalar:Deviation');
-  // …while its neighbours, which stayed ticked, survived. Without this the test
+  // …while its neighbors, which stayed ticked, survived. Without this the test
   // would also pass if the import had silently carried no scalars at all.
   // (Target Index is pinned to its canonical lower-case slug by the backend.)
   expect(options).toContain('scalar:target_index');
   // The time column rides the LAS standard gps_time field (float64, for
-  // precision — a float32 extra dim quantises GPS-magnitude times to 32 s), so
+  // precision — a float32 extra dim quantizes GPS-magnitude times to 32 s), so
   // its octree BUFFER key is PotreeConverter's `gps-time`; the picker shows it
   // under the "Timestamp" label. The option value is that buffer key.
   expect(options).toContain('scalar:gps-time');
@@ -231,7 +231,7 @@ test('unticking Import drops a field from an in-file format (PLY)', async () => 
   const reflCol = page.locator('[data-testid="import-wizard-column"]')
     .filter({ hasText: 'deviation' }).first();
   // The file fixes the layout, so this column can't be REMAPPED — its dropdown
-  // offers only the Scalar/Label colouring choice. Membership is nonetheless
+  // offers only the Scalar/Label coloring choice. Membership is nonetheless
   // the user's call now, which is exactly what the checkbox adds.
   const roleOptions = await reflCol.getByTestId('import-wizard-role')
     .locator('option').evaluateAll((els) => els.map((e) => (e as HTMLOptionElement).value));
@@ -287,10 +287,10 @@ test('E57 fixed columns display their real roles, not a Scalar fallback', async 
     .toBeVisible({ timeout: 20_000 });
 });
 
-test('E57 with colour shows RGB columns but hides the 0-255/0-1 toggle', async () => {
+test('E57 with color shows RGB columns but hides the 0-255/0-1 toggle', async () => {
   // The RGB range toggle is for ASCII files, where the wizard can't tell 8-bit
-  // ints from floats. An in-file format (E57) records the colour encoding, so
-  // the converter already normalises it — the toggle would be misleading dead UI
+  // ints from floats. An in-file format (E57) records the color encoding, so
+  // the converter already normalizes it — the toggle would be misleading dead UI
   // (buildColumnPlan returns null for non-remappable scans, so it has no effect).
   // structured-scan-color.e57 carries x/y/z + intensity + RGB.
   const { app, page } = session;
@@ -299,7 +299,7 @@ test('E57 with colour shows RGB columns but hides the 0-255/0-1 toggle', async (
   const wizard = page.getByTestId('import-wizard');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
-  // The colour columns are present (red/green/blue), proving the toggle's
+  // The color columns are present (red/green/blue), proving the toggle's
   // absence is the deliberate suppression, not just "no RGB here".
   const roleAt = (colIndex: number) =>
     page.locator(`[data-testid="import-wizard-column"][data-col-index="${colIndex}"]`)

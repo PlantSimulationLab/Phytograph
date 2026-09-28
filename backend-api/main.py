@@ -256,7 +256,7 @@ BACKEND_VERSION = "0.93.0"
 import logging
 logger = logging.getLogger("phytograph")
 
-# Per-operation diagnostics (ICP iteration counts, fitness/RMSE, centre offsets)
+# Per-operation diagnostics (ICP iteration counts, fitness/RMSE, center offsets)
 # go to `logger.debug`, NOT `print`.
 #
 # The supervisor tees the sidecar's stdout/stderr straight to the terminal in
@@ -775,7 +775,7 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True, env=None):
 # green, and die at dlopen. That is exactly the "present but unusable" state
 # _riegl_rivlib_unloadable exists to prevent, so it is closed at the gate.
 #
-# RiVLib is NEVER redistributed — its licence forbids it ("You may NOT
+# RiVLib is NEVER redistributed — its license forbids it ("You may NOT
 # distribute or modify the software for the use in commercial applications
 # without the written consent of RLMS"), so the user downloads it with their own
 # RIEGL account and points Phytograph at it. That is why this is a runtime probe
@@ -1283,7 +1283,7 @@ def _riegl_image_built() -> bool:
 # behind, and byte-identical sources must not stamp differently because of it.
 _RIEGL_CONTEXT_IGNORE = {"__pycache__"}
 
-# Serialises the self-heal below. Every endpoint here is a threadpool `def`, so
+# Serializes the self-heal below. Every endpoint here is a threadpool `def`, so
 # two imports genuinely can be in flight at once and would otherwise each start
 # their own `docker build` against the same tag.
 _RIEGL_BUILD_LOCK = _threading.Lock()
@@ -1295,7 +1295,7 @@ def _riegl_expected_stamp(context: "Optional[Path]" = None) -> "str | None":
     Deliberately a SOURCE HASH rather than a version counter, mirroring
     phytograph_backend_sources.sha256 and for the same reason: a counter only
     moves when someone remembers to move it, so it misses the common case of an
-    edit that changes the reader's behaviour without bumping anything. That is
+    edit that changes the reader's behavior without bumping anything. That is
     the silent failure — a stamp that still matches while the image runs older
     code — and it is worse than the loud one, so hash the sources instead.
 
@@ -1651,7 +1651,7 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
     overriding its virtuals, which ctypes cannot do, so something has to be
     compiled either way. Where the base class comes from then differs: Windows
     RiVLib exposes it only through a static archive, so the shim links RIEGL
-    object code and their licence rules out shipping it prebuilt; Linux exports
+    object code and their license rules out shipping it prebuilt; Linux exports
     it from libscanifc.so, so no archive is involved and the only obstacle is
     that the result is ABI-tied to this machine. Either way it is reported
     separately as `misses_available` rather than folded into `available`,
@@ -1794,7 +1794,7 @@ def _riegl_docker_context() -> Path:
 
 class RieglImageBuildRequest(BaseModel):
     # Not used by `docker build` itself — the image never contains RiVLib, which
-    # is bind-mounted at run time because its licence forbids redistribution.
+    # is bind-mounted at run time because its license forbids redistribution.
     # It is carried so the build can refuse to run before the user has a usable
     # RiVLib, which is the only reason to build the image at all.
     rivlib_path: Optional[str] = None
@@ -1810,7 +1810,7 @@ def riegl_image_build(request: RieglImageBuildRequest, http_request: Request):
     laspy onto a python:3.11-slim-bullseye base, so it carries no licensed bytes
     and is safe to re-run.
 
-    Streams PHP1 progress and honours /api/cancel/{run_id} like every other long
+    Streams PHP1 progress and honors /api/cancel/{run_id} like every other long
     operation. Declared `def` (not `async def`) per the event-loop rule — the
     work is a blocking subprocess, so FastAPI runs it in the threadpool.
     """
@@ -1855,7 +1855,7 @@ def riegl_image_build(request: RieglImageBuildRequest, http_request: Request):
 
 def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
                       timeout_s: float = 1800.0) -> None:
-    """Run `docker build` for the reader image, cancellably.
+    """Run `docker build` for the reader image, cancelably.
 
     Same shape as _run_riegl_container: env scrub, log file rather than a pipe,
     Popen + poll so the child can actually be killed. `docker build` IS a normal
@@ -1898,7 +1898,7 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
                 if cancel_event is not None and cancel_event.is_set():
                     proc.kill()
                     proc.wait()
-                    raise ScanCancelled()
+                    raise ScanCanceled()
                 if time.time() - started > timeout_s:
                     proc.kill()
                     proc.wait()
@@ -2146,7 +2146,7 @@ def _riegl_arrays_to_las_result(
     # Only the columns this scanner actually produced — see the manifest note in
     # _load_riegl_scan_arrays.
     # Only the columns this scanner produced, further narrowed to the wizard's
-    # selection. `is_miss` is never dropped — the Hit/Miss colour scheme, the
+    # selection. `is_miss` is never dropped — the Hit/Miss color scheme, the
     # hits-only octree and LAD all key off it.
     keep = set(keep_columns) if keep_columns is not None else None
     extras: Dict[str, np.ndarray] = {
@@ -2175,7 +2175,7 @@ def _riegl_arrays_to_las_result(
         # Kept as float64 out of `extras`: this is the LAD trajectory-join key,
         # and it is also what Backfill Misses needs to reconstruct misses — so
         # forwarding it gives an independent cross-check on the shim's recovery.
-        # Honours the wizard's selection like any other column, but is checked
+        # Honors the wizard's selection like any other column, but is checked
         # separately because it never rides in the float32 extras.
         timestamps=(
             arrays.get("timestamp")
@@ -2267,14 +2267,14 @@ def riegl_project_extract(
         registration (that is what RiSCAN PRO produces), so every position sits
         at its own origin; `origin_prior` is the GNSS-derived ENU offset for
         seeding ICP, not a registration.
-      frame="sensor" — additionally LEVELLED by the position's own inclinometer,
+      frame="sensor" — additionally LEVELED by the position's own inclinometer,
         which is survey-grade (agrees with RiSCAN's SOPs to <=0.05 deg on two
         independent projects). The cloud comes out plumb — so ground/DEM/CSF
         assumptions hold — but NOT rotated to north and NOT aligned to the other
         positions: the onboard compass is 10-14 deg wrong on measured data and
         its own accuracy figure does not predict that, so no heading is applied
         and ICP still owns the remaining rotation. Positions with no usable
-        inclinometer record import unlevelled rather than failing.
+        inclinometer record import unleveled rather than failing.
       frame="registered" — each position's SOP is applied, so a .PROJ's scans
         land pre-aligned in the project frame. Per-position `registration` says
         how well: "registered" is the surveyed pose, "prior" is only the
@@ -2283,7 +2283,7 @@ def riegl_project_extract(
     The response's `registered` flag reports what actually happened rather than
     being hardcoded, so the caller can tell the user whether to run ICP.
 
-    Streams PHP1 progress and honours /api/cancel/{run_id}.
+    Streams PHP1 progress and honors /api/cancel/{run_id}.
     """
     status = _resolve_riegl_runtime(request.rivlib_path)
     project = _validate_riegl_project(request.project_path)
@@ -2339,7 +2339,7 @@ def riegl_project_extract(
 
     def build_frame(progress):
         # Reclaim the transport directory on EVERY exit path. Cleanup used to
-        # sit at the end of the success path only, so a failed or cancelled
+        # sit at the end of the success path only, so a failed or canceled
         # import stranded ~1.6 GB per decoded position on disk — which then made
         # the NEXT import more likely to fail for lack of space.
         try:
@@ -2392,7 +2392,7 @@ def riegl_project_extract(
             # CloudSession's source of truth IS arrays, so writing them out just
             # to read them back cost ~10 s and ~1.6 GB of disk per position.
             # A registered import places points by the position's SOP, a sensor
-            # one by its levelling matrix, a local one by the GNSS prior alone.
+            # one by its leveling matrix, a local one by the GNSS prior alone.
             # Matrix and prior are mutually exclusive — see
             # _riegl_arrays_to_las_result — so pick exactly one here.
             #
@@ -2431,7 +2431,7 @@ def riegl_project_extract(
                         sop=sop,
                     ),
                 )
-            except (ScanCancelled, MemoryError):
+            except (ScanCanceled, MemoryError):
                 # A cancel must unwind; out-of-memory is not a per-position
                 # condition and continuing would fail every later one anyway.
                 raise
@@ -2752,7 +2752,7 @@ def _run_riegl_container(
         — Windows gives 4 KB, where this hung every time, and a project with
         enough positions would have hung on macOS too.
       * Popen + poll rather than subprocess.run, because run() retains no
-        handle and its child could never be cancelled.
+        handle and its child could never be canceled.
     """
     import subprocess
     import tempfile
@@ -2800,7 +2800,7 @@ def _run_riegl_container(
         while proc.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 _kill_riegl_container(container_name, proc)
-                raise ScanCancelled()
+                raise ScanCanceled()
             if time.time() - started > timeout_s:
                 _kill_riegl_container(container_name, proc)
                 raise HTTPException(
@@ -2944,7 +2944,7 @@ def _stream_riegl_container(
             while proc.poll() is None:
                 if cancel_event is not None and cancel_event.is_set():
                     _kill_riegl_container(container_name, proc)
-                    raise ScanCancelled()
+                    raise ScanCanceled()
                 if time.time() - started > timeout_s:
                     _kill_riegl_container(container_name, proc)
                     raise HTTPException(
@@ -3034,7 +3034,7 @@ _RIEGL_STREAM_ATTRS = (
 )
 
 # Human labels for the scalar picker and the import wizard. `is_miss` keeps the
-# canonical "Miss" label every other importer uses, so the Hit/Miss colour
+# canonical "Miss" label every other importer uses, so the Hit/Miss color
 # scheme applies to a RIEGL scan exactly as it does to an E57 one.
 _RIEGL_LABELS = {
     "is_miss": "Miss",
@@ -3050,11 +3050,11 @@ _RIEGL_LABELS = {
 # Scalars the wizard OFFERS but leaves unticked. These are instrument
 # diagnostics — how the scanner arrived at a return, not a property of the
 # surface it hit — so carrying them by default costs a float32 per point and
-# adds seven entries to the colour-by picker that nothing downstream reads.
+# adds seven entries to the color-by picker that nothing downstream reads.
 #
 # They are offered rather than dropped because they are genuinely useful when
 # you want them (echo_type and pseudo_echo separate real returns from MTA
-# artefacts; pps_locked audits GNSS timing on a moving platform), and the user
+# artifacts; pps_locked audits GNSS timing on a moving platform), and the user
 # can tick any of them in the wizard.
 #
 # Note this is a SECOND filter, layered on the reader's own pruning: rxp_reader
@@ -4467,7 +4467,7 @@ class PointSource(BaseModel):
     # deletions without a rebuild. `source_path` stays populated for provenance
     # but is not re-read when `session_id` is present. The compute consumers of
     # this path want positions only, so the session-source branch returns
-    # positions and leaves colours/intensity as None (the session DOES hold them;
+    # positions and leaves colors/intensity as None (the session DOES hold them;
     # they're simply not surfaced here).
     session_id: Optional[str] = None
     # Opt-in escape hatch for reading points from `source_path` with no session.
@@ -4610,7 +4610,7 @@ class TriangulationResponse(BaseModel):
 # quantizing decimation. The non-zero spacing estimate here and the dedup in
 # `_do_open3d_triangulation` both exist to keep that out of Open3D's hands.
 def _nn_spacing(o3d, points_np):
-    """Reference nearest-neighbour spacing for a point array: the median over the
+    """Reference nearest-neighbor spacing for a point array: the median over the
     NON-ZERO distances. A zero is an exact duplicate, which carries no spacing
     information — including them biases the estimate toward 0 and, past 50%
     duplicates, pins it AT 0. Returns 0.0 only when every point is coincident
@@ -4874,7 +4874,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         # Drop exact duplicate coordinates before Ball Pivoting.
         #
         # BPA rolls a ball over the surface; coincident points add no surface, and
-        # past 50% duplicates they take over the nearest-neighbour distribution and
+        # past 50% duplicates they take over the nearest-neighbor distribution and
         # collapse the auto radius to 0 — which Open3D rejects as an "invalid,
         # negative radius" (see the comment above `_nn_spacing`). Deduping is the
         # honest fix rather than only hardening the estimate: the duplicates would
@@ -5173,7 +5173,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         return {"success": False, "method_used": request.method,
                 "num_triangles": 0, "num_vertices": 0,
                 "error": "Open3D not installed. Run: pip install open3d"}
-    except ScanCancelled:
+    except ScanCanceled:
         raise  # cancellation propagates to the streaming wrapper (memory freed)
     except Exception as e:
         import traceback
@@ -5227,7 +5227,7 @@ class CrownFitRequest(BaseModel):
     Points come from a cloud session (`source.session_id`) so the per-point
     classification labels (tree_instance / wood_class / ground_class) can be read
     back from `sess.extras` — the same authoritative store the segmentation tools
-    write. A file/inline source is accepted for a single unlabelled tree, but
+    write. A file/inline source is accepted for a single unlabeled tree, but
     then no labels are available (whole cloud = one tree, all points = crown).
     """
     source: PointSource
@@ -5253,7 +5253,7 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
 
     # Cancellation is cooperative (this runs off-thread; a Python thread can't be
     # force-killed). We poll the run's cancel Event at stage boundaries — before
-    # reading points and around each per-tree fit — and raise ScanCancelled, which
+    # reading points and around each per-tree fit — and raise ScanCanceled, which
     # unwinds to the streaming wrapper and stops the work promptly rather than
     # letting the whole batch run on silently after the user cancels. The worst-
     # case latency is one tree's fit (a single open3d/alpha call is monolithic).
@@ -5295,7 +5295,7 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
         return {"success": False, "crowns": [], "warnings": warnings,
                 "error": "Not enough points to fit a crown."}
 
-    # Ground baseline: min-Z of labelled ground when requested + available, else
+    # Ground baseline: min-Z of labeled ground when requested + available, else
     # the per-tree lowest point (resolved inside the loop).
     global_ground_z = None
     if request.ground_baseline == "ground_class" and ground_vals is not None:
@@ -5335,7 +5335,7 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
         if len(crown_pts) < 4:
             warnings.append(f"Tree {tid}: too few crown points ({len(crown_pts)}); skipped.")
             continue
-        # Baseline for THIS tree: labelled global ground, else this tree's own
+        # Baseline for THIS tree: labeled global ground, else this tree's own
         # lowest point (which uses all tree points, incl. trunk, not just crown).
         if global_ground_z is not None:
             baseline_z = global_ground_z
@@ -5546,7 +5546,7 @@ def _do_tree_inventory(sess: "CloudSession", request: TreeInventoryRequest, prog
             # trees NaN there, and those fall back to this grid per query.
             ground_grid = ti.GroundGrid() if ground_col is not None else None
             # The plot boundary: the convex hull of the ground points, or of all
-            # the real returns when nothing is labelled ground.
+            # the real returns when nothing is labeled ground.
             plot_hull = sm.HullAccumulator()
 
             def on_chunk(chunk, keep, a, b):
@@ -5561,7 +5561,7 @@ def _do_tree_inventory(sess: "CloudSession", request: TreeInventoryRequest, prog
             reader.index(request.tree_ids, progress, on_chunk=on_chunk)
             spans = reader.ranges()
             if not spans:
-                return _fail("No labelled tree points to measure.")
+                return _fail("No labeled tree points to measure.")
 
             trees, curve = [], []
             skipped = 0
@@ -5589,7 +5589,7 @@ def _do_tree_inventory(sess: "CloudSession", request: TreeInventoryRequest, prog
 
     stand = None
     if trees and request.tree_ids:
-        # Competition and canopy cover describe a tree's neighbours and the
+        # Competition and canopy cover describe a tree's neighbors and the
         # whole canopy; computed over a requested SUBSET they would silently
         # ignore every tree left out.
         warnings.append("Stand metrics and competition need every tree, so they were "
@@ -5622,7 +5622,7 @@ def _do_tree_inventory(sess: "CloudSession", request: TreeInventoryRequest, prog
 @app.post("/api/cloud/session/{session_id}/tree_inventory")
 def session_tree_inventory(session_id: str, request: TreeInventoryRequest, http_request: Request):
     """Tree list + stem curves + stand geometry for every segmented tree.
-    Streams per-tree progress then a JSON tail; cancellable through the run-id
+    Streams per-tree progress then a JSON tail; cancelable through the run-id
     token (checked between trees and between indexing chunks), admission-gated
     inside."""
     sess = _get_cloud_session(session_id)
@@ -5699,7 +5699,7 @@ def _do_tree_qsm(sess: "CloudSession", request: TreeQSMRequest, progress=None) -
             spans = reader.ranges()
             if not spans:
                 return {"success": False, "results": [], "warnings": warnings,
-                        "error": "No labelled tree points."}
+                        "error": "No labeled tree points."}
             n_trees = len(spans)
             for i, (tid, s0, s1) in enumerate(spans):
                 base = 0.02 + 0.97 * i / n_trees
@@ -5729,7 +5729,7 @@ def _do_tree_qsm(sess: "CloudSession", request: TreeQSMRequest, progress=None) -
                     if request.include_models:
                         rec["cylinders"] = resp["cylinders"]
                         rec["shoots"] = resp["shoots"]
-                except ScanCancelled:
+                except ScanCanceled:
                     raise
                 except _QSMEmpty as e:
                     rec["error"] = str(e)
@@ -5750,7 +5750,7 @@ def _do_tree_qsm(sess: "CloudSession", request: TreeQSMRequest, progress=None) -
 @app.post("/api/cloud/session/{session_id}/tree_qsm")
 def session_tree_qsm(session_id: str, request: TreeQSMRequest, http_request: Request):
     """One QSM per segmented tree. Streams per-tree, per-stage progress then a
-    JSON tail; cancellable between stages; admission-gated inside."""
+    JSON tail; cancelable between stages; admission-gated inside."""
     sess = _get_cloud_session(session_id)
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -5842,7 +5842,7 @@ class DenoiseResponse(BaseModel):
     over_removal: bool = False
     warnings: List[str] = []
     method: str = "ror"
-    # What auto mode actually resolved, so the panel can show it in the (greyed)
+    # What auto mode actually resolved, so the panel can show it in the (grayed)
     # parameter fields rather than leaving the user guessing.
     params_used: Dict[str, float] = {}
     spacing_m: Optional[float] = None
@@ -5878,7 +5878,7 @@ async def denoise_points(request: DenoiseRequest, http_request: Request):
         except ClientDisconnected:
             return DenoiseResponse(success=False, num_points=len(points),
                                    method=request.method,
-                                   error="Noise detection was cancelled.")
+                                   error="Noise detection was canceled.")
         except RuntimeError as e:
             # denoise_mask raises ValueError for a bad method or a too-small
             # cloud; the worker surfaces it as a traceback string.
@@ -5961,14 +5961,14 @@ _COST_WARNING_SECONDS = float(os.environ.get("PHYTOGRAPH_COST_WARNING_SECONDS", 
 # this many nodes a run is minutes and gigabytes regardless of how many points
 # there are, and the panel's inputs allow a cloth fine enough to get there on a
 # field-sized extent. The DEM's auto path floors the cloth (MAX_CLOTH_NODES_PER_SIDE
-# in _auto_csf_params); the interactive path honours the user's value up to here
+# in _auto_csf_params); the interactive path honors the user's value up to here
 # and refuses with a concrete alternative beyond it.
 _MAX_CLOTH_NODES = 25_000_000
 
 
 def _convert_seconds(point_count: int) -> float:
     """Wall-time estimate for one PotreeConverter run of `point_count` points,
-    honouring the sampling policy the converter will actually be given."""
+    honoring the sampling policy the converter will actually be given."""
     n = max(0, int(point_count))
     method = _potree_sampling_method(n)
     return n / _RATE_LAS_WRITE_PTS_PER_S + n / _RATE_CONVERT_PTS_PER_S[method]
@@ -6100,7 +6100,7 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
     `/api/cloud/session/{session_id}/segment_ground`.
 
     The CSF compute runs in a KILLABLE subprocess (see `_run_killable`) so the
-    panel's Cancel button can SIGKILL it mid-run; on client disconnect a cancelled
+    panel's Cancel button can SIGKILL it mid-run; on client disconnect a canceled
     response is returned at once."""
     try:
         points = await run_in_threadpool(_resolve_segmentation_points, request)
@@ -6132,7 +6132,7 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
             return GroundSegmentationResponse(
                 success=False,
                 num_points=len(points),
-                error="Ground segmentation was cancelled.",
+                error="Ground segmentation was canceled.",
             )
         except RuntimeError as e:
             # The CSF C-extension raises ImportError inside the worker when it's
@@ -6170,14 +6170,14 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
 # caller passes ground labels), only ground points are gridded; otherwise CSF is
 # run on the fly (auto) or, as a last resort, the lowest returns of all points
 # are used. The elevation surface is built by TIN / Delaunay-linear interpolation
-# (the las2dem / PDAL approach) onto a regular cell-centred grid, with a per-cell
+# (the las2dem / PDAL approach) onto a regular cell-centered grid, with a per-cell
 # low-percentile pre-bin for outlier robustness and convex-hull void masking (no
 # extrapolation beyond measured data unless `fill_voids` is set). Output is a
 # heightmap surface mesh (same PHB1 transport as /api/triangulate) plus the
 # underlying regular grid, which the renderer round-trips to /api/dem/export-raster
 # for ESRI ASCII (.asc) / GeoTIFF (.tif) export.
 
-# Default DEM cell-size seeding bounds (metres). Mirrors groundSegmentDefaults:
+# Default DEM cell-size seeding bounds (meters). Mirrors groundSegmentDefaults:
 # scale-dependent, so seed from extent when the caller doesn't specify.
 _DEM_CELL_MIN = 0.01
 _DEM_CELL_MAX = 5.0
@@ -6225,12 +6225,12 @@ def _dem_cell_ids(xy: np.ndarray, minx: float, miny: float, cell: float,
     return out
 
 # Surface products the DEM tool can build. DTM = bare-earth ground (the historical
-# behaviour); DSM = first-return / top-of-canopy surface; CHM = DSM − DTM (canopy
+# behavior); DSM = first-return / top-of-canopy surface; CHM = DSM − DTM (canopy
 # height model). DTM/DSM differ only in which points feed the grid and which per-cell
 # percentile is picked (near-min for ground vs near-max for canopy top); CHM
 # subtracts the two aligned grids. The DTM additionally carries a bundle of scalar
 # LAYERS (point/return density, intensity, hillshade, slope, aspect) — see
-# _compute_dem_layers — that the renderer colours the terrain by and exports as
+# _compute_dem_layers — that the renderer colors the terrain by and exports as
 # rasters; they are NOT separate surfaces. See _do_dem / _do_session_dem.
 _DEM_SURFACE_TYPES = ("dtm", "dsm", "chm")
 # Per-cell z percentile for the DSM's first-return surface: near-max, so each cell
@@ -6273,7 +6273,7 @@ class DemRequest(BaseModel):
     bbox: Optional[List[float]] = None        # [minx, miny, maxx, maxy]; None ⇒ ground AABB
     method: str = "tin"                        # "tin"/"linear", "nearest", "idw"
     ground_percentile: float = 5.0            # per-cell z percentile (robust near-min)
-    fill_voids: bool = False                   # nearest-neighbour extrapolate into gaps
+    fill_voids: bool = False                   # nearest-neighbor extrapolate into gaps
     # Also return a per-point height-above-ground buffer (point z − gap-free
     # ground), aligned to the resolved points. Used by the flat-cloud CHM path.
     compute_height_above_ground: bool = False
@@ -6335,11 +6335,11 @@ def _compute_dem(
     ValueError when the requested cell size would exceed the grid-cell cap.
 
     `footprint_xy` (all returns' XY, not just ground) defines the SCANNED area for
-    `fill_voids`: under dense canopy the ground returns cluster in the centre, so
+    `fill_voids`: under dense canopy the ground returns cluster in the center, so
     their hull is far smaller than the scan — filling only inside that hull leaves
     big canopy-edge gaps. When given, fill extends (nearest-ground) to any cell that
     holds a return, i.e. the true footprint. Without it, fill stays in the ground
-    hull (the old behaviour)."""
+    hull (the old behavior)."""
     def _report(frac, msg):
         if progress is not None:
             progress(frac, msg)
@@ -6523,7 +6523,7 @@ def _dem_surface_from_reps(
     voids = int((~np.isfinite(grid_z)).sum())
 
     _report(0.75, "Building surface mesh")
-    # --- Heightmap mesh: vertices at cell centres, 2 triangles per quad whose
+    # --- Heightmap mesh: vertices at cell centers, 2 triangles per quad whose
     # four corner cells are all finite (clean holes at voids). ---
     finite = np.isfinite(grid_z)
     verts_full = np.column_stack([GX.ravel(), GY.ravel(), grid_z.ravel()])
@@ -6603,7 +6603,7 @@ def _pack_dem_frame(result: dict) -> bytes:
     """Pack a `_compute_dem`/`_compute_dem_layers` result into a PHB1 frame:
     vertices/indices/normals + the `grid_z` grid (for raster export); the DTM's
     scalar LAYERS ride as `layer_grid_<name>` (ny*nx, for export) + `layer_vert_<name>`
-    (per-vertex, for colouring) buffers, with each layer's min/max/label in
+    (per-vertex, for coloring) buffers, with each layer's min/max/label in
     `meta["layers"]`. Everything else (counts, grid params, ground_source,
     world_shift, cache info) rides in meta."""
     array_keys = {"vertices", "triangles", "normals", "grid_z", "hag",
@@ -6619,7 +6619,7 @@ def _pack_dem_frame(result: dict) -> bytes:
         buffers.append(("grid_z", result["grid_z"], "f32"))
     if result.get("hag") is not None:
         buffers.append(("hag", result["hag"], "f32"))
-    # DTM scalar layers: grids for export + per-vertex arrays for colouring. The
+    # DTM scalar layers: grids for export + per-vertex arrays for coloring. The
     # min/max/label ride in meta["layers"]; the buffers carry the numeric arrays.
     layers = result.get("layers")
     layer_vertex = result.get("layer_vertex") or {}
@@ -6675,7 +6675,7 @@ def _pack_dem_frame(result: dict) -> bytes:
 # to resolve anything.
 #
 # BOTH conditions are required, and the extent one is not redundant. Spacing
-# alone misreads a sparse SMALL cloud: 3D nearest-neighbour distance measures
+# alone misreads a sparse SMALL cloud: 3D nearest-neighbor distance measures
 # how far apart points are in space, so a volume-filling cloud reads far sparser
 # than a surface scan of the same extent — 2000 points scattered through a 5 m
 # cube measure 0.219 m, well past the spacing cutoff, and a synthetic fixture of
@@ -6692,8 +6692,8 @@ _ALS_CLASS_THRESHOLD = 0.5
 
 def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
                           n_query: int = 2000, seed: int = 0) -> float:
-    """Median 3D nearest-neighbour spacing, cheaply. Returns 0.0 when it cannot
-    be measured (fewer than 2 points, or every neighbour distance degenerate).
+    """Median 3D nearest-neighbor spacing, cheaply. Returns 0.0 when it cannot
+    be measured (fewer than 2 points, or every neighbor distance degenerate).
 
     Distinct from `_median_point_spacing` (which ICP uses to size its
     correspondence window) and deliberately so: that one builds its tree over
@@ -6721,7 +6721,7 @@ def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
       - Distances are 3D, not 2D. A terrestrial scan stacks returns in a
         vertical column (canopy over ground), so 44% of tree_1's points share
         their XY with another point exactly; the 2D median is 0.000002 m, which
-        is a property of the LAS 1 mm quantisation rather than of the scan.
+        is a property of the LAS 1 mm quantization rather than of the scan.
     """
     from scipy.spatial import cKDTree
 
@@ -6936,7 +6936,7 @@ def _chm_from_surfaces(dtm: dict, dsm: dict, progress=None) -> dict:
 
 def _mesh_from_grid(grid_z: np.ndarray, minx: float, miny: float, cell: float,
                     *, method: str, z_offset: "Optional[np.ndarray]" = None) -> dict:
-    """Build a heightmap surface mesh from an already-computed cell-centred grid
+    """Build a heightmap surface mesh from an already-computed cell-centered grid
     (row 0 = min y, NaN voids). Mirrors the mesh section of _compute_dem so CHM —
     which is a grid arithmetic result, not an interpolation — gets the same mesh
     output shape (2 triangles per quad whose four corners are all finite).
@@ -7015,7 +7015,7 @@ def _mesh_from_grid(grid_z: np.ndarray, minx: float, miny: float, cell: float,
 
 
 # The scalar LAYERS a DTM surface carries. Each is a per-cell grid on the DTM's
-# grid; the renderer colours the terrain by whichever is selected and exports it as
+# grid; the renderer colors the terrain by whichever is selected and exports it as
 # a raster. `elevation` is the DTM itself; density/intensity are gridded from the
 # points; hillshade/slope/aspect are derived from the elevation grid.
 _DEM_LAYER_NAMES = ("elevation", "hillshade", "slope", "aspect",
@@ -7114,7 +7114,7 @@ def _compute_dem_layers(ground_pts: np.ndarray, all_pts: np.ndarray,
     `_mesh_from_grid`-shaped result (the elevation surface) with two extras:
       - `layers`: {name → {"grid": (ny*nx float32 ravel), "min", "max", "label"}}
       - `layer_vertex`: {name → per-output-vertex float32 array (aligned to vertices)}
-    All layers share the DTM's grid (nx/ny/cell/origin), so the renderer colours one
+    All layers share the DTM's grid (nx/ny/cell/origin), so the renderer colors one
     mesh by any layer and exports any layer as a raster.
 
     `all_pts` feeds point_density; `first_pts` feeds return_density; `intensity`
@@ -7182,7 +7182,7 @@ def _do_dem(request: "DemRequest", progress=None) -> dict:
 
         if surface == "dtm":
             # A DTM is the elevation SURFACE plus a bundle of scalar LAYERS (density,
-            # intensity, hillshade, slope, aspect) the renderer colours/exports. The
+            # intensity, hillshade, slope, aspect) the renderer colors/exports. The
             # intensity layer needs a per-point intensity array (skipped if absent).
             intensity = (np.asarray(request.intensity, dtype=np.float64)
                          if request.intensity is not None and len(request.intensity) == len(points)
@@ -7265,7 +7265,7 @@ class DemRasterExportRequest(BaseModel):
 
 
 def _dem_asc_bytes(grid: np.ndarray, minx: float, miny: float, cell: float, nodata: float) -> bytes:
-    """ESRI ASCII grid. Rows are written north (max y) to south. Cell-centred
+    """ESRI ASCII grid. Rows are written north (max y) to south. Cell-centered
     grid with the corner origin (xllcorner/yllcorner)."""
     ny, nx = grid.shape
     lines = [f"ncols {nx}", f"nrows {ny}", f"xllcorner {minx:.6f}",
@@ -7393,10 +7393,10 @@ def export_dem_raster(request: DemRasterExportRequest):
 #        LAI is the headline number and is not carried by any of the above, nor
 #        shown in the UI, so it gets its own tiny export.
 #
-# A VoxLAD-flavoured `.asc` writer lived here too and was deliberately removed:
+# A VoxLAD-flavored `.asc` writer lived here too and was deliberately removed:
 # it was one tool's undocumented output (spec reverse-engineered from its MATLAB
 # source, single reader, and a `g_code` leaf-angle class we could only ever
-# approximate as 1), so it promised a fidelity we could not honour. GeoTIFF is
+# approximate as 1), so it promised a fidelity we could not honor. GeoTIFF is
 # the interoperable option and .vox the community one.
 #
 # THE NODATA RULE, which is the whole point of the `solved` flag: a voxel no beam
@@ -7482,7 +7482,7 @@ class LADExportCell(BaseModel):
     leaf_area_ci_upper: Optional[float] = None
     # False => Beer's law never solved here (occluded). See THE NODATA RULE above.
     # None (legacy result computed before the flag existed) is treated as solved,
-    # which preserves the old behaviour rather than silently voiding a whole grid.
+    # which preserves the old behavior rather than silently voiding a whole grid.
     solved: Optional[bool] = None
     # Total probed beam path through the voxel (m) and the occlusion verdict derived
     # from it. `under_sampled` is the flag that actually fires in practice — see
@@ -7568,7 +7568,7 @@ def _lad_is_solved(cell: "LADExportCell") -> bool:
       leaf_area = 0 for a beam-starved voxel rather than NaN, so it would otherwise
       export as a confident zero and bias any mean LAD / LAI low.
 
-    A legacy cell carrying neither flag counts as measured, preserving old behaviour
+    A legacy cell carrying neither flag counts as measured, preserving old behavior
     rather than silently voiding a whole grid.
 
     A FILLED voxel is the deliberate exception: it was under-sampled, but the user
@@ -7893,13 +7893,13 @@ class WoodSegmentationRequest(BaseModel):
     segmentation the result must NOT be downsampled, so `labels` align 1:1 with
     the resolved point order. The tuning fields map onto segment_wood():
     `wood_bias` is the wood-vs-leaf sensitivity (lower → more wood), the `k_*`
-    fields set the neighbourhood-scale search, `reg_iters` the smoothing
+    fields set the neighborhood-scale search, `reg_iters` the smoothing
     strength, and `voxel_size` (>0) enables downsample-classify-propagate for
     very large clouds."""
     points: Optional[List[List[float]]] = None
     source: Optional[PointSource] = None
     # AGGREGATE: several pre-registered scans segmented TOGETHER (denser local
-    # neighbourhoods → better wood/leaf geometry). Each source is read and its
+    # neighborhoods → better wood/leaf geometry). Each source is read and its
     # points concatenated in order; `source_counts` in the response gives each
     # source's point count so the caller can scatter the labels back per scan.
     # `sources` takes precedence over `points`/`source`.
@@ -8003,13 +8003,13 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
     try:
         # AGGREGATE: read each source full-resolution and concatenate IN ORDER so
         # the labels can be sliced back per source. The combined cloud is denser,
-        # which is exactly the point — better local neighbourhoods. Assumes the
+        # which is exactly the point — better local neighborhoods. Assumes the
         # sources are pre-registered (a common coordinate frame).
         source_counts: List[int] = []
         # Optional per-point reflectance, kept aligned 1:1 with `points`. For the
         # source/sources paths the scalar is re-read from disk alongside XYZ (so
         # it survives the same full-resolution read); for inline `points` the
-        # caller supplies it directly. None ⇒ pure-geometry (today's behaviour).
+        # caller supplies it directly. None ⇒ pure-geometry (today's behavior).
         reflectance: Optional[np.ndarray] = None
         if request.sources:
             parts = []
@@ -8059,7 +8059,7 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
             return WoodSegmentationResponse(
                 success=False,
                 num_points=len(points),
-                error="Wood/leaf segmentation was cancelled.",
+                error="Wood/leaf segmentation was canceled.",
             )
         warns = list(wood_meta.get("warnings", []))
         num_wood = int(np.count_nonzero(labels == WOOD_CLASS_WOOD))
@@ -8100,7 +8100,7 @@ class OrganSegmentationRequest(BaseModel):
 
     `units` is what the cloud's coordinates are in ("m", "cm", "mm"), or
     "auto" to read it from the cloud's size (more than 30 units across is
-    millimetres). The model works in metres; nothing in an XYZ file says which
+    millimeters). The model works in meters; nothing in an XYZ file says which
     unit it was written in. `model_id` None = the bundled default."""
     points: Optional[List[List[float]]] = None
     source: Optional[PointSource] = None
@@ -8167,7 +8167,7 @@ async def segment_organs_points(request: OrganSegmentationRequest, http_request:
             http_request=http_request)
     except ClientDisconnected:
         return OrganSegmentationResponse(success=False, num_points=len(points),
-                                         error="Organ segmentation was cancelled.")
+                                         error="Organ segmentation was canceled.")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -8222,7 +8222,7 @@ try:
 except (ValueError, TypeError):
     _TREEISO_MAX_NODES = 2_000_000
 
-# BFS skeleton extraction builds an in-RAM neighbour graph and runs BFS/cluster
+# BFS skeleton extraction builds an in-RAM neighbor graph and runs BFS/cluster
 # passes over it; beyond a few million points the graph + Python passes get
 # heavy. Cap so the endpoint fails fast with an actionable message instead of
 # appearing to hang. Override via env. (The renderer already downsamples
@@ -8345,7 +8345,7 @@ def _treeiso_params(request: "TreeSegmentationRequest"):
 
 
 def _treeiso_spacing_probe(points: np.ndarray) -> Optional[Tuple[float, int]]:
-    """Median nearest-neighbour spacing of `points`, or None for a cloud too
+    """Median nearest-neighbor spacing of `points`, or None for a cloud too
     small / degenerate to probe.
 
     Returns `(spacing_m, n_finite)`. Shared by `_auto_treeiso_decimation` (which
@@ -8386,7 +8386,7 @@ def _count_treeiso_nodes(points: np.ndarray, p) -> Optional[int]:
     a 13 M-point cloud that collapses to ~1 M voxels through, while still
     catching a fine-voxel-on-a-huge-tile request that would decimate to nothing.
 
-    EXACT, not modelled. A density model (points-per-voxel ~ (res/spacing)³) was
+    EXACT, not modeled. A density model (points-per-voxel ~ (res/spacing)³) was
     tried first and is not safe: it assumes uniform voxel occupancy, but real
     clouds cluster, so it under-counted canopy-like data ~9× — the dangerous
     direction for a guard. Measured against the real `decimate_pcd` it ranged
@@ -8404,7 +8404,7 @@ def _count_treeiso_nodes(points: np.ndarray, p) -> Optional[int]:
     pts = pts[np.isfinite(pts).all(axis=1)]
     if len(pts) == 0:
         return 0
-    # Match `_process_point_cloud`, which mean-centres before `decimate_pcd` —
+    # Match `_process_point_cloud`, which mean-centers before `decimate_pcd` —
     # the offset shifts where voxel boundaries fall, so skipping it mis-counts by
     # a few percent.
     pts = pts - np.mean(pts, axis=0)
@@ -8602,13 +8602,13 @@ def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
 _TRUNK_BAND_M = 0.8
 # Single-linkage distance that separates one stem from the next. Well above a
 # trunk's own diameter (~0.3 m) and well below orchard spacing (4-5 m measured on
-# the almond plot), so it cannot split one stem in two nor merge two neighbours.
+# the almond plot), so it cannot split one stem in two nor merge two neighbors.
 _TRUNK_LINK_M = 1.0
 # A basal cluster must hold this share of the sampled slab to count as a stem,
 # so understory litter and a few stray returns do not read as extra trunks.
 _TRUNK_MIN_SHARE = 0.02
 # Points sampled from the slab before linkage. O(n^2) in the linkage, so this
-# caps the cost; 4 k is ample to resolve clusters metres apart.
+# caps the cost; 4 k is ample to resolve clusters meters apart.
 _TRUNK_SAMPLE = 4000
 
 
@@ -8692,7 +8692,7 @@ def _treeiso_row_fusion_warning(points: np.ndarray, labels: np.ndarray,
     n_found = len([t for t in np.unique(labels) if t > 0])
     cause = (
         "TreeIso's first stage collapsed on this cloud (a known solver defect), "
-        "which fuses neighbouring trees. "
+        "which fuses neighboring trees. "
         if stage1_collapsed else ""
     )
     return (
@@ -8888,7 +8888,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             )
 
         # The points TreeIso actually sees: finite coordinates (cKDTree chokes
-        # on NaN/inf) AND not labelled ground. Ground points (from a prior
+        # on NaN/inf) AND not labeled ground. Ground points (from a prior
         # ground segmentation that was kept, not deleted) are excluded so they
         # aren't clustered into a "tree". Labels are scattered back to the full
         # input order with 0 (unassigned) for every excluded point, so `labels`
@@ -8901,7 +8901,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
 
         pts = points[eligible]
         if len(pts) < 10:
-            reason = "non-finite and ground-labelled" if ground_excluded else "non-finite"
+            reason = "non-finite and ground-labeled" if ground_excluded else "non-finite"
             return TreeSegmentationResponse(
                 success=False, num_points=n_full,
                 error=f"Fewer than 10 points remain after dropping {reason} points.",
@@ -8925,7 +8925,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             except ClientDisconnected:
                 return TreeSegmentationResponse(
                     success=False, num_points=n_full,
-                    error="Tree segmentation was cancelled.",
+                    error="Tree segmentation was canceled.",
                 )
             labels = np.zeros(n_full, dtype=np.int64)
             labels[eligible] = np.asarray(sub_labels)
@@ -8950,7 +8950,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
         # a full-N cKDTree plus up to 12 full-N np.unique passes (measured 5.4 s +
         # up to 69 s at 8 M points). Inline, that froze /health and — the sharp
         # edge — POST /api/cancel/{run_id}, making every OTHER running job
-        # uncancellable for the duration. It fires on the FIRST Segment Trees
+        # uncancelable for the duration. It fires on the FIRST Segment Trees
         # click, since `acknowledge_cost` is only set on the retry.
         if not request.acknowledge_cost:
             warning = await run_in_threadpool(
@@ -8985,7 +8985,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             # was killed; nothing to return.
             return TreeSegmentationResponse(
                 success=False, num_points=n_full,
-                error="Tree segmentation was cancelled.",
+                error="Tree segmentation was canceled.",
             )
         except RuntimeError as e:
             if "treeiso" in str(e).lower() or "ModuleNotFoundError" in str(e) or "ImportError" in str(e):
@@ -9448,7 +9448,7 @@ class LADComputeRequest(BaseModel):
     # not merely noisy but BIASED HIGH, so such voxels are flagged `under_sampled`
     # rather than reported as measurements.
     #
-    # In metres, matching the published parameter so a value is directly comparable
+    # In meters, matching the published parameter so a value is directly comparable
     # with VoxLAD / the literature. None => resolved from the grid as
     # 100 * mean voxel side length, which is how the 2021 paper states it (their
     # widely-quoted "30 m" is that rule at their ~0.3 m voxels). A FIXED default
@@ -9459,7 +9459,7 @@ class LADComputeRequest(BaseModel):
     # When true, occluded voxels are estimated from the reliable ones by LAD-kriging
     # (Soma et al. 2020) and flagged `lad_filled`. A fill is an INTERPOLATION and is
     # never folded into total_leaf_area. Off by default: reporting occlusion is always
-    # correct, whereas filling it is a modelling choice the user should opt into.
+    # correct, whereas filling it is a modeling choice the user should opt into.
     fill_occluded: bool = False
     # Which column drives the leaf/wood split (see `_resolve_lad_wood_column`).
     # Omitted: `wood_class` when the cloud carries it.
@@ -9496,7 +9496,7 @@ class LADCell(BaseModel):
     # that is the flag the exporters and any aggregate (mean LAD, LAI) must gate on.
     lad_solved: Optional[bool] = None
     # ---- Occlusion screening -------------------------------------------------
-    # Total probed path length through this voxel, in metres: the sum over beams of
+    # Total probed path length through this voxel, in meters: the sum over beams of
     # the chord each cut through it (= beam_count * mean_path_length). The quantity
     # the occlusion threshold is applied to. None when the voxel reports no beams.
     path_length_total: Optional[float] = None
@@ -9506,7 +9506,7 @@ class LADCell(BaseModel):
     # zero biases mean LAD and LAI low, the most-repeated caution in the voxel-LAD
     # literature. Exports write NoData for it; aggregates must exclude it.
     under_sampled: Optional[bool] = None
-    # True => `lad` here is an INTERPOLATION over neighbouring reliable voxels
+    # True => `lad` here is an INTERPOLATION over neighboring reliable voxels
     # (LAD-kriging), not a measurement. Never counted into total_leaf_area.
     lad_filled: Optional[bool] = None
     # ---- Leaf / wood split ---------------------------------------------------
@@ -10236,7 +10236,7 @@ def _otsu_threshold_eta(log_vals, nbins: int = 256):
 # Degenerate-sliver floor for the Lmax auto-estimate, as a fraction of the median
 # candidate max-edge. Otsu splits the candidate edge distribution into "surface"
 # and "gap bridges", but it finds the DOMINANT bimodal split — and a cluster of
-# sub-millimetre micro-triangles (near-coincident returns, which Helios's aspect
+# sub-millimeter micro-triangles (near-coincident returns, which Helios's aspect
 # filter can't catch because their aspect ratio looks normal) is a far stronger
 # mode than the surface/bridge boundary. Otsu then thresholds BELOW every real
 # triangle, the seeded filter keeps nothing, and the mesh silently renders empty
@@ -10877,7 +10877,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             "method_used": "helios",
             "error": f"PyHelios not installed: {str(e)}"
         }
-    except ScanCancelled:
+    except ScanCanceled:
         raise  # cancellation propagates to the streaming wrapper (memory freed)
     except Exception as e:
         import traceback
@@ -10961,10 +10961,10 @@ def _resolve_scan_positions(scan_entry) -> "np.ndarray":
     spacing check needs no ray directions or multi-return columns.
 
     Sky/miss points are EXCLUDED on every branch. A miss is a ray that hit
-    nothing, projected ~1 km out, so its nearest neighbour is another distant
+    nothing, projected ~1 km out, so its nearest neighbor is another distant
     miss: they do not merely widen the distribution, they define it. Measured on
     a real vineyard scan (21.06 M points, 61% misses) the pooled median
-    nearest-neighbour distance was 35.65 m with misses in versus 0.0143 m without
+    nearest-neighbor distance was 35.65 m with misses in versus 0.0143 m without
     — a 2,500x error, which inverts the bridging verdict this feeds.
 
     The caller's grid crop (`_points_inside_grid`) already removes misses
@@ -11459,7 +11459,7 @@ def _lad_labels_vals(column_getter, n: int, strip_rounded_timestamps: bool = Fal
     `calculateLeafArea` fail-fast check reads to refuse a cloud with no sky/miss
     rays, so every return must arrive explicitly tagged 0.0 rather than relying on
     the label's absence. A cloud with no `is_miss` column (e.g. plain XYZ) does
-    NOT get a synthesised one — those recover misses via gapfillMisses(), which
+    NOT get a synthesized one — those recover misses via gapfillMisses(), which
     sets the same flag C++-side. Returns labels (list[str]), vals ((N,k)|None),
     flags (see `_lad_flags`, plus `has_wood_class` when the cloud carries a
     wood/leaf classification).
@@ -11655,7 +11655,7 @@ def _dedupe_miss_timestamps(miss_ts: "np.ndarray", hit_ts: "np.ndarray"):
     out = out[keep]
     collide = np.zeros(out.shape[0], dtype=bool)
     for _ in range(16):
-        # Vectorised: a backfilled buffer can hold tens of millions of misses.
+        # Vectorized: a backfilled buffer can hold tens of millions of misses.
         _, first_idx = np.unique(out, return_index=True)
         collide = np.ones(out.shape[0], dtype=bool)
         collide[first_idx] = False  # every non-first occurrence of a repeated value
@@ -11692,7 +11692,7 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     dedupes by raster cell, not by time (4 of 41,612 on the multi-return
     fixture), and a buffer computed BEFORE a crop is paired at LAD time with
     hits the crop deleted but the grid test restored — or, after a re-run of
-    Backfill on the cropped cloud, with a synthesised miss for that very pulse.
+    Backfill on the cropped cloud, with a synthesized miss for that very pulse.
     Such a miss is the same pulse as the hit, and the hit is the truth, so
     `_dedupe_miss_timestamps` DROPS it (Helios would otherwise refuse a beam
     whose member count exceeds the pulse's target_count, or count the pulse
@@ -11710,7 +11710,7 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     n_miss = m_xyz.shape[0]
 
     labels = list(labels)
-    # Materialise hit vals as a (N,k) float64 matrix (or an empty (N,0) when the
+    # Materialize hit vals as a (N,k) float64 matrix (or an empty (N,0) when the
     # hits had no columns) so we can stack miss rows column-aligned.
     hit_vals = (np.asarray(vals, dtype=np.float64) if vals is not None
                 else np.empty((n_hits, 0), np.float64))
@@ -11744,7 +11744,7 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
             axis = {'origin_x': 0, 'origin_y': 1, 'origin_z': 2}[slug]
             miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[m_keep, axis])
         elif slug in _GRID_INDEX_SLUGS and backfilled.get(slug) is not None:
-            # The row/column gapfill path knows each synthesised miss's cell, so
+            # The row/column gapfill path knows each synthesized miss's cell, so
             # carry it rather than zeroing it — a zero here would put every
             # recovered miss in row 0 / column 0 of any structured export.
             miss_cols.append(np.asarray(backfilled[slug], dtype=np.float64)[m_keep])
@@ -12035,7 +12035,7 @@ def _attach_origins(xyz, labels, vals, origins):
 
 
 def _run_gapfill_extract(cloud):
-    """Recover sky/miss points on a built PyHelios cloud and return the synthesised
+    """Recover sky/miss points on a built PyHelios cloud and return the synthesized
     ones as (synth_xyz (M,3) float64, count int, grid {slug: (M,)} | None).
 
     gapfillMisses() (which auto-selects the row/column or timestamp path in C++)
@@ -12044,10 +12044,10 @@ def _run_gapfill_extract(cloud):
     1 == sky/miss) selects the rows, getHitsXYZRGBArrays() supplies their coords —
     never the per-hit getHitXYZ loop, which would be millions of FFI crossings at
     10M scale. Because we only call this on a cloud built from a scan with NO real
-    misses (the endpoint guards on that), every miss-flagged row is a synthesised
+    misses (the endpoint guards on that), every miss-flagged row is a synthesized
     one. The real hits are left behind — the session already holds them.
 
-    `grid` carries the synthesised misses' raster address when the C++ knew it.
+    `grid` carries the synthesized misses' raster address when the C++ knew it.
     The ROW/COLUMN path iterates the grid to find empty cells, so it attaches
     'row'/'column' to every miss it emits; the TIMESTAMP path reconstructs pulse
     grouping from per-hit times without ever forming a raster, so it attaches
@@ -12056,7 +12056,7 @@ def _run_gapfill_extract(cloud):
     scale — with the absent sentinel telling the two paths apart.
 
     `timestamp` is the per-miss pulse time when the C++ wrote one (the
-    timestamp path stamps every synthesised miss with its reconstructed pulse
+    timestamp path stamps every synthesized miss with its reconstructed pulse
     time; the row/column path does when the scan carried times), else None.
     It matters because the LAD inversion groups returns into BEAMS by shared
     timestamp: every miss handed to Helios with the same time is one beam, so
@@ -12093,7 +12093,7 @@ def _run_gapfill_extract(cloud):
         vals = col[mask]
         # The timestamp path attaches no raster address at all. A PARTIAL one
         # would mean some misses have no cell, which no consumer can use, so
-        # take the grid only when every synthesised miss carries one.
+        # take the grid only when every synthesized miss carries one.
         if vals.size == 0 or (vals == _ABSENT).any():
             grid = {}
             break
@@ -12387,7 +12387,7 @@ class _WoodTriangleClassifier:
     @staticmethod
     def _hash(xyz):
         """Exact 3-float32 -> uint64 key. Mixes the raw bit patterns, so it is a
-        content hash of the coordinate, not a quantisation."""
+        content hash of the coordinate, not a quantization."""
         import numpy as np
         u = np.ascontiguousarray(xyz).view(np.uint32).reshape(-1, 3).astype(np.uint64)
         return (u[:, 0] * np.uint64(0x9E3779B97F4A7C15)
@@ -12444,7 +12444,7 @@ def _pooled_hit_beam_zeniths(scans_arrays):
 
       * `_directions_from_origin` returns SPHERICAL [radius, elevation, azimuth],
         so the zenith comes from the ELEVATION column. Feeding this array to the
-        Cartesian `beam_zenith_samples` divides an angle by a range in metres and
+        Cartesian `beam_zenith_samples` divides an angle by a range in meters and
         collapses every beam toward 90 degrees (~-29% G error on a planophile
         canopy, and spherical G is 0.5 at every zenith so a spherical-only test
         cannot reveal it).
@@ -12950,8 +12950,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 scan_moving = True
             else:
                 # STATIC scan. `lad_shift` is enabled when ANY scan in the request
-                # is moving, and the grid was already recentred by it — so a static
-                # scan in a MIXED selection must be recentred too. Without this its
+                # is moving, and the grid was already recentered by it — so a static
+                # scan in a MIXED selection must be recentered too. Without this its
                 # points stayed in the world frame while the grid AABB lived in the
                 # shifted one, so `_cull_to_grid` tested them against a box that can
                 # be hundreds of km away, dropped every beam, and the static scan
@@ -13246,7 +13246,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 # `s["dirs"]` comes from `_directions_from_origin`, which returns
                 # SPHERICAL [radius, elevation, azimuth] (Helios cart2sphere), so the
                 # zenith must come from the elevation column — feeding this array to the
-                # Cartesian `beam_zenith_samples` divides an angle by a range in metres
+                # Cartesian `beam_zenith_samples` divides an angle by a range in meters
                 # and collapses every beam toward 90 degrees (~-29% G error, and hence
                 # LAD error, on a planophile canopy; spherical G is 0.5 at every zenith
                 # so it alone cannot reveal the mistake).
@@ -13335,7 +13335,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # is the one the UI normally takes (the dialog's "run a new
             # triangulation" runs Helios first and then REUSES that mesh), so
             # skipping it here would leave the measurement almost never firing.
-            # `soup` is already materialised for setExternalTriangulation, so
+            # `soup` is already materialized for setExternalTriangulation, so
             # reading it costs no extra transfer; the classifier subsamples to
             # its cap, so the work is bounded regardless of mesh size.
             wood_axis = _make_wood_axis_classifier(
@@ -13404,7 +13404,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
 
         # calculateLeafArea() needs miss points (transmitted beams) for the
         # Beer's-law denominator and fail-fasts without them. LAD no longer
-        # synthesises misses on the fly — they must already be present (retained
+        # synthesizes misses on the fly — they must already be present (retained
         # by the source format, or recovered via the explicit Backfill Misses
         # step). If none are present, stop here with an actionable error rather
         # than letting the raw Helios exception bubble up through the generic
@@ -13485,7 +13485,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         # Only on the supplied-G(theta) path. A TRIANGULATED G(theta) is measured
         # from the mesh per voxel and already reflects whatever surfaces are in
         # that voxel, so overriding it with a blend would discard a measurement in
-        # favour of an assumption.
+        # favor of an assumption.
         #
         # `wood_split_gleaf` records the PRE-blend (leaf) coefficient per voxel,
         # which the split needs afterwards to turn the leaf share of the
@@ -13522,7 +13522,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             except Exception as exc:
                 warnings.append(
                     "The voxel grid was too large to invert in one pass but is not "
-                    f"recognised as a regular lattice ({exc}); it was inverted whole, "
+                    f"recognized as a regular lattice ({exc}); it was inverted whole, "
                     "which needs more memory.")
             else:
                 if block_limit < lattice_n[0] * lattice_n[1] * lattice_n[2]:
@@ -13710,7 +13710,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # on a 3 m box around a 1 m cube: 148 of 216 voxels flagged, of which 144
             # were zero-beam margin and only 4 were real occlusion. They keep their
             # honest lad = 0 (nothing intercepted along a path of zero length), the
-            # behaviour before screening existed.
+            # behavior before screening existed.
             #
             # Occlusion means "beams went in and were stopped short": some path, but
             # not enough. That is what the threshold is calibrated against.
@@ -13895,7 +13895,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "error": f"PyHelios not installed: {str(e)}",
             "warnings": warnings,
         }
-    except ScanCancelled:
+    except ScanCanceled:
         raise  # cancellation propagates to the streaming wrapper (memory freed)
     except Exception as e:
         import traceback
@@ -14393,6 +14393,10 @@ class ScanExportRequest(BaseModel):
     """Export one or more scans to a Helios XML + per-scan ASCII bundle."""
     scans: List[ScanExportEntry]
     base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<label>.xyz)
+    # Where the base name goes in a multi-object export's per-file names:
+    # "prefix" → <base>_<label>, "suffix" → <label>_<base>. An empty base names
+    # each file by its label alone either way (see _scan_export_stems).
+    base_position: Literal["prefix", "suffix"] = "prefix"
     include_misses: bool = True                  # write miss points (+ is_miss column)
     # When True (default), write the Helios scan XML alongside the per-scan data
     # files (re-loadable bundle, data always .xyz). When False, write ONLY the
@@ -14535,7 +14539,7 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
     return xyz, labels, vals
 
 
-# The geometry / colour slugs handled specially by the multi-format writer; all
+# The geometry / color slugs handled specially by the multi-format writer; all
 # other requested slugs are treated as named scalar columns.
 _DATA_GEOMETRY_SLUGS = ('x', 'y', 'z')
 _DATA_COLOR_SLUGS = ('r', 'g', 'b')
@@ -14581,7 +14585,7 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
                 # `sess.colors` is uint16 in the LAS 0-65535 scale, but this
                 # function's contract — and every writer below — is 0-1, matching
                 # what the file_path branch's `_load_las_arrays` returns. Without
-                # the divide, `np.clip(colors, 0, 1)` sent every coloured point
+                # the divide, `np.clip(colors, 0, 1)` sent every colored point
                 # out as pure white.
                 colors = np.ascontiguousarray(
                     sess.colors[keep], dtype=np.float64) / 65535.0
@@ -14639,14 +14643,14 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
         icol = _get('intensity')
         if icol is not None and len(icol) == n:
             intensity = np.asarray(icol, dtype=np.float64)
-    # Colour: prefer the resolved channel, else r/g/b columns if the scan has them.
+    # Color: prefer the resolved channel, else r/g/b columns if the scan has them.
     if colors is None:
         rgb = [_get(s) for s in _DATA_COLOR_SLUGS]
         if all(c is not None and len(c) == n for c in rgb):
             colors = np.column_stack(rgb).astype(np.float64)
 
     # The ordered scalar columns the user kept (everything that isn't geometry/
-    # colour/intensity handled above). Honor the chosen order when given.
+    # color/intensity handled above). Honor the chosen order when given.
     chosen = getattr(scan_entry, 'columns', None)
     wanted = ([s for s in chosen if s not in _DATA_GEOMETRY_SLUGS + _DATA_COLOR_SLUGS]
               if chosen else list(_SCAN_EXPORT_SCALAR_COLUMNS))
@@ -14690,7 +14694,7 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
 def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> tuple:
     """Write one resolved scan (from _resolve_scan_for_format) to the requested
     format. Returns (filename, raw_bytes). ASCII formats honor the chosen column
-    order; binary/structured formats use their fixed schema (xyz + colour +
+    order; binary/structured formats use their fixed schema (xyz + color +
     intensity + scalars where the format supports them).
 
     `progress(fraction, message)` — optional; the text formats build their rows
@@ -14724,7 +14728,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
     if fmt in ("xyz", "txt", "csv"):
         delim = "," if fmt == "csv" else " "
         prefix = "" if fmt == "csv" else "# "
-        # Column order: x y z, then colour (if present), then the ordered scalars.
+        # Column order: x y z, then color (if present), then the ordered scalars.
         cols = ["x", "y", "z"]
         if colors is not None:
             cols += ["r255", "g255", "b255"]
@@ -14795,7 +14799,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
                 progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.pts", ("\n".join(lines)).encode("utf-8")
 
-    # ---- PCD (PCL ASCII; position + packed-RGB colour only) ----
+    # ---- PCD (PCL ASCII; position + packed-RGB color only) ----
     # Shares the single writer with the cloud-export path so the two cannot
     # drift — see `_write_points_as_pcd` for why the schema is fixed.
     if fmt == "pcd":
@@ -14814,7 +14818,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
                 progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.obj", ("\n".join(lines)).encode("utf-8")
 
-    # ---- PLY (ascii; preserves colour + scalar fields) ----
+    # ---- PLY (ascii; preserves color + scalar fields) ----
     if fmt == "ply":
         header = ["ply", "format ascii 1.0", f"element vertex {n}",
                   "property float x", "property float y", "property float z"]
@@ -15041,7 +15045,7 @@ def _emit_e57_file(name: str, resolved: dict, scan_entry, base: str,
     """One `files` entry for an E57 scan.
 
     With `dest` the file is written STRAIGHT TO ITS DESTINATION and never
-    materialised as bytes. pye57 can only write to a path, so the flat writer
+    materialized as bytes. pye57 can only write to a path, so the flat writer
     this replaced round-tripped every export through a temp file AND a full
     `fh.read()` — for a large scan that is the whole file resident in RAM on top
     of the channel arrays, before base64 inflates it another 4/3. Writing to the
@@ -15077,7 +15081,7 @@ def _emit_e57_file(name: str, resolved: dict, scan_entry, base: str,
 
 
 def _read_las_columns(file_path: str) -> dict:
-    """Extra (non-geometry, non-colour) columns from a LAS/LAZ, as
+    """Extra (non-geometry, non-color) columns from a LAS/LAZ, as
     slug -> (N,) float64, for the export column picker.
 
     Reads the standard export scalars off the point record, accepting either the
@@ -15121,7 +15125,7 @@ def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) ->
     binary containers simply carry no such columns and yield {}. Both callers
     already load the GEOMETRY via `_load_pointcloud_arrays` (which reads binary
     fine) and use this only for the extra scalars, so returning {} degrades the
-    export to geometry+colour rather than failing it — which is what happened
+    export to geometry+color rather than failing it — which is what happened
     before, when a LAS path reached the text reader and raised UnicodeDecodeError.
     """
     import numpy as np
@@ -15328,7 +15332,7 @@ def _ptx_write_stream(fh, resolved: dict, scan_entry,
     reasons, all load-bearing:
 
       * ScanParameters carries no registration rotation — only azimuth offset and
-        tilt, which are beam-frame knobs. Synthesising a rotation from them would
+        tilt, which are beam-frame knobs. Synthesizing a rotation from them would
         mean rotating every point by its inverse just to keep world coordinates
         unchanged, with a convention error silently yawing the whole cloud.
       * The local frame is what makes the empty-cell literal unambiguous: `0 0 0`
@@ -15387,7 +15391,7 @@ def _ptx_write_stream(fh, resolved: dict, scan_entry,
         if finite.any():
             lo, hi = float(v[finite].min()), float(v[finite].max())
             # PTX intensity is 0..1; sources range from 0..1 floats through
-            # 0..65535 LAS. Normalise by the observed range, matching how the
+            # 0..65535 LAS. Normalize by the observed range, matching how the
             # importer reads it back.
             iv = ((v - lo) / (hi - lo)) if hi > lo else np.clip(v, 0.0, 1.0)
     rgb = (np.clip(np.rint(np.asarray(colors, np.float64) * 255.0), 0, 255)
@@ -15445,7 +15449,7 @@ def _emit_ptx_file(name: str, resolved: dict, scan_entry,
     """One `files` entry for a PTX scan.
 
     With `dest` the raster is formatted STRAIGHT INTO THE FILE and never
-    materialised as bytes — a 10 M-cell colour PTX is ~700 MB, which is exactly
+    materialized as bytes — a 10 M-cell color PTX is ~700 MB, which is exactly
     the V8 string-cap failure `dest_dir` exists to avoid once base64 inflates it.
     Without a destination the caller still gets base64, but capped.
     """
@@ -15557,35 +15561,44 @@ def _scan_label_slug(scan_entry, index: int) -> str:
 
     Index is the fallback, not the norm: an entry with no label (or one that is
     nothing but punctuation) still needs a name that can't collide with its
-    neighbours.
+    neighbors.
     """
     raw = _SCAN_LABEL_EXT.sub("", (getattr(scan_entry, "label", None) or "").strip())
     slug = _SCAN_STEM_UNSAFE.sub("_", raw).strip("._")[:64].strip("._")
     return slug or str(index)
 
 
-def _scan_export_stems(scans, base: str) -> "list[str]":
+def _scan_export_stems(scans, base: str, position: str = "prefix") -> "list[str]":
     """Per-scan file stems (no extension) for one export.
 
     The scan LABEL names the file, because the index never did: the Scans panel
     is ordered by when each scan was added, so "ScanPos002, ScanPos001" exported
     as `<base>_0`/`<base>_1` and the mapping back to the instrument's own names
-    was gone. Two rules:
+    was gone. The rules:
 
       * one scan  → exactly the base name the user typed in the save dialog. They
         asked for `myscan.laz`; writing `myscan_0.laz` breaks that promise for no
         gain, since there is nothing to disambiguate.
-      * many      → `<base>_<label>`, so the files sort and read as the panel does.
+      * many      → `<base>_<label>` (position "prefix", the default) or
+        `<label>_<base>` ("suffix"), so the files read as the panel does.
+      * empty base → the label alone, for one scan or many: the user wants the
+        objects' own names as the file names.
 
     Labels are user text, so they are slugged and deduped (case-insensitively —
     macOS and Windows would otherwise let two labels overwrite one file).
     """
-    if len(scans) == 1:
+    if len(scans) == 1 and base:
         return [base]
     stems: "list[str]" = []
     used: "set[str]" = set()
     for i, scan_entry in enumerate(scans):
-        stem = f"{base}_{_scan_label_slug(scan_entry, i)}"
+        slug = _scan_label_slug(scan_entry, i)
+        if not base:
+            stem = slug
+        elif position == "suffix":
+            stem = f"{slug}_{base}"
+        else:
+            stem = f"{base}_{slug}"
         candidate, n = stem, 2
         while candidate.lower() in used:
             candidate = f"{stem}_{n}"
@@ -15645,7 +15658,8 @@ def _do_scan_export(request: "ScanExportRequest", progress=None,
       (las/laz/ply/xyz/csv/txt/obj/e57), written directly — no XML, no PyHelios.
 
     Per-scan files are named by `_scan_export_stems`: the typed base name alone
-    for a single scan, `<base>_<scan label>` for several.
+    for a single scan, `<base>_<scan label>` (or `<scan label>_<base>`) for
+    several, and the label alone when the base name is empty.
 
     Returns {"success", "files": [{"name", "data", "is_xml", "bytes", "written"}],
     ...}. With `dest_dir` the backend writes each file itself and `data` is null;
@@ -15655,8 +15669,11 @@ def _do_scan_export(request: "ScanExportRequest", progress=None,
     if not request.scans:
         return {"success": False, "error": "No scans to export"}
 
-    raw = request.base_name or "scans"
-    base = os.path.splitext(os.path.basename(raw))[0] or "scans"
+    # An empty base is legitimate: the files are then named by the objects'
+    # labels alone. Only the XML bundle's own file needs a name of its own, and
+    # it falls back to "scans" (see _do_scan_export_xml).
+    raw = (request.base_name or "").strip()
+    base = os.path.splitext(os.path.basename(raw))[0].strip()
 
     # Validate before doing any work, so a bad destination fails in milliseconds
     # rather than after serializing several million points. Its HTTPException must
@@ -15669,8 +15686,8 @@ def _do_scan_export(request: "ScanExportRequest", progress=None,
         return _do_scan_export_data(request, base, dest, progress=progress)
     except HTTPException:
         raise
-    except ScanCancelled:
-        # MUST precede the blanket handler below: ScanCancelled is an Exception,
+    except ScanCanceled:
+        # MUST precede the blanket handler below: ScanCanceled is an Exception,
         # so flattening it into {"success": False} would send the renderer a
         # normal frame and toast "Export Failed" for what the user asked for.
         raise
@@ -15801,6 +15818,10 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
             _add_hits_bulk(cloud, sid, xyz, dirs, labels, vals)
         total_points += int(xyz.shape[0])
 
+    # The per-scan stems honor an empty base (label-only names); the XML file
+    # itself, and PyHelios's interim `<name>_<i>.xyz` sidecars, need a real one.
+    stems = _scan_export_stems(request.scans, base, request.base_position)
+    base = base or "scans"
     with tempfile.TemporaryDirectory() as tmpdir:
         xml_path = os.path.join(tmpdir, f"{base}.xml")
         _cancel_checkpoint(progress)
@@ -15832,8 +15853,7 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
         # PyHelios named the sidecars <base>_<i>.xyz; give them the scan labels
         # instead (and fix the XML's references), so a bundle maps back to the
         # Scans panel by name rather than by add-order.
-        _rename_scan_bundle_files(
-            tmpdir, base, _scan_export_stems(request.scans, base))
+        _rename_scan_bundle_files(tmpdir, base, stems)
         files = []
         names = sorted(os.listdir(tmpdir))
         written: "list[Path]" = []
@@ -15847,8 +15867,8 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
                         name, fh.read(), name.lower().endswith(".xml"), dest))
                 if dest is not None:
                     written.append(dest / name)
-        except ScanCancelled:
-            # Same rule as the data path: a cancelled bundle must not leave a
+        except ScanCanceled:
+            # Same rule as the data path: a canceled bundle must not leave a
             # partial set of files that looks like a complete one.
             for path in written:
                 try:
@@ -15900,7 +15920,7 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
     total_points = 0
     n = len(request.scans)
     weights = _scan_export_weights(request.scans)
-    stems = _scan_export_stems(request.scans, base)
+    stems = _scan_export_stems(request.scans, base, request.base_position)
     # Files already on disk, so a cancel can take them back out again: a
     # half-written batch that LOOKS complete is worse than no batch at all.
     written: "list[Path]" = []
@@ -15930,7 +15950,7 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
             if is_ptx or is_e57:
                 # Both bypass _write_scan_to_bytes' (name, bytes) contract: they
                 # need the scan entry's pose and grid, and both write straight to
-                # disk rather than materialising the whole file as bytes — see
+                # disk rather than materializing the whole file as bytes — see
                 # _emit_ptx_file / _emit_e57_file.
                 if is_ptx:
                     entry = _emit_ptx_file(f"{stems[i]}.ptx", resolved, scan_entry,
@@ -15951,7 +15971,7 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
             # bytes are already on disk, so holding them would rebuild the very
             # all-scans-in-memory peak dest_dir exists to avoid.
             del raw_bytes
-    except ScanCancelled:
+    except ScanCanceled:
         for path in written:
             try:
                 path.unlink()
@@ -15973,8 +15993,8 @@ def scan_export_xml(request: "ScanExportRequest", http_request: Request):
     /api/pointcloud/export). A batch export is one blocking round-trip covering
     every checked object, so without this the UI could only show an
     indeterminate spinner for what is routinely tens of seconds of formatting —
-    and had no way to stop it. The markers also make the run CANCELLABLE via
-    /api/cancel/{run_id}; a cancel unwinds through ScanCancelled and takes the
+    and had no way to stop it. The markers also make the run CANCELABLE via
+    /api/cancel/{run_id}; a cancel unwinds through ScanCanceled and takes the
     already-written files back out with it.
 
     The JSON tail is the same ScanExportResponse shape as before; only the
@@ -16276,7 +16296,7 @@ def _add_hits_bulk(cloud, scan_id: int, xyz, dirs, labels, vals) -> None:
     """Append a scan's hits through the native bulk path (helios-core v1.3.86).
 
     Positions go in at float64: `addHitPointsWithData` cast them to float32 on
-    the way, which quantises coordinates away from the origin. Values are float64
+    the way, which quantizes coordinates away from the origin. Values are float64
     columns written directly, and a NaN leaves that label absent on that hit
     rather than stored as a NaN the C++ would read as present."""
     xyz = np.ascontiguousarray(xyz, dtype=np.float64)
@@ -16349,9 +16369,9 @@ def _texture_has_alpha(texture_path: Optional[str]) -> bool:
     and assuming transparency makes the renderer cut out a solid texture.
 
     PNG encodes transparency two ways and BOTH must be detected. The IHDR
-    color-type byte covers only the first (4 = grey+alpha, 6 = RGBA); indexed
-    (color type 3) and plain grey/truecolour images instead carry a ``tRNS``
-    chunk holding per-palette-entry alpha or a single transparent colour key.
+    color-type byte covers only the first (4 = gray+alpha, 6 = RGBA); indexed
+    (color type 3) and plain gray/truecolor images instead carry a ``tRNS``
+    chunk holding per-palette-entry alpha or a single transparent color key.
     Roughly a quarter of the plantarchitecture leaf textures are palette PNGs
     with tRNS — BeanLeaf_tip, TomatoLeaf_centered, RedbudLeaf, OliveLeaf_* and
     friends — so testing the color type alone silently renders those leaves as
@@ -16595,7 +16615,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         from pyhelios.LiDARCloud import ReturnMode, SingleReturnSelection, RisleyPrism
 
         # Shared cancel flag the C++ ray loop polls. The stream loop flips it to
-        # 1 the moment this run is cancelled (disconnect or /api/cancel), so the
+        # 1 the moment this run is canceled (disconnect or /api/cancel), so the
         # in-flight syntheticScan bails its per-scan + inner ray loops. Bind it to
         # the reporter so propagate_cancel() can mirror the Event into it.
         import ctypes as _ctypes
@@ -16950,7 +16970,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 
                 _prof["raytrace"] = time.perf_counter()
                 # The C++ trace may have stopped early on a cancel — surface it as
-                # ScanCancelled before we spend time/RAM extracting a partial cloud.
+                # ScanCanceled before we spend time/RAM extracting a partial cloud.
                 _ckpt()
                 _report(0.85, "Extracting hits")
 
@@ -17048,7 +17068,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             # backend's source of truth for triangulation / LAD / edits. A
             # session_id keeps those requests tiny; the previous misses-off path
             # left the scan a FLAT in-RAM cloud, so Helios triangulation / LAD had
-            # to serialise every point as an uncapped JSON `points` body — which
+            # to serialize every point as an uncapped JSON `points` body — which
             # overflows the JS string limit ("Invalid string length") and OOMs the
             # pydantic parse on a multi-million-point scan, and rendered a large
             # flat cloud past V8's heap limit. The session is built from the FULL
@@ -17074,7 +17094,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             # places each miss ~1 km out along its beam (LIDAR_RAYTRACE_MISS_T =
             # 1001 m); leaving them in the primary point array blows the cloud's
             # bounding box to ~2 km, so the camera auto-fit (distance = 2 * maxDim)
-            # parks the view kilometres from a sub-metre target and the user can't
+            # parks the view kilometers from a sub-meter target and the user can't
             # zoom back in. They'd also be drawn twice (here + the MissOverlay).
             # The misses are preserved in the session above (its octree is already
             # hits-only), so the renderer only needs the hits.
@@ -17130,9 +17150,9 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 
         return {"success": True, "results": out}
 
-    except ScanCancelled:
+    except ScanCanceled:
         # Cancellation is not a failure — let it propagate so the streaming
-        # wrapper emits the cancelled marker (the `with` blocks already unwound,
+        # wrapper emits the canceled marker (the `with` blocks already unwound,
         # freeing C++/numpy memory).
         raise
     except Exception as e:
@@ -17231,8 +17251,8 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
         extra_dims_meta=extra_dims_meta,
         timestamps=timestamps,
         world_shift=None,  # synthetic scans are authored near the origin
-        # A Helios-simulated scan is metres by construction — the scene it rays
-        # against is built in metres. Recorded as a KNOWN unit (scale 1.0)
+        # A Helios-simulated scan is meters by construction — the scene it rays
+        # against is built in meters. Recorded as a KNOWN unit (scale 1.0)
         # rather than left None, which would read as "never asked".
         source_units="m",
         source_unit_scale=1.0,
@@ -17353,7 +17373,7 @@ def cancel_run(run_id: str):
     waiting on the (possibly huge) computation to finish. Idempotent: an unknown
     or already-finished run_id returns found=False rather than an error."""
     found = _cancel_run(run_id)
-    return {"cancelled": found, "run_id": run_id}
+    return {"canceled": found, "run_id": run_id}
 
 
 # ==================== TREE SKELETON EXTRACTION (BFS Graph-Based Algorithm) ====================
@@ -17453,13 +17473,13 @@ GROUND_CLASS_PLANT = 2
 
 
 # A snagged cloth node sits this many robust deviations above its local
-# neighbourhood, or this far above it in absolute terms — whichever is larger.
+# neighborhood, or this far above it in absolute terms — whichever is larger.
 # The absolute floor matters because on a very flat, densely-sampled scene the
 # residual's spread is near zero, so a purely relative test flags harmless
-# millimetre ripples as snags.
+# millimeter ripples as snags.
 _SNAG_MAD_FACTOR = 4.0
 _SNAG_MIN_RISE = 0.03
-# Neighbourhood width (in nodes) for the local median. Wide enough to span a
+# Neighborhood width (in nodes) for the local median. Wide enough to span a
 # trunk's footprint on the cloth grid so the median stays on true ground.
 _SNAG_MEDIAN_WIDTH = 15
 
@@ -17471,9 +17491,9 @@ def _desnag_cloth(cloth_nodes: np.ndarray) -> "tuple[np.ndarray, int]":
 
     WHY. CSF's cloth is supposed to settle onto the ground, but a node can hang
     up on a trunk and stay there. On the `tree_1` reference this is dramatic and
-    extremely localised: 19 of 29,920 nodes (0.06%) ride up to 1.19 m while the
+    extremely localized: 19 of 29,920 nodes (0.06%) ride up to 1.19 m while the
     rest sit at -0.08 m. Because `_height_above_cloth` interpolates BILINEARLY,
-    each bad node corrupts its whole cell neighbourhood, so those 19 nodes are
+    each bad node corrupts its whole cell neighborhood, so those 19 nodes are
     what put ~125k trunk points into the ground class as one contiguous column
     ~1.7 m tall — a glaring visual defect that barely moves aggregate accuracy
     (99.56%), which is why it survived so long.
@@ -17482,7 +17502,7 @@ def _desnag_cloth(cloth_nodes: np.ndarray) -> "tuple[np.ndarray, int]":
     the ground under that trunk is sampled at 192k pts/m2, near the scene mean.
     The cloth simply caught and never fell through.
 
-    HOW. A snag is a node standing well ABOVE its neighbourhood, so compare each
+    HOW. A snag is a node standing well ABOVE its neighborhood, so compare each
     node to a local median and pull down the outliers. The test is one-sided by
     construction: a node sitting LOW is either true terrain or a harmless
     over-drape, and flattening those would erase real relief (which is exactly
@@ -17605,11 +17625,11 @@ _BAND_FLOOR_MAX_HWHM = 20.0
 # the pots' returns form an unbroken plateau from 0.05 m to 1.1 m; density does
 # not reach PEAK_FRACTION until 1.197 m, and the cap set the answer at
 # 20 x 0.0126 = 0.252 m — ~17x outside a band contained within 0.015 m, putting
-# the bottom quarter-metre of every pot in the ground class. CLEANER ground gave
+# the bottom quarter-meter of every pot in the ground class. CLEANER ground gave
 # a WORSE cut.
 #
 # So require the empty bin to arrive within a plausible band distance. The
-# labelled references separate cleanly on exactly this measure: tree_1 and
+# labeled references separate cleanly on exactly this measure: tree_1 and
 # tree_4 bottom out at 0.00017 and 0.00019 of peak (a genuinely empty gap, well
 # under PEAK_FRACTION) and reach it at 0.60-0.69 m, while Nickels bottoms out at
 # 0.00226 — never empty at all. Measured in cloth resolutions so the test is
@@ -17636,7 +17656,7 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     sigma ~10 cm, symmetric — noise/roughness, not topography and not a
     vegetation tail). The 0.5 m cut therefore lands mid-band and rejects ~40 K
     genuine ground points in coherent patches, which is what a user sees as
-    "ground labelled non-ground for no visible reason".
+    "ground labeled non-ground for no visible reason".
 
     HOW. `height` is measured from the settled cloth, which is terrain-following,
     so topography — including slope — is already removed. Verified: shearing the
@@ -17645,14 +17665,14 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     it. The threshold belongs where the ground mode's falloff meets the
     vegetation background, i.e. the first local minimum above the mode.
 
-    A valley-DEPTH test (e.g. "density < 1% of peak") does not generalise: it
+    A valley-DEPTH test (e.g. "density < 1% of peak") does not generalize: it
     works on an orchard, whose crowns float clear of the ground, but a forested
     slope has continuous understory and never gets that empty — BR04's density
     plateaus at ~10% of peak from 1 m to 8 m and never drops below it. A turning
     point still exists there, so this looks for a local minimum, not a depth.
 
     Deliberately NOT done: mirroring the below-cloth side to infer the band's
-    upper half-width. The cloth is a lower ENVELOPE, not the band's centre, so
+    upper half-width. The cloth is a lower ENVELOPE, not the band's center, so
     that sample is censored — it yields 0.38 m on Mission1, worse than the
     extent-scaled default it replaces."""
     h = np.asarray(height, dtype=np.float64)
@@ -17669,20 +17689,20 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     if not (hi > lo + 10 * binw):
         return float(fallback), meta
     counts, edges = np.histogram(h, bins=np.arange(lo, hi + binw, binw))
-    centres = edges[:-1] + binw / 2.0
+    centers = edges[:-1] + binw / 2.0
 
     # The ground mode: the cloth is fitted TO the ground, so it sits near zero.
     # Bounding the search keeps a canopy-dominated cloud from picking a canopy
     # mode as "ground".
     window = max(2.0 * cloth_resolution, 0.25)
-    near = np.abs(centres) <= window
+    near = np.abs(centers) <= window
     if not near.any():
         return float(fallback), meta
     peak = int(np.flatnonzero(near)[np.argmax(counts[near])])
 
     # Mode width, measured on the upper side at half maximum.
     half = counts[peak] / 2.0
-    hwhm = next((centres[k] - centres[peak]
+    hwhm = next((centers[k] - centers[peak]
                  for k in range(peak, len(counts)) if counts[k] < half), None)
     if hwhm is None or hwhm <= 0:
         return float(fallback), meta
@@ -17697,7 +17717,7 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
         if smooth[k] > 0.5 * smooth[peak]:
             continue                      # still on the mode's own shoulder
         # A knee is a valley the curve CLIMBS OUT OF AND STAYS OUT OF — not any
-        # bin that happens to sit below its neighbours. Testing a single step
+        # bin that happens to sit below its neighbors. Testing a single step
         # (`smooth[k] < smooth[k + span]`) cannot tell the true knee from a
         # shallow ripple in the sparse tail, because on this fixture the ripple
         # at 0.021 and the real knee at 0.051 differ only in how far the curve
@@ -17729,28 +17749,28 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
         if len(fwd) < 2 * span:
             continue                      # too close to the end to judge
         if fwd.min() >= smooth[k] and fwd.max() > smooth[k] * _KNEE_RISE_FACTOR:
-            knee = float(centres[k])
+            knee = float(centers[k])
             meta["method"] = "knee"
             break
     if knee is None:
         # Nothing above the ground: the density decays and stays down. Take the
         # point where it has effectively reached zero.
-        tail = np.flatnonzero((centres > centres[peak]) & (smooth < 0.01 * smooth[peak]))
+        tail = np.flatnonzero((centers > centers[peak]) & (smooth < 0.01 * smooth[peak]))
         if tail.size:
-            knee = float(centres[tail[0]])
+            knee = float(centers[tail[0]])
             meta["method"] = "tail"
     if knee is None:
         return float(fallback), meta
 
     # Never cut inside the ground mode itself, and stay inside the panel's range.
     #
-    # The `centres[peak] + hwhm` floor is not enough on its own for a SHARP mode.
+    # The `centers[peak] + hwhm` floor is not enough on its own for a SHARP mode.
     # On tree_1 the ground band has HWHM 0.010 m but a real spread reaching
     # 0.084 m (99.5th percentile) — sensor noise and soil roughness put a thin
     # skirt well outside the half-maximum width. The `tail` rule keys off where
     # density hits 1% of peak, which for a mode that tall arrives at 0.032 m,
     # inside the band: that discards 260k genuine ground points (1.7% of the
-    # ground) in coherent patches — the same "ground labelled non-ground for no
+    # ground) in coherent patches — the same "ground labeled non-ground for no
     # visible reason" this estimator exists to prevent, just from the other side.
     #
     # So floor the cut where the ground mode's density has genuinely decayed,
@@ -17783,18 +17803,18 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
         # Only within a plausible band distance: past that the density never
         # emptied out above the band, so there is no edge to measure and no
         # floor to apply. See _BAND_FLOOR_MAX_CLOTH.
-        limit = centres[peak] + _BAND_FLOOR_MAX_CLOTH * cloth_resolution
-        reached = np.flatnonzero((centres > centres[peak]) & (centres <= limit)
+        limit = centers[peak] + _BAND_FLOOR_MAX_CLOTH * cloth_resolution
+        reached = np.flatnonzero((centers > centers[peak]) & (centers <= limit)
                                  & (smooth < tail_lvl))
         if reached.size:
             # Cap relative to the mode's own width: on a cloud with a long
             # sparse tail the density fraction alone can run far away from the
             # band (51 m on BR04) before it is reached.
-            band_floor = min(float(centres[reached[0]]), _BAND_FLOOR_MAX_HWHM * hwhm)
-    threshold = float(np.clip(max(knee, centres[peak] + hwhm, band_floor), 0.02, 5.0))
+            band_floor = min(float(centers[reached[0]]), _BAND_FLOOR_MAX_HWHM * hwhm)
+    threshold = float(np.clip(max(knee, centers[peak] + hwhm, band_floor), 0.02, 5.0))
     meta.update({
         "class_threshold": threshold,
-        "mode": float(centres[peak]),
+        "mode": float(centers[peak]),
         "mode_hwhm": float(hwhm),
         "band_floor": band_floor,
         "bin_width": binw,
@@ -17825,7 +17845,7 @@ def segment_ground(
     per point inside the worker on top of the parent's copy, which is what
     put a 100 M-point run past a 16 GB laptop. The collar is 30 cloth
     resolutions (2-30 m), the scale over which the cloth's answer at a point
-    can depend on its neighbours; `tests/test_tiled.py` pins the seam
+    can depend on its neighbors; `tests/test_tiled.py` pins the seam
     agreement against the untiled result. With `auto_class_threshold` the
     threshold is measured ONCE on a stride sample and applied to every tile,
     so tiles cannot disagree about where the ground is.
@@ -17864,7 +17884,7 @@ def segment_ground(
             slope_smooth=slope_smooth, time_step=time_step,
             auto_class_threshold=auto_class_threshold, meta=meta)
     # CSF sees only the points its cloth can depend on (one per cloth
-    # particle, plus the bounding-box extremes) and every point is labelled
+    # particle, plus the bounding-box extremes) and every point is labeled
     # against the settled cloth afterwards - see csf_reduced. A dense TLS
     # scan's CSF working set (~60 B/pt, twice over) was the ground worker's
     # largest allocation: measured 1.3 GB -> 0.29 GB on 45.7 M points, with
@@ -18001,9 +18021,9 @@ WOOD_CLASS_LEAF = 2
 WOOD_CLASS_SLUG = "wood_class"
 WOOD_CLASS_LABEL = "Wood Class"
 
-# ── Manual point labelling ────────────────────────────────────────────────────
+# ── Manual point labeling ────────────────────────────────────────────────────
 #
-# The column the labelling tool paints into. One per cloud by default; the
+# The column the labeling tool paints into. One per cloud by default; the
 # request carries `slug` so a second pass ("my_qc_pass") is a config change
 # rather than a refactor, but the CLASSES are what users define, not the column.
 MANUAL_CLASS_SLUG = "manual_class"
@@ -18011,15 +18031,15 @@ MANUAL_CLASS_LABEL = "Manual Class"
 
 # Class 0 is reserved as "Unclassified" in every palette, and this is
 # load-bearing rather than cosmetic: `merge` zero-fills a slug that is missing
-# from one of its input sessions, so points from a never-labelled cloud arrive
+# from one of its input sessions, so points from a never-labeled cloud arrive
 # as 0. That is only correct if 0 means "unclassified" everywhere. Matches ASPRS
 # class 0 (Created, never classified) and the renderer's existing
-# "class 0 → unassigned grey" convention in classification.ts.
+# "class 0 → unassigned gray" convention in classification.ts.
 MANUAL_CLASS_UNLABELED = 0
 
 # Class values are a single byte, matching the LAS classification range. The
 # renderer keeps user-defined classes in 64-255 (the ASPRS user-definable band)
-# so a future writer to the real LAS classification byte is pure serialisation
+# so a future writer to the real LAS classification byte is pure serialization
 # with no renumbering of data users already painted.
 MANUAL_CLASS_MIN = 0
 MANUAL_CLASS_MAX = 255
@@ -18029,7 +18049,7 @@ MANUAL_CLASS_MAX = 255
 # a plot can hold far more than 255 trees. They are capped by the column's
 # storage instead: session columns are float32, which holds every integer
 # exactly only up to 2**24, so a larger id would silently round to a
-# neighbour's. MIRRORED by `INSTANCE_CLASS_VALUE_MAX` / `isInstanceColumnSlug`
+# neighbor's. MIRRORED by `INSTANCE_CLASS_VALUE_MAX` / `isInstanceColumnSlug`
 # in src/renderer/lib/classPalettes.ts (a test there reads this file).
 LABEL_INSTANCE_CLASS_MAX = 1 << 24
 
@@ -18098,15 +18118,15 @@ def _wood_local_pca_features(
     k_step: int,
     chunk: int = 50_000,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-point geometric features at an eigen-entropy-optimal neighbourhood
+    """Per-point geometric features at an eigen-entropy-optimal neighborhood
     scale (Demantke 2011 / Weinmann 2015 dimensionality).
 
     Returns (features, nbr_idx):
       features: (N,3) = [linearity, verticality, sphericity]
-      nbr_idx:  (N, k_max) int32 sorted neighbour indices (reused by the
-                regularisation pass — query the KD-tree only once).
+      nbr_idx:  (N, k_max) int32 sorted neighbor indices (reused by the
+                regularization pass — query the KD-tree only once).
 
-    For each point we pick the k in [k_min..k_max] (step k_step) that minimises
+    For each point we pick the k in [k_min..k_max] (step k_step) that minimizes
     the eigen-entropy E = -Σ αᵢ ln αᵢ, αᵢ = λᵢ/Σλ, then derive features from the
     eigenvalues/eigenvectors at that winning scale. The wood/leaf discriminators
     are verticality (wood upright) and sphericity (foliage scatters in 3D);
@@ -18129,7 +18149,7 @@ def _wood_local_pca_features(
 
     tree = cKDTree(pts)
     # Query at the largest scale; smaller scales are prefixes of the sorted
-    # neighbour list (cKDTree returns neighbours in increasing distance). Query
+    # neighbor list (cKDTree returns neighbors in increasing distance). Query
     # in CHUNKS and keep only int32 indices: a single full query allocates the
     # (N,k) float64 distances AND int64 indices at once (~10 GB at N=6M, k=100),
     # which OOMs a 16 GB machine. Chunking caps that transient to one block, and
@@ -18205,7 +18225,7 @@ def _wood_regularize(
     (a stray "wood" point inside a leaf cluster flips to leaf, and vice versa)
     without eroding genuine thin branches at low iteration counts.
 
-    `weights` (optional, per-point in [0,1]) up-weights confident neighbours so
+    `weights` (optional, per-point in [0,1]) up-weights confident neighbors so
     high-certainty points dominate the vote near wood/leaf boundaries.
     """
     if iters <= 0:
@@ -18295,7 +18315,7 @@ def _wood_prune_speckle(
     wood_set[wi] = True
     remap = -np.ones(len(points), dtype=np.int64)
     remap[wi] = np.arange(len(wi))
-    keep_edge = wood_set[sub_nbr]                       # (m, kk) neighbour is wood
+    keep_edge = wood_set[sub_nbr]                       # (m, kk) neighbor is wood
     rows = np.repeat(np.arange(len(wi)), kk)[keep_edge.ravel()]
     cols = remap[sub_nbr.ravel()[keep_edge.ravel()]]
     if rows.size == 0:
@@ -18363,11 +18383,11 @@ def _wood_geometric_labels(
     """Shared geometric classification core: returns
     (raw_labels, seed_mask, sphericity, nbr_idx) on the given (already-downsampled)
     `pts`. `raw_labels` is the per-point GMM split + reflectance promotion (BEFORE
-    branch-grow/speckle/regularise). `seed_mask` is the HIGH-PRECISION wood seed
+    branch-grow/speckle/regularize). `seed_mask` is the HIGH-PRECISION wood seed
     (strict GMM posterior) the connectivity method anchors its backbone on — the
     trunk and obvious branches, kept tight to avoid seeding the backbone from
     false-wood. Both the geometric and connectivity methods call this so they can
-    never drift apart. No region-grow / speckle / regularise here (the callers add
+    never drift apart. No region-grow / speckle / regularize here (the callers add
     those). `precomputed=(features, nbr_idx)` reuses an existing feature pass (the
     SOTA path computes features once and shares them — the pass is ~25s on 480k)."""
     n = len(pts)
@@ -18444,7 +18464,7 @@ def _wood_geometric_core(
     precomputed: Optional[tuple] = None,
 ) -> np.ndarray:
     """The original point-wise wood/leaf pipeline on a single (downsampled) cloud:
-    geometric GMM + reflectance → branch-grow → speckle prune → regularise. Returns
+    geometric GMM + reflectance → branch-grow → speckle prune → regularize. Returns
     down-resolution int32 labels (byte-identical to the pre-refactor inline code).
     `precomputed=(features, nbr_idx)` shares an existing feature pass (SOTA path)."""
     raw, _seed, sphericity, nbr_idx = _wood_geometric_labels(
@@ -18542,7 +18562,7 @@ def _segment_wood_connectivity(
     geom_wood = raw == WOOD_CLASS_WOOD
 
     def _finish(wood_mask):
-        """Apply the shared post-processing (speckle prune + regularise) and return
+        """Apply the shared post-processing (speckle prune + regularize) and return
         labels. branch-grow is skipped for connectivity — the backbone already does
         the recovery branch-grow approximates, and re-growing would re-introduce the
         leaf-bleed connectivity is meant to avoid."""
@@ -18670,7 +18690,7 @@ def _wood_skeleton_segments(pts: np.ndarray):
     segments = build_segments(graph)
     if not segments:
         return None, None, None
-    # node -> segment lookup (vectorised); points map through node_of_point.
+    # node -> segment lookup (vectorized); points map through node_of_point.
     node_seg = np.full(len(graph), -1, dtype=np.int64)
     for s in segments:
         node_seg[np.asarray(s.node_ids, dtype=np.int64)] = s.seg_id
@@ -18695,7 +18715,7 @@ def _wood_classify_segments(
     of the fitted surface) as wood. Leaves splay off the shell and keep their
     geometric label. `surf_cov_min`/`mad_frac_max`/`shell_frac` are the
     operating-point dials (leaf-off recall vs leaf-on precision). Returns a wood
-    boolean mask (regularisation is applied by the caller).
+    boolean mask (regularization is applied by the caller).
     """
     from qsm.cylinders import fit_cylinder, CylinderFitOptions
 
@@ -18740,11 +18760,11 @@ def _segment_wood_sota(
     """SOTA segment-wise wood/leaf classification on a single (downsampled) cloud.
 
     Pipeline: geometric core (seed) → skeleton segments → cylinder-fit gate +
-    tube-shell recovery → regularise. Falls back to the geometric core whenever
+    tube-shell recovery → regularize. Falls back to the geometric core whenever
     the skeleton degenerates. Returns down-resolution int32 labels."""
     # Compute the per-point PCA features ONCE and share them with the geometric
     # core (the feature pass is ~25s on 480k points; computing it twice was the
-    # bulk of the SOTA path's runtime). `nbr_idx` is reused for the final regularise.
+    # bulk of the SOTA path's runtime). `nbr_idx` is reused for the final regularize.
     features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
     geom_labels = _wood_geometric_core(
         pts, refl, k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
@@ -18832,7 +18852,7 @@ def segment_wood(
          (verticality, sphericity — Demantke 2011 / Weinmann 2015).
       2. A wood saliency score = verticality + (1 − sphericity): wood is
          vertical (trunk/branches) and locally COMPACT (low sphericity), while
-         foliage scatters the neighbourhood in 3D (high sphericity) and hangs at
+         foliage scatters the neighborhood in 3D (high sphericity) and hangs at
          varied non-vertical angles. OPTIONAL reflectance assist: when a
          per-point `reflectance` scalar is supplied (and `reflectance_weight_max`
          > 0), a 1-D GMM on the reflectance contributes a wood-probability term
@@ -18853,12 +18873,12 @@ def segment_wood(
          as wood rather than leaf.
       4. Optional speckle pruning (`min_speckle` > 1): flip tiny isolated wood
          components back to leaf.
-      5. LeWoS-style graph regularisation (iterated k-NN majority vote).
+      5. LeWoS-style graph regularization (iterated k-NN majority vote).
 
     Linearity is deliberately NOT used: branches are linear (cylinders) and so
     are needles / narrow leaves, so linearity cannot separate the two. This was
     validated across two benchmark families — real TLS trees (Weiser et al.
-    heiDATA: oak/beech/maple/pine/spruce, where neighbourhood sphericity carries
+    heiDATA: oak/beech/maple/pine/spruce, where neighborhood sphericity carries
     the signal, mean OA ≈ 0.85) and synthetic almond scans (narrow flat leaves,
     where verticality carries it, mean OA ≈ 0.80). The additive blend handles
     both; the one weak case is densely-scattered-leaf forms (e.g. the synthetic
@@ -18868,7 +18888,7 @@ def segment_wood(
     Very large clouds are handled automatically: above `max_points`
     (default `_WOOD_SEGMENT_MAX_POINTS` ≈ 1.5M, env-overridable) the geometry
     step runs on a voxel-downsampled subset and labels propagate back to full
-    resolution by nearest neighbour — the per-point k-NN feature extraction is
+    resolution by nearest neighbor — the per-point k-NN feature extraction is
     O(N·k_max) in memory and a multi-million-point cloud at full res can OOM the
     machine. Set `voxel_size` > 0 to choose the downsample resolution explicitly
     instead. Either way the returned labels are full-length.
@@ -18896,7 +18916,7 @@ def segment_wood(
 
     if method == "ml":
         # Before the safety downsample below: the model grid-samples at its
-        # own base voxel, which is the density normalisation it was trained on.
+        # own base voxel, which is the density normalization it was trained on.
         # A second, coarser downsample would feed it sparser crowns than any
         # it saw.
         return _segment_wood_ml(pts_full, model_id, refl_full)
@@ -18904,13 +18924,13 @@ def segment_wood(
     cap = int(max_points) if max_points is not None else _WOOD_SEGMENT_MAX_POINTS
 
     # AUTO safety downsample: the per-point k-NN feature extraction allocates an
-    # (N, k_max) int32 neighbour array plus transient query buffers, so a
+    # (N, k_max) int32 neighbor array plus transient query buffers, so a
     # multi-million-point cloud at full resolution can exhaust RAM (a 6.4M-point
     # tree peaked ~13 GB and hard-crashed a 16 GB machine). When the cloud is
     # over the cap and the caller hasn't picked a `voxel_size`, derive one that
     # targets ~`cap` points from the cloud's bounding volume, classify the
     # reduced set, and propagate labels back to full resolution by nearest
-    # neighbour. Result stays full-length; only the heavy geometry step shrinks.
+    # neighbor. Result stays full-length; only the heavy geometry step shrinks.
     if (not voxel_size or voxel_size <= 0) and cap > 0 and n_full > cap:
         span = pts_full.max(axis=0) - pts_full.min(axis=0)
         vol = float(np.prod(np.clip(span, 1e-6, None)))
@@ -18986,8 +19006,8 @@ def segment_wood(
     if n == n_full:
         return labels_down
 
-    # Propagate downsampled labels back to full resolution by nearest neighbour,
-    # then regularise once more at full resolution to smooth voxel seams.
+    # Propagate downsampled labels back to full resolution by nearest neighbor,
+    # then regularize once more at full resolution to smooth voxel seams.
     from scipy.spatial import cKDTree
 
     nn_tree = cKDTree(pts)
@@ -19029,17 +19049,17 @@ def build_neighbor_graph(points: np.ndarray, search_radius: float, max_neighbors
     """
     Build an undirected graph connecting neighboring points using a KD-tree.
 
-    Each point is linked to its up-to-`max_neighbors` nearest neighbours that
+    Each point is linked to its up-to-`max_neighbors` nearest neighbors that
     lie within `search_radius`. Implemented as a single batched k-NN query
     (cKDTree, parallel workers) plus a radius mask — NOT a per-point
     `query_ball_point` Python loop, which on a multi-million-point TLS cloud
-    materialises a Python list per point and runs for minutes. The batched
-    query mirrors the wood-segmentation neighbour pass (`_wood_local_pca_features`).
+    materializes a Python list per point and runs for minutes. The batched
+    query mirrors the wood-segmentation neighbor pass (`_wood_local_pca_features`).
 
-    Because cKDTree returns neighbours sorted by increasing distance, taking the
+    Because cKDTree returns neighbors sorted by increasing distance, taking the
     first `max_neighbors` after dropping self and applying the radius mask is
     exactly the "keep the closest within radius" semantics of the old code — a
-    behaviour-preserving rewrite, not a quality change.
+    behavior-preserving rewrite, not a quality change.
 
     Args:
         points: Nx3 array of point coordinates
@@ -19047,7 +19067,7 @@ def build_neighbor_graph(points: np.ndarray, search_radius: float, max_neighbors
         max_neighbors: Maximum number of neighbors per point
 
     Returns:
-        dict with 'neighbors' (per-point int32 ndarray of neighbour indices, so
+        dict with 'neighbors' (per-point int32 ndarray of neighbor indices, so
         `for j in neighbors[i]` still yields ints) and 'kdtree'
     """
     from scipy.spatial import cKDTree
@@ -19057,7 +19077,7 @@ def build_neighbor_graph(points: np.ndarray, search_radius: float, max_neighbors
     if n_points == 0:
         return {'neighbors': [], 'kdtree': tree}
 
-    # k+1: the nearest neighbour of a point is itself (distance 0); we drop it.
+    # k+1: the nearest neighbor of a point is itself (distance 0); we drop it.
     k = min(max_neighbors + 1, n_points)
 
     # Query in chunks: a single full query allocates the (N,k) float64 distances
@@ -20058,7 +20078,7 @@ async def extract_stem_skeleton(request: SkeletonRequest, http_request: Request)
     Reads (and downsamples) the points, applies the max-points guard, then runs
     the heavy `compute_skeleton` pipeline in a KILLABLE subprocess so the panel's
     Cancel button can SIGKILL it mid-run (see `_run_killable`). On client
-    disconnect (Cancel / fetch timeout) the worker is killed and a cancelled
+    disconnect (Cancel / fetch timeout) the worker is killed and a canceled
     response is returned at once."""
     try:
         if request.source is not None:
@@ -20094,7 +20114,7 @@ async def extract_stem_skeleton(request: SkeletonRequest, http_request: Request)
                 dominant_axis=request.dominant_axis,
                 points_before_filtering=points_original_count,
                 points_after_filtering=points_original_count,
-                error="Skeleton extraction was cancelled.",
+                error="Skeleton extraction was canceled.",
             )
 
         # `blocks` came back as plain dicts (JSON round-trip); rebuild the models.
@@ -20588,9 +20608,9 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
 
         _report(1.0, "Done")
         return _qsm_to_response(qsm, m, points_used=len(points)).dict()
-    except ScanCancelled:
+    except ScanCanceled:
         # Must escape the catch-all below: the streaming layer turns this into a
-        # terminal `cancelled` marker, and reporting it as "QSM build failed" would
+        # terminal `canceled` marker, and reporting it as "QSM build failed" would
         # show the user an error for their own Cancel click.
         raise
     except Exception as e:
@@ -20606,7 +20626,7 @@ def build_qsm(request: QSMBuildRequest, http_request: Request):
     fetchJsonWithProgress drains the markers and parses the trailing JSON, which is
     the same QSMBuildResponse shape _do_qsm_build returns.
 
-    Cancellable. Without the token trio the reporter's `should_cancel()` is
+    Cancelable. Without the token trio the reporter's `should_cancel()` is
     hard-wired False, so every `_cancel_checkpoint` below is a no-op, no run_id
     ever reaches the client and /api/cancel/{run_id} cannot address this run --
     i.e. the panel's Cancel button did nothing while the heaviest endpoint in the
@@ -20990,7 +21010,7 @@ def _adjust_leaf_angles_request_from_frame(body: bytes) -> "QSMAdjustLeafAnglesR
         raise ValueError("adjust-leaf-angles frame missing 'grid_for_triangulation'")
     # `triangle_cell_ids` is signed (-1 = outside the grid) but rides as u32,
     # carrying the 0xffffffff sentinel the renderer already uses on the response
-    # side. Normalising it to -1 here is BELT AND BRACES, not load-bearing:
+    # side. Normalizing it to -1 here is BELT AND BRACES, not load-bearing:
     # `compute_cell_targets` filters `(cell_ids >= 0) & (cell_ids != _OUTSIDE)`,
     # so it already rejects either spelling. Kept so the request model carries
     # the same values the JSON path would, rather than leaving a 4-billion id in
@@ -22555,7 +22575,7 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
       event: run_id    data: {"run_id": "..."}   (first, so the client can cancel)
       event: progress  data: {"progress": 0.0-1.0, "message": "..."}
       event: result    data: <PlantGenerationResponse-shaped JSON>
-      event: cancelled data: {}                  (build aborted; memory freed)
+      event: canceled data: {}                  (build aborted; memory freed)
       event: error     data: {"detail": "..."}
 
     Progress maps the C++ growth phase to 0–0.6 (via setProgressCallback),
@@ -22577,7 +22597,7 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
     is_canopy = request.mode == "canopy"
     run_id, cancel_event = _new_cancel_token()
     # Shared cancel flag the C++ build loops poll. The SSE generator flips it the
-    # moment this run is cancelled (disconnect or /api/cancel); the worker also
+    # moment this run is canceled (disconnect or /api/cancel); the worker also
     # checks cancel_event at stage boundaries to bail before geometry extraction.
     cancel_flag = _ctypes.c_int(0)
 
@@ -22638,10 +22658,10 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                     age=request.age,
                     germination_rate=request.germination_rate,
                 )
-                # A cancelled canopy can return early with few/no plants — report
+                # A canceled canopy can return early with few/no plants — report
                 # that as cancellation, not a germination failure.
                 if cancel_event.is_set():
-                    progress_queue.put(("cancelled", None))
+                    progress_queue.put(("canceled", None))
                     return
                 if not plant_ids:
                     progress_queue.put(("error", "No plants germinated. Try a higher germination rate."))
@@ -22656,12 +22676,12 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
 
             plantarch.setProgressCallback(None)
 
-            # The build loops honor the cancel flag, so a cancelled run returns a
+            # The build loops honor the cancel flag, so a canceled run returns a
             # partial/empty plant. Bail here — before the expensive geometry
             # extraction + serialization — and let the finally tear everything
             # down so the C++/numpy memory is freed promptly.
             if cancel_event.is_set():
-                progress_queue.put(("cancelled", None))
+                progress_queue.put(("canceled", None))
                 return
 
             try:
@@ -22805,8 +22825,8 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                     # item[1] is already-serialized JSON (built in the worker thread).
                     yield f"event: result\ndata: {item[1]}\n\n"
                     break
-                elif kind == "cancelled":
-                    yield f"event: cancelled\ndata: {json.dumps({})}\n\n"
+                elif kind == "canceled":
+                    yield f"event: canceled\ndata: {json.dumps({})}\n\n"
                     break
                 elif kind == "error":
                     yield f"event: error\ndata: {json.dumps({'detail': item[1]})}\n\n"
@@ -22945,7 +22965,7 @@ def _do_mesh_import(request: MeshImportRequest) -> dict:
     material_texture_name: Dict[str, str] = tpl["material_texture_name"]
     has_any_normals = True  # loader always populates normals (flat-filled where absent)
 
-    # Build per-vertex colors from each triangle's material Kd (fallback grey).
+    # Build per-vertex colors from each triangle's material Kd (fallback gray).
     out_colors: List[List[float]] = [[0.8, 0.8, 0.8]] * len(out_vertices)
     for ti, face in enumerate(out_faces):
         mat = tri_material[ti]
@@ -23134,7 +23154,7 @@ def _format_points_as_text(
     per column come from `_text_export_layout`, shared with the streaming writer
     (`_write_points_as_text`) so the two cannot drift.
 
-    Vectorised with `np.savetxt` rather than a per-point Python f-string loop —
+    Vectorized with `np.savetxt` rather than a per-point Python f-string loop —
     on a multi-million-point octree cloud the old loop dominated export time and
     held the whole formatted string list in RAM. Output is byte-identical to the
     previous loop (same precision, separators, headers, and no trailing newline).
@@ -23153,12 +23173,12 @@ def _format_points_as_text(
         Applying ONE `%` over a whole chunk's flattened values does all the
         conversion inside CPython's C formatter with a single dispatch, which
         measured 2.0x faster on 8 M points (8.84 s -> 4.42 s) for byte-identical
-        output. Vectorised alternatives were tried and are SLOWER than savetxt:
+        output. Vectorized alternatives were tried and are SLOWER than savetxt:
         np.char.mod + join (0.57x) and pandas.to_csv (0.45x).
 
         Chunking serves two purposes: it lets `progress` report a real
         percentage, and it bounds the transient. `row_fmt * n % tuple(flat)`
-        materialises a Python tuple of every value, which peaks around 5x the
+        materializes a Python tuple of every value, which peaks around 5x the
         output size — chunking held peak RSS to 133 MB vs savetxt's 751 MB on the
         same 8 M-point export. Joining chunks is byte-identical to one pass: each
         row carries its own newline and only the final one is stripped.
@@ -23188,7 +23208,7 @@ def _format_points_as_text(
     return "\n".join([part for part in ("\n".join(header), body) if part])
 
 
-# Display headers for the fixed geometry/colour slugs in a text export. Any slug
+# Display headers for the fixed geometry/color slugs in a text export. Any slug
 # not listed here is a scalar column and gets its own slug as the header.
 _TEXT_EXPORT_SLUG_HEADERS = {
     "x": "X", "y": "Y", "z": "Z", "r": "R", "g": "G", "b": "B",
@@ -23210,8 +23230,8 @@ def _resolve_export_columns(
 
     `columns` is the ordered list the export modal's column picker produced.
     None/empty falls back to `default_slugs` — which each format supplies, because
-    the historical fixed layouts differ per format: txt/csv carried colour AND
-    intensity, ply carried colour only, and xyz/obj were geometry-only. Getting
+    the historical fixed layouts differ per format: txt/csv carried color AND
+    intensity, ply carried color only, and xyz/obj were geometry-only. Getting
     that wrong is not cosmetic; `test_text_export_is_byte_identical_to_reference`
     pins every one of those combinations.
 
@@ -23241,7 +23261,7 @@ def _resolve_export_columns(
         if arr.shape != (n,):
             # A desynced column would silently mislabel points; skip it.
             continue
-        # The dedicated arrays win: a session that holds a real intensity/colour
+        # The dedicated arrays win: a session that holds a real intensity/color
         # array has already registered those slugs above, so an extras column of
         # the same name (LAS promotes intensity to its standard dimension) must
         # not shadow it.
@@ -23285,7 +23305,7 @@ def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=Non
         default_slugs = geom + rgb_slugs      # never carried intensity
     elif fmt == "pts":
         # PTS has ONE layout, and it is not negotiable: `x y z intensity r g b`,
-        # intensity BEFORE colour. Both trailing groups are optional but their
+        # intensity BEFORE color. Both trailing groups are optional but their
         # order is not, so this is a fixed schema rather than a default the user
         # may re-pick — see the `pts` branch below, which ignores `columns`.
         default_slugs = geom + (["intensity"] if has_int else []) + rgb_slugs
@@ -23296,7 +23316,7 @@ def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=Non
     # user-chosen subset or order would produce a file that still parses and is
     # read wrong (drop intensity and every reader takes column 3 as red). The
     # picker is hidden for it in the UI; ignoring `columns` here is the backstop
-    # that keeps a direct API call from writing a mislabelled file.
+    # that keeps a direct API call from writing a mislabeled file.
     resolved = _resolve_export_columns(
         None if fmt == "pts" else columns,
         points, colors, intensity, extras, default_slugs=default_slugs)
@@ -23412,10 +23432,10 @@ def _write_points_as_pcd(
 ) -> None:
     """Write an ASCII PCD (PCL's Point Cloud Data format).
 
-    Schema is FIXED at position + optional colour, and deliberately so: PCD
+    Schema is FIXED at position + optional color, and deliberately so: PCD
     packs RGB as a single float-bit-cast field rather than three columns, and
     our own reader for it (`_load_ply_pcd_arrays`, via open3d) returns position
-    and colour ONLY — it drops intensity and every scalar on read. Offering a
+    and color ONLY — it drops intensity and every scalar on read. Offering a
     column picker here would let the user select fields that this format cannot
     carry back into Phytograph, which is a worse outcome than stating the limit:
     the export would look lossless and re-import short. Verified against open3d
@@ -23423,7 +23443,7 @@ def _write_points_as_pcd(
     silently absent.
 
     Streamed in chunks for the same reason as `_write_points_as_text`: a
-    25 M-point cloud must not be materialised as one Python string. Written to a
+    25 M-point cloud must not be materialized as one Python string. Written to a
     sibling `.part` and renamed on success so a cancel never leaves a truncated
     file that looks like a finished export.
     """
@@ -23454,7 +23474,7 @@ def _write_points_as_pcd(
     if has_colors:
         rgb8 = np.clip(np.rint(np.asarray(colors) * 255.0), 0, 255).astype(np.uint32)
         packed = (rgb8[:, 0] << 16) | (rgb8[:, 1] << 8) | rgb8[:, 2]
-        # PCD stores the packed 24-bit colour in a float32's BIT PATTERN, not as
+        # PCD stores the packed 24-bit color in a float32's BIT PATTERN, not as
         # a numeric value — reinterpret rather than cast.
         rgb_f = packed.astype(np.uint32).view(np.float32)
         stacked = np.column_stack([points[:, 0], points[:, 1], points[:, 2], rgb_f])
@@ -23491,7 +23511,7 @@ def export_point_cloud_las(request: PointCloudExportRequest, http_request: Reque
     previously one opaque blocking call, so the UI could only show an
     indeterminate spinner. `_do_point_cloud_export` reports per-chunk progress
     through the same streaming wrapper the triangulate/DEM/crown-fit endpoints
-    use, which also makes the export CANCELLABLE via /api/cancel/{run_id} — a
+    use, which also makes the export CANCELABLE via /api/cancel/{run_id} — a
     25 M-point export is a ~30 s operation the user needs a way out of.
 
     The JSON tail is the same PointCloudExportResponse shape as before; only the
@@ -23540,7 +23560,7 @@ _LAS_FLAG_COLUMNS = {"flag_withheld": "withheld", "flag_synthetic": "synthetic",
                      "flag_key_point": "key_point"}
 _LAS_FLAG_LABELS = {"withheld": "Withheld", "synthetic": "Synthetic", "key_point": "Key-point"}
 # The Phytograph palette record: {slug: palette} as JSON, so a re-import (ours)
-# shows every class column by name and colour. The LAS 1.4 classification
+# shows every class column by name and color. The LAS 1.4 classification
 # lookup beside it names the classification byte's classes for other software.
 _PHYTOGRAPH_VLR_USER = "Phytograph"
 _PHYTOGRAPH_PALETTE_RECORD = 1
@@ -23656,11 +23676,11 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                            progress=None, classification_column: "Optional[str]" = None,
                            class_palettes: "Optional[dict]" = None) -> dict:
     """Stream a session to a LAS/LAZ file in row chunks - the export twin of
-    `_session_to_las`, without ever materialising the survivor set.
+    `_session_to_las`, without ever materializing the survivor set.
 
     The generic export path reads `_read_points_and_extras` (a float64 copy of
     every surviving point plus every column) and then builds ONE `laspy.LasData`
-    for all of them (another ~30-50 B/pt of quantised record) - at 100 M
+    for all of them (another ~30-50 B/pt of quantized record) - at 100 M
     points that is ~10 GB of transient beside the session, which no 16 GB
     laptop survives. Here the survivor indices are taken once under the
     session lock, then each `_LAS_WRITE_CHUNK` block is gathered under the
@@ -23778,7 +23798,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                        "Compressing and writing" if ext == ".laz" else "Writing file")
                 writer.write_points(record)
                 del record, bpos, bcol, bint, bext, bts
-            _stage(0.95, "Finalising")
+            _stage(0.95, "Finalizing")
             pad = 0.001
             writer.header.mins = (pos_min - pad).tolist()
             writer.header.maxs = (pos_max + pad).tolist()
@@ -23870,7 +23890,7 @@ def _do_point_cloud_export(
                 # QUEUES a marker, it never raises, so without this poll a cancel
                 # would not land until formatting finished — which for a 25 M-point
                 # export is the entire operation. Raising here unwinds before the
-                # file is written, so a cancelled export leaves nothing behind.
+                # file is written, so a canceled export leaves nothing behind.
                 def _fmt_progress(frac, msg):
                     if progress is not None:
                         progress(0.05 + 0.90 * frac, msg)
@@ -23906,11 +23926,11 @@ def _do_point_cloud_export(
                     text = _format_points_as_text(
                         fmt, points, src_colors, src_intensity, progress=_fmt_progress,
                         extras=src_extras, columns=request.columns)
-            except (HTTPException, ScanCancelled):
-                # ScanCancelled is a plain Exception, so the broad handler below
+            except (HTTPException, ScanCanceled):
+                # ScanCanceled is a plain Exception, so the broad handler below
                 # would swallow it and report a user cancel as "Export failed".
                 # It must reach the streaming wrapper, which turns it into the
-                # terminal `cancelled` marker the renderer expects.
+                # terminal `canceled` marker the renderer expects.
                 raise
             except Exception as e:
                 return dict(
@@ -24024,9 +24044,9 @@ def _do_point_cloud_export(
             {"r", "g", "b"} & set(request.columns)))
         point_format = _las_export_point_format(want_color)
 
-        # Assembling the LAS is NOT free, despite each step being vectorised: at
-        # 25 M points the stages below total ~5 s (bounds ~0.5 s, the quantising
-        # x/y/z assignment ~1.5 s, colour clip+scale ~0.6 s, laspy.write ~1 s).
+        # Assembling the LAS is NOT free, despite each step being vectorized: at
+        # 25 M points the stages below total ~5 s (bounds ~0.5 s, the quantizing
+        # x/y/z assignment ~1.5 s, color clip+scale ~0.6 s, laspy.write ~1 s).
         # They used to run between the "Reading points" and "Writing file"
         # markers, so the pill sat at 2% for the whole time and then jumped to
         # 90% — reading as a hang. Report each stage instead. The fractions are
@@ -24061,7 +24081,7 @@ def _do_point_cloud_export(
             header.evlrs = list(header.evlrs or []) + palette_evlrs
         las = laspy.LasData(header)
 
-        # Each assignment quantises to the header scale (the 1 mm grid), which is
+        # Each assignment quantizes to the header scale (the 1 mm grid), which is
         # where the bulk of the per-axis cost is. X carries the one-off setup, so
         # it is consistently the slowest of the three.
         _stage(0.20, "Packing coordinates")
@@ -24074,7 +24094,7 @@ def _do_point_cloud_export(
         # `want_color`, not `has_colors`: deselecting r/g/b chose format 1, which
         # has no red/green/blue dimension to assign to.
         if want_color:
-            _stage(0.65, "Packing colours")
+            _stage(0.65, "Packing colors")
             colors = np.clip(np.asarray(colors_arr, dtype=np.float64), 0, 1)
             las.red = (colors[:, 0] * 65535).astype(np.uint16)
             las.green = (colors[:, 1] * 65535).astype(np.uint16)
@@ -24176,7 +24196,7 @@ def _do_point_cloud_export(
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-    except (HTTPException, ScanCancelled):
+    except (HTTPException, ScanCanceled):
         # Same reason as the text branch: a cancel is not a failure, and a bad
         # dest_path must keep its own 400 rather than become a generic error.
         raise
@@ -24240,13 +24260,13 @@ async def import_point_cloud_las(file: UploadFile = File(...)):
 
 # ==================== POINT CLOUD PATH-BASED IMPORT ====================
 # Reads point-cloud files directly from disk rather than over HTTP. The
-# renderer's TS parsers (parseXYZ, parsePLY, parsePCD) all materialise the
+# renderer's TS parsers (parseXYZ, parsePLY, parsePCD) all materialize the
 # whole file as a JS string and hit V8's max string size (~512 MB) on
 # multi-hundred-MB scans typical of TLS surveys. The endpoint here returns a
 # packed binary stream so we don't re-trip the same limit on the response.
 
-# Helios <ASCII_format> tokens we recognise for XYZ-family files. Roles in
-# DATA_ROLES populate dedicated fields (positions/colours/intensity); the
+# Helios <ASCII_format> tokens we recognize for XYZ-family files. Roles in
+# DATA_ROLES populate dedicated fields (positions/colors/intensity); the
 # per-pulse multi-return roles (timestamp/target_index/target_count) are carried
 # as extra dimensions under their canonical slug (see `_MULTI_RETURN_SLUGS`) so
 # the LAD path can recover them; any remaining known-but-unmapped role
@@ -24261,7 +24281,7 @@ _XYZ_DATA_ROLES = {
 # to tell single- from multi-return scans (see `_LAD_MULTI_RETURN_COLUMNS`). We
 # pin these as extra-dim slugs at import so they survive edits/bake exactly like
 # positions and the LAD accessor can find them deterministically — regardless of
-# the source header text or how the wizard labelled the column.
+# the source header text or how the wizard labeled the column.
 _MULTI_RETURN_SLUGS = ('timestamp', 'target_index', 'target_count')
 _MULTI_RETURN_LABELS = {
     'timestamp': 'Timestamp',
@@ -24292,7 +24312,7 @@ _XYZ_KNOWN_ROLES = (
 )
 
 # Standard LAS point-format dimensions that are NOT carried as user-selectable
-# scalar fields on import, because they're either materialised elsewhere in the
+# scalar fields on import, because they're either materialized elsewhere in the
 # session (x/y/z → positions, red/green/blue → colors, intensity → intensity) or
 # auto-mapped to a canonical multi-return slug (`_LAS_MULTIRETURN_SRC`). Every
 # OTHER standard dimension that holds non-constant data (classification,
@@ -24316,21 +24336,21 @@ _LAS_MULTIRETURN_SRC = ('return_number', 'number_of_returns', 'gps_time')
 
 # Per-point sky/miss flag carried as a LAS extra dimension (0.0 = hit, 1.0 =
 # miss). Misses are laser pulses that returned nothing (hit the sky); Helios
-# represents each as a real point placed `_MISS_GAP_DISTANCE` metres from the
+# represents each as a real point placed `_MISS_GAP_DISTANCE` meters from the
 # scanner along the pulse direction. They flow through the same extra-dim →
 # octree → session → LAD machinery as any scalar, so deletes/bake keep them in
-# lockstep with positions, the renderer can colour/hide them, and the LAD path
+# lockstep with positions, the renderer can color/hide them, and the LAD path
 # reads them for free. The slug is pinned (case-insensitive aliases accepted on
 # import) so the renderer and LAD find it deterministically.
 _MISS_SLUG = 'is_miss'
 _MISS_LABEL = 'Miss'
 # Aliases a source column may use for the miss flag (PLY property / E57 field).
 _MISS_ALIASES = {'is_miss', 'miss', 'sky', 'ismiss'}
-# Same set with punctuation/case stripped, for matching a sanitised slug.
-_MISS_ALIASES_NORMALISED = {re.sub(r'[^a-z0-9]+', '', a) for a in _MISS_ALIASES}
+# Same set with punctuation/case stripped, for matching a sanitized slug.
+_MISS_ALIASES_NORMALIZED = {re.sub(r'[^a-z0-9]+', '', a) for a in _MISS_ALIASES}
 
 
-def _normalise_miss_alias(name: str) -> Optional[str]:
+def _normalize_miss_alias(name: str) -> Optional[str]:
     """Return `_MISS_SLUG` when `name` is any miss-flag spelling (is_miss / miss
     / sky, case- and punctuation-insensitive), else None.
 
@@ -24346,7 +24366,7 @@ def _normalise_miss_alias(name: str) -> Optional[str]:
 # the LAD path uses them directly and bypasses the timestamp->trajectory join
 # (see `CloudSession.beam_origins` / `_do_lad_computation`). Defined HERE (rather
 # than next to the LAS reader where it's also used) so the ASCII import path —
-# header auto-detect and column-plan canonicalisation below — can share the exact
+# header auto-detect and column-plan canonicalization below — can share the exact
 # same alias spellings. Origins are world/UTM coordinates needing full float64
 # precision, so they are NEVER carried as float32 extra dims; the ASCII path
 # captures them into a side-channel (see `_xyz_to_las` `capture_origins`) exactly
@@ -24366,8 +24386,8 @@ _BEAM_ORIGIN_ALIAS_SETS = (
     ("beamoriginx", "beamoriginy", "beamoriginz"),
 )
 # Map each alias spelling (punctuation/case stripped) to its canonical origin
-# slug, preserving the x/y/z axis. Built once so `_normalise_origin_alias` is a
-# dict lookup mirroring `_normalise_miss_alias`.
+# slug, preserving the x/y/z axis. Built once so `_normalize_origin_alias` is a
+# dict lookup mirroring `_normalize_miss_alias`.
 _ORIGIN_ALIAS_TO_SLUG = {
     re.sub(r'[^a-z0-9]+', '', alias): _ORIGIN_SLUGS[axis]
     for triple in _BEAM_ORIGIN_ALIAS_SETS
@@ -24375,13 +24395,13 @@ _ORIGIN_ALIAS_TO_SLUG = {
 }
 
 
-def _normalise_origin_alias(name: str) -> Optional[str]:
+def _normalize_origin_alias(name: str) -> Optional[str]:
     """Return the canonical origin slug ('origin_x'/'origin_y'/'origin_z') when
     `name` is any beam-origin spelling (ox/oy/oz, xorigin/yorigin/zorigin,
     beamoriginx/y/z — case- and punctuation-insensitive), else None. Mirrors
-    `_normalise_miss_alias`, but maps to one of three axis-specific slugs.
+    `_normalize_miss_alias`, but maps to one of three axis-specific slugs.
 
-    Thin wrapper over the canonical table (see `_normalise_miss_alias`)."""
+    Thin wrapper over the canonical table (see `_normalize_miss_alias`)."""
     slug = _canonical_slug_for_name(name)
     return slug if slug in _ORIGIN_SLUGS else None
 
@@ -24392,23 +24412,23 @@ def _normalise_origin_alias(name: str) -> Optional[str]:
 # CANONICAL SLUG: Backfill Misses looks for `timestamp`, LAD's multi-return path
 # for `timestamp`/`target_index`/`target_count`, the miss filter for `is_miss`.
 # Source files spell these however their vendor pleased — RIEGL writes
-# `Reflectance`, LAS standardises `gps_time`, a Helios export writes
+# `Reflectance`, LAS standardizes `gps_time`, a Helios export writes
 # `Timestamp[s]`, and a user's own file might just say `time`.
 #
 # This table is the ONE place that knowledge lives. It previously existed in six
 # copies that did not share a source (two `aliases` dicts in the LAD readers,
-# `_normalise_miss_alias`, `_normalise_origin_alias`, `_role_from_header_name`,
+# `_normalize_miss_alias`, `_normalize_origin_alias`, `_role_from_header_name`,
 # and `role_for` in `_preview_las`), which is exactly why a `gps-time` column
-# could be recognised by the colour-by picker and simultaneously invisible to
+# could be recognized by the color-by picker and simultaneously invisible to
 # Backfill Misses: each site had its own opinion and fixing one left the others
 # stale. Add a spelling HERE and every consumer gets it.
 #
-# Matching is on the NORMALISED form (see `_normalise_column_name`): unit
+# Matching is on the NORMALIZED form (see `_normalize_column_name`): unit
 # suffixes stripped (`Timestamp[s]` → `timestamp`), lower-cased, non-alphanumerics
 # removed (`gps_time`/`gps-time`/`GPS Time` → `gpstime`). So entries below are
-# written pre-normalised — no underscores, no punctuation, no capitals.
+# written pre-normalized — no underscores, no punctuation, no capitals.
 #
-# NOTE the colour convention: this table maps colour to the '255-scale' roles
+# NOTE the color convention: this table maps color to the '255-scale' roles
 # (`r255`/`g255`/`b255`) that the ASCII/LAS pipeline uses. The import WIZARD's
 # dropdown exposes plain `r`/`g`/`b` and handles the scale with a separate
 # per-scan toggle. The two vocabularies are deliberately distinct; do not
@@ -24435,14 +24455,14 @@ _CANONICAL_NAME_ALIASES: "dict[str, tuple[str, ...]]" = {
 # The miss flag and the beam-origin triple keep their own constants (they are
 # referenced directly elsewhere), but fold into the same table so there is still
 # exactly one lookup.
-_CANONICAL_NAME_ALIASES[_MISS_SLUG] = tuple(sorted(_MISS_ALIASES_NORMALISED))
+_CANONICAL_NAME_ALIASES[_MISS_SLUG] = tuple(sorted(_MISS_ALIASES_NORMALIZED))
 for _axis, _slug in enumerate(_ORIGIN_SLUGS):
     _CANONICAL_NAME_ALIASES[_slug] = tuple(
         a for triple in _BEAM_ORIGIN_ALIAS_SETS
         for i_, a in enumerate(triple) if i_ == _axis
     )
 
-# Reverse index: normalised spelling → canonical slug. Built once.
+# Reverse index: normalized spelling → canonical slug. Built once.
 #
 # A spelling must not map to two slugs; that would make resolution depend on
 # dict order. Asserted at import so a bad edit fails loudly at startup rather
@@ -24459,7 +24479,7 @@ for _slug, _names in _CANONICAL_NAME_ALIASES.items():
         _CANONICAL_ALIAS_TO_SLUG[_name] = _slug
 
 
-def _normalise_column_name(name: str) -> str:
+def _normalize_column_name(name: str) -> str:
     """Fold a source column name to its comparison form.
 
     Strips a bracketed unit suffix (`Timestamp[s]`, `Reflectance[dB]`), lowers
@@ -24476,7 +24496,7 @@ def _canonical_slug_for_name(name: str) -> Optional[str]:
     None means "carry it as a plain scalar under its own name" — never a reason
     to drop a column.
     """
-    return _CANONICAL_ALIAS_TO_SLUG.get(_normalise_column_name(name))
+    return _CANONICAL_ALIAS_TO_SLUG.get(_normalize_column_name(name))
 
 
 # Seconds in a GPS week. GPS Week Time is seconds-into-week, so it is bounded by
@@ -24563,7 +24583,7 @@ def _dims_for_slug(dims, slug: str) -> "tuple[str, ...]":
     ordered = []
     for cand in (slug,) + _CANONICAL_NAME_ALIASES.get(slug, ()):
         for d in present:
-            if d not in ordered and _normalise_column_name(d) == _normalise_column_name(cand):
+            if d not in ordered and _normalize_column_name(d) == _normalize_column_name(cand):
                 ordered.append(d)
     ordered.extend(sorted(d for d in present if d not in ordered))
     return tuple(ordered)
@@ -24572,7 +24592,7 @@ def _dims_for_slug(dims, slug: str) -> "tuple[str, ...]":
 
 
 def _canonical_drop_slugs(drop_slugs: "Optional[List[str]]") -> "tuple[str, ...]":
-    """Normalise a wizard drop list to a sorted, de-duplicated, lower-cased tuple.
+    """Normalize a wizard drop list to a sorted, de-duplicated, lower-cased tuple.
 
     Used both to filter the session's extras and to key the octree cache, so the
     two can never disagree about what "the same drop list" means (['A','b'] and
@@ -24587,11 +24607,11 @@ def _canonical_drop_slugs(drop_slugs: "Optional[List[str]]") -> "tuple[str, ...]
 def _drops_channel(drop_slugs: "Optional[List[str]]", channel: str) -> bool:
     """True when the wizard unticked a NON-extra-dim channel.
 
-    `intensity` and the r/g/b colour triple are first-class session fields, not
+    `intensity` and the r/g/b color triple are first-class session fields, not
     entries in `extras`, so `_apply_drop_slugs` can't reach them — yet the
-    wizard offers them an Import checkbox like any other column. Colour is
+    wizard offers them an Import checkbox like any other column. Color is
     dropped only when the WHOLE triple is unticked: a cloud with two of three
-    channels has no meaningful colour, and the renderer has no way to show one.
+    channels has no meaningful color, and the renderer has no way to show one.
     """
     drop = set(_canonical_drop_slugs(drop_slugs))
     if not drop:
@@ -24614,7 +24634,7 @@ def _apply_drop_slugs(extras: "Optional[Dict[str, np.ndarray]]",
     single point where every format's arrays have been read but the session has
     not yet been built. The octree is rebuilt from these arrays
     (`_session_to_las` -> PotreeConverter), NOT from the source file, so
-    dropping here removes the field from the octree, the renderer's colour-by
+    dropping here removes the field from the octree, the renderer's color-by
     menu and every export, for all formats at once.
 
     Returns the filtered (extras, extra_dims_meta). Both may be None (formats
@@ -24662,7 +24682,7 @@ def _apply_role_overrides(extras: "Optional[Dict[str, np.ndarray]]",
     if not role_overrides:
         return extras, extra_dims_meta, None
 
-    # Normalise: source slugs are matched case-insensitively, like drop_slugs.
+    # Normalize: source slugs are matched case-insensitively, like drop_slugs.
     wanted = {str(k).strip().lower(): str(v).strip().lower()
               for k, v in role_overrides.items() if k and v}
     if not wanted:
@@ -24678,7 +24698,7 @@ def _apply_role_overrides(extras: "Optional[Dict[str, np.ndarray]]",
             if timestamp_source is None:
                 timestamp_source = src
             continue
-        excl = _canonicalise_exclusive_role(role)
+        excl = _canonicalize_exclusive_role(role)
         if excl is not None:
             if excl in claimed:
                 continue  # first claim wins
@@ -24757,7 +24777,7 @@ def _apply_scalar_labels(extra_dims_meta: "Optional[List[dict]]",
 # would otherwise silently orphan the duplicate under a deduped `<slug>_2` extra
 # that no algorithm looks up. 'extra'/'label' (many distinct named scalars) and
 # 'skip' are deliberately excluded. The r/g/b channels appear here without their
-# 255 variants because `_canonicalise_exclusive_role` folds r255->r etc., so a
+# 255 variants because `_canonicalize_exclusive_role` folds r255->r etc., so a
 # plan can't carry both a 0-255 and a 0-1 red.
 _EXCLUSIVE_PLAN_ROLES = frozenset(
     {'x', 'y', 'z', 'r', 'g', 'b', 'intensity', 'reflectance'}
@@ -24766,7 +24786,7 @@ _EXCLUSIVE_PLAN_ROLES = frozenset(
 )
 
 
-def _canonicalise_exclusive_role(role: str) -> Optional[str]:
+def _canonicalize_exclusive_role(role: str) -> Optional[str]:
     """Fold a plan entry's role token to the singleton key it competes for, or
     None if the role isn't a singleton. Collapses the 0-255 RGB variants onto the
     plain channel (r255->r) so 'red as 0-255' and 'red as 0-1' count as the same
@@ -24775,7 +24795,7 @@ def _canonicalise_exclusive_role(role: str) -> Optional[str]:
     if r in ('r255', 'g255', 'b255'):
         r = r[0]
     return r if r in _EXCLUSIVE_PLAN_ROLES else None
-# Distance (metres) at which a miss point is placed from the scanner origin along
+# Distance (meters) at which a miss point is placed from the scanner origin along
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
 
@@ -24788,7 +24808,7 @@ _PTX_HEADER_LINES = 10
 # Squared local range below which a cell is the "0 0 0" no-return sentinel.
 # Expressed as a range test rather than three == 0 comparisons so a writer
 # emitting -0.0 or 0.000000 is caught identically. A real return at exactly the
-# scanner's optical centre is physically impossible, so this cannot false-fire.
+# scanner's optical center is physically impossible, so this cannot false-fire.
 _PTX_MISS_RANGE2 = 1e-18
 # A cell this close to +/-Z has an arbitrary azimuth, so it must not pollute its
 # column's azimuth statistic (it still feeds the zenith one).
@@ -24814,7 +24834,7 @@ _PTX_MAX_EXTRAP_FRACTION = 0.10
 #       250,000 -> 0.47 GB,           13.8 s
 # So a big chunk buys nothing but memory. 500 k sits just past the knee (halving
 # again saves only 0.11 GB) and still gives 150 whole columns per chunk on a
-# 3333-row grid, keeping the pandas read comfortably vectorised.
+# 3333-row grid, keeping the pandas read comfortably vectorized.
 _PTX_CHUNK_CELLS = 500_000
 # Cells sampled per block when scoring the columns-vs-rows header hypotheses.
 _PTX_HYPOTHESIS_SAMPLE_CELLS = 4_000_000
@@ -24836,7 +24856,7 @@ _MISS_RAYTRACE_DISTANCE = 1001.0
 
 
 # Fraction of points allowed to sit below the reported ground level. Low-flying
-# noise (multipath, birds, scanner artefacts, a stray sub-surface return) is a
+# noise (multipath, birds, scanner artifacts, a stray sub-surface return) is a
 # tiny tail; real ground is a dense mode. 0.5% is well above any plausible noise
 # count and well below the ground's own share of a terrestrial scan.
 _GROUND_PERCENTILE = 0.5
@@ -24911,9 +24931,9 @@ def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
     """Outlier-resistant bounding box {"min": [...], "max": [...]}, or None.
 
     The percentile box the extent is measured across. The renderer needs the box
-    and not just the span: with far outliers the RAW box centre sits out in empty
+    and not just the span: with far outliers the RAW box center sits out in empty
     space among the strays, so a camera that converges on it stalls hundreds of
-    metres short of the data. This gives the centre of the actual content.
+    meters short of the data. This gives the center of the actual content.
     """
     if positions is None or len(positions) == 0 or positions.shape[1] < 3:
         return None
@@ -24944,7 +24964,7 @@ def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
 
     The raw bounding box is set by its most extreme point on each axis, so a
     handful of stray returns — multipath, birds, a mis-registered scan, a sky
-    point projected a kilometre out — inflate it by orders of magnitude. The
+    point projected a kilometer out — inflate it by orders of magnitude. The
     renderer scales the camera's zoom limits from the scene size, and limits
     derived from an inflated box are wrong for the content the user is actually
     looking at: you cannot get close enough to inspect anything, and the far
@@ -24986,7 +25006,7 @@ def _robust_attribute_ranges(
     so a handful of noise returns — a hot specular spike in reflectance, a bird
     above the canopy in z — push the end of the ramp out to where nothing lives.
     Every real point then crowds into a narrow band of the colormap and the
-    structure the user is trying to read washes out to one flat colour.
+    structure the user is trying to read washes out to one flat color.
 
     Computed HERE because this is the one place the full arrays are in RAM: the
     octree carries only PotreeConverter's absolute per-attribute extrema, and a
@@ -25025,7 +25045,7 @@ def _robust_attribute_ranges(
         # one: these columns are float32, where np.percentile returns float32
         # for a scalar q and float64 for a sequence of them, so merging the
         # calls would shift the colorbar's endpoints in their last few ULPs.
-        # A silent numerical change to every imported cloud's colour domain is
+        # A silent numerical change to every imported cloud's color domain is
         # not worth 0.5 s.
         finite = a if bool(ok.all()) else a[ok]
         if finite.size == 0:
@@ -25062,7 +25082,7 @@ def _autodetect_misses(
     scan (e.g. `x y z timestamp target_index target_count`) keeps the sentinel
     but loses `is_miss`, so the octree/overlay/LAD infrastructure — all of which
     key off `is_miss` — never sees them and the far-field points poison the
-    bounding box. We synthesise the flag here, at the single file-read point, so
+    bounding box. We synthesize the flag here, at the single file-read point, so
     every downstream consumer works unchanged.
 
     Precedence:
@@ -25074,7 +25094,7 @@ def _autodetect_misses(
          the C++ 0.98 band around miss_distance). `threshold` defaults to 1001 m.
       4. neither index nor origin → no signal; tag nothing (don't guess).
     """
-    # 1. Honour an explicit, already-flagged column.
+    # 1. Honor an explicit, already-flagged column.
     existing = extras.get(_MISS_SLUG)
     if existing is not None and bool(np.any(np.asarray(existing) != 0)):
         return 0
@@ -25104,7 +25124,7 @@ def _autodetect_misses(
     if count == 0:
         return 0
 
-    # Overwrite any all-zero is_miss column (e.g. one synthesised by a prior step)
+    # Overwrite any all-zero is_miss column (e.g. one synthesized by a prior step)
     # rather than appending a duplicate dim.
     extras[_MISS_SLUG] = miss.astype(np.float32)
     if not any(ed.get("slug") == _MISS_SLUG for ed in extra_dims_meta):
@@ -25130,7 +25150,7 @@ class ColumnPlanEntry(BaseModel):
     `role` is a Helios-style token (x/y/z/r255/g255/b255/r/g/b/intensity/
     reflectance/skip) or the literal 'extra' for a carried scalar field. For an
     'extra' column, `slug`/`label` give the on-disk LAS extra-dim name and the
-    picker label (rename), and `categorical` marks it for discrete colouring in
+    picker label (rename), and `categorical` marks it for discrete coloring in
     the renderer. `index` is the 0-based source column position.
     """
     index: int
@@ -25162,7 +25182,7 @@ class ColumnPlan(BaseModel):
         # the UI, this guards against any other/older client.
         seen: dict[str, int] = {}
         for entry in self.columns:
-            key = _canonicalise_exclusive_role(entry.role)
+            key = _canonicalize_exclusive_role(entry.role)
             if key is None:
                 continue
             if key in seen:
@@ -25205,7 +25225,7 @@ class PointCloudPreviewRequest(BaseModel):
     """Inspect a point-cloud file cheaply for the import wizard.
 
     Reads only the header + first `max_rows` data rows (ASCII) or the header +
-    a few points (LAS/PLY/PCD) — never materialises the whole file. The optional
+    a few points (LAS/PLY/PCD) — never materializes the whole file. The optional
     `ascii_format` hint biases role detection the same way the import path does.
     """
     file_path: str
@@ -25245,7 +25265,7 @@ class PreviewColumn(BaseModel):
     # defined layout, and reassigning them would break the reader.
     role_assignable: bool = False
     # Whether the wizard should pre-tick this column's Import checkbox. Defaults
-    # True, so every existing preview keeps its "offered means ticked" behaviour
+    # True, so every existing preview keeps its "offered means ticked" behavior
     # and a no-edit import stays byte-identical.
     #
     # False means "offered but off by default": the column is real and the user
@@ -25271,14 +25291,14 @@ class PointCloudPreviewResponse(BaseModel):
     # be probed cheaply.
     suggested_shift: Optional[List[float]] = None
     # The length unit the SOURCE declares, when it declares one: a slug from
-    # _UNIT_TO_METRES ("m", "ftUS", …). The wizard seeds its unit control from
+    # _UNIT_TO_METERS ("m", "ftUS", …). The wizard seeds its unit control from
     # this and, when `units_certain`, presents it as a statement rather than a
     # guess.
     #
     # `units_certain` is True only when the answer comes from the FORMAT — a
     # CRS in a LAS header, or a spec that fixes the unit (E57 and RIEGL are
-    # metres by definition). False means the format cannot say and the user is
-    # being asked; the wizard defaults to metres, which is what the app assumed
+    # meters by definition). False means the format cannot say and the user is
+    # being asked; the wizard defaults to meters, which is what the app assumed
     # implicitly before units existed.
     detected_units: Optional[str] = None
     units_certain: bool = False
@@ -25371,11 +25391,11 @@ def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
 
 
 def _role_from_header_name(name: str) -> Optional[str]:
-    """Map a header column name to a known XYZ role, or None if unrecognised.
+    """Map a header column name to a known XYZ role, or None if unrecognized.
 
-    Recognises the common terrestrial-scanner / Helios header conventions:
+    Recognizes the common terrestrial-scanner / Helios header conventions:
     'XYZ[0][m]'/'X' → x, 'Reflectance[dB]' → reflectance, 'Intensity' → intensity,
-    'Red'/'R' → r255, etc. An unrecognised name returns None so the caller can
+    'Red'/'R' → r255, etc. An unrecognized name returns None so the caller can
     carry it as an extra-dimension scalar (e.g. 'Deviation[]', 'Timestamp[s]').
 
     Delegates to `_canonical_slug_for_name` — this function's only remaining job
@@ -25395,10 +25415,10 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
 
     When the file has a header row (comma- or whitespace-delimited names with
     letters), map each header name to a known role via `_role_from_header_name`
-    and leave unrecognised columns as 'skip' — the LAS writer's column plan
+    and leave unrecognized columns as 'skip' — the LAS writer's column plan
     then carries those as extra-dimension scalars under their header name.
     This is what makes a Pistachio-style export's Reflectance/Deviation/...
-    columns colourable after import.
+    columns colorable after import.
 
     Without a header, fall back to the positional convention: xyz first, then
     r255/g255/b255 if there are six columns, then intensity at column seven.
@@ -25413,12 +25433,12 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
             return roles
 
     # Sample the first chunk of data rows: we need the column count AND, for the
-    # RGB assumption, the actual value ranges of the candidate colour columns.
+    # RGB assumption, the actual value ranges of the candidate color columns.
     sample: List[List[float]] = []
     ncols = 0
     # A PTS count line is a bare integer, so the letter test below reads it as
     # data — and being 1 column wide it would set ncols=1 and short-circuit the
-    # whole layout to a bare x/y/z, discarding the file's real colour/intensity
+    # whole layout to a bare x/y/z, discarding the file's real color/intensity
     # columns. Drop it before sampling.
     skip_count_line = _is_pts_count_header(file_path)
     seen_uncommented = False
@@ -25436,7 +25456,7 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
             # notation and nan/inf are letter-bearing DATA, and skipping every
             # such row walked the entire file and then returned an empty sample
             # (falling back to a bare x/y/z layout that discards the file's real
-            # colour/intensity columns). See `_is_header_row`.
+            # color/intensity columns). See `_is_header_row`.
             if not seen_uncommented:
                 seen_uncommented = True
                 if _is_header_row(line):
@@ -25474,7 +25494,7 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
            and _any_column_has_decimals(sample, range(xyz_start + 1, ncols))):
         xyz_start += 1
 
-    # Recognised structured-scan index spellings for up to two leading columns.
+    # Recognized structured-scan index spellings for up to two leading columns.
     index_roles = ['row_index', 'column_index']
     roles: List[str] = [index_roles[i] if i < len(index_roles) else 'skip'
                         for i in range(xyz_start)]
@@ -25484,16 +25504,16 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
 
     # Canonical PTS puts INTENSITY BETWEEN xyz and RGB — `x y z intensity r g b`
     # (Leica Cyclone; also what CloudCompare writes). That one column of offset
-    # defeats the generic rule below, which only recognises RGB directly after
+    # defeats the generic rule below, which only recognizes RGB directly after
     # xyz: a real 7-column PTS came back as ['x','y','z','skip','skip','skip',
-    # 'skip'], silently dropping BOTH colour and intensity. Checked before the
+    # 'skip'], silently dropping BOTH color and intensity. Checked before the
     # generic rule (an `x y z i r g b` file satisfies neither on its own) and
     # gated on the extension, so no other ASCII layout changes meaning.
     #
     # PTS intensity is conventionally -2048..2047, but exporters vary (0..255
     # and 0..1 both occur), so intensity is identified POSITIONALLY and only the
     # RGB triple is range-checked — that check is what keeps a 7-column file
-    # whose columns 4-6 aren't colour from being mislabelled here.
+    # whose columns 4-6 aren't color from being mislabeled here.
     if (rest == 4
             and os.path.splitext(file_path)[1].lower() == '.pts'
             and _columns_look_like_rgb255(
@@ -25503,7 +25523,7 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
     # An RGB triple — three consecutive 0-255 integer columns — typically
     # follows xyz when present. Tagging it r255/g255/b255 saves the user three
     # manual reassignments; the range check (via `_columns_look_like_rgb255`)
-    # rejects timestamp / return-count columns, so we never mislabel non-colour.
+    # rejects timestamp / return-count columns, so we never mislabel non-color.
     if rest >= 3 and _columns_look_like_rgb255(
             sample, (rest_start, rest_start + 1, rest_start + 2)):
         roles += ['r255', 'g255', 'b255']
@@ -25532,8 +25552,8 @@ def _columns_look_like_rgb255(sample: List[List[float]], idxs) -> bool:
     Used by the headerless positional fallback to avoid tagging a timestamp or
     return-count column as 'red'. We require, across the sampled rows, that
     every candidate value is a non-negative integer within 0-255. We do NOT
-    require the columns to span the full range (a uniform grey patch is valid
-    colour), only that nothing falls outside it. With no sample to inspect we
+    require the columns to span the full range (a uniform gray patch is valid
+    color), only that nothing falls outside it. With no sample to inspect we
     return False — better to leave columns unassigned than to guess wrong.
     """
     if not sample:
@@ -25729,7 +25749,7 @@ def _sanitize_extra_dim_name(raw: str) -> str:
     laspy/LAS extra dimensions accept a restricted name set: we keep
     [A-Za-z0-9_], collapse every other run to a single underscore, trim
     leading/trailing underscores, and cap at the 32-char LAS limit. A name
-    that sanitises to empty (e.g. all punctuation) falls back to 'field'.
+    that sanitizes to empty (e.g. all punctuation) falls back to 'field'.
     Callers dedupe collisions; this function is deterministic per input.
 
     Examples:
@@ -25746,7 +25766,7 @@ def _sanitize_extra_dim_name(raw: str) -> str:
 # LAS point format 3 (and the standard dimensions every format carries) reserve
 # these names. An extra dimension may NOT reuse one — laspy's dtype build fails
 # with "field '<name>' occurs more than once". A user-renamed scalar, or a
-# source column literally named "Intensity"/"Classification", can sanitise onto
+# source column literally named "Intensity"/"Classification", can sanitize onto
 # one of these, so we rename the collision. Matched case-insensitively because
 # laspy lower-cases extra-dim names internally.
 _LAS_RESERVED_DIM_NAMES = {
@@ -25772,7 +25792,7 @@ def _avoid_reserved_las_dim(slug: str) -> str:
 def _humanize_extra_dim_label(raw: str) -> str:
     """Tidy a source header into a human-readable picker label.
 
-    Keeps unit brackets but normalises whitespace and drops empty brackets:
+    Keeps unit brackets but normalizes whitespace and drops empty brackets:
       'Reflectance[dB]' -> 'Reflectance [dB]'
       'Target Index[]'  -> 'Target Index'
       'Deviation[]'     -> 'Deviation'
@@ -25829,7 +25849,7 @@ def _read_ascii_header_names(file_path: str) -> Optional[List[str]]:
 
 # A pandas `names=` list can't contain a repeated value, so a column plan that
 # skips more than one column can't use bare 'skip' for each. These helpers give
-# every skipped column a unique placeholder that the readers still recognise and
+# every skipped column a unique placeholder that the readers still recognize and
 # drop via `usecols`. Bare 'skip' (from the auto-detect path, which never repeats
 # it) is also treated as a skip for backwards compatibility.
 def _skip_name(pos: int) -> str:
@@ -25955,7 +25975,7 @@ def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
 def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
     """Build (names, extra_dims) directly from a wizard-supplied ColumnPlan.
 
-    Honours each entry's explicit role, and for role=='extra' the user's custom
+    Honors each entry's explicit role, and for role=='extra' the user's custom
     slug/label/categorical. Falls back to a sane slug when the wizard omitted
     one. Reserved roles keep their token; a multi-return role (or an extra
     slugged as one) is pinned to its canonical slug/label so the LAD path finds
@@ -25975,10 +25995,10 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
         # canonical slug/label so the LAD accessor can recover it by name. But a
         # column the user explicitly marked categorical (the wizard's 'Label'
         # role) is a discrete class field by intent: multi-return per-pulse
-        # values (timestamp/target index/count) are never categorical, so honour
+        # values (timestamp/target index/count) are never categorical, so honor
         # the user's choice and let it fall through to the generic extra-dim path
-        # (preserving its sanitised slug + categorical flag) instead of diverting
-        # it into the LAD canonicalisation, which would lower-case the slug and
+        # (preserving its sanitized slug + categorical flag) instead of diverting
+        # it into the LAD canonicalization, which would lower-case the slug and
         # relabel it as a per-pulse field.
         mr = role if role in _MULTI_RETURN_SLUGS else (entry.slug or '').lower()
         if mr in _MULTI_RETURN_SLUGS and not entry.categorical:
@@ -26007,8 +26027,8 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
         # (is_miss/miss/sky) carries under the canonical is_miss slug so the LAD
         # path and renderer find it by name — matching the E57/PLY convention.
         # Never categorical (it's a 0/1 flag the LAD check reads as a continuous
-        # value), so honour it regardless of the wizard's categorical toggle.
-        ms = role if role == _MISS_SLUG else _normalise_miss_alias(entry.slug or '')
+        # value), so honor it regardless of the wizard's categorical toggle.
+        ms = role if role == _MISS_SLUG else _normalize_miss_alias(entry.slug or '')
         if ms == _MISS_SLUG:
             slug = _dedupe_slug(_MISS_SLUG, used_slugs)
             col_id = f"extra:{slug}"
@@ -26018,7 +26038,7 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
                                "categorical": False})
             continue
         # Per-pulse beam-origin column (the wizard's Beam Origin X/Y/Z role, or an
-        # 'extra' whose slug normalises to an ox/oy/oz alias). These are world/UTM
+        # 'extra' whose slug normalizes to an ox/oy/oz alias). These are world/UTM
         # emission coordinates needing FULL float64 precision, so — unlike every
         # other branch above — they must NOT become a float32 extra dim (the LAS is
         # 1 mm-quantized and extras are float32; both would shatter them). Instead
@@ -26026,7 +26046,7 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
         # the column (it's not a skip name, so pandas/usecols read it) and captures
         # it into the float64 origin side-channel, exactly like `capture_full_xyz`
         # does for positions. Deliberately NOT appended to `extra_dims`.
-        ori = role if role in _ORIGIN_SLUGS else (_normalise_origin_alias(entry.slug or '') or '')
+        ori = role if role in _ORIGIN_SLUGS else (_normalize_origin_alias(entry.slug or '') or '')
         if ori in _ORIGIN_SLUGS:
             names.append(f"origin:{ori}")
             continue
@@ -26064,7 +26084,7 @@ def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str],
       - `names` is the per-column identifier list for pandas `names=` — known
         roles keep their role token (x/y/z/r255/intensity/...), extras get a
         unique 'extra:<slug>' identifier, and truly droppable columns (no
-        header name, beyond the recognised layout) stay 'skip'.
+        header name, beyond the recognized layout) stay 'skip'.
       - `extra_dims` is an ordered list of dicts {col, slug, label, categorical}
         for each carried extra column, where `col` is the matching entry in
         `names`.
@@ -26072,7 +26092,7 @@ def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str],
     When `column_plan` is supplied (the import wizard's explicit choices) it
     fully determines the layout — roles, custom slugs/labels, and the
     categorical flag — bypassing header/format sniffing. When it's None,
-    behaviour is exactly as before: role tokens come from
+    behavior is exactly as before: role tokens come from
     `_tokenize_ascii_format` / `_autodetect_xyz_columns`, and extras are named
     from the header row (or a positional 'Column N' fallback).
     """
@@ -26181,13 +26201,13 @@ def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
 _PROGRESS_MARKER_MAGIC = b"PHP1"
 
 
-def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=False,
+def _pack_progress_marker(progress, message: str, *, run_id=None, canceled=False,
                           error=None) -> bytes:
     """Pack one PHP1 progress marker. `progress` is a 0..1 fraction or None.
 
     `run_id` (when set) rides the first marker so the renderer learns the
-    cancellation token before any heavy work starts; `cancelled` rides the
-    terminal marker emitted in place of a frame when a run is cancelled;
+    cancellation token before any heavy work starts; `canceled` rides the
+    terminal marker emitted in place of a frame when a run is canceled;
     `error` rides the terminal marker when the worker RAISED.
 
     Why `error` exists: these endpoints are StreamingResponses, so `200 OK` and
@@ -26197,14 +26217,14 @@ def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=Fals
     truncated body and had to guess. (A user-reported Helios triangulation crash
     was logged server-side as a full traceback while the access log cheerfully
     recorded `POST /api/triangulate/helios 200`.) Carrying the failure in-band,
-    exactly as `cancelled` already does, is the only way to report it on a
+    exactly as `canceled` already does, is the only way to report it on a
     stream that has already committed its status line."""
     import struct
     obj = {"progress": progress, "message": message}
     if run_id is not None:
         obj["run_id"] = run_id
-    if cancelled:
-        obj["cancelled"] = True
+    if canceled:
+        obj["canceled"] = True
     if error is not None:
         obj["error"] = error
     payload = json.dumps(obj).encode("utf-8")
@@ -26216,15 +26236,15 @@ def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=Fals
 # Long-running streaming ops (synthetic scan, triangulation, LAD inversion) run
 # off-thread in an executor; the heavy C++/Open3D primitives are monolithic, so
 # cancellation is cooperative — the worker polls a per-run threading.Event at
-# every stage boundary and raises ScanCancelled, which unwinds its `with
+# every stage boundary and raises ScanCanceled, which unwinds its `with
 # Context()/LiDARCloud()` blocks and frees the multi-GB C++/numpy memory
-# promptly. A run is cancelled either by the client POSTing /api/cancel/{run_id}
+# promptly. A run is canceled either by the client POSTing /api/cancel/{run_id}
 # or by the client disconnecting (detected in _bin_frame_streaming_response).
-class ScanCancelled(Exception):
-    """Raised inside a streaming worker when its run has been cancelled."""
+class ScanCanceled(Exception):
+    """Raised inside a streaming worker when its run has been canceled."""
 
 
-# Serialises the LAS writes of PRIVATE (not-yet-reachable) sessions — see
+# Serializes the LAS writes of PRIVATE (not-yet-reachable) sessions — see
 # `_session_rebuild(private=True)`. It exists to keep the write throttle the
 # global `_cloud_session_lock` was providing by accident, WITHOUT blocking every
 # unrelated session request for the writes' combined duration.
@@ -26235,13 +26255,13 @@ _CANCEL_REGISTRY_LOCK = threading.Lock()
 
 
 def _cancel_checkpoint(progress) -> None:
-    """Raise ScanCancelled if `progress` is a reporter whose run was cancelled.
+    """Raise ScanCanceled if `progress` is a reporter whose run was canceled.
 
     Workers call this at stage boundaries; raising unwinds their `with Context()/
     LiDARCloud()` blocks so the C++/numpy memory is freed promptly. A no-op when
     progress is None (e.g. unit tests calling a worker directly)."""
     if progress is not None and getattr(progress, "should_cancel", None) and progress.should_cancel():
-        raise ScanCancelled()
+        raise ScanCanceled()
 
 
 def _new_cancel_token() -> "tuple[str, threading.Event]":
@@ -26330,7 +26350,7 @@ class _SegProc:
     def __init__(self, argv, env, error_log: str, stdout_log: "str | None" = None,
                  stdout_fd: "int | None" = None):
         # `setpgroup=0` puts the child in its OWN process group (pgid == its pid)
-        # so `_kill_seg_worker` can killpg the worker's subtree WITHOUT signalling
+        # so `_kill_seg_worker` can killpg the worker's subtree WITHOUT signaling
         # the backend's own group. This is non-negotiable: getpgid would otherwise
         # return the parent's group and a cancel would SIGKILL the whole backend.
         # Send the child's stdout/stderr to the error log file (fd 1 & 2).
@@ -26715,8 +26735,8 @@ class _ProgressReporter:
     """Callable progress reporter handed to streaming workers.
 
     Calling it (`progress(fraction, message)`) queues a PHP1 marker for the
-    stream. `should_cancel()` / `cancelled` let the worker poll its run's cancel
-    Event at stage boundaries and raise ScanCancelled to unwind promptly.
+    stream. `should_cancel()` / `canceled` let the worker poll its run's cancel
+    Event at stage boundaries and raise ScanCanceled to unwind promptly.
 
     `cancel_int` is an optional ctypes c_int shared with the C++ ray loop: a
     worker registers one via `bind_cancel_int()` and the stream loop flips it to
@@ -26744,12 +26764,12 @@ class _ProgressReporter:
         return self._cancel_event
 
     @property
-    def cancelled(self) -> bool:
+    def canceled(self) -> bool:
         return self.should_cancel()
 
-    def raise_if_cancelled(self) -> None:
+    def raise_if_canceled(self) -> None:
         if self.should_cancel():
-            raise ScanCancelled()
+            raise ScanCanceled()
 
     def bind_cancel_int(self, cancel_int) -> None:
         """Register the ctypes c_int the C++ ray loop polls for this run."""
@@ -26769,9 +26789,9 @@ class _WindowedProgress:
     raises when its argument exposes a truthy `should_cancel`. Windowing the
     fraction with a bare closure therefore SILENTLY strips cancellation from
     every checkpoint the sub-worker runs — the failure is invisible (no error,
-    no log; the work simply runs to completion after the user cancelled), which
+    no log; the work simply runs to completion after the user canceled), which
     is exactly how it survived in `_do_create_multi_cloud_session`. Wrapping in
-    a class that delegates `should_cancel`/`cancelled`/`raise_if_cancelled`/
+    a class that delegates `should_cancel`/`canceled`/`raise_if_canceled`/
     `bind_cancel_int` keeps the two concerns from being separable by accident.
 
     Use this anywhere a sub-range of a streaming op's progress is delegated;
@@ -26797,16 +26817,16 @@ class _WindowedProgress:
         return bool(fn()) if fn else False
 
     @property
-    def cancelled(self) -> bool:
+    def canceled(self) -> bool:
         return self.should_cancel()
 
     @property
     def cancel_event(self):
         return getattr(self._outer, "cancel_event", None)
 
-    def raise_if_cancelled(self) -> None:
+    def raise_if_canceled(self) -> None:
         if self.should_cancel():
-            raise ScanCancelled()
+            raise ScanCanceled()
 
     def bind_cancel_int(self, cancel_int) -> None:
         fn = getattr(self._outer, "bind_cancel_int", None)
@@ -26836,7 +26856,7 @@ def _bin_frame_streaming_response(
     Cancellation: when `cancel_event`/`run_id` are supplied, the run_id rides the
     first PHP1 marker (so the client can target /api/cancel/{run_id}), the stream
     loop also sets the event if the client disconnects, and a worker that raises
-    ScanCancelled yields a terminal `cancelled` marker instead of a frame."""
+    ScanCanceled yields a terminal `canceled` marker instead of a frame."""
     import asyncio
     import inspect
     import queue as _queue
@@ -26910,15 +26930,15 @@ def _bin_frame_streaming_response(
                 pass
             try:
                 yield await fut
-            except ScanCancelled:
+            except ScanCanceled:
                 # Cooperative cancel landed: the worker unwound its Context/
                 # LiDARCloud (memory freed). Tell the client instead of a frame.
-                yield _pack_progress_marker(None, "Cancelled", cancelled=True)
+                yield _pack_progress_marker(None, "Canceled", canceled=True)
             except Exception as e:  # noqa: BLE001
                 # The worker raised. We are mid-body: the 200 status line and
                 # headers went out before the executor was even scheduled, so
                 # the status CANNOT be changed to a 5xx here. Report the failure
-                # in-band as a terminal marker (the same mechanism `cancelled`
+                # in-band as a terminal marker (the same mechanism `canceled`
                 # uses) so the client raises a real error instead of trying to
                 # decode a truncated frame and reporting something misleading.
                 # Still log the traceback: the server-side record is what makes
@@ -26944,7 +26964,7 @@ def _load_xyz_arrays(
     so the crop endpoint can reuse the loader and apply a boolean mask
     before responding.
 
-    Positions are float64 because projected (UTM) coordinates lose centimetre
+    Positions are float64 because projected (UTM) coordinates lose centimeter
     detail in float32 — see the dtype note on the read below.
 
     When `column_plan` is supplied (import wizard) it determines the column
@@ -26984,11 +27004,11 @@ def _load_xyz_arrays(
     try:
         # float64, NOT float32: projected coordinates (UTM eastings ~5e5,
         # northings ~5.4e6) have a float32 spacing of 0.03-0.5 m, so parsing as
-        # float32 quantises the cloud onto a coarse lattice BEFORE anything can
-        # recentre it — on a real UTM tile that collapsed ~99% of distinct
-        # northings and destroyed centimetre-scale branch geometry. The cost is
+        # float32 quantizes the cloud onto a coarse lattice BEFORE anything can
+        # recenter it — on a real UTM tile that collapsed ~99% of distinct
+        # northings and destroyed centimeter-scale branch geometry. The cost is
         # 2x transient parse memory; positions are returned as float64 (what
-        # every compute consumer wants anyway) and only colour/intensity are
+        # every compute consumer wants anyway) and only color/intensity are
         # narrowed back to float32 below.
         df = pd.read_csv(
             file_path,
@@ -27068,7 +27088,7 @@ def _load_ply_pcd_arrays(
         raise HTTPException(status_code=400, detail=f"No points found in {file_path}")
 
     # float64 for the same reason as the ASCII loader: a projected PLY/PCD
-    # would otherwise be quantised onto a decimetre lattice at parse time.
+    # would otherwise be quantized onto a decimeter lattice at parse time.
     # (open3d already reads points as float64 internally.)
     positions = points.astype(np.float64, copy=False)
     colors = np.asarray(cloud.colors).astype(np.float32, copy=False) if cloud.has_colors() else None
@@ -27174,7 +27194,7 @@ def _load_las_arrays(
     """Read a LAS/LAZ file into (positions[N,3] float64, colors[N,3] float32 in
     0-1 | None, intensity[N] float32 | None). Same laspy read as the legacy
     multipart `/api/pointcloud/import` endpoint, but returns the arrays for the
-    binary `import_by_path` stream instead of JSON-serialising them — so a large
+    binary `import_by_path` stream instead of JSON-serializing them — so a large
     LAZ no longer round-trips through `points.tolist()` + a 100s-of-MB JSON body.
     """
     try:
@@ -27220,7 +27240,7 @@ def _iter_session_hit_positions(src: "PointSource", rows: "Optional[int]" = None
     streaming form for point-local tools (C2M, DEM pre-binning), which have no
     reason to hold every surviving point at once.
 
-    Same selection as the whole-array read: deletions honoured, misses dropped
+    Same selection as the whole-array read: deletions honored, misses dropped
     unless `include_misses`, `world_shift` and `translation` added. The survivor
     indices are taken once under the session lock and each block is gathered
     under it, so the working set is one block. `max_points` is not supported
@@ -27253,7 +27273,7 @@ def _source_point_count_estimate(src: "PointSource") -> int:
     """How many points a `_read_points_and_extras(src)` call is about to copy,
     for the memory budget. Session sources answer from the in-RAM arrays; a file
     source answers from the LAS header when it is one, else 0 (unknown - the
-    admission then costs nothing, which is the pre-budget behaviour)."""
+    admission then costs nothing, which is the pre-budget behavior)."""
     sid = getattr(src, "session_id", None)
     if sid:
         sess = _peek_cloud_session(sid)
@@ -27308,12 +27328,12 @@ def _read_points_and_extras(
     When `src.session_id` is set, points come from the live cloud session's
     in-RAM array with its per-point deletions already applied (the Family-1
     source of truth), so downstream ops honor unbaked deletions without a
-    rebuild. The compute consumers of this path want positions only, so colours
+    rebuild. The compute consumers of this path want positions only, so colors
     and intensity are surfaced ONLY when `src.want_colors` is set — which the
     export endpoint does. Before that, the session branch hardcoded both to None
     regardless of the flag, so exporting a session-backed cloud (the app's normal
     state for every octree import) silently dropped RGB and intensity: the LAS
-    writer saw no colours and downgraded to point format 0, so the dimension was
+    writer saw no colors and downgraded to point format 0, so the dimension was
     absent rather than merely blank.
 
     Sky/miss points (`is_miss != 0`) are dropped here on BOTH branches, exactly
@@ -27321,7 +27341,7 @@ def _read_points_and_extras(
     miss is a ray that hit nothing, projected ~1 km out — it is not a surface
     point, so every compute consumer of this chokepoint (triangulate, skeleton,
     hits-only LAD, export) must skip it. Leaving them in not only meshes a
-    phantom shell a kilometre away but, for ball-pivoting, makes BPA explode
+    phantom shell a kilometer away but, for ball-pivoting, makes BPA explode
     combinatorially and hang; for ICP it inflates the bbox diagonal ~170x, which
     scales max_correspondence_distance into a confidently-wrong alignment. The
     session branch reads `sess.extras`; the file branch probes the file's own
@@ -27363,7 +27383,7 @@ def _read_points_and_extras(
                         and 'timestamp' not in extras
                         and sess.timestamps.shape[0] == sess.positions.shape[0]):
                     extras['timestamp'] = np.asarray(sess.timestamps[keep])
-            # Surface colours/intensity only when asked (export does; the compute
+            # Surface colors/intensity only when asked (export does; the compute
             # consumers don't need them and skip the copy). The session stores
             # both at LAS uint16 scale, but every consumer of this function's
             # return — `_format_points_as_text`, the LAS writer's `* 65535` — wants
@@ -27536,7 +27556,7 @@ _DEFAULT_OCTREE_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024
 
 
 def _octree_cache_max_bytes() -> int:
-    """The octree cache size cap, honouring PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES.
+    """The octree cache size cap, honoring PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES.
 
     A malformed override falls back to the default rather than raising — an
     unparseable env var must not break an import, a bake or a transform.
@@ -27561,7 +27581,7 @@ def _octree_cache_root() -> _Path:
     dir. It used to be ~/Library/Application Support/Phytograph/cache/octrees,
     and on a (default, case-insensitive) APFS volume that `cache` is the very
     same directory as `<userData>/Cache` — Chromium's HTTP cache, which Chromium
-    empties when it initialises its disk cache. Every app launch therefore
+    empties when it initializes its disk cache. Every app launch therefore
     deleted the whole octree cache, and a second concurrent instance deleted it
     mid-session. Mirrored on the Electron side by resolveOctreeCacheRoot in
     src/main/octreeCacheRoot.ts and pinned by the shared contract in
@@ -27579,7 +27599,7 @@ def _octree_cache_root() -> _Path:
 
 
 def _canonical_ascii_format(ascii_format: Optional[str]) -> str:
-    """Normalise whitespace and case so equivalent format strings hash the same."""
+    """Normalize whitespace and case so equivalent format strings hash the same."""
     if not ascii_format:
         return ""
     return " ".join(ascii_format.split()).lower()
@@ -27690,7 +27710,7 @@ def _resolve_potree_converter_path() -> _Path:
 def _intensity_to_las_uint16(values: "np.ndarray",
                              lo: "Optional[float]" = None,
                              hi: "Optional[float]" = None) -> "np.ndarray":
-    """Map an intensity/reflectance column to the LAS uint16 field by normalising
+    """Map an intensity/reflectance column to the LAS uint16 field by normalizing
     a finite range to 0..65535.
 
     The LAS intensity field is uint16, so the source values must land in
@@ -27699,12 +27719,12 @@ def _intensity_to_las_uint16(values: "np.ndarray",
     use [0, 1] floats, the legacy convention was [0, 255], and Helios's raw
     "intensity" is a signed beam·normal dot product. A fixed `* 256` + clip(0, …)
     crushes every all-negative column (dB, signed dot-products) to a uniform 0 —
-    losing the field entirely. Normalising from the column's range instead
-    preserves the gradient for any scale; the renderer colours by the resulting
+    losing the field entirely. Normalizing from the column's range instead
+    preserves the gradient for any scale; the renderer colors by the resulting
     range either way (see OctreePointCloud `attributeRanges.intensity`). Mirrors
-    the E57 path's per-scan normalisation.
+    the E57 path's per-scan normalization.
 
-    Pass `lo`/`hi` to normalise against a precomputed GLOBAL range (the chunked
+    Pass `lo`/`hi` to normalize against a precomputed GLOBAL range (the chunked
     ASCII path does this so the gradient is consistent across chunk seams); omit
     them to use this array's own finite min/max. Non-finite values map to 0. A
     zero-width range maps to all-0 (no gradient, and avoids a divide-by-zero).
@@ -27801,10 +27821,10 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     by total point count.
 
     Column layout uses the same `ascii_format` convention as
-    `_load_xyz_arrays` — roles are tokenised, with x/y/z mandatory and
+    `_load_xyz_arrays` — roles are tokenized, with x/y/z mandatory and
     r255/g255/b255/intensity (or reflectance, mapped to intensity) optional.
     Any remaining numeric columns are carried into the octree as LAS extra
-    dimensions (float32) so the renderer can colour by them later.
+    dimensions (float32) so the renderer can color by them later.
 
     Returns (total_points, extra_dims, full_xyz, origins), where extra_dims is
     the [{slug, label}, ...] list of carried scalar attributes (for the cache's
@@ -27848,7 +27868,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     # A scan with BOTH intensity and reflectance columns can only put one in the
     # LAS intensity field. The other is a reserved role (so `_plan_columns`
     # didn't carry it) yet pandas still reads it — without rescue it's silently
-    # dropped. Carry it as an extra dim under its own slug so it's colourable /
+    # dropped. Carry it as an extra dim under its own slug so it's colorable /
     # filterable like any scalar, instead of vanishing.
     secondary_intensity = None
     if intensity_role is not None:
@@ -28079,7 +28099,7 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                     record.green = np.clip(chunk[gc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
                     record.blue = np.clip(chunk[bc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
             if intensity_role is not None:
-                # Map intensity/reflectance to the LAS uint16 field, normalising
+                # Map intensity/reflectance to the LAS uint16 field, normalizing
                 # the column's GLOBAL finite range (computed above) — handles dB,
                 # [0,1], [0,255], and signed dot-product scales uniformly.
                 record.intensity = _intensity_to_las_uint16(
@@ -28102,10 +28122,10 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                 if _ts_vals.size and np.nanmax(np.abs(_ts_vals)) > _GPS_WEEK_SECONDS:
                     _mark_gps_time_absolute(writer.header)
             for ed in extra_dims:
-                # Extra dims carry RAW values (the renderer normalises by the
+                # Extra dims carry RAW values (the renderer normalizes by the
                 # attribute's own range) — including a rescued secondary
                 # intensity/reflectance column, so its true dB/float values stay
-                # available for colour-by and filtering.
+                # available for color-by and filtering.
                 record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)
             writer.write_points(record)
             total_points += n
@@ -28118,14 +28138,14 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
     octree pipeline, preserving scalar fields as LAS extra dimensions.
 
     open3d (used on the flat path) drops every vertex property except position
-    and RGB, so we parse the PLY directly. Recognised roles: x/y/z (required),
+    and RGB, so we parse the PLY directly. Recognized roles: x/y/z (required),
     red/green/blue or r/g/b (RGB), and the first of intensity/scalar_intensity/
     reflectance (mapped to LAS intensity). Every remaining numeric vertex
-    property is carried as a float32 extra dimension so the renderer can colour
+    property is carried as a float32 extra dimension so the renderer can color
     by it — the same mechanism `_xyz_to_las` uses for unmapped ASCII columns.
 
     Sky/miss handling (for LAD): a property aliased to `is_miss` (is_miss/miss/
-    sky) is normalised to the canonical `is_miss` extra dim. Rows with non-finite
+    sky) is normalized to the canonical `is_miss` extra dim. Rows with non-finite
     (NaN/Inf) coordinates are also treated as misses — a structured/organized PLY
     marks empty grid cells that way. A generic PLY carries no scanner origin, so
     a NaN-coord miss has no recoverable beam direction; those rows are dropped
@@ -28181,7 +28201,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
         reserved.add(miss_col)
 
     # Carry every other numeric property as a float32 extra dim. Dedupe slugs
-    # the same way the ASCII path does, since two headers can sanitise alike.
+    # the same way the ASCII path does, since two headers can sanitize alike.
     extra_dims: List[dict] = []
     used_slugs: set[str] = set()
     for col in names:
@@ -28190,7 +28210,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
         slug = _sanitize_extra_dim_name(col)
         # A normal component keeps the canonical `nx`/`ny`/`nz` slug whatever the
         # file spelled it, so a cloud exported from here (or from CloudCompare)
-        # re-imports with its normals recognised instead of as three unrelated
+        # re-imports with its normals recognized instead of as three unrelated
         # scalars that nothing ever reassembles into a vector.
         slug = _PLY_NORMAL_ALIASES.get(col.lower(), slug)
         base, i = slug, 1
@@ -28201,7 +28221,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
         extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
 
     # `vertex` is plyfile's memory map of a binary PLY (ASCII PLY is parsed
-    # into RAM by plyfile itself). Nothing below materialises a full float64
+    # into RAM by plyfile itself). Nothing below materializes a full float64
     # copy of a coordinate column: the miss flag, the finiteness mask and the
     # bounds come from one pass in `_LAS_WRITE_CHUNK` blocks, and the LAS is
     # written block by block from the same map. Before this the converter held
@@ -28258,7 +28278,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
             _mark_gps_time_absolute(header)
         del _ts_all
 
-    # The intensity normaliser needs the column's range; give it the whole
+    # The intensity normalizer needs the column's range; give it the whole
     # column once (one numeric column, not the record) and let it map blocks.
     intensity_scaled = (_intensity_to_las_uint16(vertex[intensity_col][keep])
                         if intensity_col is not None else None)
@@ -28454,9 +28474,9 @@ def _pcd_to_las(source_path: _Path, out_las: _Path,
     ASCII and binary PCD are read in `_LAS_WRITE_CHUNK` blocks (binary through a
     memory map), so the whole file is never in RAM. Every single-valued numeric
     field is kept: x/y/z, packed rgb/rgba as LAS RGB, intensity/reflectance as
-    LAS intensity (normalised by its GLOBAL range), and the rest - normals
+    LAS intensity (normalized by its GLOBAL range), and the rest - normals
     (canonical nx/ny/nz), curvature, labels, … - as float32 scalar fields, a
-    timestamp as float64 gps_time. Points with non-finite x/y/z (an organised
+    timestamp as float64 gps_time. Points with non-finite x/y/z (an organized
     cloud's empty pixels) are dropped. The session's positions go into
     `positions_sink` at the file's own precision, not the LAS's 1 mm.
 
@@ -28635,7 +28655,7 @@ def _e57_scan_params(header, has_grid: bool) -> dict:
 
     Both sub-structures are optional in the spec; many files omit one or both.
     Every field is guarded independently — whatever isn't present is simply left
-    out so the renderer falls back to its default (XML-parity behaviour: blank
+    out so the renderer falls back to its default (XML-parity behavior: blank
     stays blank). Returns a dict with only the recoverable keys (may be empty).
     """
     params: dict = {}
@@ -28714,8 +28734,8 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
     multi-scan E57 merges into one cloud with every scan's misses placed relative
     to its own origin. The first scan's origin is stashed in `_import_scan_meta`
     (plus per-scan origins + the unplaceable-miss count) for the create endpoint.
-    Intensity is normalised per scan from its observed valid range (E57 intensity
-    is often 0..1 float); RGB colour (colorRed/Green/Blue) is carried into the LAS
+    Intensity is normalized per scan from its observed valid range (E57 intensity
+    is often 0..1 float); RGB color (colorRed/Green/Blue) is carried into the LAS
     when present (misses get black). Returns (n, extra_dims) with `is_miss` always
     present and `row_index`/`column_index` present when the source carried a grid.
     """
@@ -28895,7 +28915,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
 
             if "intensity" in keys:
                 inten = np.asarray(raw["intensity"], dtype=np.float64)
-                # Normalise from the VALID cells' observed range to LAS uint16.
+                # Normalize from the VALID cells' observed range to LAS uint16.
                 # E57 intensity is commonly 0..1 float; a flat clip(0,65535) would
                 # crush it to ~0. Misses have no real return -> 0.
                 valid = ~miss
@@ -28915,9 +28935,9 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
             else:
                 scan_intensity = None
 
-            # RGB colour, when the scan carries it. E57 stores per-channel
+            # RGB color, when the scan carries it. E57 stores per-channel
             # colorRed/Green/Blue, usually uint8 0..255 but the spec allows other
-            # integer ranges (declared in the file's colorLimits). Normalise each
+            # integer ranges (declared in the file's colorLimits). Normalize each
             # channel from its declared/observed max to 8-bit, then store as the
             # LAS uint16 convention (8-bit << 8) used by the PLY/PCD paths. Misses
             # get black — they have no real return.
@@ -28952,7 +28972,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
                 if scan_rgb is not None:
                     # Point format 3 carries RGB; *256 lifts 8-bit into the
                     # 16-bit LAS channel, matching _ply_to_las / _pcd_to_las so
-                    # colours render identically regardless of source format.
+                    # colors render identically regardless of source format.
                     record.red = scan_rgb[_a:_b, 0] * 256
                     record.green = scan_rgb[_a:_b, 1] * 256
                     record.blue = scan_rgb[_a:_b, 2] * 256
@@ -29245,7 +29265,7 @@ def _ptx_fill_lut(vals: "np.ndarray", unwrap: bool,
     """Complete a per-index angle LUT (NaN where an index had no valid cell).
 
     Indices with no measurement are linearly INTERPOLATED between populated
-    neighbours — exact for any smooth sweep, uniform or not — and the ENDS are
+    neighbors — exact for any smooth sweep, uniform or not — and the ENDS are
     EXTRAPOLATED with the robust median step. Returns (filled, trusted), where
     `trusted` is False further than `max_extrap_frac` of the axis beyond the
     populated range.
@@ -29636,7 +29656,7 @@ def _ptx_scan_params(block: _PtxBlock, model: _PtxGridModel,
             p0 = 90.0 - math.degrees(az_un[0]) - math.degrees(yaw)
             p1 = 90.0 - math.degrees(az_un[-1]) - math.degrees(yaw)
             # phi is a REFLECTION of az, so the sweep's low end is whichever
-            # endpoint maps lower. Normalise only the start and carry the span, so
+            # endpoint maps lower. Normalize only the start and carry the span, so
             # a sweep crossing north stays contiguous rather than folding to
             # min=0/max=360 (matching `_e57_scan_params`, which also lets the pair
             # run outside [0, 360)).
@@ -29671,11 +29691,11 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
     A file may hold several blocks (one per scan setup) with DIFFERENT dimensions
     and poses; each is transformed by its own pose and they merge into one cloud.
     The first block's origin and scan parameters are stashed in `_import_scan_meta`
-    for the create endpoint, mirroring E57's multi-scan behaviour.
+    for the create endpoint, mirroring E57's multi-scan behavior.
 
     With `out_las` set, writes that LAS and returns `(n, extra_dims, full_xyz)`;
     `full_xyz` is the float64 world coordinate array, because PTX is an ASCII
-    source and the LAS synthesised here is 1 mm-quantized so it must not become
+    source and the LAS synthesized here is 1 mm-quantized so it must not become
     the session's source of truth.
 
     With `out_las=None` it writes NOTHING and returns `(LasReadResult, scan_meta)`
@@ -29827,7 +29847,7 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
                 iv = np.where(valid, (grid[3] - inten_lo) / inten_span, 0.0)
                 out_intensity[sl] = np.clip(iv.T.ravel() * 65535.0, 0, 65535).astype(np.uint16)
             if out_colors is not None and block.n_tokens >= 7:
-                # PTX colour is 0-255; *256 lifts it into the 16-bit LAS channel,
+                # PTX color is 0-255; *256 lifts it into the 16-bit LAS channel,
                 # matching every other converter. Misses go black.
                 for ci, gi in ((0, 4), (1, 5), (2, 6)):
                     v = np.where(valid, grid[gi], 0.0).T.ravel()
@@ -29937,7 +29957,7 @@ _MULTI_SCAN_EXTENSIONS = {"e57", "ptx"}
 def _source_scan_count(source_path: _Path) -> int:
     """How many scan positions `source_path` holds. 1 for every format that can
     only hold one, and on any probe failure — a file we can't count is imported
-    as a single scan, which is the pre-existing behaviour."""
+    as a single scan, which is the pre-existing behavior."""
     ext = source_path.suffix.lower().lstrip(".")
     try:
         if ext == "ptx":
@@ -29969,7 +29989,7 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     conversion for XYZ/PLY; empty for PCD, which carries position + RGB only).
 
     `full_xyz` is the (N,3) float64 SOURCE-PRECISION coordinate array for every
-    converted format (XYZ family, PLY, PCD, PTX): the LAS we synthesise is
+    converted format (XYZ family, PLY, PCD, PTX): the LAS we synthesize is
     1 mm-quantized and so must not be the session's source of truth (1 mm
     shatters triangulation). It is written into `positions_sink` when the
     caller passes one (the session store, for a large cloud - see
@@ -30049,7 +30069,7 @@ _POTREE_RANDOM_SAMPLING_MIN_POINTS = 2_000_000
 # and it lives in a child process the Python-side estimates never saw - a
 # ground segmentation with split runs THREE converts at once (parent + two
 # children), 14 GB+ on a 100 M cloud. Every build is therefore admitted
-# against the memory budget at this rate, which serialises concurrent builds
+# against the memory budget at this rate, which serializes concurrent builds
 # on a machine that cannot hold them side by side.
 _POTREE_BYTES_PER_POINT = 72
 
@@ -30114,7 +30134,7 @@ def _run_potree_converter(
     multi-GB scan), so it must be interruptible. We spawn with Popen and poll
     instead of `subprocess.run` — run() retains no handle, so its child could
     never be killed. When `cancel_event` fires we hard-kill the child and raise
-    ScanCancelled, which unwinds `_build_octree_from_las`'s staging cleanup.
+    ScanCanceled, which unwinds `_build_octree_from_las`'s staging cleanup.
     """
     converter = _resolve_potree_converter_path()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -30152,7 +30172,7 @@ def _run_potree_converter(
     # crashes the child in the post-fork/pre-exec window (SIGSEGV, exit -11).
     # posix_spawn never forks the loaded image. It also puts the child in its OWN
     # process group, which is what lets `_kill_seg_worker` killpg the converter's
-    # subtree on cancel without ever signalling the backend's own group.
+    # subtree on cancel without ever signaling the backend's own group.
     returncode: int
     if hasattr(_os, "posix_spawn"):
         proc = _SegProc(cmd, env, str(log_path))
@@ -30177,7 +30197,7 @@ def _run_potree_converter(
                 # SIGKILL the whole server if the setpgroup ever failed).
                 _kill_seg_worker(proc)
                 proc.wait()
-                raise ScanCancelled()
+                raise ScanCanceled()
             time.sleep(poll)
         returncode = proc.poll()
     finally:
@@ -30195,7 +30215,7 @@ def _run_potree_converter(
     # to land in that window. The caller's staging cleanup discards the output.
     # Pinned by tests/test_converter_cancel_last_interval.py.
     if cancel_event is not None and cancel_event.is_set():
-        raise ScanCancelled()
+        raise ScanCanceled()
 
     if returncode != 0:
         # Surface the converter's output tail directly so failures are debuggable.
@@ -30240,7 +30260,7 @@ def _write_octree_labels(octree_dir: _Path, extra_dims: List[dict]) -> None:
     came from, `gps-time`, and that name is LOAD-BEARING: it is the key the
     renderer looks the GPU buffer up by (`geometry.attributes[field]`), so it
     must NOT be renamed in the octree itself — doing so silently breaks
-    colour-by, which was a real regression here.
+    color-by, which was a real regression here.
 
     But `gps-time` is not what a user should READ. Phytograph calls that
     quantity `timestamp` everywhere else — the import wizard's role, the export
@@ -30337,7 +30357,7 @@ def _install_octree_dir(
             # read, which is the CANCEL-SAFETY window. A cancel here leaves the
             # entry absent, and the caller's except removes the staging dir.
             if cancel_event is not None and cancel_event.is_set():
-                raise ScanCancelled()
+                raise ScanCanceled()
             # Say so rather than freezing a finished-looking bar for seconds.
             # Safe here despite the CANCEL-SAFETY INVARIANT: the reporter only
             # queues a marker, it never raises (see _ProgressReporter.__call__).
@@ -30377,7 +30397,7 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
     """Load metadata.json and return a renderer-friendly subset.
 
     Two quirks of PotreeConverter 2.x output we work around here:
-      1. The JSON contains lowercase `inf`/`-inf` literals on uninitialised
+      1. The JSON contains lowercase `inf`/`-inf` literals on uninitialized
          min/max fields for one of the attribute entries. Standard JSON
          rejects these, so we rewrite them to `null` before parsing.
       2. The attribute list often contains a duplicate `position` entry —
@@ -30403,7 +30423,7 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
 
     # PotreeConverter writes the FULL position attribute schema as two
     # entries: a primary "position" with the true min/max bounds, and a
-    # second "position" with morton-encoded extension bits (uninitialised
+    # second "position" with morton-encoded extension bits (uninitialized
     # min/max, hence the `inf` literals). The first occurrence is the one
     # we want for tight bounds; subsequent ones get dropped here.
     seen_attrs: set[str] = set()
@@ -30423,7 +30443,7 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
         # these for the intensity / height shaders' uniform ranges
         # (intensityRange, heightMin/Max) — without them the shader maps
         # every point to the same gradient sample and the cloud renders
-        # as a solid colour.
+        # as a solid color.
         amin = a.get("min")
         amax = a.get("max")
         entry: dict = {
@@ -30459,7 +30479,7 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
         # `bounds` is PotreeConverter's cube-padded octree extent (used by
         # the loader for LOD math). `tight_bounds` is the actual data
         # extent — what the UI should use for camera framing and crop-box
-        # initialisation. Fall back to the padded box if the tight values
+        # initialization. Fall back to the padded box if the tight values
         # were missing.
         "bounds": {
             "min": list(bbox.get("min", [0.0, 0.0, 0.0])),
@@ -30667,7 +30687,7 @@ def _evict_octree_cache(max_bytes: int,
     if not root.is_dir():
         return []
 
-    # Normalise `keep` to a set of resolved paths so callers can pass one path
+    # Normalize `keep` to a set of resolved paths so callers can pass one path
     # or several (the hits + miss octrees built in the same bake).
     if keep is None:
         keep_set: set = set()
@@ -30786,7 +30806,7 @@ def _detect_ascii_delimiter(file_path: str) -> Optional[str]:
 
     So: only the first non-comment line is eligible to be skipped as a header,
     and the search stops after `_DELIM_SNIFF_MAX_LINES` regardless. Past that cap
-    a file has no recognisable data row, and reading further cannot change the
+    a file has no recognizable data row, and reading further cannot change the
     answer — a full-file scan only ever bought a slower None."""
     seen_uncommented = False
     with open(file_path) as f:
@@ -30867,7 +30887,7 @@ def _column_type_hint(values: List[str], name: Optional[str] = None) -> str:
     known continuous measurements that merely LOOK like class labels in a
     sample — RIEGL's pulse-shape deviation is a small non-negative integer
     (RiSCAN exports commonly cap it at ~15), so the value shape alone would
-    offer to colour it as discrete classes."""
+    offer to color it as discrete classes."""
     nonblank = [v for v in values if v != '']
     if not nonblank:
         return 'empty'
@@ -30890,19 +30910,19 @@ def _column_type_hint(values: List[str], name: Optional[str] = None) -> str:
     return 'float' if all_float else 'categorical'
 
 
-# Columns whose VALUES are class ids rather than measurements, recognised by
+# Columns whose VALUES are class ids rather than measurements, recognized by
 # name. These are the class fields Phytograph's own tools write — tree
-# segmentation, wood/leaf, ground, denoise, the manual labelling tool — and an
+# segmentation, wood/leaf, ground, denoise, the manual labeling tool — and an
 # export puts each of them in the file under exactly this name, so a re-import
 # has to come back as a LABEL (categorical), not as a continuous scalar.
 #
 # It is not cosmetic. The wizard's role decides two things in the renderer: how
-# the field is COLOURED, and — for a slug that owns a registered scheme
+# the field is COLORED, and — for a slug that owns a registered scheme
 # (wood_class, ground_class, noise_class, las_classification) — whether
 # `registerContinuousSlug` SUPPRESSES that scheme, which it does process-wide
 # and for every cloud in the session, not just the re-imported one. Defaulting
 # these to "Scalar" therefore meant a round trip through our own exporter
-# turned Wood/Leaf into a grey gradient everywhere until the app was restarted.
+# turned Wood/Leaf into a gray gradient everywhere until the app was restarted.
 #
 # Mirrors SCHEMES + the dynamic categoricals in src/renderer/lib/
 # classification.ts — keep the two in sync. `height_above_ground` is
@@ -30918,7 +30938,7 @@ def _class_field_slugs() -> "set[str]":
 def _is_class_field_name(name: Optional[str]) -> bool:
     """True when `name` spells one of the class columns above.
 
-    Matched on a normalised key rather than the exact slug so the spellings a
+    Matched on a normalized key rather than the exact slug so the spellings a
     round trip actually produces still land: case and separators vary by
     format, and CloudCompare prefixes every imported scalar with `scalar_`.
     """
@@ -30993,7 +31013,7 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             # pre-select it — mirroring the grid-index roles above. The slug/label
             # are pinned to the canonical name (regardless of the source spelling
             # is_miss/miss/sky) so the LAD path and the renderer's fixed Hit/Miss
-            # colour scheme find it by name, matching `_plan_columns`.
+            # color scheme find it by name, matching `_plan_columns`.
             detected_role = _MISS_SLUG
             suggested_slug = _MISS_SLUG
             suggested_label = _MISS_LABEL
@@ -31100,7 +31120,7 @@ def _ply_header_properties(file_path: str) -> tuple[List[str], bool, List[List[s
 # PLY spellings of a per-point normal, mapped to the slugs Compute Normals
 # writes. `nx/ny/nz` is the canonical PLY convention (and what this app exports);
 # `normal_x` and `scalar_nx` are what CloudCompare emits. Keeping the slug stable
-# across a round trip is what lets an imported cloud's normals be RECOGNISED as
+# across a round trip is what lets an imported cloud's normals be RECOGNIZED as
 # normals rather than arriving as three unrelated scalar columns.
 _PLY_NORMAL_ALIASES = {
     'nx': 'nx', 'ny': 'ny', 'nz': 'nz',
@@ -31197,7 +31217,7 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
             # two disagreeing is how a column could be shown as `gps_time` here
             # and land under `timestamp` (or nowhere) after import.
             #
-            # LAS colour dims are the 255-scale roles; the table already returns
+            # LAS color dims are the 255-scale roles; the table already returns
             # r255/g255/b255 for red/green/blue.
             slug = _canonical_slug_for_name(n)
             if slug is None:
@@ -31258,7 +31278,7 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
                 type_hint='categorical' if (is_class or n.lower() == 'classification') else 'float',
                 remappable=False,
                 # Scalars can be reassigned; geometry cannot. An ExtraBytes name
-                # is a vendor string we may not recognise, so the user needs a
+                # is a vendor string we may not recognize, so the user needs a
                 # way to say what it is. x/y/z are a defined layout — offering to
                 # reassign them would only create a broken import.
                 role_assignable=role not in ('x', 'y', 'z'),
@@ -31283,12 +31303,12 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
 
 
 def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
-    """Summarise an E57's structure for the import wizard without decoding the
+    """Summarize an E57's structure for the import wizard without decoding the
     full point data. Reports the scan count, total points, and which attributes
     the file carries (read cheaply from the first scan's declared `point_fields`,
     no point decode). Columns are fixed (E57 defines its own layout), so they're
     not remappable — we surface position plus whatever of intensity / RGB the
-    file actually contains, so the user can see (and colour by) them.
+    file actually contains, so the user can see (and color by) them.
 
     `is_miss` is deliberately omitted: it's a system-managed flag the converter
     populates, not a user column — showing it as an editable "scalar" would imply
@@ -31322,7 +31342,7 @@ def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
         ]
         idx = 3
         # Surface the real scalars the converter carries through, so the wizard
-        # shows the user what they'll be able to colour by (intensity / RGB).
+        # shows the user what they'll be able to color by (intensity / RGB).
         if 'intensity' in fields:
             columns.append(PreviewColumn(
                 index=idx, header_name='intensity', detected_role='intensity',
@@ -31376,7 +31396,7 @@ def _ptx_probe_first_block(file_path: str) -> dict:
 
 
 def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
-    """Summarise a RIEGL raw project for the import wizard.
+    """Summarize a RIEGL raw project for the import wizard.
 
     A `.riproject` or `.PROJ` is a DIRECTORY and its point data is only
     reachable through RiVLib inside a container, so unlike every other preview
@@ -31427,7 +31447,7 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
         # 'extra'. Several of these columns ARE first-class roles — reflectance,
         # target_index, target_count — and reporting them as anonymous scalars
         # made the wizard show "Scalar" for a column every downstream tool keys
-        # off by name (multi-return grouping, the reflectance colour mode).
+        # off by name (multi-return grouping, the reflectance color mode).
         # A column with no canonical role (amplitude, deviation, facet, …) still
         # falls back to 'extra' and is carried under its own name.
         columns.append(PreviewColumn(
@@ -31471,14 +31491,14 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
 
 
 def _preview_ptx(file_path: str, max_rows: int = 20) -> PointCloudPreviewResponse:
-    """Summarise a PTX for the import wizard, with real sample rows.
+    """Summarize a PTX for the import wizard, with real sample rows.
 
     Columns are fixed — PTX defines its own layout (`x y z intensity [r g b]`)
     and `_ptx_to_las` reads those positions by spec — so they are not remappable;
     offering a mapping the converter ignores would be worse than offering none.
     But fixed schema does NOT mean no preview: PTX is plain ASCII sitting behind
     a 10-line header, so its rows cost nothing to read, and seeing them is how a
-    user confirms the column count and the intensity/colour scales before
+    user confirms the column count and the intensity/color scales before
     committing. (ASCII PLY, also fixed-schema, shows its rows for the same
     reason; E57 does not, because sampling it means decoding binary point data.)
 
@@ -31586,7 +31606,7 @@ def _las_hit_mins(file_path: str) -> Optional[np.ndarray]:
                     if seen >= _SHIFT_PROBE_MAX_POINTS:
                         break
                     continue
-                # Scale the raw ints ourselves: chunk.x/.y/.z would materialise a
+                # Scale the raw ints ourselves: chunk.x/.y/.z would materialize a
                 # float64 copy of every point including the misses we're dropping.
                 keep = ~miss
                 xyz = np.column_stack((
@@ -31711,7 +31731,7 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
             resp = _preview_riproject(str(source))
         if resp is not None:
             # What unit does the source declare, if any? Read before the shift
-            # probe because the probe's threshold is metre-calibrated (see
+            # probe because the probe's threshold is meter-calibrated (see
             # _SHIFT_SUGGEST_THRESHOLD) and the suggestion it returns has to be
             # in the same frame the points will end up in.
             _units, _factor, _certain = _detect_source_units(source)
@@ -31728,8 +31748,8 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
             # picks that AFTER this response is built. One scaler, in the one
             # place that knows the final answer.
             #
-            # The threshold inside `_suggest_global_shift` is metre-calibrated
-            # and is applied to raw values, so a millimetre-unit cloud can still
+            # The threshold inside `_suggest_global_shift` is meter-calibrated
+            # and is applied to raw values, so a millimeter-unit cloud can still
             # trip it spuriously; the suggestion is only ever a default the user
             # can turn off, so that is a nuisance rather than a correctness bug.
             resp.suggested_shift = _suggest_global_shift(str(source), resp)
@@ -31765,7 +31785,7 @@ def _canonical_translation(translation: Optional[List[float]]) -> str:
 def _canonical_region(region: dict) -> str:
     """Stable string form of the crop region for cache keying. Same shape →
     same string; same string → same octree. Polygon points and matrices are
-    serialised verbatim because re-cropping with even slightly different
+    serialized verbatim because re-cropping with even slightly different
     camera framing produces a different filter mask."""
     kind = region.get("kind")
     if kind == "box":
@@ -31934,7 +31954,7 @@ def _canonical_region(region: dict) -> str:
         if math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1])) < 1e-12:
             raise HTTPException(
                 status_code=400,
-                detail="region.a and region.b must differ (a slab needs a centreline).",
+                detail="region.a and region.b must differ (a slab needs a centerline).",
             )
         return "slab|{:.6g},{:.6g}|{:.6g},{:.6g}|{:.6g}|{:.6g},{:.6g}|{:.6g}|{}".format(
             float(a[0]), float(a[1]), float(b[0]), float(b[1]),
@@ -32040,7 +32060,7 @@ def _canonical_scalar_filters(filters: Optional[List[dict]]) -> str:
 
 
 def _resolve_scalar_filter(f: dict) -> tuple:
-    """Normalise one scalar-filter spec into `(lo, hi, value_set)`.
+    """Normalize one scalar-filter spec into `(lo, hi, value_set)`.
 
     `value_set` is a Python set of int class ids for a categorical filter, or
     None for a continuous [lo, hi] range. Continuous fields keep their float
@@ -32060,7 +32080,7 @@ def _session_scalar_column(sess, slug: str) -> "Optional[np.ndarray]":
     it by the octree BUFFER name, `gps-time` (PotreeConverter's name for the LAS
     gps_time dimension the import writes it to), while export and compute use
     the canonical `timestamp`. It is not in `extras` on purpose — a float32
-    extra dim quantises GPS-magnitude times to 32 s — so a filter that only
+    extra dim quantizes GPS-magnitude times to 32 s — so a filter that only
     looked there answered "Unknown scalar attribute" for a column the picker
     had just offered. Same (N,) alignment as every extra, so callers index it
     identically.
@@ -32154,8 +32174,8 @@ def _slab_mask(positions: "np.ndarray", region: dict) -> "np.ndarray":
     rather than by two implementations of a projection happening to match. That
     is also why a slab session never has to freeze the camera.
 
-    A point is inside when it lies within depth/2 of the (offset) centreline
-    plane, between the centreline's endpoints along the tangent, and within the
+    A point is inside when it lies within depth/2 of the (offset) centerline
+    plane, between the centerline's endpoints along the tangent, and within the
     vertical extent."""
     a = np.asarray(region["a"], dtype=np.float64)
     b = np.asarray(region["b"], dtype=np.float64)
@@ -32164,7 +32184,7 @@ def _slab_mask(positions: "np.ndarray", region: dict) -> "np.ndarray":
     if length < 1e-12:
         raise HTTPException(
             status_code=400,
-            detail="region.a and region.b must differ (a slab needs a centreline).",
+            detail="region.a and region.b must differ (a slab needs a centerline).",
         )
     t = t / length
     n = np.array([-t[1], t[0]], dtype=np.float64)   # left normal
@@ -32191,7 +32211,7 @@ def _polyline_halfspace_mask(positions: "np.ndarray", region: dict) -> "np.ndarr
     pinned to src/shared/profileLine.contract.json.
 
     The line lives in the SLAB FRAME: `line` is a list of [along, z] vertices,
-    where `along` is the distance from `a` along the a→b centreline and `z` is
+    where `along` is the distance from `a` along the a→b centerline and `z` is
     world height — exactly the two axes a face-on section shows on screen. A
     point's height is compared with the line's height at the point's own
     `along`, linearly interpolated between vertices and held flat past either
@@ -32246,7 +32266,7 @@ def _region_mask(
     region: Optional[dict],
     pixels: Optional["np.ndarray"] = None,
 ) -> "np.ndarray":
-    """Spatial keep-mask for already-materialised Nx3 world positions.
+    """Spatial keep-mask for already-materialized Nx3 world positions.
 
     Supports box / polygon / squares_union regions over a whole positions
     array at once, so the cloud session can mask its in-memory points.
@@ -32400,7 +32420,7 @@ def _project_world_to_pixel(
 
 
 def _points_in_polygon_mask(pixels: np.ndarray, polygon: np.ndarray) -> np.ndarray:
-    """Vectorised ray-cast point-in-polygon for Nx2 pixels against an Mx2
+    """Vectorized ray-cast point-in-polygon for Nx2 pixels against an Mx2
     polygon. Returns a bool ndarray of length N.
 
     Matches `pointInPolygon` in src/renderer/lib/cropGeometry.ts (winding
@@ -32467,9 +32487,9 @@ class CropOctreeRegion(BaseModel):
     # preview and apply agree exactly. See `_spheres_union_mask`.
     radii: Optional[List[float]] = None
     # Cross-section slab fields. WORLD-space and camera-free — see `_slab_mask`.
-    # `a`/`b` are the horizontal centreline endpoints, `depth` the thickness,
+    # `a`/`b` are the horizontal centerline endpoints, `depth` the thickness,
     # `offset` how far the slab has been STEPPED along its normal from where it
-    # was drawn (so the centreline keeps expressing the user's chosen azimuth).
+    # was drawn (so the centerline keeps expressing the user's chosen azimuth).
     a: Optional[List[float]] = None
     b: Optional[List[float]] = None
     depth: Optional[float] = None
@@ -32530,7 +32550,7 @@ class ScalarFilter(BaseModel):
 #
 # Why store regions (not just the mask) for bake: the regions are the auditable
 # record of what was removed. The survivor LAS is written straight from the
-# in-RAM arrays by `_session_to_las` (colours + scalar extra-dims intact, no
+# in-RAM arrays by `_session_to_las` (colors + scalar extra-dims intact, no
 # second full copy held in RAM). The in-RAM `deleted` mask and the region replay
 # are kept in lock-step (both go through the shared `_region_mask`) so the array
 # the compute ops see and the baked octree always agree.
@@ -32699,7 +32719,7 @@ _session_restore_locks_guard = threading.Lock()
 # id it resolves, and the sweep never evicts a pinned id. RAM can then exceed the
 # cap by exactly one request's working set, which is unavoidable: that set is in
 # use. Pins die with the request -- or, for the streaming paths whose worker can
-# outlive a cancelled request (see `_bin_frame_streaming_response`), with the
+# outlive a canceled request (see `_bin_frame_streaming_response`), with the
 # worker thread itself, which is what `_run_pinned` is for.
 import contextvars as _contextvars
 
@@ -32735,7 +32755,7 @@ def _run_pinned(fn):
 
     `loop.run_in_executor` does not propagate contextvars, and a scope owned by
     the THREAD (rather than the request) is what keeps a worker that outlives a
-    cancelled request -- the orphan `_bin_frame_streaming_response` documents --
+    canceled request -- the orphan `_bin_frame_streaming_response` documents --
     from having its session evicted and pickled mid-flight.
     """
     def _wrapped():
@@ -32785,7 +32805,7 @@ def _session_spill_root() -> _Path:
 
     Inside the octree cache root, under `.sessions/<pid>-<nonce>/`. Inside rather
     than beside it so it inherits every isolation the octree root already has
-    (per-launch under E2E, per-dev-session under `npm run dev`, honoured by both
+    (per-launch under E2E, per-dev-session under `npm run dev`, honored by both
     processes) and is removed with it. `_evict_octree_cache` cannot touch it:
     that walk only considers 40-hex sha1 directory names.
     """
@@ -32947,10 +32967,10 @@ def _session_mutation_bytes(sessions, out_points: "Optional[int]" = None,
 
     `sessions` is the input session(s); `out_points` the size of the result
     (default: the inputs' surviving points); `copies` how many times that result
-    is held at once (a fancy-index gather materialises the slice AND the output).
+    is held at once (a fancy-index gather materializes the slice AND the output).
 
     Sized from the columns the session actually carries rather than a flat
-    bytes-per-point, so a bare xyz cloud is not charged for colour, intensity,
+    bytes-per-point, so a bare xyz cloud is not charged for color, intensity,
     timestamps and beam origins it does not have. Memmapped columns still count:
     the OUTPUT of a mutation is a fresh RAM array whatever the input's layout.
 
@@ -33362,7 +33382,7 @@ def _drop_session_spill(session_id: str) -> None:
 def _trim_session_spills() -> None:
     """Hold the spill directory under its cap, least-recently-USED first.
 
-    A trimmed session reverts to the pre-spill behaviour (404, cloud lost), so
+    A trimmed session reverts to the pre-spill behavior (404, cloud lost), so
     this is the last thing that happens and is logged loudly when it does.
 
     Only sessions that are purely on-disk are eligible: a resident or mid-spill
@@ -33539,7 +33559,7 @@ def _sweep_plant_sessions() -> None:
             print(f"[Plant Session] Evicted idle/over-cap session {sid}")
 
 
-# Manual-labelling undo budget. Capped by BYTES rather than by entry count
+# Manual-labeling undo budget. Capped by BYTES rather than by entry count
 # (the idiom `_MAX_DELETED_HISTORY` uses) because label-edit sizes span four
 # orders of magnitude: a brush stamp changes a few thousand points (~25 KB)
 # while a bulk/propagate pass rewrites millions. A count cap would either waste
@@ -33686,7 +33706,7 @@ def _trim_label_history_locked(sess: "CloudSession", slug: str) -> int:
 class CloudSession:
     """An imported point cloud held in RAM as the COMPLETE source of truth.
 
-    The full attribute set — positions, colours, intensity, and every scalar
+    The full attribute set — positions, colors, intensity, and every scalar
     extra-dimension — lives in these arrays. The source FILE is read exactly
     once (at create); after that every operation (delete/crop/erase, filter,
     ground/tree segment, bake, downstream compute) reads or mutates these arrays
@@ -33822,28 +33842,28 @@ class CloudSession:
     # to georeference DEM raster exports (GeoTIFF). Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     crs_epsg: Optional[int] = None
-    # What unit the SOURCE FILE was in, and the factor applied to reach metres.
-    # PROVENANCE ONLY — `positions` is already metres by the time the session
-    # exists (see `_scale_positions_to_metres` at import), exactly as
+    # What unit the SOURCE FILE was in, and the factor applied to reach meters.
+    # PROVENANCE ONLY — `positions` is already meters by the time the session
+    # exists (see `_scale_positions_to_meters` at import), exactly as
     # `world_shift` records a shift that has already been subtracted. Kept so
     # the UI can explain why coordinates differ from the file, and so an export
     # could one day offer to convert back.
     #
     # `source_unit_scale` is recorded even when it is 1.0, because "known to be
-    # metres" and "never asked" are different states: the first came from a CRS
+    # meters" and "never asked" are different states: the first came from a CRS
     # or a format guarantee, the second is the ASCII default. Both are None on a
     # session created before units existed. Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     source_units: Optional[str] = None
     source_unit_scale: Optional[float] = None
-    # Manual-labelling undo stack, keyed by label-column slug. Each entry records
+    # Manual-labeling undo stack, keyed by label-column slug. Each entry records
     # the PRIOR values of the points one edit changed (see `_LabelDelta`), so a
     # rollback is a reverse-apply rather than a snapshot restore.
     #
     # Deliberately NOT shaped like `deleted_history`: that stores a full (N,) bool
     # mask per edit, which is ~1 bit/point and capped at 50 entries. A label
     # snapshot would be an (N,) float32 column — 200 MB per stroke on a 50 M-point
-    # cloud — and labelling produces hundreds of strokes, so snapshots are wrong by
+    # cloud — and labeling produces hundreds of strokes, so snapshots are wrong by
     # two orders of magnitude in both directions. Deltas are ~5 bytes per CHANGED
     # point instead, and the stack is bounded by BYTES (see
     # `_trim_label_history_locked`) because entry sizes span four orders of
@@ -33876,7 +33896,7 @@ class CloudSession:
     #
     # WHY: `octree_cache_id = None` means "this cache no longer describes the
     # session's points, rebuild before using it" — and the only pin
-    # `_evict_octree_cache` has ever honoured is `octree_cache_id`. But the
+    # `_evict_octree_cache` has ever honored is `octree_cache_id`. But the
     # renderer does NOT drop the cloud when a delete lands: it keeps drawing the
     # old octree and hides the deleted points with a clip volume / per-tile mask
     # (that is the whole instant-delete design, and crop now leans on it while a
@@ -33897,7 +33917,7 @@ class CloudSession:
     octree_stale_gen: int = 0
     # True when the stored normal columns predate a geometry edit.
     #
-    # A normal is a NEIGHBOURHOOD statistic, so deleting or cropping points
+    # A normal is a NEIGHBORHOOD statistic, so deleting or cropping points
     # changes the right answer for every surviving point near the cut — the
     # stored column stays correctly INDEXED (`_session_add_extra_column`
     # scatters by `~deleted`, which is absolute), it just answers a question
@@ -33912,7 +33932,7 @@ class CloudSession:
     # slug -> the expression that produced it.
     #
     # Kept because a derived field is otherwise indistinguishable from an
-    # imported one BY DESIGN (that is the whole point — it colours, filters and
+    # imported one BY DESIGN (that is the whole point — it colors, filters and
     # exports through the same machinery), and that leaves the user with no way
     # to answer "what is `ndvi`, and how did I make it?" a week later. The
     # Fields tab reads this to mark a field as derived and show its formula.
@@ -33961,20 +33981,20 @@ def _epsg_from_wkt_vlr(header) -> Optional[int]:
 
 # ── Length units ───────────────────────────────────────────────────────────
 #
-# Every physically-dimensioned constant in this file assumes METRES — CSF's
+# Every physically-dimensioned constant in this file assumes METERS — CSF's
 # cloth resolution and its airborne-vs-terrestrial regime switch, LAD's m²/m³,
 # QSM's 4.23 mm twig radius, ICP's voxel floors, the miss-distance threshold.
 # That assumption is now made true rather than merely hoped for: a cloud whose
-# source declares another unit is SCALED TO METRES at import, and the source
+# source declares another unit is SCALED TO METERS at import, and the source
 # unit is kept only as provenance.
 #
-# Normalising (rather than carrying a unit and scaling at every use site) is
+# Normalizing (rather than carrying a unit and scaling at every use site) is
 # forced by the intermediate LAS this backend writes, which hardcodes
 # `header.scales = [0.001]*3` — 0.001 in SOURCE units. That is a 1 mm quantum
-# for a metre cloud but a 1 METRE quantum for a kilometre-unit one, so a cloud
+# for a meter cloud but a 1 METER quantum for a kilometer-unit one, so a cloud
 # that is not converted before the write is silently destroyed. Converting first
 # makes the existing 1 mm quantum true for every input.
-_UNIT_TO_METRES: Dict[str, float] = {
+_UNIT_TO_METERS: Dict[str, float] = {
     "m": 1.0,
     "km": 1000.0,
     "cm": 0.01,
@@ -34003,12 +34023,12 @@ _PYPROJ_UNIT_NAMES: Dict[str, str] = {
 # Formats whose unit is fixed by the SPECIFICATION, so there is nothing to
 # detect and nothing to ask:
 #
-#   * E57 — the spec mandates metres for Cartesian coordinates. Verified against
+#   * E57 — the spec mandates meters for Cartesian coordinates. Verified against
 #     the committed fixtures: cartesianX/Y/Z are plain Float nodes carrying no
 #     unit attribute and no coordinateMetadata, because there is no unit to
 #     declare.
-#   * RIEGL RXP / .riproject — scanner-local metres by format definition.
-_METRE_BY_SPEC_SUFFIXES = {".e57", ".rxp", ".riproject"}
+#   * RIEGL RXP / .riproject — scanner-local meters by format definition.
+_METER_BY_SPEC_SUFFIXES = {".e57", ".rxp", ".riproject"}
 
 
 # Angular units, which are NOT lengths. Listed explicitly so a degree/radian
@@ -34034,7 +34054,7 @@ def _unit_slug_from_name(name: Optional[str]) -> Optional[str]:
     """Map a pyproj axis unit name onto one of our slugs, or None if unknown.
 
     An ANGULAR unit is None, never a length: degrees cannot be converted to
-    metres by any constant (metres-per-degree of longitude depends on latitude).
+    meters by any constant (meters-per-degree of longitude depends on latitude).
     """
     if not name or _is_angular_unit(name):
         return None
@@ -34042,7 +34062,7 @@ def _unit_slug_from_name(name: Optional[str]) -> Optional[str]:
 
 
 def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optional[float]]:
-    """Best-effort (EPSG, unit slug, metres-per-unit) from a LAS/LAZ header.
+    """Best-effort (EPSG, unit slug, meters-per-unit) from a LAS/LAZ header.
 
     One function rather than two because both answers come from the SAME
     `pyproj.CRS`: reading the header twice would be wasteful and — worse — lets
@@ -34053,8 +34073,8 @@ def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optio
     pyproj won't match to an EPSG, but whose WKT names the code).
 
     Unit: read from the CRS's first axis. `unit_conversion_factor` is already
-    metres-per-unit, so it is authoritative even when the unit NAME is one we
-    don't recognise — the slug is for display, the factor is for arithmetic.
+    meters-per-unit, so it is authoritative even when the unit NAME is one we
+    don't recognize — the slug is for display, the factor is for arithmetic.
 
     Returns (None, None, None) for a non-LAS source or an unreadable header.
     Reads only the header (no point data)."""
@@ -34085,15 +34105,15 @@ def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optio
             #
             # A lat/long CRS (EPSG:4326, 4269, …) reports unit "degree" with a
             # `unit_conversion_factor` of 0.0174533 — RADIANS per degree, not
-            # metres per unit. Treating that as a length factor multiplies every
+            # meters per unit. Treating that as a length factor multiplies every
             # coordinate by 1/57, turning a 25 m tree into 0.44 m while the
             # numbers still look plausible.
             #
-            # Degrees also cannot be converted to metres by any constant: the
-            # metres-per-degree of longitude depends on latitude. A geographic
+            # Degrees also cannot be converted to meters by any constant: the
+            # meters-per-degree of longitude depends on latitude. A geographic
             # cloud needs reprojection, which is a different feature. So it is
             # reported as UNKNOWN (no factor, not certain) and left unscaled —
-            # the wizard then asks, defaulting to metres, which at least leaves
+            # the wizard then asks, defaulting to meters, which at least leaves
             # the coordinates untouched.
             #
             # `is_geographic` rather than a name check: it catches every
@@ -34108,7 +34128,7 @@ def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optio
                 # ── Every axis must agree ──────────────────────────────────
                 #
                 # A COMPOUND CRS can mix units: horizontal US survey feet with
-                # vertical metres (e.g. EPSG:2229+5703) is a standard US survey
+                # vertical meters (e.g. EPSG:2229+5703) is a standard US survey
                 # configuration, not a contrivance. Scaling all three axes by
                 # the FIRST axis's factor would divide every elevation by 3.28
                 # while leaving XY correct — so a 30 m tree becomes 9.14 m and
@@ -34130,7 +34150,7 @@ def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optio
                 if agree:
                     f = factors[0]
                     # A zero/negative/absurd factor means we misread the CRS; a
-                    # unit nobody uses is likelier a parse artefact than data.
+                    # unit nobody uses is likelier a parse artifact than data.
                     if math.isfinite(f) and 1e-6 < f < 1e6:
                         factor = f
                         unit_slug = _unit_slug_from_name(axis.unit_name)
@@ -34150,15 +34170,15 @@ def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
     return _read_las_georef(path)[0]
 
 
-def _scale_positions_to_metres(
+def _scale_positions_to_meters(
     positions: "np.ndarray",
-    metres_per_unit: Optional[float],
+    meters_per_unit: Optional[float],
 ) -> "np.ndarray":
-    """Scale an (N,3) position array from its source unit into metres.
+    """Scale an (N,3) position array from its source unit into meters.
 
     Returns the input UNCHANGED when the factor is 1.0, absent, or nonsensical:
 
-      * 1.0 is returned by identity rather than multiplied, so the metre path —
+      * 1.0 is returned by identity rather than multiplied, so the meter path —
         which is almost all real data — is bit-identical to what it was before
         units existed. A float multiply by 1.0 is exact in IEEE754, but not
         multiplying at all is the property worth guaranteeing.
@@ -34166,13 +34186,13 @@ def _scale_positions_to_metres(
         would mangle the cloud, so it is refused rather than trusted.
 
     POSITIONS ONLY. Intensity, classification, timestamps, return numbers and
-    colour are dimensionless or in their own units and must not be touched.
+    color are dimensionless or in their own units and must not be touched.
     Scan origins and trajectories ARE positions and scale with the cloud — see
     the world-frame contract for `scan_params.origin`.
     """
-    if metres_per_unit is None:
+    if meters_per_unit is None:
         return positions
-    f = float(metres_per_unit)
+    f = float(meters_per_unit)
     if not math.isfinite(f) or f <= 0.0:
         return positions
     if f == 1.0:
@@ -34188,15 +34208,15 @@ def _scale_positions_to_metres(
 
 
 def _detect_source_units(path: "_Path") -> Tuple[Optional[str], Optional[float], bool]:
-    """(unit slug, metres-per-unit, certain?) for a source file.
+    """(unit slug, meters-per-unit, certain?) for a source file.
 
     `certain` is True only when the answer comes from the format itself — a
     declared CRS, or a spec that fixes the unit. A False/None result means the
     format cannot say, and the user must be asked (the wizard defaults to
-    metres, which is what the app assumed implicitly before units existed).
+    meters, which is what the app assumed implicitly before units existed).
     """
     suffix = path.suffix.lower()
-    if suffix in _METRE_BY_SPEC_SUFFIXES:
+    if suffix in _METER_BY_SPEC_SUFFIXES:
         return ("m", 1.0, True)
     if suffix in (".las", ".laz"):
         _epsg, slug, factor = _read_las_georef(path)
@@ -34205,7 +34225,7 @@ def _detect_source_units(path: "_Path") -> Tuple[Optional[str], Optional[float],
             # closest slug we have, or fall back to naming the raw factor.
             if slug is None:
                 slug = next(
-                    (s for s, f in _UNIT_TO_METRES.items() if abs(f - factor) < 1e-9),
+                    (s for s, f in _UNIT_TO_METERS.items() if abs(f - factor) < 1e-9),
                     None,
                 )
             return (slug, factor, True)
@@ -34266,12 +34286,12 @@ def _peek_cloud_session(session_id: "Optional[str]") -> "Optional[CloudSession]"
 
 # `_BEAM_ORIGIN_ALIAS_SETS` (the ExtraBytes name aliases for a per-pulse
 # beam-origin triple, used by `_read_las_into_arrays` below) is defined earlier,
-# next to `_normalise_origin_alias`, so the ASCII import path can share it.
+# next to `_normalize_origin_alias`, so the ASCII import path can share it.
 
 
 @dataclass
 class LasReadResult:
-    """Everything `_read_las_into_arrays` materialises from a normalised LAS.
+    """Everything `_read_las_into_arrays` materializes from a normalized LAS.
 
     A dataclass (not a tuple) because the set has grown past readable positional
     unpacking and carries several Optionals with subtle precision contracts.
@@ -34324,7 +34344,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
     (not in `extras`) — it is the moving-platform LAD join key and a float32 cast
     would destroy its precision (see CloudSession.timestamps). Per-pulse beam-origin
     ExtraBytes are read as float64 `beam_origins` and likewise kept out of `extras`.
-    This is the ONE point where a normalised LAS is materialised into the session —
+    This is the ONE point where a normalized LAS is materialized into the session —
     used by create after `_source_to_las` converts whatever the source format was.
 
     CHUNKED, deliberately. This used to be `reader.read()` followed by
@@ -34406,7 +34426,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
             # An ExtraBytes name is an arbitrary vendor string — RIEGL writes
             # `Reflectance`, another exporter `refl`. Downstream tools key off the
             # CANONICAL slug, so carrying the raw name verbatim meant a perfectly
-            # ordinary reflectance column was invisible to the reflectance colour
+            # ordinary reflectance column was invisible to the reflectance color
             # mode purely because of its capital R. Resolve it; keep the file's own
             # spelling as the LABEL so the UI still shows the user what their file
             # called it.
@@ -34467,10 +34487,10 @@ def _read_las_into_arrays(las_path: _Path, store=None,
         # (e.g. 'classification') makes laspy try to bit-pack the float column into
         # the classification-flags byte and hard-crash the process. The 'las_' prefix
         # keeps the slug clear of the standard schema; the label stays the clean name.
-        # Labelled "LAS <name>", not the bare name: PotreeConverter always emits
+        # Labeled "LAS <name>", not the bare name: PotreeConverter always emits
         # its OWN built-in `classification` attribute (all zeros here, since it
         # does not read our extra dims), so a bare label put two entries called
-        # "classification" in the colour-by list with nothing to tell them apart.
+        # "classification" in the color-by list with nothing to tell them apart.
         for d in std_dims:
             name = d.name
             if name in _LAS_FLAG_LABELS:
@@ -34611,7 +34631,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
                 extra_dims_meta.append({"slug": cand["slug"], "label": cand["label"]})
             del cand["arr"]
 
-        # Class names and colours a Phytograph export wrote into the file (F9),
+        # Class names and colors a Phytograph export wrote into the file (F9),
         # carried on the column's extra-dim entry so the create response can hand
         # them to the renderer as the cloud's palettes.
         file_palettes = _las_file_palettes(header)
@@ -34660,7 +34680,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
     # visible columns: a lower-case `timestamp` holding the data, and an
     # upper-case `Timestamp` (the canonical channel) reading all zeros.
     #
-    # Resolved through the canonical table so any recognised spelling works.
+    # Resolved through the canonical table so any recognized spelling works.
     if timestamps is None:
         _ts_key = next(
             (k for k in extras if _canonical_slug_for_name(k) == 'timestamp'), None)
@@ -34682,7 +34702,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
                 timestamps = _cand
 
     # Audit the pulse columns once, here, where every source format passes
-    # (ASCII, E57, PLY ... are all normalised to LAS first). A return number
+    # (ASCII, E57, PLY ... are all normalized to LAS first). A return number
     # that no longer orders a pulse's returns is worse than none -- Helios would
     # read every return as the first -- so it is not imported; rounded GPS time
     # is kept (Backfill has nothing else to rebuild the raster from, and a
@@ -34804,7 +34824,7 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     once per `_LAS_WRITE_CHUNK` block for the gather. The write itself (the
     laspy encode, most of the cost - ~1 s per 10 M points with extras) runs
     unlocked. The array REFERENCES are captured up front, so a bake that
-    replaces `sess.positions` mid-write cannot desynchronise the block indices
+    replaces `sess.positions` mid-write cannot desynchronize the block indices
     from the arrays they were computed against; an in-place edit landing
     between blocks (a delete, a label stroke) can differ between blocks, which
     the next rebuild reconciles and the renderer masks meanwhile. Without it
@@ -34862,7 +34882,7 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     if getattr(sess, "gps_time_encoding", None) == 'adjusted_standard':
         _mark_gps_time_absolute(header)
 
-    # Write the LAS in row chunks rather than materialising ONE laspy record for
+    # Write the LAS in row chunks rather than materializing ONE laspy record for
     # all N survivors. `ScaleAwarePointRecord.zeros(n, header)` allocates a full
     # structured array (point-format-3 + every float32 extra dim ≈ tens of bytes
     # per point); on a multi-million-point synthetic scan that's a multi-GB
@@ -34899,7 +34919,7 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             # stayed identically zero — PotreeConverter then reported an
             # all-zero range for `gps-time` and the renderer's degenerate-range
             # filter (correctly) dropped it from the export picker and the
-            # colour-by list. Timestamps live outside `extras` (they are float64,
+            # color-by list. Timestamps live outside `extras` (they are float64,
             # the extras are float32), so the extra-dims loop above never
             # covered them; they need their own assignment.
             # Only when the column is not ALSO an extra dim. An ASCII import
@@ -34925,8 +34945,8 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
 # float64 xyz plus its squared-length column, so this trades memory for loop
 # iterations at no measured cost in time: on the 18.6 M-hit reference position,
 # 8M/4M/2M/1M rows all took 0.90 s and peaked at 571/288/142/71 MB. 2M keeps the
-# per-block numpy work comfortably vectorised while staying two orders of
-# magnitude below what materialising the whole selection costs.
+# per-block numpy work comfortably vectorized while staying two orders of
+# magnitude below what materializing the whole selection costs.
 _FAR_SCAN_BLOCK = 2_000_000
 
 
@@ -34954,7 +34974,7 @@ def _farthest_from_origin(positions: "np.ndarray", mask: "np.ndarray",
     registry lock; an edit landing between blocks can make the result straddle
     it, which for a display radius that the next bake recomputes is the cheaper
     side of that trade. The array REFERENCE is the caller's, captured under the
-    lock, so a bake that REPLACES `sess.positions` cannot desynchronise the
+    lock, so a bake that REPLACES `sess.positions` cannot desynchronize the
     block indices from the array they were computed against.
     """
     best = 0.0
@@ -34983,7 +35003,7 @@ def _gather_miss_positions(sess: "CloudSession",
     - `origin` is None → return the positions verbatim (true far-field coords),
       radius 0. The miss octree is built at true coordinates; its own bbox keeps
       the ~20 km extent from ever touching the hits octree's framing.
-    - `origin` supplied → project each placeable miss onto a sphere centred on
+    - `origin` supplied → project each placeable miss onto a sphere centered on
       the origin at `radius = 1.4 * far` (far = the max HIT distance from the
       origin), a halo sitting a fixed 40% beyond the farthest return so the
       sky/miss shell reads as distinct from the cloud. Misses sitting AT the
@@ -35005,7 +35025,7 @@ def _gather_miss_positions(sess: "CloudSession",
             miss_pos = np.empty((0, 3), np.float64)
         # The hits are wanted for ONE SCALAR — the farthest hit distance — and
         # only when an origin was supplied. So keep the mask and a REFERENCE to
-        # the array rather than a materialised copy of every hit: see
+        # the array rather than a materialized copy of every hit: see
         # `_farthest_from_origin`, and note this also stops the `origin is None`
         # path below from building a 447 MB array it then returns without ever
         # reading.
@@ -35049,7 +35069,7 @@ def _gather_miss_positions(sess: "CloudSession",
 
 def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
     """Write position-only miss points to a LAS for PotreeConverter. The miss
-    octree renders flat-orange, so it carries no colours/intensity/extra-dims.
+    octree renders flat-orange, so it carries no colors/intensity/extra-dims.
     Mirrors `_session_to_las`'s header (pt fmt 3, 1 mm scale, offset = floor(min)
     so far-field coords don't overflow the LAS int32). Returns the count."""
     import laspy
@@ -35086,7 +35106,7 @@ def _build_miss_octree(sess: "CloudSession",
     priority. Eager but cheap: when there are no misses, no PotreeConverter runs.
 
     A user CANCEL is not a failure and must NOT be swallowed: re-raise
-    ScanCancelled so the caller unwinds instead of reporting a successful import
+    ScanCanceled so the caller unwinds instead of reporting a successful import
     with a silently missing miss overlay."""
     import tempfile
     try:
@@ -35099,7 +35119,7 @@ def _build_miss_octree(sess: "CloudSession",
             cache_key, _cache_dir, _meta = _build_octree_from_las(
                 miss_las, [], cancel_event=cancel_event)
         return cache_key
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except Exception:
         logger.exception("Miss octree build failed for session %s", sess.session_id)
@@ -35125,7 +35145,7 @@ def _build_octree_from_las(
     CANCEL-SAFETY INVARIANT — do not add a checkpoint between the `rename` and
     `_read_octree_metadata` below. The install is an atomic same-filesystem
     rename that runs only after the converter returned 0, and the cache-hit gate
-    is `metadata.json` existing, so a cancelled build leaves an entry that is
+    is `metadata.json` existing, so a canceled build leaves an entry that is
     either ABSENT or FULLY BUILT — never half. A checkpoint in that window would
     break that and let a later import happily reuse a poisoned cache entry."""
     def _report(frac: float, msg: str) -> None:
@@ -35153,7 +35173,7 @@ def _build_octree_from_las(
     with _octree_build_lock(cache_key):
         if not (cache_dir / "metadata.json").is_file():
             if cancel_event is not None and cancel_event.is_set():
-                raise ScanCancelled()
+                raise ScanCanceled()
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             staging_dir = cache_dir.parent / (cache_key + ".staging")
             if staging_dir.exists():
@@ -35173,7 +35193,7 @@ def _build_octree_from_las(
                     cancel_event=cancel_event,
                 )
             except Exception:
-                # Catches ScanCancelled too (it subclasses Exception), so a
+                # Catches ScanCanceled too (it subclasses Exception), so a
                 # killed converter's partial output is always removed.
                 try:
                     _shutil.rmtree(staging_dir)
@@ -35201,8 +35221,8 @@ class CloudSessionCreateRequest(BaseModel):
     # coords. None / omitted = keep the original (possibly large) coordinates.
     world_shift: Optional[List[float]] = None
     # The unit the SOURCE FILE's coordinates are in, chosen (or confirmed) in the
-    # import wizard: one of _UNIT_TO_METRES' slugs. Positions are scaled to
-    # metres at create — BEFORE the world shift, before every derived metric,
+    # import wizard: one of _UNIT_TO_METERS' slugs. Positions are scaled to
+    # meters at create — BEFORE the world shift, before every derived metric,
     # and before the intermediate LAS write whose 1 mm quantum is expressed in
     # source units. None / omitted / "m" = no scaling, which is what every
     # import did before units existed.
@@ -35222,7 +35242,7 @@ class CloudSessionCreateRequest(BaseModel):
     origin: Optional[List[float]] = None
     # Which scan position inside a multi-scan source (E57 with several scans, PTX
     # with several blocks) this session is for. None = the whole file, merging
-    # every position into one cloud — the pre-multi-scan behaviour, kept for
+    # every position into one cloud — the pre-multi-scan behavior, kept for
     # single-scan sources and for any caller that doesn't fan out.
     scan_index: Optional[int] = None
     # Scalar fields to leave out of the import, from the wizard's per-column
@@ -35237,7 +35257,7 @@ class CloudSessionCreateRequest(BaseModel):
     # Auto-detection (`_canonical_slug_for_name`) covers the spellings we know,
     # but it cannot know that a column called `t` or `shot_time` is the
     # timestamp — and until now the user had no way to say so: the wizard's role
-    # dropdown is disabled for these formats, so an unrecognised column could
+    # dropdown is disabled for these formats, so an unrecognized column could
     # only ever be an anonymous scalar. Tools that key off a canonical slug
     # (Backfill Misses, the LAD trajectory join, multi-return grouping) then
     # refused the scan while naming an internal slug the user never chose.
@@ -35368,7 +35388,7 @@ class LabelStroke(BaseModel):
     # stepped between strokes in one batch.
     #
     # A dedicated field rather than a general and/or region combinator — that
-    # would mean canonicalisation, nesting rules and validation for a composition
+    # would mean canonicalization, nesting rules and validation for a composition
     # this is the only caller of.
     slab: Optional[CropOctreeRegion] = None
     # Front-surface limit (lasso / rectangle in "Front" mode): only the points
@@ -35389,7 +35409,7 @@ class LabelRegionRequest(BaseModel):
 
     `strokes` are applied IN ORDER and atomically (one lock acquisition), so a
     brush drag flushes its whole batch in a single call rather than one request
-    per stamp. Order matters: labelling is not commutative (paint-everything-leaf
+    per stamp. Order matters: labeling is not commutative (paint-everything-leaf
     then paint-a-subregion-wood is not the reverse), so the list is never sorted
     or deduped."""
     strokes: List[LabelStroke]
@@ -35439,7 +35459,7 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
                              session_id: "Optional[str]" = None,
                              preloaded_store: "Optional[session_store.SessionStore]" = None) -> dict:
     """See `_do_create_cloud_session_inner`. This wrapper only guarantees that
-    a large import which fails or is cancelled part-way removes the on-disk
+    a large import which fails or is canceled part-way removes the on-disk
     session store it had started filling (the inner body creates it once the
     point count is known and hands it out through `store_box`)."""
     store_box: dict = {}
@@ -35472,9 +35492,9 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     Before this split the endpoint was an `async def` doing every blocking step
     inline, which froze the whole backend for the duration of an import — a
     concurrent `POST /api/cancel/{run_id}` could not even be serviced, so the
-    import was structurally uncancellable.
+    import was structurally uncancelable.
 
-    Cancellation unwinds via `ScanCancelled` from `_cancel_checkpoint`. Cleanup is
+    Cancellation unwinds via `ScanCanceled` from `_cancel_checkpoint`. Cleanup is
     inherent: the body runs inside a TemporaryDirectory, `_build_octree_from_las`
     removes its own staging dir on any exception, and the session is registered in
     `_cloud_sessions` only as the LAST statement — so a cancel leaves nothing
@@ -35492,7 +35512,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     if store is not None:
         store_box["store"] = store
 
-    # Normalise to a LAS in a temp dir, read it fully into RAM, then build the
+    # Normalize to a LAS in a temp dir, read it fully into RAM, then build the
     # octree from that same LAS. After this the file is never touched again.
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
@@ -35500,7 +35520,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         _report(0.02, "Reading source file…")
         _cancel_checkpoint(progress)
         if preloaded is not None:
-            # ALREADY IN RAM — skip the normalise-to-LAS + read-it-back round
+            # ALREADY IN RAM — skip the normalize-to-LAS + read-it-back round
             # trip entirely. The RIEGL importer streams arrays straight out of
             # the reader container, so writing them to a LAS purely so this
             # function could read them again cost ~10 s and ~1.6 GB of disk per
@@ -35509,7 +35529,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             las_path, las_is_temp = source_path, False
             # Prefer the labels the producer supplied ("Miss", "Row Index", …).
             # Falling back to slug==label here would relabel every extra dim to
-            # its raw slug in the octree sidecar and the renderer's colour-by menu.
+            # its raw slug in the octree sidecar and the renderer's color-by menu.
             source_extra_dims = (
                 [dict(ed) for ed in preloaded.extra_dims_meta]
                 if preloaded.extra_dims_meta
@@ -35572,7 +35592,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                 store_box.pop("store", None)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
-        # synthesised is 1 mm-quantized — coarse enough to shatter precision-
+        # synthesized is 1 mm-quantized — coarse enough to shatter precision-
         # sensitive ops like triangulation — so prefer the source-precision xyz
         # `_source_to_las` captured during conversion. Colors/intensity/extras
         # still come from the LAS read (it filters NaN-xyz rows identically, so
@@ -35621,33 +35641,33 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                     ),
                 )
             beam_origins = source_origins
-        # ── Normalise to metres ────────────────────────────────────────────
+        # ── Normalize to meters ────────────────────────────────────────────
         #
         # BEFORE the global shift, and before every derived metric below
         # (ground_z, robust_extent, point_spacing) — all of which feed
-        # metre-calibrated thresholds — and before the intermediate LAS write,
+        # meter-calibrated thresholds — and before the intermediate LAS write,
         # whose `header.scales = [0.001]*3` is expressed in SOURCE units. A
-        # kilometre-unit cloud written unscaled is quantised to 1 metre.
+        # kilometer-unit cloud written unscaled is quantized to 1 meter.
         #
         # Deliberately positions + beam origins only: intensity, classification,
-        # timestamps and colour are dimensionless or carry their own units.
+        # timestamps and color are dimensionless or carry their own units.
         # `source_unit_scale` is recorded even when 1.0, so a later reader can
-        # tell "known metres" from "never asked".
+        # tell "known meters" from "never asked".
         source_units: Optional[str] = getattr(request, "source_units", None) or None
         source_unit_scale: Optional[float] = None
         if source_units:
-            _f = _UNIT_TO_METRES.get(source_units)
+            _f = _UNIT_TO_METERS.get(source_units)
             if _f is None:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"Unknown source_units {source_units!r}; expected one of "
-                            f"{sorted(_UNIT_TO_METRES)}"),
+                            f"{sorted(_UNIT_TO_METERS)}"),
                 )
             source_unit_scale = float(_f)
             if source_unit_scale != 1.0:
-                positions = _scale_positions_to_metres(positions, source_unit_scale)
+                positions = _scale_positions_to_meters(positions, source_unit_scale)
                 if beam_origins is not None:
-                    beam_origins = _scale_positions_to_metres(beam_origins, source_unit_scale)
+                    beam_origins = _scale_positions_to_meters(beam_origins, source_unit_scale)
                 # The scanner origin is a position in the same frame and scales
                 # with the cloud — applied where it is resolved (`_miss_origin`
                 # below), since it may come from E57 scan_meta or the request.
@@ -35660,7 +35680,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # shift means the cloud keeps its original coordinates.
         #
         # NOTE the ordering: the shift the wizard sent was computed by a preview
-        # probe that ALSO scaled to metres, so both are in the same frame here.
+        # probe that ALSO scaled to meters, so both are in the same frame here.
         world_shift_arr: Optional[np.ndarray] = None
         if request.world_shift is not None:
             ws = np.asarray(request.world_shift, dtype=np.float64)
@@ -35686,7 +35706,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # after every format's arrays are in RAM and before the session exists,
         # because this is the one place all in-file formats converge — and the
         # octree is rebuilt from these arrays rather than the source file, so a
-        # field removed here is gone from the octree, the colour-by menu and
+        # field removed here is gone from the octree, the color-by menu and
         # every export. Deliberately BEFORE miss auto-detection: dropping
         # `is_miss` must let the detector re-derive misses from the remaining
         # signals, not read the column the user just removed.
@@ -35714,7 +35734,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # The wizard's in-file renames. Label only, after the drop and role
         # passes — see `_apply_scalar_labels`.
         extra_dims_meta = _apply_scalar_labels(extra_dims_meta, request.scalar_labels)
-        # Intensity and colour are first-class session channels rather than
+        # Intensity and color are first-class session channels rather than
         # entries in `extras`, so they need dropping explicitly — the wizard
         # offers them a checkbox like any other column.
         if _drops_channel(request.drop_slugs, "intensity"):
@@ -35744,7 +35764,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         #
         # PTX (`_ptx_scan_params`) and PCD (VIEWPOINT) are the exposed formats —
         # both report no detectable unit, so the wizard actively offers the user
-        # feet/mm for exactly these. E57 and RIEGL are metres by spec, and their
+        # feet/mm for exactly these. E57 and RIEGL are meters by spec, and their
         # other scan_params fields are angles and counts, not lengths.
         if scan_meta and source_unit_scale not in (None, 1.0):
             _usf = float(source_unit_scale)
@@ -35844,7 +35864,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             _hits_only(intensity),
             {k: _hits_only(v) for k, v in (extras or {}).items()},
         )
-        # Median nearest-neighbour spacing, for the ground tool's ALS/close-range
+        # Median nearest-neighbor spacing, for the ground tool's ALS/close-range
         # regime switch (see _ALS_SPACING_M). Measured HERE rather than when the
         # panel opens because the renderer holds no positions for an octree
         # cloud, so a panel-time probe would be a backend round-trip on every
@@ -35869,8 +35889,8 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             beam_origins=beam_origins,  # float64 ExtraBytes origins; bypass the join
             # For DEM raster georeferencing — but ONLY when the coordinates are
             # still in the CRS's own units. An EPSG like 2229 is DEFINED in US
-            # survey feet; once we scale those coordinates to metres, stamping
-            # 2229 into a GeoTIFF tells a GIS to read metre tiepoints as feet,
+            # survey feet; once we scale those coordinates to meters, stamping
+            # 2229 into a GeoTIFF tells a GIS to read meter tiepoints as feet,
             # placing the raster 3.28x too close to the false origin and
             # overlaying nothing. A missing CRS is honest; a wrong one is not.
             crs_epsg=(_read_las_crs_epsg(source_path)
@@ -35917,7 +35937,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         sess.miss_octree_cache_id = _build_miss_octree(
             sess, _miss_origin, cancel_event=cancel_event)
 
-    _report(1.0, "Finalising…")
+    _report(1.0, "Finalizing…")
     _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
@@ -35935,7 +35955,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     if file_palettes:
         meta["class_palettes"] = file_palettes
 
-    # Surface sky/miss info so the renderer can hide misses by default, colour
+    # Surface sky/miss info so the renderer can hide misses by default, color
     # them distinctly, and relocate them onto the bounding sphere for display.
     # `has_misses` is derived from the actual data (any source that carried an
     # is_miss extra dim), not just E57. The scanner origin (when known, e.g. from
@@ -36041,7 +36061,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     world_shift_out = world_shift_arr.tolist() if world_shift_arr is not None else None
     return {"session_id": session_id, "point_count": n, "world_shift": world_shift_out,
             # What the source file's unit was, and the factor applied to reach
-            # metres. Provenance only — positions above are already metres —
+            # meters. Provenance only — positions above are already meters —
             # but the renderer persists it so the UI can explain why a scan's
             # coordinates differ from the file it came from.
             "source_units": source_units,
@@ -36052,11 +36072,11 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             "ground_z": ground_z,
             # Outlier-resistant per-axis extent (see `_robust_extent`). The
             # renderer scales the camera's zoom limits from it, so a few stray
-            # returns hundreds of metres out can't make the scene un-navigable.
+            # returns hundreds of meters out can't make the scene un-navigable.
             # Cannot be derived renderer-side: rejecting the tail needs the points.
             "robust_extent": robust_extent,
             # The percentile box those spans were measured across. The renderer
-            # needs its CENTRE: with far outliers the raw box centre sits out in
+            # needs its CENTER: with far outliers the raw box center sits out in
             # empty space, so a camera converging on it stalls short of the data.
             "robust_bounds": robust_bounds,
             # Per-attribute percentile ranges for the colorbar (see
@@ -36065,7 +36085,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             # out to where no points are. Includes categorical columns — the
             # renderer decides what to apply them to.
             "robust_attribute_ranges": robust_attribute_ranges,
-            # Median nearest-neighbour spacing (see `_regime_point_spacing`). The
+            # Median nearest-neighbor spacing (see `_regime_point_spacing`). The
             # ground tool switches CSF recipe on it: close-range and airborne
             # clouds want opposite cloth resolutions, and the renderer cannot
             # measure this itself on an octree cloud (it holds no positions).
@@ -36076,15 +36096,15 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
 @app.post("/api/cloud/session/create")
 def create_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
     """Load a source cloud FULLY into an in-RAM session (the complete source of
-    truth — positions + colours + intensity + every scalar extra-dim), build its
+    truth — positions + colors + intensity + every scalar extra-dim), build its
     first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
     point the source FILE is read; every later edit/bake/op works on the arrays.
 
-    The source is normalised to a LAS once via `_source_to_las` (handling
+    The source is normalized to a LAS once via `_source_to_las` (handling
     XYZ/PLY/PCD/LAS/LAZ + the wizard column_plan uniformly), that LAS is read
     into the session arrays AND fed to PotreeConverter for the first octree.
 
-    Streams PHP1 progress markers ahead of the JSON result and is CANCELLABLE via
+    Streams PHP1 progress markers ahead of the JSON result and is CANCELABLE via
     `/api/cancel/{run_id}` — importing a multi-GB scan is a minute-scale operation
     that can wedge on a bad file, and the user needs a way out that actually stops
     the work (the PotreeConverter child is killed, not just detached)."""
@@ -36101,7 +36121,7 @@ def create_cloud_session(request: CloudSessionCreateRequest, http_request: Reque
             return json.dumps(_do_create_cloud_session(
                 request, source_path, progress=progress, cancel_event=cancel_event,
             )).encode("utf-8")
-        except ScanCancelled:
+        except ScanCanceled:
             raise
         except BaseException as exc:
             # The response stream is already open, so an exception here could only
@@ -36125,7 +36145,7 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
     several genuinely separate acquisitions, and merging them leaves one origin
     standing in for all of them — which silently breaks the LAD inversion (it
     takes a single scanner origin), puts the sky/miss display shell around the
-    wrong centre, and makes the per-scan `row_index`/`column_index` rasters
+    wrong center, and makes the per-scan `row_index`/`column_index` rasters
     collide. So each position gets its own session, its own octree, and its own
     `ScanParameters`.
 
@@ -36178,7 +36198,7 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
         # that still stopped was the PotreeConverter poll loop (which watches the
         # `cancel_event` directly), so a cancel took effect only if it happened
         # to land while the converter was running; land it a moment earlier — the
-        # common case, during the ASCII→LAS normalise and the point read — and
+        # common case, during the ASCII→LAS normalize and the point read — and
         # the import ran to completion and installed an octree into the cache
         # after the dialog had already been dismissed.
         _sub_progress = _WindowedProgress(progress, sess_lo, hi, prefix)
@@ -36220,7 +36240,7 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
             # session owns them now, and holding a second reference would keep a
             # whole block resident across the loop.
             del pre, pre_meta
-        except ScanCancelled:
+        except ScanCanceled:
             raise
         except BaseException as exc:
             logger.exception("multi-scan import failed for %s scan %d",
@@ -36253,7 +36273,7 @@ def create_multi_cloud_session(request: CloudSessionCreateRequest, http_request:
             return json.dumps(_do_create_multi_cloud_session(
                 request, source_path, progress=progress, cancel_event=cancel_event,
             )).encode("utf-8")
-        except ScanCancelled:
+        except ScanCanceled:
             raise
         except BaseException as exc:
             logger.exception("create_multi_cloud_session failed for %s", request.source_path)
@@ -36395,7 +36415,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
                           "misses (E57 / structured PLY).")}
 
     _report(0.9, "Storing misses")
-    # Reconstruct per-beam directions for the synthesised misses so LAD's beam
+    # Reconstruct per-beam directions for the synthesized misses so LAD's beam
     # path can re-emit them. For a moving scan we lack each synthetic miss's own
     # origin, so fall back to the scan origin (the timestamp grouping already
     # placed the miss in the right direction relative to it).
@@ -36406,12 +36426,12 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "directions": synth_dirs,
     }
     if synth_ts is not None and synth_ts.shape[0] == synth_xyz.shape[0]:
-        # Each synthesised miss's own pulse time. The LAD inversion groups
+        # Each synthesized miss's own pulse time. The LAD inversion groups
         # returns into beams by shared timestamp, so these keep every miss its
         # own transmitted pulse (see _append_backfilled_misses for the fallback).
         buffer["timestamp"] = synth_ts
     if synth_grid:
-        # The raster address of each synthesised miss, when the row/column path
+        # The raster address of each synthesized miss, when the row/column path
         # produced one (the timestamp path forms no raster and supplies none).
         # Carried so a structured export can place these misses in their own
         # cells rather than falling back to angular binning.
@@ -36472,7 +36492,7 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
     and/or scan-grid row/column indices. This endpoint builds an ephemeral
     PyHelios cloud from the session's surviving points, runs gapfillMisses()
     (which auto-selects the row/column or timestamp path in C++), extracts the
-    synthesised misses, and stores them in a lightweight per-session buffer
+    synthesized misses, and stores them in a lightweight per-session buffer
     (`sess.backfilled_misses`) — leaving the hit arrays untouched.
 
     Session resolve + array assembly + eligibility run up front (so a bad request
@@ -36492,17 +36512,17 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
     with _cloud_session_lock:
         # Gap-fill against the scan AS MEASURED, not against the survivors of a
         # crop. `gapfillMisses()` reconstructs the angular raster from the returns
-        # it is handed and synthesises a miss into every cell that has none — so a
+        # it is handed and synthesizes a miss into every cell that has none — so a
         # pulse whose only return was cropped away comes back as a MISS, i.e. a
         # fully transmitted beam. That is wrong in both directions: the beam was
         # extinguished at its (now deleted) hit, and if that hit was in FRONT of
         # the voxel grid the pulse should not sample the grid at all, whereas a
-        # synthesised miss is projected ~1 km out and rays straight through it.
+        # synthesized miss is projected ~1 km out and rays straight through it.
         # Restoring every deleted hit makes a re-run reproduce the measured miss
         # set instead of inventing beams. Deletions are the user's view of the
         # cloud; the raster is a property of the instrument, and this buffer
         # describes the latter. (`_session_to_lad_arrays` tags none of these as
-        # hits for LAD — the buffer it produces holds only synthesised misses.)
+        # hits for LAD — the buffer it produces holds only synthesized misses.)
         _deleted = getattr(sess, "deleted", None)
         _restore = (np.asarray(_deleted, dtype=bool)
                     if _deleted is not None and _deleted.shape[0] == len(sess.positions)
@@ -36555,7 +36575,7 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
 
     # Stream the heavy build/gapfill/extract with per-stage progress markers, and
     # register a cancel token so the user can abandon a long run. The gapfill itself
-    # is ONE opaque C++ call that cannot be interrupted mid-flight, so cancelling
+    # is ONE opaque C++ call that cannot be interrupted mid-flight, so canceling
     # frees the client rather than the worker thread — but that is the difference
     # between a dismissable dialog and an app that looks hung, and the streaming
     # wrapper also sets the event on client disconnect.
@@ -36671,7 +36691,7 @@ def _label_class_summary_locked(
     Restricting to editable is not cosmetic: computing over the whole column
     would count deleted rows and sky/miss points (which are always 0), so a scan
     that is 40% misses would report a huge phantom "Unclassified" tally and the
-    user's "how much have I labelled?" readout would be meaningless. Caller
+    user's "how much have I labeled?" readout would be meaningless. Caller
     holds the lock."""
     return _label_class_summary(sess.extras.get(slug), editable)
 
@@ -36902,7 +36922,7 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
                         else np.zeros(len(sess.positions), dtype=bool))
         for entry in sess.deleted_history:
             sess.deleted[entry] = True
-        # Restoring points changes neighbourhoods just as deleting them does.
+        # Restoring points changes neighborhoods just as deleting them does.
         _mark_normals_stale_locked(sess)
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None   # see the invariant note in delete_cloud_region
@@ -36921,12 +36941,12 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
 class ResetLabelEditsRequest(BaseModel):
     """Undo. `edit_count` = how many committed label edits to KEEP; the column is
     rolled back to that point and later entries are discarded. Omit to clear ALL
-    labelling on the slug (edit_count = 0)."""
+    labeling on the slug (edit_count = 0)."""
     edit_count: Optional[int] = None
     slug: str = MANUAL_CLASS_SLUG
     # Preferred over `edit_count` for a global undo: the ids the renderer still
     # holds, NEWEST FIRST. The history is rolled back to the first of them it
-    # recognises, keeping that edit and dropping everything after it.
+    # recognizes, keeping that edit and dropping everything after it.
     #
     # A count is unsafe here because the renderer's stroke list counts USER
     # GESTURES while this history counts RECORDED CHANGES — a stroke whose
@@ -36975,39 +36995,39 @@ def get_cloud_label_summary(session_id: str, slug: str = MANUAL_CLASS_SLUG):
     }
 
 
-# Grid resolution for the unlabelled-point finder: cells per axis over the
+# Grid resolution for the unlabeled-point finder: cells per axis over the
 # cloud's extent. Coarse on purpose: a cluster is "a place to look", not a
 # segmentation, and 48^3 cells is ~110k booleans however large the cloud.
-_UNLABELLED_GRID = 48
-_UNLABELLED_MAX_CLUSTERS = 500
-# Above this many unlabelled points the finder works on an even stride of them
+_UNLABELED_GRID = 48
+_UNLABELED_MAX_CLUSTERS = 500
+# Above this many unlabeled points the finder works on an even stride of them
 # and scales the counts: it answers "where to look", and touching every point of
-# a mostly-unlabelled 30 M-point cloud took ~3 s per N press.
-_UNLABELLED_SAMPLE = 2_000_000
+# a mostly-unlabeled 30 M-point cloud took ~3 s per N press.
+_UNLABELED_SAMPLE = 2_000_000
 
 
-def _unlabelled_clusters(positions: np.ndarray, unlabelled: np.ndarray,
-                         grid: int = _UNLABELLED_GRID) -> list:
-    """Connected groups of `positions[unlabelled]` on a coarse grid, largest
+def _unlabeled_clusters(positions: np.ndarray, unlabeled: np.ndarray,
+                         grid: int = _UNLABELED_GRID) -> list:
+    """Connected groups of `positions[unlabeled]` on a coarse grid, largest
     first: [{"count", "center", "min", "max"}] in session coordinates.
 
-    Cells holding an unlabelled point are joined to their 26 neighbours
+    Cells holding an unlabeled point are joined to their 26 neighbors
     (scipy.ndimage.label), so a leaf's worth of stragglers is one stop for the
     camera rather than dozens of cells. Counts are estimates (an even sample,
-    scaled) above `_UNLABELLED_SAMPLE` points."""
+    scaled) above `_UNLABELED_SAMPLE` points."""
     from scipy import ndimage
 
-    idx = np.flatnonzero(unlabelled)
+    idx = np.flatnonzero(unlabeled)
     if idx.size == 0:
         return []
-    stride = max(1, -(-idx.size // _UNLABELLED_SAMPLE))
+    stride = max(1, -(-idx.size // _UNLABELED_SAMPLE))
     if stride > 1:
         idx = idx[::stride]
     pts = positions[idx]
     lo = pts.min(axis=0)
     # CUBIC cells sized from the longest extent: per-axis cells would be
     # needle-thin along a short axis and splinter one blob into fragments. And
-    # never finer than twice the typical point spacing, or neighbouring points
+    # never finer than twice the typical point spacing, or neighboring points
     # of one sparse blob land in non-adjacent cells and it splinters the same way.
     size = max(float((pts.max(axis=0) - lo).max()), 1e-9) / grid
     if pts.shape[0] > 1:
@@ -37021,7 +37041,7 @@ def _unlabelled_clusters(positions: np.ndarray, unlabelled: np.ndarray,
     occupied[cell[:, 0], cell[:, 1], cell[:, 2]] = True
     labels, n = ndimage.label(occupied, structure=np.ones((3, 3, 3), dtype=bool))
     # Aggregate per CELL (at most grid^3 bins) rather than sorting the points
-    # by component, which cost 3 s on 30 M unlabelled points. Centres stay exact;
+    # by component, which cost 3 s on 30 M unlabeled points. Centers stay exact;
     # a component's box is the extent of its cells, which is what framing needs.
     flat = np.ravel_multi_index((cell[:, 0], cell[:, 1], cell[:, 2]), shape)
     ncell = int(np.prod(shape))
@@ -37040,7 +37060,7 @@ def _unlabelled_clusters(positions: np.ndarray, unlabelled: np.ndarray,
     np.maximum.at(cmax, comp, ijk)
     mins = lo + cmin * size
     maxs = lo + (cmax + 1) * size
-    ranked = np.argsort(-counts, kind="stable")[:_UNLABELLED_MAX_CLUSTERS]
+    ranked = np.argsort(-counts, kind="stable")[:_UNLABELED_MAX_CLUSTERS]
     return [{
         "count": int(counts[c]),
         "center": (sums[c] / counts[c]).tolist(),
@@ -37048,12 +37068,12 @@ def _unlabelled_clusters(positions: np.ndarray, unlabelled: np.ndarray,
         "max": maxs[c].tolist(),
     } for c in ranked]
 
-@app.get("/api/cloud/session/{session_id}/unlabelled_clusters")
-def get_unlabelled_clusters(session_id: str, slug: str = MANUAL_CLASS_SLUG):
-    """Where a label column's still-unlabelled points gather, for the label
+@app.get("/api/cloud/session/{session_id}/unlabeled_clusters")
+def get_unlabeled_clusters(session_id: str, slug: str = MANUAL_CLASS_SLUG):
+    """Where a label column's still-unlabeled points gather, for the label
     tool's finder to step the camera through (N / Shift+N). Read-only.
 
-    Unlabelled means an EDITABLE point (alive, not a sky/miss point) whose class
+    Unlabeled means an EDITABLE point (alive, not a sky/miss point) whose class
     is 0 (Unclassified), or every editable point when the column does not exist
     yet. Coordinates are in the session frame, the one strokes are drawn in."""
     sess = _get_cloud_session(session_id)
@@ -37062,11 +37082,11 @@ def get_unlabelled_clusters(session_id: str, slug: str = MANUAL_CLASS_SLUG):
         positions = sess.positions
         editable = _session_editable_mask_locked(sess)
         col = sess.extras.get(slug)
-    unlabelled = editable if col is None else editable & (np.rint(col) == MANUAL_CLASS_UNLABELED)
-    clusters = _unlabelled_clusters(positions, unlabelled)
-    total = int(unlabelled.sum())
+    unlabeled = editable if col is None else editable & (np.rint(col) == MANUAL_CLASS_UNLABELED)
+    clusters = _unlabeled_clusters(positions, unlabeled)
+    total = int(unlabeled.sum())
     return {"session_id": session_id, "slug": slug, "total": total,
-            "estimated": total > _UNLABELLED_SAMPLE, "clusters": clusters}
+            "estimated": total > _UNLABELED_SAMPLE, "clusters": clusters}
 
 
 # One cached segmentation per session: (mode, size, geometry identity) -> seg.
@@ -37093,7 +37113,7 @@ def segment_pick(session_id: str, request: SegmentPickRequest):
     """The label tool's click-to-pick (F6): segment the cloud's editable points
     (cached), find the segment at `seed`, optionally grow it across adjacent
     segments with a similar normal, and return it as a `voxel_set` region for
-    a label stroke. Read-only: nothing is labelled until that stroke is sent."""
+    a label stroke. Read-only: nothing is labeled until that stroke is sent."""
     if request.mode not in ("pieces", "connected"):
         raise HTTPException(status_code=400, detail="mode must be 'pieces' or 'connected'.")
     if len(request.seed) != 3 or not all(math.isfinite(c) for c in request.seed):
@@ -37107,7 +37127,7 @@ def segment_pick(session_id: str, request: SegmentPickRequest):
         gen = sess.octree_stale_gen
     n_editable = int(editable.sum())
     if n_editable == 0:
-        raise HTTPException(status_code=400, detail="The cloud has no points that can be labelled.")
+        raise HTTPException(status_code=400, detail="The cloud has no points that can be labeled.")
     ident = (id(positions), gen, n_editable)
     with _SEGMENT_CACHE_LOCK:
         for sid in [k for k in _SEGMENT_CACHE if k not in _cloud_sessions]:
@@ -37203,7 +37223,7 @@ def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
         if request.undo_after_stroke_ids is not None:
             # Resolve the count from the join keys, newest first. Ids the history
             # does not hold are gestures it never recorded (a no-op stroke), so we
-            # walk back to the newest one it DOES hold. Recognising none of them
+            # walk back to the newest one it DOES hold. Recognizing none of them
             # means every surviving gesture was a no-op and nothing recorded
             # should remain, which is the same answer as an empty list.
             index_of = {d.stroke_id: i for i, d in enumerate(hist)}
@@ -37282,7 +37302,7 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest,
     history's memory. Unlike `bake` it does NOT compact arrays or clear
     deletions, and other columns' histories are untouched.
 
-    Streams PHP1 progress markers ahead of the JSON tail and is **cancellable**
+    Streams PHP1 progress markers ahead of the JSON tail and is **cancelable**
     via `/api/cancel/{run_id}`, like `bake`: the renderer runs it in its
     background refresh queue, whose Cancel used to stop the bake that follows it
     but not this converter run."""
@@ -37325,7 +37345,7 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
     """Worker for POST .../bake — see the endpoint docstring.
 
     Runs off the event loop (via `_bin_frame_streaming_response`) so the
-    PotreeConverter run can report progress and be cancelled. EVERY mutation of
+    PotreeConverter run can report progress and be canceled. EVERY mutation of
     the session happens AFTER the build returns, so a cancel mid-build unwinds
     out of here leaving the session pristine — the same guarantee
     `session_segment_ground` gives for its killable compute.
@@ -37404,7 +37424,7 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
     # label histories hold). A cancel that lands while the converter is finishing
     # would otherwise be observed by nobody — the converter returns normally and
     # we compact anyway — so the user's cancel would silently apply the very
-    # deletions they just cancelled. Check here, before the first mutation.
+    # deletions they just canceled. Check here, before the first mutation.
     _cancel_checkpoint(progress)
 
     if not compact:
@@ -37513,7 +37533,7 @@ def _finish_bake(sess: "CloudSession", session_id: str, remaining: int,
         # the compacted arrays. The renderer mirrors this stack one-for-one (its
         # entries index `reset_edits`), so it has to be told the surviving length
         # rather than assuming zero, or a delete racing a background rebuild
-        # would desynchronise the two and misaddress a later undo.
+        # would desynchronize the two and misaddress a later undo.
         history_len = len(sess.deleted_history)
         pending = _pending_deleted_count_locked(sess)
         display_stats = _bake_display_stats_locked(sess)
@@ -37537,7 +37557,7 @@ def _finish_bake(sess: "CloudSession", session_id: str, remaining: int,
 @app.post("/api/cloud/session/{session_id}/bake")
 def bake_cloud_session(session_id: str, http_request: Request, compact: bool = True):
     """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
-    ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
+    ARRAYS — the survivors (positions[~deleted] + colors + intensity + every
     scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
     PotreeConverter. The source file is NOT read. Then the in-RAM arrays are
     compacted to the survivors and the mask cleared. Returns the new octree
@@ -37549,7 +37569,7 @@ def bake_cloud_session(session_id: str, http_request: Request, compact: bool = T
     octree but keeps the deleted rows under the mask, because LAD restores the
     deleted hits outside its grid from them. See `_do_bake_cloud_session`.
 
-    Streams PHP1 progress markers ahead of the JSON tail and is **cancellable**
+    Streams PHP1 progress markers ahead of the JSON tail and is **cancelable**
     via `/api/cancel/{run_id}` (the cancel SIGKILLs the PotreeConverter child).
     Before this it was a silent 300 s-timeout POST with no busy state in the
     renderer at all: the Erase panel's button stayed live throughout, so an
@@ -37572,7 +37592,7 @@ def _mark_normals_stale_locked(sess: "CloudSession") -> None:
 
     A no-op unless the session actually carries normals, so an ordinary crop on
     a cloud that never had them stays flagged clean. Call from every path that
-    deletes or restores points — a normal is a neighbourhood statistic, so the
+    deletes or restores points — a normal is a neighborhood statistic, so the
     cut changes the right answer for every surviving point beside it.
     """
     if any(slug in sess.extras for slug, _ in normals_mod.COLUMNS):
@@ -37663,7 +37683,7 @@ def _session_editable_mask_locked(sess: "CloudSession") -> np.ndarray:
 
     Miss exclusion mirrors `delete_region`'s guard. A miss is a ray that hit
     nothing, projected ~1 km out along the beam, so it lands inside screen-space
-    regions by coordinate accident rather than user intent. Labelling one would
+    regions by coordinate accident rather than user intent. Labeling one would
     poison the class counts, the legend's value range, and any child cloud split
     out by class — and a "Leaf" cloud carrying sky points at 1 km hangs the next
     reconstruction tool rather than erroring."""
@@ -37695,7 +37715,7 @@ def _session_observed_classes_locked(sess: "CloudSession") -> dict:
     enumerating 0..max from that still invents Unassigned/Tree 1/Tree 2, listing
     three classes that no longer own a single point. Worse, min/max cannot
     express GAPS: keeping Trees 1 and 3 gives [1,3], and Tree 2 reappears no
-    matter how carefully the endpoints are honoured. Only the distinct values are
+    matter how carefully the endpoints are honored. Only the distinct values are
     the truth, so we compute them where the arrays live.
 
     Restricted to alive-and-not-miss for the same reason
@@ -37966,9 +37986,9 @@ def _session_set_full_column_locked(sess: "CloudSession", slug: str, label: str,
     The absolute-indexed sibling of `_session_add_extra_column`, and the one
     scalar-field arithmetic must use. The difference is not stylistic:
 
-      * A NEIGHBOURHOOD statistic (a normal, a noise class, a CSF label) is
+      * A NEIGHBORHOOD statistic (a normal, a noise class, a CSF label) is
         genuinely undefined for a point that is not in the cloud — it was not
-        part of any neighbourhood the compute saw. Zero-filling its deleted rows
+        part of any neighborhood the compute saw. Zero-filling its deleted rows
         states that honestly, which is what `_session_add_extra_column` does.
       * An ELEMENTWISE expression has a perfectly good value on a deleted row:
         `intensity * 2` does not care whether the point is currently hidden. And
@@ -38043,7 +38063,7 @@ def _session_rebuild(
     A private write still takes `_las_write_lock`, so the K writes stay SERIAL
     with respect to each other while no longer blocking anything else. That is
     deliberate and measured: letting them run concurrently was ~20% SLOWER
-    end-to-end on a 1.2 M-point 2-way split, because serialised writes let one
+    end-to-end on a 1.2 M-point 2-way split, because serialized writes let one
     child's PotreeConverter overlap the next child's write, and running every
     write at once then every convert at once destroys that pipelining while the
     writers contend for memory bandwidth and the same temp dir. The global lock
@@ -38128,7 +38148,7 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
     octree is NOT built here (caller rebuilds, outside the lock).
 
     Index-based rather than mask-based because of the K-way split: the obvious
-    `sess.positions[~sess.deleted][keep]` materialises the ENTIRE survivor array
+    `sess.positions[~sess.deleted][keep]` materializes the ENTIRE survivor array
     before narrowing it, so slicing K subsets out of an N-point cloud moved
     O(K x N) bytes per attribute column. On a multi-million-point plot split into
     a few dozen trees that was tens of seconds of pure memcpy under the global
@@ -38205,7 +38225,7 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         crs_epsg=sess.crs_epsg,  # subsets keep the parent's CRS for DEM georeferencing
         # A subset is the SAME points, already converted — it inherits the
         # parent's provenance rather than losing it. (Nothing is re-scaled here:
-        # the positions it copies are metres already.)
+        # the positions it copies are meters already.)
         source_units=getattr(sess, "source_units", None),
         source_unit_scale=getattr(sess, "source_unit_scale", None),
         deleted=deleted,
@@ -38271,7 +38291,7 @@ def session_split(session_id: str, request: SessionSplitRequest):
     if region_dict is None and not request.scalar_filters:
         raise HTTPException(status_code=400, detail="split requires `region` or `scalar_filters`.")
 
-    # The gather materialises the survivor slice of every column and then a
+    # The gather materializes the survivor slice of every column and then a
     # second copy for the leftover child, so two full-size sets are live at
     # once. Admitted outside `_cloud_session_lock` (admission sleeps while it
     # waits; the session lock must never be held across that).
@@ -38501,7 +38521,7 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
     """Worker for POST .../extract_by_column — see the endpoint docstring.
 
     Runs off the event loop (via `_bin_frame_streaming_response`) so it can
-    report per-child progress and be cancelled. On cancel or failure the
+    report per-child progress and be canceled. On cancel or failure the
     already-registered child sessions are dropped from the registry, so a
     half-finished split doesn't strand a full copy of the cloud in RAM."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38581,7 +38601,7 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
                 _cloud_sessions.pop(child.session_id, None)
         for _value, child in children:
             _drop_session_spill(child.session_id)
-        if isinstance(exc, ScanCancelled):
+        if isinstance(exc, ScanCanceled):
             raise
         # The response stream is already open, so an exception here could only
         # reach the client as a truncated body ("Unexpected end of JSON input").
@@ -38604,7 +38624,7 @@ def session_extract_by_column(session_id: str, request: SessionExtractByColumnRe
     """Fan a categorical column out into one child session per distinct value
     (parent untouched). Returns {session_id, children: [{value, ...octree}]}
     ordered by value. Empty selections are skipped. No source file read.
-    Streams PHP1 progress markers ahead of the JSON result (cancellable pill) —
+    Streams PHP1 progress markers ahead of the JSON result (cancelable pill) —
     a per-tree split of a large plot is a minute-scale operation and the caller
     has no other signal that it's running.
 
@@ -38714,7 +38734,7 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     positions = np.vstack([_reshift(s.positions[m], s) for s, m in zip(sessions, survs)])
 
     # colors / intensity: all-or-nothing. Present iff any input has it; missing
-    # inputs fill neutral (white for colour, 0 for intensity), matching the LAS
+    # inputs fill neutral (white for color, 0 for intensity), matching the LAS
     # scale the session stores (uint16 0-65535).
     any_colors = any(s.colors is not None for s in sessions)
     if any_colors:
@@ -38814,9 +38834,9 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     crs_epsg = next(iter(epsgs)) if len(epsgs) == 1 and all(s.crs_epsg is not None for s in sessions) else None
 
     # Source-unit provenance, by the same all-must-agree rule. Every input is
-    # ALREADY in metres (each was converted at its own import), so this is
+    # ALREADY in meters (each was converted at its own import), so this is
     # purely a question of what to report, never of rescaling — a merge of a
-    # feet scan and a metre scan is perfectly valid geometry whose provenance is
+    # feet scan and a meter scan is perfectly valid geometry whose provenance is
     # simply "mixed", recorded as None.
     unit_slugs = {getattr(s, "source_units", None) for s in sessions}
     merged_units = (next(iter(unit_slugs))
@@ -39052,7 +39072,7 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
 @app.post("/api/project/save")
 def project_save(request: ProjectSaveRequest, http_request: Request):
     """Write the scene (staged blob) and every listed cloud session into one
-    .phyto file. Streams progress; cancellable; writes to `<path>.partial` and
+    .phyto file. Streams progress; cancelable; writes to `<path>.partial` and
     renames over the target only when complete."""
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -39193,7 +39213,7 @@ def _project_drop_restored(restored: Dict[str, "CloudSession"]) -> None:
 def project_open(request: ProjectOpenRequest, http_request: Request):
     """Restore a .phyto file: install its octrees, create NEW sessions from its
     saved ones, and stage its scene blob (fetch it with GET
-    /api/project/scene/{token}). Streams progress; cancellable; a failure
+    /api/project/scene/{token}). Streams progress; cancelable; a failure
     leaves no half-registered session behind."""
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -39257,7 +39277,7 @@ def session_merge(request: SessionMergeRequest):
             "world_shift": world_shift_out,
             # Unit provenance, merged by the all-must-agree rule in
             # `_merge_sessions_locked` (a mixed batch reports none). Every input
-            # is already metres, so this only says what to display.
+            # is already meters, so this only says what to display.
             "source_units": merged.source_units,
             "source_unit_scale": merged.source_unit_scale,
             "cache_id": cache_key,
@@ -39291,7 +39311,7 @@ class SessionGroundSegmentRequest(BaseModel):
     # 1.2 M points). The response omits `cache_id`/`bounds`/... entirely rather
     # than returning the pre-column octree with them: handing back an octree the
     # renderer would treat as current is the exact shape of the stale-octree bug
-    # `bake` guards against. If the follow-up split is cancelled the session
+    # `bake` guards against. If the follow-up split is canceled the session
     # keeps its new column while its octree predates it — harmless (the column is
     # simply unused until the next rebuild, and the renderer never adopted any
     # new data), and re-running the tool recomputes and rebuilds normally.
@@ -39351,7 +39371,7 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         hit_labels, gmeta = await _run_killable("ground", pts, csf_params,
                                                 http_request=http_request)
     except ClientDisconnected:
-        raise HTTPException(status_code=499, detail="Ground segmentation was cancelled.")
+        raise HTTPException(status_code=499, detail="Ground segmentation was canceled.")
     except RuntimeError as e:
         if "CSF" in str(e) or "cloth" in str(e).lower():
             raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
@@ -39401,9 +39421,9 @@ def _normals_cost_estimate(n_points: int, rebuild_points: int) -> "tuple[float, 
 class SessionComputeNormalsRequest(BaseModel):
     """Estimate per-point normals on the session's in-RAM points and append the
     `nx`/`ny`/`nz`/`curvature`/`verticality` columns."""
-    # Neighbours per local plane fit. Clamped into [MIN_K, MAX_K] by the core.
+    # Neighbors per local plane fit. Clamped into [MIN_K, MAX_K] by the core.
     k: int = normals_mod.DEFAULT_K
-    # Optional hard cap on the search radius (metres). None = pure k-NN, which
+    # Optional hard cap on the search radius (meters). None = pure k-NN, which
     # adapts to density on its own and is the right default for a scan whose
     # return density falls as 1/r^2.
     radius: Optional[float] = None
@@ -39416,7 +39436,7 @@ class SessionComputeNormalsRequest(BaseModel):
     viewpoint: Optional[List[float]] = None
     acknowledge_cost: bool = False
     # See SessionGroundSegmentRequest.defer_octree. Normals are usable by
-    # export / Poisson / ICP the moment the columns land; only the COLOURING
+    # export / Poisson / ICP the moment the columns land; only the COLORING
     # needs the rebuild, so a big cloud defers it to the background queue.
     defer_octree: bool = False
 
@@ -39484,7 +39504,7 @@ async def session_compute_normals(session_id: str,
     with _cloud_session_lock:
         # HIT survivors only. A miss is a ray that hit nothing, projected ~1 km
         # out; including them would wreck the KD-tree balance and every spacing
-        # heuristic (the collar is measured from the k-th neighbour distance).
+        # heuristic (the collar is measured from the k-th neighbor distance).
         hit = _session_survivor_hit_mask(sess)
         pts = _session_hit_positions_locked(sess, hit)
         origin, origin_source = _session_normal_origins_locked(
@@ -39499,8 +39519,8 @@ async def session_compute_normals(session_id: str,
             detail=f"Unknown orientation {request.orientation!r}.")
 
     if request.orientation == "origin" and origin is None:
-        # Nothing records where the sensor was, so treat the cloud's own centre
-        # as the viewpoint: normals face INWARD, toward that centre. That is the
+        # Nothing records where the sensor was, so treat the cloud's own center
+        # as the viewpoint: normals face INWARD, toward that center. That is the
         # same convention as a real sensor origin (a scanner sees a surface from
         # one side and the normal points back at it), so a cloud with no
         # recorded origin is shaded consistently with one that has it.
@@ -39537,7 +39557,7 @@ async def session_compute_normals(session_id: str,
             "normals", pts, params, http_request=http_request,
             origins=origin if per_point_origin else None)
     except ClientDisconnected:
-        raise HTTPException(status_code=499, detail="Normal estimation was cancelled.")
+        raise HTTPException(status_code=499, detail="Normal estimation was canceled.")
 
     values = np.asarray(values, dtype=np.float32)
     if values.shape != (len(pts), normals_mod.N_COLUMNS):
@@ -39614,7 +39634,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
     The compute runs in a KILLABLE subprocess (see `_run_killable`) so the
     panel's Cancel actually stops it: a single `cKDTree.query` is a monolithic C
     call that cannot poll a cancel flag. The column write + octree rebuild happen
-    in the parent AFTER the compute returns, so cancelling mid-compute leaves the
+    in the parent AFTER the compute returns, so canceling mid-compute leaves the
     session pristine."""
     sess = _get_cloud_session(session_id)
     if request.method not in denoise.METHODS:
@@ -39625,7 +39645,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
     with _cloud_session_lock:
         # Compute on HIT survivors only. A miss is a ray that hit nothing,
         # projected ~1 km out along its beam: it would blow up the KD-tree's
-        # extent AND poison the nearest-neighbour spacing the auto parameters are
+        # extent AND poison the nearest-neighbor spacing the auto parameters are
         # derived from (measured elsewhere in this file at ~2,500x). See
         # _session_survivor_hit_mask.
         hit = _session_survivor_hit_mask(sess)
@@ -39644,7 +39664,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
         hit_labels, dmeta = await _run_killable("denoise", pts, params,
                                                 http_request=http_request)
     except ClientDisconnected:
-        raise HTTPException(status_code=499, detail="Noise detection was cancelled.")
+        raise HTTPException(status_code=499, detail="Noise detection was canceled.")
     except RuntimeError as e:
         # denoise_mask raises ValueError for a bad method / too-small cloud; the
         # worker reports it as a non-zero exit with the traceback in the message.
@@ -39652,7 +39672,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
 
     # Scatter hit-labels back over ALL survivors. Misses default to NOISE_CLEAN,
     # NOT the house-convention 0: `session_split` already forces misses onto the
-    # kept side, but labelling them "clean" means no future refactor of that
+    # kept side, but labeling them "clean" means no future refactor of that
     # guard can move a miss into a noise cloud and silently cost the parent its
     # Beer's-law transmission denominator for LAD.
     labels = np.full(len(hit), denoise.NOISE_CLEAN, dtype=np.int64)
@@ -39662,7 +39682,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
                                   denoise.NOISE_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     # `**meta` supplies `point_count` — the REBUILT OCTREE's count, which is what
-    # `buildSessionOctreeData` consumes. The number of points actually analysed
+    # `buildSessionOctreeData` consumes. The number of points actually analyzed
     # (survivors, hits only) is reported separately rather than as a
     # `point_count` that `**meta` would silently overwrite.
     return {"session_id": session_id,
@@ -40108,7 +40128,7 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
             result["point_count"] = int(boxes["all"].n)
             result.update(meta)
         return result
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except ValueError as e:
         return _err(str(e))
@@ -40321,7 +40341,7 @@ class SessionWoodSegmentRequest(WoodSegmentationRequest):
     # 1.2 M points). The response omits `cache_id`/`bounds`/... entirely rather
     # than returning the pre-column octree with them: handing back an octree the
     # renderer would treat as current is the exact shape of the stale-octree bug
-    # `bake` guards against. If the follow-up split is cancelled the session
+    # `bake` guards against. If the follow-up split is canceled the session
     # keeps its new column while its octree predates it — harmless (the column is
     # simply unused until the next rebuild, and the renderer never adopted any
     # new data), and re-running the tool recomputes and rebuilds normally.
@@ -40417,7 +40437,7 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
             http_request=http_request, reflectance=reflectance,
         )
     except ClientDisconnected:
-        raise HTTPException(status_code=499, detail="Wood/leaf segmentation was cancelled.")
+        raise HTTPException(status_code=499, detail="Wood/leaf segmentation was canceled.")
     warns = list(wood_meta.get("warnings", []))
 
     def _write():
@@ -40553,7 +40573,7 @@ async def session_segment_organs(session_id: str, request: SessionOrganSegmentRe
             "organs", pts, {"units": request.units, "model_id": request.model_id},
             http_request=http_request)
     except ClientDisconnected:
-        raise HTTPException(status_code=499, detail="Organ segmentation was cancelled.")
+        raise HTTPException(status_code=499, detail="Organ segmentation was canceled.")
     await run_in_threadpool(_organ_write_columns, sess, deleted0, hit, out)
     cache_key, cache_dir, octree_meta = await run_in_threadpool(_session_rebuild, sess)
     return {"session_id": session_id, "point_count": int(len(pts)),
@@ -40591,7 +40611,7 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
             ground=ground_pts if len(ground_pts) else None, meta_out=meta,
         )
     except ClientDisconnected:
-        raise HTTPException(status_code=499, detail="Tree segmentation was cancelled.")
+        raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
     labels = np.zeros(len(pts), dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)
     with _cloud_session_lock:
@@ -40698,7 +40718,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     except ClientDisconnected:
         # Client gave up before the octree rebuild; the worker was killed and the
         # session is left untouched (no tree_instance column written).
-        raise HTTPException(status_code=499, detail="Tree segmentation was cancelled.")
+        raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = np.zeros(len(pts), dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)
@@ -40728,7 +40748,7 @@ def _translate_octree_in_place(cache_id: Optional[str],
     octree's coordinates instead of reconverting the cloud.
 
     A rigid transform does not invalidate an octree — rotation and translation
-    preserve neighbourhood, subdivision and LOD selection — and for a
+    preserve neighborhood, subdivision and LOD selection — and for a
     translation the node structure is provably unchanged (see
     `octree_transform`'s module docstring for the measurements). Reconverting
     5 M points costs ~39 s; rewriting the coordinates costs ~0.8 s.
@@ -40778,7 +40798,7 @@ def _translate_octree_in_place(cache_id: Optional[str],
             except Exception:
                 # Includes OctreeTransformError (unsupported layout/encoding).
                 # Clean up and tell the caller to take the converter path — an
-                # in-place rewrite is an optimisation, never a hard requirement.
+                # in-place rewrite is an optimization, never a hard requirement.
                 try:
                     _shutil.rmtree(staging_dir)
                 except (FileNotFoundError, OSError):
@@ -40825,7 +40845,7 @@ def _relabel_octree_attribute(
 
     `metadata.json` is edited as TEXT, never round-tripped through `json`:
     PotreeConverter writes bare `inf`/`nan` literals that standard JSON rejects
-    (see `_read_octree_metadata`), and re-serialising would have to invent a
+    (see `_read_octree_metadata`), and re-serializing would have to invent a
     spelling for them.
 
     Returns (cache_key, cache_dir, meta), or None to mean "caller must fall back
@@ -41046,7 +41066,7 @@ class ScalarFieldComputeRequest(BaseModel):
     # overwriting an imported or tool-written column — see the endpoint.
     overwrite: bool = False
     # See SessionGroundSegmentRequest.defer_octree. The column is usable by
-    # export and by a further expression the moment it lands; only the COLOURING
+    # export and by a further expression the moment it lands; only the COLORING
     # needs the rebuild, so a big cloud can chain several derivations and repay
     # one rebuild at the end via POST .../rebuild_octree.
     defer_octree: bool = False
@@ -41524,7 +41544,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         return (world @ R.T + t) - shift
 
     had_miss_octree = False
-    # `_apply` materialises a float64 copy of positions (and of beam_origins)
+    # `_apply` materializes a float64 copy of positions (and of beam_origins)
     # before assigning it back, so the old and new arrays are both live. Charged
     # against the FULL point count, not the survivors: a transform rewrites
     # deleted rows too (they keep their coordinates for undo). Admitted outside
@@ -41760,7 +41780,7 @@ class SessionFilterRequest(BaseModel):
 
 def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=None) -> dict:
     """Body of the filter endpoint, split out so the route can stream PHP1
-    progress and be cancelled. `progress` is a _ProgressReporter or None."""
+    progress and be canceled. `progress` is a _ProgressReporter or None."""
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump() if request.region else None
     if region_dict is not None:
@@ -41844,7 +41864,7 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
 def session_filter(session_id: str, request: SessionFilterRequest, http_request: Request):
     """Delete the points a spatial+scalar filter excludes, on the in-RAM arrays.
 
-    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
     Applying a filter rebuilds the octree via PotreeConverter — a minute-scale
     job on a large plot — and before this streamed the button looked dead:
     the user had no signal it was running, clicked again, and each click queued
@@ -41898,7 +41918,7 @@ def _load_cloud_for_segmentation(
       - `extra_dims` is the [{slug,label}, ...] list for the slug->label sidecar
         (matches the shape `_xyz_column_plan` / `_ply_to_las` produce).
 
-    XYZ-family is read via pandas (honouring the Helios ascii_format); PLY via
+    XYZ-family is read via pandas (honoring the Helios ascii_format); PLY via
     plyfile (carries every numeric vertex property — incl. benchmark `instance`/
     `semantic` labels); PCD via open3d (points/RGB only). Keeping this in one
     place lets segment_trees/apply accept the same formats the importer does.
@@ -42045,7 +42065,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
     Runs off-thread under _bin_frame_streaming_response; reports coarse stages and
     honors cancellation between them. Errors are caught and returned as
     {success: False, error} (preserving the endpoint's HTTP-200 error contract);
-    only ScanCancelled propagates so the stream emits its terminal marker."""
+    only ScanCanceled propagates so the stream emits its terminal marker."""
     try:
         import open3d as o3d
         import numpy as np
@@ -42071,7 +42091,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             # nothing upstream guarantees misses are gone. The renderer now
             # filters them, but a stale client or a direct API caller would
             # otherwise silently get a ~2000x inflated correspondence threshold
-            # and a centroid kilometres off — a confident wrong answer, not an
+            # and a centroid kilometers off — a confident wrong answer, not an
             # error. See _drop_far_outliers.
             points = _drop_far_outliers(
                 np.array(request.points or [], dtype=np.float64).reshape(-1, 3))
@@ -42089,12 +42109,12 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             progress(0.30, "Building raycasting scene")
 
 
-        # RECENTRE BEFORE THE float32 CAST. Open3D's RaycastingScene is Embree-
+        # RECENTER BEFORE THE float32 CAST. Open3D's RaycastingScene is Embree-
         # backed and accepts float32 only (a float64 tensor is rejected outright),
         # but `_read_points_from_source` adds `world_shift` back, so these are
         # ABSOLUTE coordinates — real UTM magnitudes for a projected cloud. float32
-        # spacing at a UTM northing of 4,210,000 is 0.5 m, i.e. the quantisation is
-        # 500x coarser than the millimetre clearances this endpoint reports
+        # spacing at a UTM northing of 4,210,000 is 0.5 m, i.e. the quantization is
+        # 500x coarser than the millimeter clearances this endpoint reports
         # (`points_within_1mm`). Measured on a true 5 mm clearance at UTM 32N:
         # mean 0.0128 m (2.6x), RMSE 0.0619 m (12x), max 0.5000 m — a confidently
         # wrong answer, no error raised.
@@ -42197,7 +42217,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             point_count=n_points,
         )
 
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except Exception as e:
         import traceback
@@ -42213,7 +42233,7 @@ def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
     Uses Open3D's RaycastingScene for efficient point-to-mesh distance computation.
     Returns comprehensive statistics about how well the mesh fits the point cloud.
     Streams PHP1 progress markers (see _bin_frame_streaming_response) ahead of the
-    JSON result so the renderer shows a cancellable progress pill.
+    JSON result so the renderer shows a cancelable progress pill.
     """
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -42281,7 +42301,7 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
     transform while still reporting fitness ~1.0. Using the 1-99 percentile
     span per axis keeps the scale tied to where the data actually is.
 
-    Implemented as a median-centred radial trim rather than a per-axis
+    Implemented as a median-centered radial trim rather than a per-axis
     percentile: sky/miss rays form a THICK far-field shell (a Helios scan is
     routinely ~10% misses), so a 99th-percentile cut still lands inside the
     shell and barely dents the diagonal. Distance from the median point
@@ -42290,7 +42310,7 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
     genuinely-populated core.
 
     Falls back to the true AABB when the trim degenerates (e.g. a tiny or
-    highly-clustered cloud), so behaviour is unchanged for clean input.
+    highly-clustered cloud), so behavior is unchanged for clean input.
 
     Small clouds are returned UNTRIMMED. Outlier rejection is only meaningful
     once there is a population to reject from: on a coarse mesh sample (a
@@ -42311,8 +42331,8 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
     _MIN_PTS_FOR_TRIM = 64
 
     if len(pts) >= _MIN_PTS_FOR_TRIM:
-        centre = np.median(pts, axis=0)
-        radii = np.linalg.norm(pts - centre, axis=1)
+        center = np.median(pts, axis=0)
+        radii = np.linalg.norm(pts - center, axis=1)
         med_r = float(np.median(radii))
         if med_r > 0:
             keep = radii <= 3.0 * med_r
@@ -42329,7 +42349,7 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
 # ICP correspondence window as a multiple of median point spacing. Measured
 # across three real orchards, error grows monotonically with this multiplier,
 # and below ~10x ICP loses the ability to pull in a pose that starts a couple
-# of metres out -- so it is a compromise between reach and accuracy, and there
+# of meters out -- so it is a compromise between reach and accuracy, and there
 # is no setting that is good at both.
 #
 # For the CLOUD paths that compromise is gone: `fine_registration` walks a
@@ -42344,7 +42364,7 @@ _CORR_DIST_SPACING_MULTIPLE = 20.0
 
 
 def _median_point_spacing(points: np.ndarray, sample: int = 30000) -> Optional[float]:
-    """Median nearest-neighbour distance, or None if it cannot be measured.
+    """Median nearest-neighbor distance, or None if it cannot be measured.
 
     Sampled rather than exhaustive -- this only needs the scale, and a full
     all-pairs query on a multi-million-point scan would dominate the ICP it is
@@ -42373,7 +42393,7 @@ def _auto_correspondence_distance(points: np.ndarray, diagonal: float) -> float:
     see `_CORR_DIST_SPACING_MULTIPLE`.
 
     Falls back to the historical `diagonal * 0.05` when spacing cannot be
-    measured (too few points, or scipy missing), so behaviour degrades to the
+    measured (too few points, or scipy missing), so behavior degrades to the
     previous rule rather than to something arbitrary.
     """
     spacing = _median_point_spacing(points)
@@ -42441,7 +42461,7 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
     Returns the final transformation and metrics.
 
     `progress`, when supplied, is a _ProgressReporter: after each 20-iteration
-    batch we poll it for cancellation (raising ScanCancelled between batches — a
+    batch we poll it for cancellation (raising ScanCanceled between batches — a
     running C++ batch can't be interrupted mid-call) and report a monotonic
     0.15→0.95 fraction so the renderer's pill advances per batch. A no-op when
     progress is None (e.g. direct unit-test callers).
@@ -42520,7 +42540,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             # nothing upstream guarantees misses are gone. The renderer now
             # filters them, but a stale client or a direct API caller would
             # otherwise silently get a ~2000x inflated correspondence threshold
-            # and a centroid kilometres off — a confident wrong answer, not an
+            # and a centroid kilometers off — a confident wrong answer, not an
             # error. See _drop_far_outliers.
             points = _drop_far_outliers(
                 np.array(request.points or [], dtype=np.float64).reshape(-1, 3))
@@ -42638,7 +42658,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             quality_warning=quality_warning,
         )
 
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except Exception as e:
         import traceback
@@ -42653,7 +42673,7 @@ def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Re
 
     The point cloud is the TARGET (stays fixed), the mesh is the SOURCE (will be transformed).
     Pre-aligns by moving source center to target center, then runs ICP until convergence.
-    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
     """
     run_id, cancel_event = _new_cancel_token()
     # The cloud, Open3D's copy of it, its KD-tree and the mesh-sampled cloud are
@@ -42684,7 +42704,7 @@ class CloudToCloudICPRequest(BaseModel):
     # resolved independently, so a flat cloud and an octree cloud can be mixed.
     target_source: Optional[PointSource] = None
     source_source: Optional[PointSource] = None
-    # How far the initial pose may be wrong, in metres. Sizes the FIRST rung of
+    # How far the initial pose may be wrong, in meters. Sizes the FIRST rung of
     # the multi-scale ladder -- the accuracy comes from the rungs below it, so
     # this is a reach setting rather than a precision one. None => derive it
     # from the cloud, which is what every in-app caller does.
@@ -42698,7 +42718,7 @@ class CloudToCloudICPRequest(BaseModel):
     # the same layout `transformation_matrix` comes back in. This is how
     # /api/c2c/global-register hands its result to the fine stage: ICP refines
     # the coarse alignment instead of starting from identity. Omit it (the
-    # default) for the original behaviour: identity init after centroid
+    # default) for the original behavior: identity init after centroid
     # pre-alignment. Supplying identity explicitly is equivalent to omitting it.
     init_transform: Optional[List[float]] = None
 
@@ -42767,7 +42787,7 @@ def _c2c_align(target_points, source_points, init_transform=None,
     # original source and is used as-is. With none, fall back to matching
     # centroids, which is the only free information about where the source
     # belongs. Both are ordinary initial poses for the ladder, so there is
-    # no centre-offset frame to compose out afterwards — the old code had
+    # no center-offset frame to compose out afterwards — the old code had
     # to rebase a caller's matrix by `M @ inv(T_center)` and applying the
     # offset twice was a live footgun.
     if init_transform is None:
@@ -42868,7 +42888,7 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
                 max_iterations=request.max_iterations,
                 rmse_threshold=request.rmse_threshold, progress=progress)
 
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except Exception as e:
         import traceback
@@ -42884,7 +42904,7 @@ def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: R
 
     The target cloud stays fixed, the source cloud will be transformed.
     Pre-aligns by moving source center to target center, then runs ICP until convergence.
-    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
     """
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -42905,7 +42925,7 @@ def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: R
 # unique surface. Running FPFH descriptors over raw foliage there is close to
 # useless — every leaf cluster looks like every other, so the correspondence set
 # is dominated by outliers and RANSAC happily locks the source onto a
-# NEIGHBOURING plant, one whole row-spacing off, while reporting a good score.
+# NEIGHBORING plant, one whole row-spacing off, while reporting a good score.
 #
 # The fix is not a cleverer estimator, it is a better input: reduce each cloud
 # to a sparse set of stable per-plant ANCHORS (one point per tree) and register
@@ -42930,9 +42950,9 @@ def _drop_far_outliers(points: np.ndarray, k: float = 20.0) -> np.ndarray:
     not produce a bad answer — it produces a HANG.
 
     Detect the GAP, not a multiple of the spread. The obvious implementation —
-    "drop anything beyond k x the 99th-percentile distance from the centre" —
+    "drop anything beyond k x the 99th-percentile distance from the center" —
     cannot work, and not because of the constant: once misses are numerous they
-    define that percentile themselves. Measured at 52% misses, the median centre
+    define that percentile themselves. Measured at 52% misses, the median center
     landed at (828, 835, 805), i.e. among the sky points, giving a p99 of 1429 m
     and a threshold of 28 km. Nothing was ever removed and the extent stayed at
     2324 m instead of 22 m.
@@ -42945,7 +42965,7 @@ def _drop_far_outliers(points: np.ndarray, k: float = 20.0) -> np.ndarray:
     if len(points) < 8:
         return points
 
-    # Finding the reference point is the crux. Any centre derived from a
+    # Finding the reference point is the crux. Any center derived from a
     # percentile of ALL points fails once misses are the majority: measured at
     # 52% misses, the median sat at (828, 835, 805) and a "densest half"
     # centroid at (997, 995, 984) — both inside the sky cluster rather than the
@@ -42953,16 +42973,16 @@ def _drop_far_outliers(points: np.ndarray, k: float = 20.0) -> np.ndarray:
     # origin.
     #
     # Use the densest CELL instead. Real returns are concentrated (a canopy in a
-    # few tens of metres) while misses are spread thinly over a ~1 km shell, so
+    # few tens of meters) while misses are spread thinly over a ~1 km shell, so
     # the most populated coarse voxel belongs to the real cloud no matter how
     # many misses there are.
     span = float(np.percentile(np.abs(points - np.median(points, axis=0)), 95).max())
     cell = max(span / 32.0, 1e-6)
     keys = np.floor(points / cell).astype(np.int64)
     _, inv, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
-    centre = points[inv == int(np.argmax(counts))].mean(axis=0)
+    center = points[inv == int(np.argmax(counts))].mean(axis=0)
 
-    d = np.linalg.norm(points - centre, axis=1)
+    d = np.linalg.norm(points - center, axis=1)
     order = np.argsort(d)
     ds = d[order]
 
@@ -43008,13 +43028,13 @@ def _drop_far_outliers(points: np.ndarray, k: float = 20.0) -> np.ndarray:
     return points[keep] if keep.sum() >= 8 else points
 
 
-def _neighbour_scale(points: np.ndarray) -> float:
-    """Median nearest-neighbour distance — the cloud's own sampling scale.
+def _neighbor_scale(points: np.ndarray) -> float:
+    """Median nearest-neighbor distance — the cloud's own sampling scale.
 
     FPFH radii are conventionally quoted as multiples of the downsampling voxel,
     which works when the input is a dense surface. It breaks badly on an ANCHOR
-    cloud: anchors sit one-per-plant, metres apart, so voxel-derived radii land
-    far below the spacing and every anchor ends up with an empty neighbourhood.
+    cloud: anchors sit one-per-plant, meters apart, so voxel-derived radii land
+    far below the spacing and every anchor ends up with an empty neighborhood.
     FPFH then returns a degenerate descriptor and RANSAC matches nothing —
     measured as coarse fitness 0.0000 with anchors correctly extracted.
 
@@ -43034,10 +43054,10 @@ def _preprocess_for_fpfh(points: np.ndarray, voxel: float):
     """Downsample + normals + FPFH, the standard Open3D coarse-registration prep.
 
     Radii are driven by whichever is LARGER: the usual voxel multiples, or the
-    cloud's own neighbour spacing (see `_neighbour_scale`). On a dense cloud the
+    cloud's own neighbor spacing (see `_neighbor_scale`). On a dense cloud the
     voxel dominates and this behaves conventionally; on a sparse anchor cloud the
     spacing dominates, so each anchor's descriptor actually covers its
-    neighbours instead of being computed on an empty ball."""
+    neighbors instead of being computed on an empty ball."""
     import open3d as o3d
 
     pts = np.asarray(points, dtype=np.float64)[:, :3]
@@ -43048,8 +43068,8 @@ def _preprocess_for_fpfh(points: np.ndarray, voxel: float):
         down = pcd
 
     down_pts = np.asarray(down.points)
-    spacing = _neighbour_scale(down_pts)
-    # A descriptor has to span several neighbours to carry any information;
+    spacing = _neighbor_scale(down_pts)
+    # A descriptor has to span several neighbors to carry any information;
     # 3x the spacing reaches the nearest few plants on an anchor cloud.
     normal_radius = max(voxel * 2.0, spacing * 2.0)
     feature_radius = max(voxel * 5.0, spacing * 3.0)
@@ -43072,7 +43092,7 @@ def run_global_registration(target_pts: np.ndarray, source_pts: np.ndarray,
     distance checker. That edge-length test is the specific guard against the
     repetitive-planting failure: it requires that the DISTANCES between paired
     points agree between the two clouds, so a candidate set that maps each tree
-    onto its neighbour (preserving positions but not the pairing) is rejected.
+    onto its neighbor (preserving positions but not the pairing) is rejected.
     """
     import open3d as o3d
 
@@ -43094,11 +43114,11 @@ def run_global_registration(target_pts: np.ndarray, source_pts: np.ndarray,
     tgt_down, tgt_fpfh = _preprocess_for_fpfh(target_pts, voxel)
     # How close two points must be to count as corresponding. Like the feature
     # radii this cannot be voxel-only: on an anchor cloud whose landmarks sit
-    # metres apart, a sub-metre threshold rejects every true correspondence
+    # meters apart, a sub-meter threshold rejects every true correspondence
     # (RANSAC then reports fitness 0). Take the larger of the voxel-derived
     # value and a fraction of the actual spacing, so a correct pairing survives
     # while a one-plant-off pairing is still comfortably out of range.
-    spacing = _neighbour_scale(np.asarray(tgt_down.points))
+    spacing = _neighbor_scale(np.asarray(tgt_down.points))
     dist = max(voxel * 1.5, spacing * 0.5)
 
     if estimator == "fgr":
@@ -43168,17 +43188,17 @@ class GlobalRegisterRequest(BaseModel):
     yaw_prior_deg: Optional[float] = None
     yaw_search_deg: float = 30.0
     # When a prior is available, USE IT to constrain the coarse search rather
-    # than skipping the search. Skipping was the original behaviour, justified
+    # than skipping the search. Skipping was the original behavior, justified
     # by a measurement against RiSCAN transforms reconstructed from the
     # registration report's Euler angles -- a reconstruction that was later
     # proved wrong. Re-measured against ground truth recovered exactly (via
-    # per-return gps_time correspondence, sub-millimetre), skipping the coarse
+    # per-return gps_time correspondence, sub-millimeter), skipping the coarse
     # stage leaves the source 180 degrees FLIPPED on 3 of 5 peach pairs, because
     # unseeded ICP has no way to know which end of a near-symmetric orchard row
     # it is on. Constraining the search to the prior instead fixes every flip:
     # yaw error drops from ~179 degrees to under 0.9 on all five pairs.
     #
-    # Set True to restore the old skip-the-search behaviour.
+    # Set True to restore the old skip-the-search behavior.
     prefer_refine_with_prior: bool = False
     # Downsampling/feature scale. Defaults to a fraction of the robust extent.
     voxel_size: Optional[float] = None
@@ -43252,7 +43272,7 @@ def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
             if progress is not None and getattr(progress, "should_cancel", lambda: False)():
                 proc.kill()
                 proc.wait(timeout=5)
-                raise ScanCancelled()
+                raise ScanCanceled()
             time.sleep(0.25)
 
         if proc.returncode != 0:
@@ -43428,7 +43448,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # and that pre-alignment is worth real accuracy: measured 31.1
             # degrees from RiSCAN's answer with it versus 49.8 without. Leaving
             # `transform` as None lets the refine step below start from matched
-            # centroids, which is the behaviour that beat the coarse stage.
+            # centroids, which is the behavior that beat the coarse stage.
             transform = None
             coarse_fitness = 1.0
             coarse_rmse = 0.0
@@ -43470,7 +43490,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         elif anchors_usable:
             # Match the landmark sets by their PAIRWISE DISTANCES, not with a
             # surface descriptor. FPFH was the obvious reuse and it does not
-            # work here: it histograms normal angles over a dense neighbourhood
+            # work here: it histograms normal angles over a dense neighborhood
             # and discards inter-point distance, which is the only signal a set
             # of ~15 scattered tree positions carries. Measured on real anchor
             # clouds its descriptors came out 0.98 mean cosine-similar — the
@@ -43480,7 +43500,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # forest-registration literature it follows.
             from anchor_matching import match_anchor_sets
 
-            spacing = _neighbour_scale(tgt_xyz)
+            spacing = _neighbor_scale(tgt_xyz)
             result = match_anchor_sets(tgt_xyz, tgt_feat, src_xyz, src_feat,
                                        spacing=spacing or None)
             transform = result["transformation"]
@@ -43512,7 +43532,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         if request.refine_icp:
             # Hand the coarse pose to the existing fine stage. Reuse the c2c
             # worker rather than re-implementing ICP so both paths share one
-            # convergence loop, quality gate and cancellation behaviour.
+            # convergence loop, quality gate and cancellation behavior.
             # Arrays, not a request model: these clouds are full resolution
             # and `.ravel().tolist()` on a pair of them is gigabytes of
             # temporary Python list. `transform=None` lets the fine stage
@@ -43617,7 +43637,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             match_margin=match_margin,
         )
 
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except Exception as e:
         import traceback
@@ -43640,7 +43660,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
 _MULTI_MAX_INLINE_POINTS = 2_000_000
 
 # Points sampled to decide where the sky/miss cut falls. The filter keys on a
-# multiplicative gap in distance-from-centre, which a sample resolves as well as
+# multiplicative gap in distance-from-center, which a sample resolves as well as
 # the full cloud -- see `_ingest`.
 _MISS_PROBE_POINTS = 200_000
 
@@ -43711,12 +43731,12 @@ class MultiScanRegisterRequest(BaseModel):
 # count still made the olive set worse (6 bad pairs of 10 against 2 with no
 # filter at all), because a coarse voxel needs a high count and that strips the
 # sparse far-field structure wide-baseline pairs register against. A fine voxel
-# discriminates on its own: real distant returns still find one neighbour within
+# discriminates on its own: real distant returns still find one neighbor within
 # 0.10 m, while scatter sits alone. Measured on olive, 0.10/2 gives 1 bad pair
 # of 10 -- better than no filter -- where 0.10/3 and 0.25/20 both give 6.
 _DENSITY_VOXEL_M = 0.10
 # Knife edge: min 3 costs five pairs. It is a floor on "this return has a
-# neighbour", not a density estimate, and raising it removes real structure.
+# neighbor", not a density estimate, and raising it removes real structure.
 _DENSITY_MIN_PTS = 2
 
 
@@ -43729,8 +43749,8 @@ def _footprint_extent(points: np.ndarray, percentile: float = 99.0) -> float:
     """
     if len(points) < 100:
         return 0.0
-    centre = np.median(points[:, :2], axis=0)
-    radius = float(np.percentile(np.linalg.norm(points[:, :2] - centre, axis=1),
+    center = np.median(points[:, :2], axis=0)
+    radius = float(np.percentile(np.linalg.norm(points[:, :2] - center, axis=1),
                                  percentile))
     return 2.6 * radius
 
@@ -43782,14 +43802,14 @@ def _reject_sparse_voxels(points: np.ndarray,
 # distance -- an azimuth error invisible at the tripod and growing linearly
 # with range (-0.41 deg measured, 7 cm at 10 m and 43 cm at 60 m).
 #
-# That was a symptom of stride sampling, not of the near field. Voxelising
+# That was a symptom of stride sampling, not of the near field. Voxelizing
 # weights every surface by AREA instead of by return count, so near and far
 # geometry already carry equal weight and there is nothing left to rebalance --
 # and the returns that were being thrown away are the most accurate in the
 # scan. See `fine_registration`.
 
 # Concurrent coarse searches. Each search's ranking ICP is itself OpenMP-
-# threaded but spends most of a call in serial numpy (rasterise / FFT) and in
+# threaded but spends most of a call in serial numpy (rasterize / FFT) and in
 # Open3D's fixed per-call overhead, so a few in flight fill the cores the one
 # search leaves idle. Memory is small -- each search holds only rasters and
 # the shared, already-decimated clouds.
@@ -43860,7 +43880,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                 X = X[np.isfinite(X).all(axis=1)]
             # Decide the sky/miss cut from a SAMPLE, then apply it to the whole
             # cloud. `_drop_far_outliers` looks for a large multiplicative gap in
-            # distance-from-centre, and misses sit ~1 km out -- a sample sees
+            # distance-from-center, and misses sit ~1 km out -- a sample sees
             # that gap exactly as well as 13 M points do. Measured on a peach
             # scan: 1.34 s against 17.65 s, agreeing to 0.000% on which points
             # survive. That was ~82 s of a 6-scan run.
@@ -43868,9 +43888,9 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                 probe = X[np.linspace(0, len(X) - 1, _MISS_PROBE_POINTS).astype(int)]
                 kept = _drop_far_outliers(probe)
                 if len(kept) >= 100:
-                    centre = np.median(kept, axis=0)
-                    limit = float(np.max(np.linalg.norm(kept - centre, axis=1)))
-                    X = X[np.linalg.norm(X - centre, axis=1) <= limit]
+                    center = np.median(kept, axis=0)
+                    limit = float(np.max(np.linalg.norm(kept - center, axis=1)))
+                    X = X[np.linalg.norm(X - center, axis=1) <= limit]
             # The fine stage's working copy is taken HERE, before the density
             # filter below: that filter drops sparse voxels, which on a
             # terrestrial scan means the far field, and the far field is what
@@ -44030,7 +44050,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             pool rather than one after another -- measured on a four-scan
             orchard set, 24 serial searches took 56 s. Progress and
             cancellation are reported from THIS thread as results land; the
-            workers only check for cancellation, so a cancelled run stops
+            workers only check for cancellation, so a canceled run stops
             taking new searches and the in-flight ones finish within one call.
             """
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44169,7 +44189,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             edge = tuple(sorted((ref, i)))
             # A pair the loop check blamed is not trustworthy enough to apply.
             # Saying so beats placing the scan somewhere plausible-looking.
-            if report.get("localised") and edge in suspect:
+            if report.get("localized") and edge in suspect:
                 unresolved.append(i)
                 continue
             transforms[i] = relative(ref, i)
@@ -44305,7 +44325,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             loops=loops,
             loops_checked=bool(report.get("checked")),
             loops_consistent=bool(report.get("consistent")),
-            loops_localised=bool(report.get("localised")),
+            loops_localized=bool(report.get("localized")),
             suspect_pairs=[list(p) for p in report.get("suspect_pairs", [])],
             variant=variant,
             # With fewer than three overlapping scans there is no cycle, so
@@ -44313,10 +44333,10 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # the same level of validation.
             validated=bool(report.get("checked")),
         )
-    except ScanCancelled:
+    except ScanCanceled:
         # Propagate to the streaming wrapper so the run really stops and its
         # memory is freed. Catching this below would report a blank-message
-        # failure while the user believes they cancelled.
+        # failure while the user believes they canceled.
         raise
     except Exception as e:
         import traceback
@@ -44359,7 +44379,7 @@ def global_register_cloud_to_cloud(request: GlobalRegisterRequest, http_request:
     Unlike /api/c2c/icp-register this does NOT need the clouds to start close
     together: it reduces both to sparse per-plant anchors, matches those, and
     (by default) refines the winner with the same point-to-plane ICP. Streams
-    PHP1 progress markers ahead of the JSON result (cancellable pill).
+    PHP1 progress markers ahead of the JSON result (cancelable pill).
     """
     run_id, cancel_event = _new_cancel_token()
     # Both clouds are loaded in full before anchor extraction reduces them, and
@@ -44468,13 +44488,13 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         # Scaled from the cloud's own POINT SPACING, not its extent. The old rule
         # (`diagonal * 0.05`) tied the correspondence window to how big the plot
         # is, which is unrelated to how far a point should have to look for its
-        # true partner -- it worked out to ~100-120x the median nearest-neighbour
+        # true partner -- it worked out to ~100-120x the median nearest-neighbor
         # spacing on every real dataset here, and that is far too wide.
         #
         # Too wide is not merely imprecise, it moves the minimum. On a real
         # vineyard with 5.2 m rows, ICP started from the CORRECT pose and walked
         # 2.87 m away at 100x spacing, because dense near-field foliage found
-        # partners in the neighbouring row. Error grew monotonically with the
+        # partners in the neighboring row. Error grew monotonically with the
         # multiplier on every pair measured across three orchards.
         #
         # 20x is the balance point. Tighter is slightly more accurate but loses
@@ -44535,7 +44555,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
             quality_warning=quality_warning,
         )
 
-    except ScanCancelled:
+    except ScanCanceled:
         raise
     except Exception as e:
         import traceback
@@ -44570,7 +44590,7 @@ async def icp_register_mesh_to_mesh(http_request: Request):
 
     The target mesh stays fixed, the source mesh will be transformed.
     Pre-aligns by moving source center to target center, then runs ICP until convergence.
-    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
 
     Accepts JSON or a PHB1 binary frame; `async def` only to read the body, with
     the decode pushed to the threadpool so the loop is never held.

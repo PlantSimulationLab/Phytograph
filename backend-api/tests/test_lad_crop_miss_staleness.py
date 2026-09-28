@@ -33,7 +33,7 @@ import main
 GRID = main.HeliosGrid(center=[0.0, 0.0, 0.0], size=[2.0, 2.0, 2.0],
                        nx=1, ny=1, nz=1)
 
-# Two hits inside the 2 m box centred on the origin, two well outside it.
+# Two hits inside the 2 m box centered on the origin, two well outside it.
 _POSITIONS = [
     [0.1, 0.1, 0.1],     # 0 inside
     [-0.4, 0.2, -0.3],   # 1 inside

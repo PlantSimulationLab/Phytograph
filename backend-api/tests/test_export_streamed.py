@@ -6,7 +6,7 @@ file path now goes through `_export_session_to_las`, which gathers one block
 at a time. The contract pinned here: the streamed file is point-for-point
 what the generic path produces (same coordinates after world shift and
 translation, same columns, same classification byte, same point format when
-RGB is deselected), it works for LAZ, it honours `columns`, and it never
+RGB is deselected), it works for LAZ, it honors `columns`, and it never
 calls the whole-cloud read.
 """
 import base64

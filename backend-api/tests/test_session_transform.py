@@ -402,7 +402,7 @@ def test_rotation_still_falls_back_to_a_full_rebuild(tmp_path, monkeypatch):
 
 def test_in_place_translation_matches_a_full_rebuild(tmp_path, monkeypatch):
     """Equivalence: the fast path and the converter must agree on the octree's
-    world-frame extent, to within the format's 1 mm quantisation."""
+    world-frame extent, to within the format's 1 mm quantization."""
     import octree_transform
 
     delta = np.array([12.0, -4.0, 3.0])
@@ -609,7 +609,7 @@ def test_rebuild_mode_rewrites_a_translation_in_place(tmp_path, monkeypatch):
     assert sess.octree_pose is None
 
 
-def test_default_is_unchanged_behaviour(tmp_path, monkeypatch):
+def test_default_is_unchanged_behavior(tmp_path, monkeypatch):
     """Back-compat: an omitted `octree_mode` must behave exactly as before —
     a rotation reconverts and nothing is left stale."""
     sid = _grid_session(tmp_path, monkeypatch)

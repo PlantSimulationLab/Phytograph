@@ -360,7 +360,7 @@ def test_mesh_import_obj_mtl_roundtrip(client):
     # vt (0,0) is V-flipped to (0,1) for three.js.
     assert uvs[0].tolist() == [0.0, 1.0]
 
-    # One material with the quad's Kd colour and PNG texture.
+    # One material with the quad's Kd color and PNG texture.
     mats = meta["materials"]
     assert len(mats) == 1
     assert mats[0]["texture_name"] == "quad_texture.png"
@@ -374,7 +374,7 @@ def test_mesh_import_obj_mtl_roundtrip(client):
     raw = base64.b64decode(meta["textures"]["quad_texture.png"])
     assert raw[:4] == b"\x89PNG"
 
-    # Per-vertex colours come from Kd.
+    # Per-vertex colors come from Kd.
     assert buffers["colors"].reshape(-1, 3)[0].tolist() == pytest.approx([0.3, 0.55, 0.2])
     # Normals from vn.
     assert buffers["normals"].reshape(-1, 3)[0].tolist() == [0.0, 0.0, 1.0]
@@ -440,7 +440,7 @@ def _write_binary_ply_quad(path) -> None:
 
 
 def test_mesh_import_ply_ascii(client, tmp_path):
-    """An ASCII PLY mesh imports as geometry with per-vertex colour, no textures."""
+    """An ASCII PLY mesh imports as geometry with per-vertex color, no textures."""
     ply = tmp_path / "quad_ascii.ply"
     ply.write_text(_PLY_QUAD_ASCII)
     resp = client.post("/api/mesh/import", json={"path": str(ply)})
@@ -457,7 +457,7 @@ def test_mesh_import_ply_ascii(client, tmp_path):
     tris = buffers["indices"].reshape(-1, 3)
     assert sorted(tuple(int(i) for i in t) for t in tris) == [(0, 1, 2), (0, 2, 3)]
 
-    # Per-vertex colours preserved (0-1), first vertex is red.
+    # Per-vertex colors preserved (0-1), first vertex is red.
     colors = buffers["colors"].reshape(-1, 3)
     assert len(colors) == 4
     r, g, b = colors[0]
@@ -504,11 +504,11 @@ def test_mesh_import_large_mesh_body_stays_under_v8_string_cap(client, tmp_path)
     meta, buffers = decode_bin_frame(resp.content)
 
     nv, nt = meta["vertex_count"], meta["triangle_count"]
-    # Per-vertex buffers (position/normal/colour) vs the per-triangle index list.
+    # Per-vertex buffers (position/normal/color) vs the per-triangle index list.
     per_vertex = sum(b.nbytes for n, b in buffers.items() if n != "indices") / nv
     per_tri = buffers["indices"].nbytes / nt
     assert per_tri == 12.0, "indices must be 3 uint32 per triangle"
-    assert per_vertex == 36.0, "expected float32 position + normal + colour per vertex"
+    assert per_vertex == 36.0, "expected float32 position + normal + color per vertex"
 
     # Project onto the real apple scan that triggered this bug.
     projected = per_vertex * 3_174_846 + per_tri * 6_302_999

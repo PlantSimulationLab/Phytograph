@@ -34,11 +34,11 @@ export function ComputePathBadge() {
 
   useEffect(() => {
     if (info) return;
-    let cancelled = false;
+    let canceled = false;
     void loadDeviceInfo()
-      .then((d) => { if (!cancelled) setInfo(d); })
+      .then((d) => { if (!canceled) setInfo(d); })
       .catch(() => { /* leave the badge hidden if device info is unavailable */ });
-    return () => { cancelled = true; };
+    return () => { canceled = true; };
   }, [info]);
 
   if (!info) return null;

@@ -143,13 +143,13 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   //
   //   - Any spec that changes a setting through the UI overwrote the
   //     developer's actual preferences, permanently and silently.
-  //   - Chromium EMPTIES <userData>/Cache when it initialises its disk cache,
+  //   - Chromium EMPTIES <userData>/Cache when it initializes its disk cache,
   //     so every launch here wiped whatever the running desktop app had in
   //     there. That is how the octree cache (once <userData>/cache/octrees, the
   //     same directory on case-insensitive APFS) was destroyed mid-session,
   //     costing a user the edits on a cloud that had diverged from its file.
   //
-  // --user-data-dir is a Chromium switch Electron honours before any JS runs,
+  // --user-data-dir is a Chromium switch Electron honors before any JS runs,
   // and app.getPath('userData') follows it, so electron-store lands here too.
   // Per-launch rather than stable: specs must not inherit each other's settings.
   // Note this makes every launch a "first run" (ipc.ts probes for the store

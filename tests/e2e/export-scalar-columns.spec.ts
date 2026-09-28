@@ -20,14 +20,14 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars.xyz');
  *      live in `octree.attributeRanges`), so it degenerated to bare x/y/z;
  *   2. the renderer's octree export branch never forwarded the picker's chosen
  *      slugs to the backend, so the picker was decorative on that path;
- *   3. the backend's read chokepoint returned positions/colours/intensity only,
+ *   3. the backend's read chokepoint returned positions/colors/intensity only,
  *      so no scalar could reach the writers even if asked for.
  *
  * scalars.xyz routes through convert_to_octree on import (the renderer holds no
  * positions), and carries three real scalars. Two of its headers auto-detect
  * into Helios per-pulse multi-return fields and so take the canonical lowercase
  * slugs `timestamp` / `target_index`; 'Deviation[]' is not a multi-return field
- * and keeps the sanitised `Deviation` (see octree-scalar-color.spec.ts). That
+ * and keeps the sanitized `Deviation` (see octree-scalar-color.spec.ts). That
  * makes this fixture the exact shape all three bugs needed.
  *
  * These assert on the CONTENT of the written file, not on the absence of an
@@ -114,7 +114,7 @@ test('the column picker offers the octree cloud\'s imported scalars', async () =
   for (const phantom of ['classification', 'gps-time', 'return number', 'user data']) {
     expect(slugs).not.toContain(phantom);
   }
-  // scalars.xyz carries no colour and no intensity, so neither is offered.
+  // scalars.xyz carries no color and no intensity, so neither is offered.
   expect(slugs).not.toContain('r');
   expect(slugs).not.toContain('intensity');
 });
@@ -179,7 +179,7 @@ test('drag-reordering the picker changes the file column order', async () => {
 
   // Drag Deviation to the front. The rows use HTML5 drag-and-drop
   // (draggable + onDragStart/onDragOver/onDrop), which Playwright's
-  // `locator.dragTo()` does NOT drive — it synthesises mouse moves, and the
+  // `locator.dragTo()` does NOT drive — it synthesizes mouse moves, and the
   // browser only raises dragstart/drop for a real OS-level drag. Dispatching the
   // drag events directly is what exercises the component's own handlers.
   //

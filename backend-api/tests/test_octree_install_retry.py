@@ -166,7 +166,7 @@ def test_every_octree_install_uses_the_retrying_helper():
 
 
 def test_a_complete_rival_install_is_never_touched(tmp_path, monkeypatch):
-    """M1 from the independent review. The first cut only recognised a rival's
+    """M1 from the independent review. The first cut only recognized a rival's
     finished install AFTER its own rmtree failed — by which point that rmtree
     could have half-deleted the rival's complete tree (rmtree stops at the first
     locked file; NTFS lists hierarchy.bin before octree.bin), leaving a
@@ -257,7 +257,7 @@ def test_a_delete_pending_probe_does_not_escape_the_retry(tmp_path, monkeypatch)
 
 
 def test_a_cancel_between_retries_unwinds(tmp_path, monkeypatch):
-    """L3: a cancelled import must not sit out the full retry window."""
+    """L3: a canceled import must not sit out the full retry window."""
     import threading
     import time as _time
     staging, cache_dir = _staged(tmp_path)
@@ -271,6 +271,6 @@ def test_a_cancel_between_retries_unwinds(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_OCTREE_INSTALL_RETRY_SECONDS", 60.0)
 
     started = _time.time()
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._install_octree_dir(staging, cache_dir, cancel_event=ev)
     assert _time.time() - started < 5.0

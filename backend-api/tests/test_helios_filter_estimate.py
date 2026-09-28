@@ -6,7 +6,7 @@ downstream as "mesh_indices is empty" when LAD reuses that triangulation.
 
 The regression these guard is a real capture from the terrain-snapped LAD
 workflow (`tests/e2e/lad-snap-to-ground.spec.ts`): the candidate set carried a
-cluster of sub-millimetre micro-triangles alongside the real surface, Otsu
+cluster of sub-millimeter micro-triangles alongside the real surface, Otsu
 locked onto that (much stronger) split, and returned an Lmax ~62x below the
 smallest genuine triangle.
 """
@@ -35,14 +35,14 @@ def test_degenerate_slivers_do_not_drag_lmax_below_real_geometry():
     est = main._helios_filter_estimate(e, np.zeros(e.size, dtype=np.int64))
 
     assert est["lmax"] is not None
-    # The pre-fix behaviour returned ~2.3e-4 here — below every real triangle.
+    # The pre-fix behavior returned ~2.3e-4 here — below every real triangle.
     assert est["lmax"] >= real_min, (
         f"lmax {est['lmax']:.6g} sits below the smallest real edge {real_min:.6g}; "
         "the seeded filter would keep zero triangles and render an empty mesh")
 
 
 def test_seeded_filter_keeps_triangles_when_slivers_present():
-    """Behavioural consequence: filtering the candidates at the estimated Lmax
+    """Behavioral consequence: filtering the candidates at the estimated Lmax
     must leave a non-empty mesh (this is what the reuse path requires)."""
     e = _edges_with_slivers()
 

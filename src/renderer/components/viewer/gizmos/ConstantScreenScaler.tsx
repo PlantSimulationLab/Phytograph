@@ -8,7 +8,7 @@ import { worldPerPixel } from '../../../lib/screenScale';
  * regardless of camera distance/zoom.
  *
  * Why gizmos need this: sizing a gizmo off the object's bounds makes it useless
- * on the two cases that matter most — a kilometre-wide survey cloud you're
+ * on the two cases that matter most — a kilometer-wide survey cloud you're
  * zoomed into (arrows the size of the county, no handle on screen) and a tiny
  * object (a gizmo too small to grab). The handles are UI, so they belong in
  * pixels, like the scene-origin marker.
@@ -32,7 +32,7 @@ export function ConstantScreenScaler({
   useFrame(() => {
     const grp = target.current;
     if (!grp) return;
-    // World position, not local — a parent group may be cancelling displayOffset.
+    // World position, not local — a parent group may be canceling displayOffset.
     grp.getWorldPosition(worldPos);
     // `size` is the gizmo's nominal world extent, so dividing it out makes the
     // scaled glyph exactly `pixels` px.

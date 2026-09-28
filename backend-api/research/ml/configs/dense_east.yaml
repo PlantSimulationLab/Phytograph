@@ -1,6 +1,6 @@
 # Dense-crown fix (2026-09-25). Same recipe as the shipped final_S_finetune_s0
 # (fine-tune from the seed-0 synthetic pre-training), plus clear-of-wood crop
-# seeding and the hand-labelled redbud(s) dense_eastern.
+# seeding and the hand-labeled redbud(s) dense_eastern.
 name: dense_east
 description: "Leaf/wood PointNeXt-S, clear-of-wood seeding + eastern redbud (western held out)."
 task: wood_leaf

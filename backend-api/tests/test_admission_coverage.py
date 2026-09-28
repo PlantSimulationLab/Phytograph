@@ -178,7 +178,7 @@ def test_admission_is_acquired_before_the_session_lock_not_under_it(
 # ---- the estimators ----------------------------------------------------------
 
 def test_mutation_estimate_follows_the_columns_a_session_carries():
-    """A bare xyz cloud must not be charged for colour it does not have."""
+    """A bare xyz cloud must not be charged for color it does not have."""
     class _S:
         def __init__(self, n, **kw):
             self.deleted = np.zeros(n, dtype=bool)

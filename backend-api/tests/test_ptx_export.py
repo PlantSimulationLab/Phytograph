@@ -31,7 +31,7 @@ def _entry(points, *, n_theta=6, n_phi=8, origin=(0.0, 0.0, 0.0),
 
 def _grid_points(rows, cols, origin=(0.0, 0.0, 0.0), radius=5.0):
     """One point per cell of a rows x cols raster, on a sphere around `origin`,
-    placed at the CENTRE of each angular bin so binning is unambiguous."""
+    placed at the CENTER of each angular bin so binning is unambiguous."""
     th = (np.arange(rows) + 0.5) / rows * 180.0
     ph = (np.arange(cols) + 0.5) / cols * 360.0
     T, P = np.meshgrid(np.radians(th), np.radians(ph), indexing="ij")
@@ -193,7 +193,7 @@ class TestPtxWorldShift:
         the header's `origin + shift` reads correctly by accident. Move the
         scanner off zero and the two frames separate: a WORLD-frame origin on
         a georeferenced cloud made `local` wrong by the whole shift (radii in
-        thousands of km instead of metres) and double-shifted the header pose.
+        thousands of km instead of meters) and double-shifted the header pose.
 
         Points are built 5 m around a scanner that sits at `local_origin` in
         the session's STORED frame, so the true local radius is exactly 5 m
@@ -249,7 +249,7 @@ class TestPtxCellAssignment:
         res = _export([_entry(pts, n_theta=rows, n_phi=cols)])
         g = res["files"][0]["grid"]
         assert g["source"] == "angles"
-        # Points sit at bin centres, so every one lands in its own cell.
+        # Points sit at bin centers, so every one lands in its own cell.
         assert g["filled"] == rows * cols and g["collapsed"] == 0
 
     def test_minus_one_sentinels_are_unplaced_not_crashed(self):
@@ -318,7 +318,7 @@ class TestPtxCellAssignment:
 
 
 class TestPtxChannels:
-    def test_colour_writes_seven_columns_and_empty_cells_stay_black(self):
+    def test_color_writes_seven_columns_and_empty_cells_stay_black(self):
         rows, cols = 2, 3
         pts, rr, cc = _grid_points(rows, cols)
         keep = np.ones(rows * cols, bool)
@@ -336,7 +336,7 @@ class TestPtxChannels:
         empty = [l for l in body if l.startswith("0.000000 0.000000 0.000000")]
         assert empty[0].split()[4:] == ["0", "0", "0"]
 
-    def test_intensity_is_normalised_into_the_unit_range(self):
+    def test_intensity_is_normalized_into_the_unit_range(self):
         rows, cols = 2, 3
         pts, rr, cc = _grid_points(rows, cols)
         inten = [0.0, 16383.0, 32767.0, 49151.0, 65535.0, 100.0]

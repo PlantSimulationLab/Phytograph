@@ -285,7 +285,7 @@ describe('splitDeletesByClipBudget', () => {
     expect(cpu[0]).toBe(stack[0]);
   });
 
-  it('honours a reserve for the live erase stamps', () => {
+  it('honors a reserve for the live erase stamps', () => {
     const stack = [stamps(25)];
     // 10 live boxes are about to be appended, so only 20 remain for committed.
     const { gpu, cpu } = splitDeletesByClipBudget(stack, MAX_CLIP_BOXES - 10);
@@ -316,7 +316,7 @@ describe('overflow is still hidden, just on the CPU', () => {
     const view = cam.matrixWorldInverse.toArray();
     const canvas = { width: 200, height: 200 };
 
-    // A stamp over canvas centre, which covers the world origin.
+    // A stamp over canvas center, which covers the world origin.
     const region: PendingDeleteRegion = {
       kind: 'squares_union',
       centers: [[100, 100]],
@@ -339,7 +339,7 @@ describe('overflow is still hidden, just on the CPU', () => {
       invert: false,
     };
     const rules = pendingDeletesToCropMaskRules([region], [region]);
-    expect(cropRulesKeep(rules, 5, 5, 5)).toBe(false);          // centre deleted
+    expect(cropRulesKeep(rules, 5, 5, 5)).toBe(false);          // center deleted
     expect(cropRulesKeep(rules, 5.9, 5.9, 5.9)).toBe(false);    // cube corner too
     expect(cropRulesKeep(rules, 8, 8, 8)).toBe(true);           // outside survives
   });

@@ -17,7 +17,7 @@ export interface DemDefaults {
   cellSize: number;
 }
 
-// Seeding bounds (metres). The panel input allows finer values; we never
+// Seeding bounds (meters). The panel input allows finer values; we never
 // auto-seed below the plant-scale floor.
 const CELL_MIN = 0.02;
 const CELL_MAX = 2;

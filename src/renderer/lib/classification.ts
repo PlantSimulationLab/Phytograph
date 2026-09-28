@@ -43,7 +43,7 @@ export const HEIGHT_ABOVE_GROUND_ATTRIBUTE = 'height_above_ground';
 // The slugs are a cross-process contract: they are the LAS/PLY extra-dim names
 // the backend exports, the octree buffer keys the shader reads, and — for
 // nx/ny/nz — the canonical PLY spelling, so a cloud round-trips through other
-// software with its normals still recognisable as normals. They must stay in
+// software with its normals still recognizable as normals. They must stay in
 // step with `COLUMNS` in backend-api/normals.py.
 export const NORMAL_X_ATTRIBUTE = 'nx';
 export const NORMAL_Y_ATTRIBUTE = 'ny';
@@ -60,7 +60,7 @@ export const NORMAL_ATTRIBUTES = [
   CURVATURE_ATTRIBUTE, VERTICALITY_ATTRIBUTE,
 ] as const;
 
-// Exported so the labelling tool's ground preset is the same class list the
+// Exported so the labeling tool's ground preset is the same class list the
 // segmentation writes — one vocabulary for machine and hand classification.
 export const GROUND_SCHEME_CLASSES: ClassDef[] = [
   { value: 1, label: 'Ground', color: [0.55, 0.40, 0.26] },
@@ -78,10 +78,10 @@ const GROUND_SCHEME: CategoricalScheme = {
 // confused when both are present.
 export const WOOD_CLASS_ATTRIBUTE = 'wood_class';
 
-// Exported so the manual-labelling tool's "Wood / leaf" preset palette is
+// Exported so the manual-labeling tool's "Wood / leaf" preset palette is
 // literally the same class list the automatic segmentation writes — a user
 // correcting segment_wood's output by hand works in one vocabulary, and a
-// colour tweak here can never leave the two out of sync.
+// color tweak here can never leave the two out of sync.
 export const WOOD_SCHEME_CLASSES: ClassDef[] = [
   { value: 1, label: 'Wood', color: [0.40, 0.26, 0.13] },
   { value: 2, label: 'Leaf', color: [0.30, 0.69, 0.31] },
@@ -96,9 +96,9 @@ const WOOD_SCHEME: CategoricalScheme = {
 // 1 = clean, 2 = noise. Deliberately only two classes so the panel's categorical
 // checkbox UI stays a single "keep clean / keep noise" choice.
 //
-// Muted grey for clean and a hot red for noise, because the whole point of the
+// Muted gray for clean and a hot red for noise, because the whole point of the
 // Detect step is that the flagged points POP against the rest of the cloud —
-// this colouring IS the preview the user judges before committing a removal.
+// this coloring IS the preview the user judges before committing a removal.
 // Nothing else in the registry uses saturated red.
 export const NOISE_CLASS_ATTRIBUTE = 'noise_class';
 
@@ -128,7 +128,7 @@ export const TREE_INSTANCE_ATTRIBUTE = 'tree_instance';
 // Dark gray, deliberately OUTSIDE the tree palette's lightness band (trees are
 // saturated hues at L≈0.50–0.62). A medium gray reads as just a desaturated
 // tree; going much darker makes "unassigned"/ground stand out as clearly
-// not-a-tree in the tree_instance colouring.
+// not-a-tree in the tree_instance coloring.
 const TREE_UNASSIGNED_COLOR: RGB = [0.22, 0.22, 0.22];
 // Golden-angle hue step keeps successive ids far apart on the color wheel.
 const GOLDEN_ANGLE_DEG = 137.508;
@@ -182,7 +182,7 @@ export function buildTreeInstanceScheme(maxId: number): CategoricalScheme {
 // the 0..max enumeration above cannot represent a filtered cloud (keeping only
 // Tree 3 must list Tree 3 alone, not Unassigned/Tree 1/Tree 2/Tree 3), and no
 // [min,max] pair can represent the gap left by keeping Trees 1 and 3.
-// Colours stay keyed to the id, so a class's colour never shifts when its
+// Colors stay keyed to the id, so a class's color never shifts when its
 // siblings are filtered away.
 export function buildTreeInstanceSchemeFromValues(values: readonly number[]): CategoricalScheme {
   const ids = Array.from(new Set(values.map((v) => Math.round(v)))).sort((a, b) => a - b);
@@ -287,10 +287,10 @@ export function buildGenericCategoricalSchemeFromValues(
 // Sky/miss flag (is_miss): 0 = a real return (hit), 1 = a sky/miss point (the
 // laser pulse returned nothing). Misses are hidden by default and drawn by a
 // dedicated overlay, but when shown inline they get a distinct, unmistakable
-// colour so they read as "not real geometry": muted slate for hits, warm orange
+// color so they read as "not real geometry": muted slate for hits, warm orange
 // for misses.
 export const MISS_ATTRIBUTE = 'is_miss';
-// The colour the dedicated miss overlay (and the inline scheme) paints misses.
+// The color the dedicated miss overlay (and the inline scheme) paints misses.
 export const MISS_COLOR: RGB = [1.0, 0.55, 0.0];
 
 const MISS_SCHEME: CategoricalScheme = {
@@ -308,8 +308,8 @@ const MISS_SCHEME: CategoricalScheme = {
 // fruit, gray for unlabeled.
 export const ORGAN_ATTRIBUTE = 'organ';
 
-// Exported so the labelling tool's "Plant organs" preset reuses these exact
-// values and colours. That makes hand labels directly comparable with the
+// Exported so the labeling tool's "Plant organs" preset reuses these exact
+// values and colors. That makes hand labels directly comparable with the
 // organ tags a Helios synthetic scan carries — one vocabulary for measured and
 // simulated ground truth.
 export const ORGAN_SCHEME_CLASSES: ClassDef[] = [
@@ -330,7 +330,7 @@ const ORGAN_SCHEME: CategoricalScheme = {
 // Plant organs from the ML organ tool (backend-api/ml/organs.py writes
 // `plant_organ`): 1 = soil, 2 = stem (petioles, rachises and petiolules
 // included), 3 = leaf. Distinct from `organ` above, which is the fine organ a
-// Helios synthetic scan tags each hit with. Colours are the model package's own
+// Helios synthetic scan tags each hit with. Colors are the model package's own
 // (ml/tasks.py `plant_organ`), so the legend matches what the package declares.
 // Mirrors PLANT_ORGAN_SLUG in backend-api/main.py.
 export const PLANT_ORGAN_ATTRIBUTE = 'plant_organ';
@@ -352,13 +352,13 @@ const PLANT_ORGAN_SCHEME: CategoricalScheme = {
 //
 // Registering the ASPRS 1.4 standard classes here is what turns an imported
 // file's classes from "Class 5" into "High Vegetation" in the legend and the
-// class-filter checkboxes. Colours follow Potree's ClassificationScheme, which
-// is the convention users will recognise from other LiDAR tools — brown ground,
+// class-filter checkboxes. Colors follow Potree's ClassificationScheme, which
+// is the convention users will recognize from other LiDAR tools — brown ground,
 // a three-shade green vegetation ramp.
 //
 // Codes 8 and 12 are Reserved in LAS 1.4: their old meanings (Model Key-point,
 // Overlap) moved to per-point FLAGS, which are orthogonal to the class code.
-// The class list is shared with the labelling tool's ASPRS preset palette
+// The class list is shared with the labeling tool's ASPRS preset palette
 // (lib/classPalettes.ts) so the two can never drift apart.
 export const LAS_CLASSIFICATION_ATTRIBUTE = 'las_classification';
 
@@ -403,7 +403,7 @@ const SCHEMES: Record<string, CategoricalScheme> = {
 };
 
 // True when `slug` has a STATIC registered scheme (is_miss, ground_class, …) —
-// i.e. a field that colours categorically by name regardless of the wizard's
+// i.e. a field that colors categorically by name regardless of the wizard's
 // Scalar/Label dropdown. The wizard uses this to detect when a user picked
 // "Scalar" for such a slug (e.g. a Miss Flag downgraded to Scalar) and must
 // register a continuous override so the choice actually takes effect. Ignores
@@ -483,7 +483,7 @@ export function isDynamicCategoricalAttribute(attribute: string | undefined | nu
 // semantic field like is_miss carries fixed domain labels (Hit/Miss); routing
 // it through the generic path would discard those for neutral "Class N" — and
 // worse, since the octree is built hits-only its observed range is [0,0], so
-// the generic path would collapse to a single bogus "Class 0". Honour the
+// the generic path would collapse to a single bogus "Class 0". Honor the
 // registered scheme so "Label" never degrades a known field below "Scalar".
 export function categoricalSchemeForRange(
   attribute: string | undefined | null,
@@ -529,7 +529,7 @@ export function categoricalSchemeFor(attribute: string | undefined | null): Cate
   const key = attribute.toLowerCase();
   // A slug the user forced to continuous ("Scalar") suppresses its registered
   // scheme so the renderer falls through to the gradient path with a numeric
-  // legend, honouring the explicit choice over the by-name default.
+  // legend, honoring the explicit choice over the by-name default.
   if (FORCE_CONTINUOUS.has(key)) return null;
   return SCHEMES[key] ?? null;
 }
@@ -538,13 +538,13 @@ export function isCategoricalAttribute(attribute: string | undefined | null): bo
   return categoricalSchemeFor(attribute) !== null || isDynamicCategoricalAttribute(attribute);
 }
 
-// The manual labelling tool's column. Declared here (rather than only in
+// The manual labeling tool's column. Declared here (rather than only in
 // classPalettes.ts) so the resolution helpers can special-case it, and MIRRORED
 // from MANUAL_CLASS_SLUG in backend-api/main.py — keep them in sync.
 export const MANUAL_CLASS_ATTRIBUTE = 'manual_class';
 
 /**
- * Resolve a categorical scheme for an attribute ON A SPECIFIC CLOUD, honouring
+ * Resolve a categorical scheme for an attribute ON A SPECIFIC CLOUD, honoring
  * that cloud's user-defined palette.
  *
  * Why this exists as a separate, additive function rather than a change to
@@ -555,9 +555,9 @@ export const MANUAL_CLASS_ATTRIBUTE = 'manual_class';
  * those ("if two clouds disagree on the same slug, continuous wins").
  *
  * It is NOT fine for user palettes. Two clouds with different palettes bound to
- * `manual_class` is the normal case, not an edge case: a rose labelled with
- * organ classes and a plot labelled with ASPRS classes, both open at once. A
- * process-wide Set can only pick one winner and would silently mis-colour the
+ * `manual_class` is the normal case, not an edge case: a rose labeled with
+ * organ classes and a plot labeled with ASPRS classes, both open at once. A
+ * process-wide Set can only pick one winner and would silently mis-color the
  * other cloud's points and legend. So the palette is threaded explicitly from
  * the cloud that owns it.
  *
@@ -611,7 +611,7 @@ export function rgbToHex([r, g, b]: readonly [number, number, number]): string {
 }
 
 // The swatch hex for a fixed categorical class — so a child cloud split out by
-// class (ground/non-ground, wood/leaf) carries exactly the colour the viewer
+// class (ground/non-ground, wood/leaf) carries exactly the color the viewer
 // paints that class, and a scheme tweak can never leave the two out of sync.
 // Returns null for a slug with no registered scheme, so callers can fall back.
 export function classColorHex(attribute: string, value: number): string | null {
@@ -623,14 +623,14 @@ export function classColorHex(attribute: string, value: number): string | null {
 // potree-core bakes the stop array into a 64-texel CanvasGradient sampled with
 // LinearFilter, and the shader samples class value v at t = (v-lo)/span. Two
 // failure modes to avoid:
-//   (a) a band narrower than a texel gets averaged away — its colour bleeds
-//       into the neighbour;
+//   (a) a band narrower than a texel gets averaged away — its color bleeds
+//       into the neighbor;
 //   (b) widening bands so they OVERLAP is worse: after the stops are sorted by
 //       t, a later class's stop at the same offset overwrites the earlier one,
 //       so a class can be emitted yet buried.
 // The edge class matters most here: ground is tree_instance 0, sampled at
 // t = 0. With many classes (tree_instance over [0, 86]) its natural band is a
-// sub-texel sliver, so it read as Tree 1's colour instead of grey.
+// sub-texel sliver, so it read as Tree 1's color instead of gray.
 const GRADIENT_TEXELS = 64; // potree-core canvas width (must match its bake)
 
 // Build a STEP gradient (array of [t, RGB] stops in 0..1) for the potree
@@ -639,12 +639,12 @@ const GRADIENT_TEXELS = 64; // potree-core canvas width (must match its bake)
 // class owns [midpoint-with-prev, midpoint-with-next] in t-space, so sampling
 // value v at t = (v-lo)/span always lands in v's own cell (no interpolation
 // across class boundaries, and — unlike a widen-and-clamp scheme — no cell ever
-// overwrites its neighbour).
+// overwrites its neighbor).
 //
 // The first and last cells are additionally guaranteed at least one texel of
 // width against the texture edge, so the edge classes (value == lo at t=0,
 // value == hi at t=1) survive the LinearFilter bake even when the range packs
-// classes tighter than a texel apart. That is what keeps ground (id 0) grey.
+// classes tighter than a texel apart. That is what keeps ground (id 0) gray.
 //
 // `range` is [min, max] of the attribute (e.g. [1, 2] for ground_class).
 export function buildCategoricalGradientStops(
@@ -682,8 +682,8 @@ export function buildCategoricalGradientStops(
   for (let i = 0; i < cells.length; i++) {
     const tStart = bounds[i];
     const tEnd = bounds[i + 1];
-    if (tEnd <= tStart) continue; // squeezed to nothing by an interior neighbour
-    // Hard edges: same colour at both ends of the cell.
+    if (tEnd <= tStart) continue; // squeezed to nothing by an interior neighbor
+    // Hard edges: same color at both ends of the cell.
     stops.push([tStart, cells[i].cls.color]);
     stops.push([tEnd, cells[i].cls.color]);
   }

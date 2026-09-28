@@ -41,7 +41,7 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
   const startedAt = useRef<number>(Date.now());
 
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
     const baseUrl = getBackendUrl();
     startedAt.current = Date.now();
     if (retryNonce > 0) {
@@ -52,7 +52,7 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
     }
 
     const tick = async (): Promise<void> => {
-      if (cancelled) return;
+      if (canceled) return;
       const elapsedMs = Date.now() - startedAt.current;
 
       try {
@@ -63,14 +63,14 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
           // too. Only treat a version-matched backend as ready; otherwise fall
           // through and keep polling (the supervisor is replacing it).
           if (json.version === EXPECTED_BACKEND_VERSION) {
-            // Honour the minimum splash time. If the backend was already warm
+            // Honor the minimum splash time. If the backend was already warm
             // (typical in dev or on a warm restart) we'd otherwise unmount the
             // splash within a single frame. Rather than schedule a one-shot
             // timer (which would freeze the displayed counter at its first-tick
             // value for the whole floor), keep looping until the floor is met —
             // each pass advances elapsedMs below, so the timer keeps climbing.
             if (elapsedMs >= minSplashMs) {
-              if (!cancelled) {
+              if (!canceled) {
                 setState({ status: 'ready', elapsedMs, version: json.version });
               }
               return;
@@ -84,7 +84,7 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
       }
 
       if (elapsedMs >= timeoutMs) {
-        if (!cancelled) {
+        if (!canceled) {
           setState({ status: 'failed', elapsedMs, error: 'Backend did not start within the expected time.' });
         }
         return;
@@ -95,7 +95,7 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
       // mismatched version. (Previously this only ran after a failed fetch, so
       // a backend that answered on the first tick left the counter pinned at 0
       // for the whole minSplashMs wait.)
-      if (!cancelled) {
+      if (!canceled) {
         setState((prev) => (prev.status === 'starting' ? { ...prev, elapsedMs } : prev));
       }
       setTimeout(tick, intervalMs);
@@ -103,7 +103,7 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
 
     tick();
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, [timeoutMs, intervalMs, minSplashMs, retryNonce]);
 

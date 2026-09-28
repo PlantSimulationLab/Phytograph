@@ -88,16 +88,16 @@ export function SyntheticScanOptionsPopup({
   // Load the remembered options each time the popup opens.
   useEffect(() => {
     if (!isOpen) return;
-    let cancelled = false;
+    let canceled = false;
     void window.electronAPI.store
       .get(SYNTHETIC_SCAN_OPTIONS_STORE_KEY)
       .then((stored) => {
-        if (!cancelled) setOpts(coerceSyntheticScanOptions(stored));
+        if (!canceled) setOpts(coerceSyntheticScanOptions(stored));
       })
       .catch(() => {
-        if (!cancelled) setOpts({ ...DEFAULT_SYNTHETIC_SCAN_OPTIONS });
+        if (!canceled) setOpts({ ...DEFAULT_SYNTHETIC_SCAN_OPTIONS });
       });
-    return () => { cancelled = true; };
+    return () => { canceled = true; };
   }, [isOpen]);
 
   // Seed the scan-position selection each time the popup opens — from the live

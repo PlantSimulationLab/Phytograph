@@ -18,7 +18,7 @@ import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octree
 // The origin is scene-wide, so this picks across every visible cloud rather
 // than only the selected one. Scoping it to the selection meant that with
 // nothing selected there was no surface to snap to AND no floor to fall back
-// on, so every click landed on z = 0 — tens of metres below a georeferenced
+// on, so every click landed on z = 0 — tens of meters below a georeferenced
 // scan whose ground sits at +60 m.
 export function OriginPicker({
   octrees,

@@ -1,18 +1,18 @@
-"""Tests for cancelling an in-flight point-cloud import.
+"""Tests for canceling an in-flight point-cloud import.
 
 `/api/cloud/session/create` used to be an `async def` that did every blocking
 step inline on the event loop: the whole backend froze for the duration of an
 import, so a concurrent `POST /api/cancel/{run_id}` could not even be serviced.
-The import was structurally uncancellable, and the progress modal had no way out.
+The import was structurally uncancelable, and the progress modal had no way out.
 
 It now runs its worker off-thread under `_bin_frame_streaming_response`, streams
-PHP1 stage markers, and honours a cancel token. These tests pin the four things
+PHP1 stage markers, and honors a cancel token. These tests pin the four things
 that make the cancel REAL rather than cosmetic:
 
   - progress markers actually stream (and carry the run_id the client cancels with);
-  - a cancel emits the terminal `cancelled` marker AND registers no session;
+  - a cancel emits the terminal `canceled` marker AND registers no session;
   - the PotreeConverter CHILD PROCESS is killed, not merely detached;
-  - a cancelled build leaves no staging dir and no cache entry, so the next
+  - a canceled build leaves no staging dir and no cache entry, so the next
     import of the same file can't reuse a half-built octree.
 """
 
@@ -96,11 +96,11 @@ def test_create_streams_progress_markers(client, cache_root, grid_xyz, monkeypat
     assert main._cloud_sessions[body["session_id"]].positions.shape[0] == 125
 
 
-def test_cancel_emits_cancelled_marker_and_registers_no_session(
+def test_cancel_emits_canceled_marker_and_registers_no_session(
         client, cache_root, grid_xyz, monkeypatch):
-    """The actual fix. Cancelling mid-build ends the stream with a terminal
-    `cancelled` marker instead of a result, and — critically — leaves NO session
-    in the registry, so a cancelled import can't leak a multi-GB in-RAM cloud."""
+    """The actual fix. Canceling mid-build ends the stream with a terminal
+    `canceled` marker instead of a result, and — critically — leaves NO session
+    in the registry, so a canceled import can't leak a multi-GB in-RAM cloud."""
     reached = threading.Event()
     release = threading.Event()
 
@@ -142,28 +142,28 @@ def test_cancel_emits_cancelled_marker_and_registers_no_session(
     res = result["res"]
     assert res.status_code == 200, res.text
     markers = decode_progress_markers(res.content)
-    assert any(m.get("cancelled") for m in markers), (
-        f"a cancelled run must end with a terminal cancelled marker; got {markers}")
+    assert any(m.get("canceled") for m in markers), (
+        f"a canceled run must end with a terminal canceled marker; got {markers}")
 
     # No session was registered: create adds to _cloud_sessions only as its LAST
     # statement, so the cancel unwound before anything was published.
     assert set(main._cloud_sessions) == sessions_before
 
 
-def test_cancelled_build_leaves_no_staging_dir_and_no_cache_entry(
+def test_canceled_build_leaves_no_staging_dir_and_no_cache_entry(
         tmp_path, cache_root, monkeypatch):
     """Poisoned-cache lock. A killed converter must leave the cache entry ABSENT
     (never half-built), and must not strand its staging dir — otherwise a later
     import of the same file would happily reuse a broken octree."""
     def cancel_midway(cancel_event):
-        raise main.ScanCancelled()
+        raise main.ScanCanceled()
 
     _install_fake_converter(monkeypatch, before_write=cancel_midway)
 
     las = tmp_path / "hits.las"
     las.write_bytes(b"deterministic bytes -> deterministic cache key")
 
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._build_octree_from_las(las, [])
 
     keys = list(cache_root.glob("*")) if cache_root.exists() else []
@@ -174,7 +174,7 @@ def test_cancelled_build_leaves_no_staging_dir_and_no_cache_entry(
 
 
 def test_import_after_cancel_succeeds(client, cache_root, grid_xyz, monkeypatch):
-    """The same file must import cleanly after a cancelled attempt. Identical
+    """The same file must import cleanly after a canceled attempt. Identical
     bytes derive the identical cache key, so a poisoned entry from the killed
     build would surface here as a wrong point count or a failure."""
     calls = {"n": 0}
@@ -182,14 +182,14 @@ def test_import_after_cancel_succeeds(client, cache_root, grid_xyz, monkeypatch)
     def cancel_first_build(cancel_event):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise main.ScanCancelled()
+            raise main.ScanCanceled()
 
     _install_fake_converter(monkeypatch, before_write=cancel_first_build)
 
     first = client.post("/api/cloud/session/create",
                         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT})
     assert first.status_code == 200
-    assert any(m.get("cancelled") for m in decode_progress_markers(first.content))
+    assert any(m.get("canceled") for m in decode_progress_markers(first.content))
 
     second = client.post("/api/cloud/session/create",
                          json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT})
@@ -198,7 +198,7 @@ def test_import_after_cancel_succeeds(client, cache_root, grid_xyz, monkeypatch)
     assert "error" not in body, body
     assert body["session_id"]
     assert main._cloud_sessions[body["session_id"]].positions.shape[0] == 125
-    # The second attempt really rebuilt (the cancelled first install left nothing
+    # The second attempt really rebuilt (the canceled first install left nothing
     # behind), rather than silently reusing a half-built cache entry.
     assert calls["n"] == 2
 

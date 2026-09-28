@@ -39,7 +39,7 @@ class TestCircleThrough3Points:
 
 class TestTaubin:
     def test_exact_on_a_full_circle_far_from_origin(self):
-        # World coordinates are large (UTM); the fit centres the data first.
+        # World coordinates are large (UTM); the fit centers the data first.
         pts = _circle(200, r=0.2, c=(612345.0, 4270000.0))
         center, r = ti.fit_circle_taubin(pts)
         assert np.allclose(center, [612345.0, 4270000.0], atol=1e-6)
@@ -249,7 +249,7 @@ class TestMeasureTree:
         # Axial distance steps by 0.5 m from 0.5 m.
         assert [c["axial_m"] for c in curve[:3]] == pytest.approx([0.5, 1.0, 1.5])
 
-    def test_ground_from_labelled_ground_grid(self, method):
+    def test_ground_from_labeled_ground_grid(self, method):
         t = SyntheticTree(slope=(0.2, -0.1), base_xy=(2.0, 2.0))
         r = _measure(t, method, ground="grid")["tree"]
         assert r["ground_source"] == "ground_class"
@@ -347,9 +347,9 @@ class TestEdgeCases:
             g.add(chunk)
         keys = np.array(list(g._cnt.keys()), dtype=float)
         z = np.array([g._sum[k] / g._cnt[k] for k in g._cnt])
-        centres = (keys + 0.5) * 0.5
+        centers = (keys + 0.5) * 0.5
         for x, y in rng.uniform(0, 30, (20, 2)):
-            d = np.hypot(centres[:, 0] - x, centres[:, 1] - y)
+            d = np.hypot(centers[:, 0] - x, centers[:, 1] - y)
             near = d <= 2.0
             w = 1 / np.maximum(d[near], 0.05)
             assert g(x, y) == pytest.approx(np.sum(w * z[near]) / np.sum(w))

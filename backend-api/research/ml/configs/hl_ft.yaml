@@ -1,5 +1,5 @@
-# Hand-label-like synthetic wood (2026-09-25). Neither labelled redbud is trained on: both are the test.
-# Fine-tunes the exact-label synthetic pre-training on real trees plus relabelled synthetic scenes
+# Hand-label-like synthetic wood (2026-09-25). Neither labeled redbud is trained on: both are the test.
+# Fine-tunes the exact-label synthetic pre-training on real trees plus relabeled synthetic scenes
 # (every woody species, incl. dense crowns grown past the age cap), leaf-off almonds, clear-of-wood seeding.
 name: hl_ft
 description: "Leaf/wood PointNeXt-S fine-tuned with hand-label-like synthetic wood (redbuds held out)."

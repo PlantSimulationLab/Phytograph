@@ -120,7 +120,7 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
 
 // Aggregate QSM: select two VIEWS of one tree and fuse them into a SINGLE QSM.
 // Drives the live backend through the real UI: multi-select, pick "One QSM from
-// all scans", build. Asserts exactly ONE QSM row lands, labelled as fused, with
+// all scans", build. Asserts exactly ONE QSM row lands, labeled as fused, with
 // a clean 1-trunk structure — proving the points were merged, not built apart.
 test('aggregates multiple scans into a single fused QSM via the UI', async () => {
   const { app, page } = session;

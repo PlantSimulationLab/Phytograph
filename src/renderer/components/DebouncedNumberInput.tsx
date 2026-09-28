@@ -38,7 +38,7 @@ interface DebouncedNumberInputProps {
 //
 // While the input is focused, parent value changes don't clobber the local
 // draft; once blurred, the draft re-syncs from the parent. This avoids the
-// cursor-jumping problem when the parent normalises the value on commit.
+// cursor-jumping problem when the parent normalizes the value on commit.
 export function DebouncedNumberInput({
   value,
   onCommit,

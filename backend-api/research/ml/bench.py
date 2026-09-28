@@ -7,7 +7,7 @@
 
 Every method sees the same items (``corpus.py`` splits) at the cache's 5 mm
 resolution, and is scored per item and pooled per dataset. Each real item is
-scored twice: over every labelled point, and with the 2 cm label-boundary
+scored twice: over every labeled point, and with the 2 cm label-boundary
 band excluded (``ml.metrics.boundary_mask``), because hand labels are least
 reliable there.
 

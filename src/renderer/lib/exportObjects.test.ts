@@ -55,7 +55,7 @@ describe('blockedReason', () => {
     expect(blockedReason(scan('s'), PTX)).toBeUndefined();
   });
 
-  it('honours a per-object reason (a Risley scan has no raster grid)', () => {
+  it('honors a per-object reason (a Risley scan has no raster grid)', () => {
     const risley = scan('livox', { xmlBlockedReason: 'no grid', ptxBlockedReason: 'no grid' });
     expect(blockedReason(risley, XML)).toBe('no grid');
     expect(blockedReason(risley, DATA)).toBeUndefined();
@@ -105,7 +105,7 @@ describe('effectiveCheckedIds', () => {
 });
 
 describe('mergeCheckedIntent', () => {
-  it('keeps checkmarks on rows the current mode has greyed out', () => {
+  it('keeps checkmarks on rows the current mode has grayed out', () => {
     const items = [scan('s1'), plain('c1')];
     const prev = new Set(['s1', 'c1']);
     // In XML mode the picker only knows about s1; unchecking nothing there must
@@ -115,7 +115,7 @@ describe('mergeCheckedIntent', () => {
     expect(effectiveCheckedIds(items, merged, DATA)).toEqual(['s1', 'c1']);
   });
 
-  it('still honours an unchecking of a row that IS selectable', () => {
+  it('still honors an unchecking of a row that IS selectable', () => {
     const items = [scan('s1'), scan('s2')];
     const merged = mergeCheckedIntent(
       new Set(['s1', 's2']), new Set(['s1']), selectableIds(items, XML));
@@ -168,9 +168,10 @@ describe('exportBaseName', () => {
     expect(exportBaseName('C:\\out\\myscan.xyz')).toBe('myscan');
   });
 
-  it('falls back to "scans" on an empty field', () => {
-    expect(exportBaseName('')).toBe('scans');
-    expect(exportBaseName('   ')).toBe('scans');
+  it('keeps an empty field empty — it means "use the object names"', () => {
+    expect(exportBaseName('')).toBe('');
+    expect(exportBaseName('   ')).toBe('');
+    expect(exportBaseName('/some/dir/')).toBe('');
   });
 });
 
@@ -200,7 +201,30 @@ describe('plannedFileNames', () => {
   it('applies the backend reading of the base name', () => {
     expect(plannedFileNames(['a', 'b'], 'myscan.laz', 'xyz'))
       .toEqual(['myscan_a.xyz', 'myscan_b.xyz']);
-    expect(plannedFileNames(['a', 'b'], '', 'xyz'))
-      .toEqual(['scans_a.xyz', 'scans_b.xyz']);
+  });
+
+  // Same cases as TestScanExportNaming's base-position / empty-base tests in
+  // backend-api/tests/test_scan_export.py.
+  it('appends the base name after the object name when asked', () => {
+    expect(plannedFileNames(['ScanPos002', 'ScanPos001'], 'myscan', 'laz', false, 'suffix'))
+      .toEqual(['ScanPos002_myscan.laz', 'ScanPos001_myscan.laz']);
+    expect(plannedFileNames(['tree', 'TREE'], 'out', 'xyz', false, 'suffix'))
+      .toEqual(['tree_out.xyz', 'TREE_out_2.xyz']);
+  });
+
+  it('names files by their objects alone when the base name is empty', () => {
+    expect(plannedFileNames(['a', 'b'], '', 'xyz')).toEqual(['a.xyz', 'b.xyz']);
+    expect(plannedFileNames(['a', 'b'], '  ', 'xyz', false, 'suffix')).toEqual(['a.xyz', 'b.xyz']);
+    expect(plannedFileNames(['tree', 'tree'], '', 'xyz')).toEqual(['tree.xyz', 'tree_2.xyz']);
+    expect(plannedFileNames(['ScanPos001.las'], '', 'laz')).toEqual(['ScanPos001.laz']);
+  });
+
+  it('still gives an empty-base XML bundle a name of its own', () => {
+    expect(plannedFileNames(['north', 'south'], '', 'xyz', true))
+      .toEqual(['scans.xml', 'north.xyz', 'south.xyz']);
+  });
+
+  it('a single object keeps the typed base regardless of position', () => {
+    expect(plannedFileNames(['ScanPos001'], 'myscan', 'laz', false, 'suffix')).toEqual(['myscan.laz']);
   });
 });

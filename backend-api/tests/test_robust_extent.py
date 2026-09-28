@@ -2,7 +2,7 @@
 
 The renderer scales the camera's zoom limits from the scene size. Taken from the
 raw bounding box, that size is set by the single most extreme point on each axis,
-so a handful of stray returns hundreds of metres out make the scene
+so a handful of stray returns hundreds of meters out make the scene
 un-navigable: you can't get close enough to inspect anything, and the far limit
 sits out where the real data is a dot.
 
@@ -135,13 +135,13 @@ def test_percentile_bounds_are_symmetric_and_sane():
 class TestRobustAabb:
     """The percentile box itself — what the renderer needs to find the CONTENT.
 
-    The raw bounding box's centre is the midpoint of the outliers, which on a
+    The raw bounding box's center is the midpoint of the outliers, which on a
     scene with far strays sits in empty space nowhere near the data. A camera
-    that converges on it stalls hundreds of metres short of anything visible.
+    that converges on it stalls hundreds of meters short of anything visible.
     """
 
-    def test_centre_tracks_the_content_not_the_outliers(self):
-        cloud = _grid(span=(6.0, 6.0, 3.0))  # content centred on (3, 3, 1.5)
+    def test_center_tracks_the_content_not_the_outliers(self):
+        cloud = _grid(span=(6.0, 6.0, 3.0))  # content centered on (3, 3, 1.5)
         outliers = np.array([
             [500.0, 3.0, 1.0],
             [-480.0, 2.0, 0.5],
@@ -151,16 +151,16 @@ class TestRobustAabb:
         ])
         noisy = np.vstack([cloud, outliers])
 
-        raw_centre = (noisy.min(axis=0) + noisy.max(axis=0)) / 2.0
+        raw_center = (noisy.min(axis=0) + noisy.max(axis=0)) / 2.0
         box = _robust_aabb(noisy)
-        centre = [(box["min"][i] + box["max"][i]) / 2.0 for i in range(3)]
+        center = [(box["min"][i] + box["max"][i]) / 2.0 for i in range(3)]
 
-        # The robust centre is on the content...
-        assert centre[0] == pytest.approx(3.0, abs=0.3)
-        assert centre[1] == pytest.approx(3.0, abs=0.3)
-        assert centre[2] == pytest.approx(1.5, abs=0.3)
+        # The robust center is on the content...
+        assert center[0] == pytest.approx(3.0, abs=0.3)
+        assert center[1] == pytest.approx(3.0, abs=0.3)
+        assert center[2] == pytest.approx(1.5, abs=0.3)
         # ...and the raw one is badly off, which is the bug being fixed.
-        assert abs(raw_centre[2] - 1.5) > 100
+        assert abs(raw_center[2] - 1.5) > 100
 
     def test_box_matches_the_extent(self):
         cloud = _grid(span=(9.0, 4.0, 2.0))

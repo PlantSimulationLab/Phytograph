@@ -8,7 +8,7 @@ ground-cropped cloud.
 There are four methods (see **Method** below):
 
 - **Machine learning** (the default, recommended) runs a PointNeXt network trained on about 180
-  hand-labelled real trees, including dense-crowned and leaf-off orchard trees, plus Helios
+  hand-labeled real trees, including dense-crowned and leaf-off orchard trees, plus Helios
   synthetic scans of every woody library species. It is the most accurate
   method on trees it has never seen (see *How accurate is it?* below) and has
   no tuning knobs. It uses an NVIDIA GPU (Windows/Linux) or Apple-silicon GPU
@@ -36,7 +36,7 @@ There are four methods (see **Method** below):
    leaf either side of a dashed split, in the **Tools** › Segmentation group),
    or open the command palette and choose **Segment Wood / Leaf**.
 4. Choose the method and adjust the parameters if needed (the defaults work
-   across broadleaf and conifer scans; the sensitivity, neighbourhood, smoothing
+   across broadleaf and conifer scans; the sensitivity, neighborhood, smoothing
    and reflectance settings belong to the geometric methods and are hidden for
    Machine learning):
     - **Method** — **Machine learning** (default; a trained network, no other
@@ -50,11 +50,11 @@ There are four methods (see **Method** below):
     - **Wood sensitivity (0–1)** — the wood/leaf decision threshold. Raise it
       to classify more points as wood (catches thin twigs at the cost of some
       leaf bleed); lower it to be stricter about what counts as wood.
-    - **Neighbourhood size** — how many neighbours define each point's local
+    - **Neighborhood size** — how many neighbors define each point's local
       geometry. Larger is smoother but slower; the default suits typical TLS
       densities.
     - **Smoothing** — how aggressively isolated misclassifications are cleaned
-      up by a majority vote over neighbours. **0** disables it.
+      up by a majority vote over neighbors. **0** disables it.
     - **Use reflectance assist** — *only shown when the cloud carries a
       reflectance or intensity value per point* (e.g. a Riegl `Reflectance`
       column, auto-detected on import). When ticked, the brightest returns —
@@ -63,7 +63,7 @@ There are four methods (see **Method** below):
       when available; see the note below for when to turn it off.
 5. Choose the **Output**:
     - **Label in place** — keep every point, add a **Wood Class** attribute,
-      and recolour by it.
+      and recolor by it.
     - **Split into wood + leaf clouds** — additionally emit two new clouds,
       `… (wood)` and `… (leaf)`, alongside the classified original. The two
       child clouds are built after the classification lands, so a progress pill
@@ -82,7 +82,7 @@ If you select **more than one scan**, a chooser appears:
 - **Segment scans together** — the selected scans are combined into one dense
   cloud, segmented once, and the wood/leaf labels are written back to each
   scan in place. Use this for several **views of a single tree**: merging the
-  views gives each point a fuller local neighbourhood, which the classifier
+  views gives each point a fuller local neighborhood, which the classifier
   reads more reliably than a thin single-view cloud. The scans must already be
   in a common coordinate frame — [register](register-compare.md) them first if
   they aren't. (In-memory clouds only; if a selection streams from an octree,
@@ -91,7 +91,7 @@ If you select **more than one scan**, a chooser appears:
   independently, in sequence. Use this for **separate trees** that each happen
   to be selected, where each scan is already a complete cloud.
 
-When it finishes, the cloud is recoloured by the **Wood Class** attribute
+When it finishes, the cloud is recolored by the **Wood Class** attribute
 (dark brown for wood, green for leaf) with a legend in the corner. In
 *Label* and *Split* modes the original points are never deleted.
 
@@ -99,7 +99,7 @@ When it finishes, the cloud is recoloured by the **Wood Class** attribute
 
 The classification is stored as a scalar attribute named **Wood Class**. Switch
 back to it any time from the **Color by** picker in the Display panel — it shows
-discrete colours, not a continuous gradient.
+discrete colors, not a continuous gradient.
 
 If you chose **Split**, the classified original is hidden automatically — it
 still holds every point, so you'd otherwise see all three clouds drawn on top of
@@ -108,7 +108,7 @@ extraction or QSM building on the `… (wood)` cloud alone; if you chose **Remov
 wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
 
 !!! note "How accurate is it?"
-    Measured on 59 hand-labelled real trees that no method was tuned or
+    Measured on 59 hand-labeled real trees that no method was tuned or
     trained on (tropical, temperate and boreal), **Machine learning** labels
     wood with an intersection-over-union of about **0.80**, against **0.61**
     for Branch-segment. On leaf-off almond trees, where every point is wood,
@@ -117,7 +117,7 @@ wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
     In a **dense crown** where little or no wood is visible (a thick outer
     leaf layer hides the branches), it labels the crown leaf and marks only
     the trunk and the branches you could actually see and follow, the way a
-    careful person labelling the scan would. Branches hidden inside the
+    careful person labeling the scan would. Branches hidden inside the
     foliage are not reported as wood, because nothing in the scan shows them.
 
     It still leads on clouds thinned to 3 cm point spacing, but by less, and
@@ -168,4 +168,4 @@ wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
 
 ## See also
 
-- [Fit a crown & metrics](fit-crown.md) — fits the crown to the leaf points once wood/leaf is labelled.
+- [Fit a crown & metrics](fit-crown.md) — fits the crown to the leaf points once wood/leaf is labeled.

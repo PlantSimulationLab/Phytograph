@@ -35,11 +35,11 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
     setTitle('');
     setDescription('');
     setIncludeLogs(mode === 'bug');
-    let cancelled = false;
+    let canceled = false;
     void window.electronAPI.backend
       .getInfo()
       .then((info) => {
-        if (cancelled) return;
+        if (canceled) return;
         setDiagnostics({
           appVersion: info.appVersion,
           backendVersion: info.expectedVersion,
@@ -49,10 +49,10 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
         });
       })
       .catch(() => {
-        if (!cancelled) setDiagnostics(null);
+        if (!canceled) setDiagnostics(null);
       });
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, [isOpen, mode]);
 
@@ -69,7 +69,7 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
       // the user lands on the GitHub/email page; pass its name into the body so
       // triage knows to look for the attachment they're about to drag in. The
       // save path is chosen via the normal dialog.save() IPC (consistent with
-      // exports elsewhere); cancelling it just skips the attachment.
+      // exports elsewhere); canceling it just skips the attachment.
       let logFileName: string | undefined;
       if (includeLogs) {
         try {

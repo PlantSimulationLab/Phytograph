@@ -204,7 +204,7 @@ export function CropPanel({
               : 'Cropped-out points are discarded.'}
         </div>
 
-        {/* Non-destructive opt-out. Greyed in Segment mode, which already keeps
+        {/* Non-destructive opt-out. Grayed in Segment mode, which already keeps
             every point across the two output clouds — a third full copy would
             just be noise. `checked` is AND-ed with the enabled flag so the box
             reads unchecked while disabled even if it was ticked beforehand. */}

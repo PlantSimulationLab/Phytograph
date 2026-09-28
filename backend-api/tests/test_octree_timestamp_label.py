@@ -8,7 +8,7 @@ a regression in each direction:
               that exact string (`geometry.attributes[field]`). Renaming it in
               the octree made the lookup miss, the swap silently no-op, and the
               shader keep the previous buffer — the legend showed the timestamp
-              range while the points stayed coloured by intensity.
+              range while the points stayed colored by intensity.
 
   `Timestamp` is what the user should READ. Phytograph calls the quantity
               `timestamp` in the import wizard, the export picker and every tool
@@ -105,7 +105,7 @@ def test_label_reaches_an_octree_built_before_the_fix(tmp_path):
     added only at write time never reaches a cloud the user already imported —
     the fix ships, the user re-imports, and nothing changes.
 
-    Simulates a sidecar written by the OLD code: every scalar labelled EXCEPT
+    Simulates a sidecar written by the OLD code: every scalar labeled EXCEPT
     the time column.
     """
     _write_metadata(tmp_path)

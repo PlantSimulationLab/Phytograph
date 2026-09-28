@@ -25,7 +25,7 @@ function voxel(over: Partial<LADVoxel> = {}): LADVoxel {
 }
 
 describe('ladVoxelValue', () => {
-  it('defaults to LAD, which is the pre-wood behaviour', () => {
+  it('defaults to LAD, which is the pre-wood behavior', () => {
     const v = voxel({ lad: 2.5 });
     expect(ladVoxelValue(v)).toBe(2.5);
     expect(ladVoxelValue(v, 'lad')).toBe(2.5);

@@ -10,7 +10,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 // Generate button becomes a disabled spinner beside a red Cancel button. DEM is a
 // STREAMING op, so Cancel POSTs /api/cancel/{runId} (stops the backend gridding +
 // frees memory) AND aborts the fetch — the renderer ignores the terminal
-// `cancelled` marker rather than treating it as a failure.
+// `canceled` marker rather than treating it as a failure.
 //
 // Drives the real DOM against the live backend: import → open the DEM panel → run
 // → assert the two-button running state appears → Cancel → assert the UI returns
@@ -39,7 +39,7 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // toast stack (components/Toast.tsx) is `fixed bottom-4 right-4 top-4` at
     // z-[110] — the FULL window height — and its cards are pointer-events-auto,
     // so a live toast sits on top of the DEM panel's Run button and swallows
-    // the click. Verified by hit-testing the button's centre:
+    // the click. Verified by hit-testing the button's center:
     // document.elementFromPoint there returns `toast-success` while a toast is
     // up and `dem-run-button` once it is gone. Success toasts auto-expire after
     // 4 s, so whether the click lands is a pure race against machine speed —
@@ -88,10 +88,10 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // either way the UI must end up idle.)
     await cancelButton.click().catch(() => {});
 
-    // The op ends one of two clean ways: cancelled (panel stays open, idle) or it
+    // The op ends one of two clean ways: canceled (panel stays open, idle) or it
     // beat the cancel and finished (panel auto-closes on success). Both are a valid
     // recovery — the invariant is that the spinner/Cancel is gone and nothing errored.
-    // Either path (cancelled, or finished first) has to unwind the whole
+    // Either path (canceled, or finished first) has to unwind the whole
     // backend op, which on CI is the 20-30 s compute plus teardown.
     await expect(cancelButton).toBeHidden({ timeout: 60_000 });
     await expect(panel.locator('.bg-red-900\\/30')).toHaveCount(0);

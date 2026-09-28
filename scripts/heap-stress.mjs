@@ -108,7 +108,7 @@ for (let i = 0; i < CYCLES; i++) {
   const row = await importTree('tree.xyz');
 
   // Touch some real state: select, toggle visibility a few times, change
-  // color mode through commands. This exercises edit-state initialisation
+  // color mode through commands. This exercises edit-state initialization
   // (line ~2070 effect) and the cloud-mounted code paths.
   await row.click();
   const visToggle = row.locator('button[title="Hide"], button[title="Show"]');

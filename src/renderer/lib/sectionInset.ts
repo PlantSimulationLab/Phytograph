@@ -26,7 +26,7 @@ export function slabFootprint(s: SlabRegion): Vec2[] {
 
 /**
  * World XY → inset pixels, uniform scale (a map must not stretch), +Y up, the
- * union of `bounds` and every `extra` point centred in a `size` square with
+ * union of `bounds` and every `extra` point centered in a `size` square with
  * `pad` px of margin. The union is what keeps a slab stepped past the edge of
  * the cloud on the map rather than silently off it.
  */

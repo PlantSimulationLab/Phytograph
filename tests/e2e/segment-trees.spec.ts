@@ -14,7 +14,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'multi_tree.xyz');
 // (cut-pursuit) segments it into multiple individual trees. Imports become
 // octree-backed, so this drives the real `/api/segment/trees/apply` path:
 // import → select → open Tree Segmentation → run → assert the cloud is
-// re-coloured by the discrete `tree_instance` attribute (no legend is shown for
+// re-colored by the discrete `tree_instance` attribute (no legend is shown for
 // tree instances — see below), exercising the live backend end-to-end (no mocks).
 //
 // Shared session: one app + backend for the whole file; File → New resets the
@@ -36,7 +36,7 @@ test.beforeAll(async () => {
 // (leaving it visible drew the whole cloud on top of the pieces), and the
 // legend overlay only reports a scalar for a VISIBLE cloud — so
 // `data-active-scalar="tree_instance"` exists for the few hundred ms between
-// "parent recoloured" and "parent hidden". Waiting on it was a race: it passed
+// "parent recolored" and "parent hidden". Waiting on it was a race: it passed
 // when the poll happened to land in that window (a cold octree build) and
 // timed out at 3 min when the split completed first (a cached one), which is
 // how the second run of the split-distance test failed both on CI and locally.
@@ -69,7 +69,7 @@ test.beforeEach(async () => {
   await resetToFreshScene(session.app, session.page);
 });
 
-test('segments individual trees and colours by the tree_instance attribute', async () => {
+test('segments individual trees and colors by the tree_instance attribute', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
@@ -89,8 +89,8 @@ test('segments individual trees and colours by the tree_instance attribute', asy
   // Run TreeIso. The backend re-converts the octree carrying tree_instance.
   await page.getByTestId('tree-segment-run-button').click();
 
-  // The cloud becomes coloured by the tree_instance scalar — proof the
-  // segmentation ran and its labels drive colour. We read the active scalar
+  // The cloud becomes colored by the tree_instance scalar — proof the
+  // segmentation ran and its labels drive color. We read the active scalar
   // from the always-present overlay container rather than the legend, because
   // tree_instance deliberately shows NO legend (one entry per tree would fill
   // the viewport; the ids are arbitrary nominal labels).
@@ -118,7 +118,7 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
 
   // Enable the split option BEFORE running. This is the regression under test:
   // the octree-backed (session) path used to ignore this flag entirely, so the
-  // scan list ended up with only the recoloured parent — no child clouds.
+  // scan list ended up with only the recolored parent — no child clouds.
   await page.getByTestId('tree-split-clouds').check();
   await expect(page.getByTestId('tree-split-clouds')).toBeChecked();
 
@@ -133,13 +133,13 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
 
   await page.getByTestId('tree-segment-run-button').click();
 
-  // The parent is still recoloured by tree_instance …
+  // The parent is still recolored by tree_instance …
   const overlay = page.getByTestId('scalar-overlay');
   await expect(overlay).toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 120_000 });
 
   // … AND one "… (tree N)" child cloud is added per detected tree. The split is
   // one batched `sessionExtractByColumn` call whose per-child octree builds run
-  // server-side, so the children arrive after the parent recolour — wait for at
+  // server-side, so the children arrive after the parent recolor — wait for at
   // least one to appear.
   const childRows = page.locator('[data-testid="scan-row"][data-scan-name*="(tree "]');
   await expect(async () => {
@@ -147,7 +147,7 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
   }).toPass({ timeout: 120_000 });
 
   // Each child is a real, non-empty cloud (proof the extract selected points,
-  // not an empty recolour of the parent), and each holds strictly fewer points
+  // not an empty recolor of the parent), and each holds strictly fewer points
   // than the parent (a per-tree subset, not a copy of the whole cloud).
   const childCount = await childRows.count();
   for (let i = 0; i < childCount; i++) {
@@ -163,8 +163,8 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
   }
   expect(sum).toBeLessThanOrEqual(EXPECTED_POINTS);
 
-  // Each child carries ITS TREE's swatch colour, matching the tree_instance
-  // colormap the parent is recoloured with. The regression: every child used to
+  // Each child carries ITS TREE's swatch color, matching the tree_instance
+  // colormap the parent is recolored with. The regression: every child used to
   // get the same hardcoded green, so the scan list gave the user no way to tell
   // which row was which tree.
   const swatches: string[] = [];
@@ -174,17 +174,17 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
     const color = (await row.getAttribute('data-scan-color')) ?? '';
     // Not the old hardcoded green.
     expect(color).not.toBe('#4caf50');
-    // The colour is the one the viewer paints tree N — parsed from the row's
+    // The color is the one the viewer paints tree N — parsed from the row's
     // own "(tree N)" name, so this ties the swatch to the parent's colormap
-    // rather than just asserting "some colour was assigned".
+    // rather than just asserting "some color was assigned".
     const treeId = parseInt(name.match(/\(tree (\d+)\)/)?.[1] ?? '', 10);
     expect(Number.isFinite(treeId), `child "${name}" has no (tree N) suffix`).toBe(true);
-    expect(color, `child "${name}" should carry tree ${treeId}'s colour`)
+    expect(color, `child "${name}" should carry tree ${treeId}'s color`)
       .toBe(rgbToHex(treeInstanceColor(treeId)));
     swatches.push(color);
   }
-  // All distinct — this is what actually proves per-tree colouring; a second
-  // hardcoded colour would satisfy the "not green" check above but not this.
+  // All distinct — this is what actually proves per-tree coloring; a second
+  // hardcoded color would satisfy the "not green" check above but not this.
   expect(new Set(swatches).size, `swatches were not distinct: ${swatches.join(', ')}`)
     .toBe(childCount);
 
@@ -242,7 +242,7 @@ test('warns before an expensive run, then segments when confirmed', async () => 
     // The button is now an explicit opt-in, and the panel stayed open.
     const runButton = page.getByTestId('tree-segment-run-button');
     await expect(runButton).toHaveText(/Segment Anyway/);
-    // Not a failure: no error toast, and the cloud is NOT yet recoloured.
+    // Not a failure: no error toast, and the cloud is NOT yet recolored.
     await expect(page.getByTestId('scalar-overlay'))
       .not.toHaveAttribute('data-active-scalar', 'tree_instance');
 
@@ -279,7 +279,7 @@ test('the split distance is editable and changes how many trees come out', async
   await expect(gapField).toHaveValue('0.65');
 
   // Also split into per-tree clouds, so the tree COUNT is readable from the
-  // scan list rather than inferred from colours.
+  // scan list rather than inferred from colors.
   await page.getByTestId('tree-split-clouds').check();
 
   // A tighter split distance separates more bodies, so more instances come out.
@@ -344,7 +344,7 @@ test('warns when the split distance is set above the intra-tree gap', async () =
 });
 
 // chm-plantation.xyz: 20 trees in 4 rows of 5, 3.5 m apart with 4.8 m-wide
-// crowns, so every crown touches its neighbours — seen from above, as an
+// crowns, so every crown touches its neighbors — seen from above, as an
 // airborne scan sees them. Generated by `_plantation(seed=0, density=30)` in
 // backend-api/tests/test_chm_trees.py, where the exact truth is pinned; this
 // spec proves the panel drives that method end to end.

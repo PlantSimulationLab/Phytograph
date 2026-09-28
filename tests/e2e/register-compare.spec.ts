@@ -192,7 +192,7 @@ test('Snap to Fit (ICP) REMOVES a known cloud↔mesh offset', async () => {
   // cylinder the residual (~40-65 mm, see below) is >2% of the fixture's ~1.5 m
   // extent, so the backend attaches a `quality_warning` and the renderer raises
   // a WARNING toast ("Snap to Fit — Check Result") instead of the success one.
-  // That is correct behaviour for a sparse fixture, not a failure — the real
+  // That is correct behavior for a sparse fixture, not a failure — the real
   // correctness checks are the two assertions below. Matching only
   // `toast-success` made this test unpassable.
   await expect(

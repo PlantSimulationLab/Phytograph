@@ -1,7 +1,7 @@
 """Training crops: what one training example is.
 
 A crop is built the way inference builds one (``ml.infer``): the k nearest
-base-voxel points of a seed, centred on the seed. On top of that it applies
+base-voxel points of a seed, centered on the seed. On top of that it applies
 augmentations aimed at the two gaps this corpus has.
 
 **Synthetic vs real.** The realism reports under SyntheticLiDAR_Organs/reports
@@ -14,7 +14,7 @@ crops are thinned in two density-changing ways:
   falloff within one crop.
 
 **Noisy real labels.** Hand labels are least reliable where wood meets leaf,
-so points of a noisy source that have a differently labelled neighbour
+so points of a noisy source that have a differently labeled neighbor
 within ``boundary_radius`` are down-weighted (``boundary_weight``) rather
 than trusted fully. Synthetic labels are exact and keep weight 1.
 
@@ -25,7 +25,7 @@ therefore shared by every task.
 **Partial labels.** A code may instead map to a SET of output classes, when
 the source labels a region without drawing the line the task needs (Sugar4D's
 leaf is blade and petiole undivided). Each crop carries ``allowed``, an
-(n, C) mask, and the loss maximises the probability of the set. A singleton
+(n, C) mask, and the loss maximizes the probability of the set. A singleton
 set is ordinary cross-entropy, so ``label`` (the index, or -1 for anything
 that is not a single class) stays the scoring truth.
 
@@ -75,7 +75,7 @@ class CropConfig:
     # Seeds at least `clear_min_dist` from any minority-class point, this
     # often. Minority seeding alone means almost no training crop is free of
     # wood (3.6 % of real-tree crops had < 1 % wood, 0 % of synthetic ones), so
-    # the model learned that every neighbourhood holds some and, in a dense
+    # the model learned that every neighborhood holds some and, in a dense
     # crown with no visible wood, called its most wood-like leaf clumps wood
     # (eastern redbud: wood precision 0.06). This only helps where the data
     # HAS crop-sized pure foliage: the public trees are sparse enough that a
@@ -92,7 +92,7 @@ class CropConfig:
 class Source:
     item: CachedItem
     weight: float
-    noisy: bool                   # hand-labelled: apply boundary down-weighting
+    noisy: bool                   # hand-labeled: apply boundary down-weighting
     group: str = ""
 
 
@@ -183,24 +183,24 @@ class CropSampler:
         elif r < cfg.clear_seed_prob + cfg.minority_seed_prob:
             rows = it.rows_of(tuple(cfg.minority_codes))
         if rows is None or len(rows) == 0:
-            labelled = [c for c in range(255) if self.allowed_lut[c].any()]
-            rows = it.rows_of(tuple(labelled))
+            labeled = [c for c in range(255) if self.allowed_lut[c].any()]
+            rows = it.rows_of(tuple(labeled))
         if len(rows) == 0:
             return None
         seed_row = int(rows[rng.integers(len(rows))])
-        centre = np.asarray(it.xyz[seed_row], dtype=np.float32)
+        center = np.asarray(it.xyz[seed_row], dtype=np.float32)
 
         # Fetch a ball big enough to hold max_points base voxels, growing it
         # where the cloud is sparse (the same crop inference would make there).
         radius = cfg.fetch_radius
         while True:
-            ball = it.ball(centre, radius)
+            ball = it.ball(center, radius)
             if len(ball) >= cfg.max_points * 3 or radius >= cfg.fetch_radius_max:
                 break
             radius = min(radius * 1.8, cfg.fetch_radius_max)
         if len(ball) < 64:
             return None
-        pts = np.asarray(it.xyz[ball], dtype=np.float64) - centre
+        pts = np.asarray(it.xyz[ball], dtype=np.float64) - center
         sem = np.asarray(it.sem[ball])
         # Offset to the instance centroid (item frame), zero and unused where
         # there is no instance. Carried through every thinning below.
@@ -211,7 +211,7 @@ class CropSampler:
             off = np.zeros((len(ball), 5), np.float64)
             if has.any():
                 cents, radii = it.instance_centroids(), it.instance_radii()
-                off[has, :3] = cents[inst[has]] - (pts[has] + centre)
+                off[has, :3] = cents[inst[has]] - (pts[has] + center)
                 off[has, 3] = 1.0
                 off[has, 4] = np.log(np.maximum(radii[inst[has]], 1e-4))
         refl = None
@@ -250,7 +250,7 @@ class CropSampler:
         refl = None if refl is None else refl[keep]
         off = None if off is None else off[keep]
 
-        # k nearest to the seed, re-centred on the nearest surviving point.
+        # k nearest to the seed, re-centered on the nearest surviving point.
         tree = cKDTree(pts)
         k = min(cfg.max_points, len(pts))
         _, idx = tree.query(np.zeros(3), k=k)

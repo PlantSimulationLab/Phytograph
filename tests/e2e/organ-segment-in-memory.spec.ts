@@ -81,9 +81,9 @@ test('labels an in-memory synthetic scan of a generated bean', async () => {
 
   const r = await readResultToast(page);
   console.log(`in-memory scan: ${total} points`, r);
-  expect(r.units).toBe('metres');
+  expect(r.units).toBe('meters');
   await expect(page.locator('[data-testid="toast-info"]')).toHaveCount(0);
-  // Every point of the in-memory cloud was labelled, and only once.
+  // Every point of the in-memory cloud was labeled, and only once.
   expect(r.soil + r.stem + r.leaf).toBe(total);
   // A bean from above with no ground in the scene: nearly all leaf, some
   // stem, next to no soil. Helios builds this 25-day bean with 95 leaflets

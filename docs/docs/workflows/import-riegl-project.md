@@ -13,7 +13,7 @@ what is inside the folder rather than by its name:
 | `.PROJ` | Newer instruments (e.g. VZ-2000i) | Scan positions **plus the instrument's own registration** |
 
 The import path is otherwise identical: same menu item, same picker, same
-decoding. The one behavioural difference is that a `.PROJ`'s scans can land
+decoding. The one behavioral difference is that a `.PROJ`'s scans can land
 already aligned — see [Which frame the points land in](#which-frame-the-points-land-in).
 
 If your data has already been through RiSCAN PRO or RiPROCESS, you don't need
@@ -37,7 +37,7 @@ processing software isn't in the loop at all.
 
 ## Before you start: install RiVLib
 
-RiVLib is proprietary. Its licence forbids redistribution, so Phytograph
+RiVLib is proprietary. Its license forbids redistribution, so Phytograph
 **cannot ship it** — you download it yourself with your own RIEGL account, and
 Phytograph reads it from wherever you put it. Nothing is copied into the app.
 
@@ -205,7 +205,7 @@ compiler:
     workload works too.)
 
     RIEGL ships the class Windows needs only as a *static library*, which their
-    licence does not let us distribute pre-built — so even in principle this
+    license does not let us distribute pre-built — so even in principle this
     could not ship ready-made.
 
 === "Linux"
@@ -232,7 +232,7 @@ and caches the result until you change RiVLib or update Phytograph.
 
 **Without it, scans still import** — points, reflectance, amplitude, deviation,
 returns, timestamps, GNSS and registration are all unaffected. What you lose is
-the sky shell, so the cloud has no **Miss** points under the Hit/Miss colour
+the sky shell, so the cloud has no **Miss** points under the Hit/Miss color
 scheme and Leaf Area Density has nothing to work from. Settings shows this as
 its own checklist line rather than a failure, and an import that skipped them
 says so.
@@ -278,7 +278,7 @@ Every readable position is selected already, so untick the ones you don't want
 and click **Import**. The header checkbox toggles them all at once — it reads
 **Deselect all** while everything is selected, and **Select all** otherwise.
 
-Positions that couldn't be read are listed but not selectable, greyed out with
+Positions that couldn't be read are listed but not selectable, grayed out with
 the reason shown inline.
 
 !!! tip "Start small"
@@ -288,7 +288,7 @@ the reason shown inline.
     resolution. Import one or two positions first to check the data is what you
     expect.
 
-    You can cancel a running import from the progress dialog. Cancelling
+    You can cancel a running import from the progress dialog. Canceling
     discards the whole import — including positions that had already finished —
     so nothing half-imported is left in the scene. An import that somehow runs
     past an hour is stopped automatically.
@@ -309,7 +309,7 @@ scanner at its origin.
 
 Where a position has a **GNSS fix**, Phytograph places it at that fix's offset
 from the project centroid. This is a *starting point*, not a registration: the
-instrument's built-in GNSS is metres-accurate, not survey-grade. Use it to seed
+instrument's built-in GNSS is meters-accurate, not survey-grade. Use it to seed
 [ICP registration](register-compare.md), which refines the alignment properly.
 
 The centroid is the whole project's, not just the positions you ticked, so a
@@ -320,7 +320,7 @@ still line up with each other.
 Where a position has **no fix**, it imports at the origin — so several such
 positions will sit on top of one another until you register them.
 
-#### …but it can still be levelled
+#### …but it can still be leveled
 
 Even without registration, the scanner recorded **which way was down**. A
 V-Line instrument writes its dual-axis inclinometer into the scan, and that
@@ -330,16 +330,16 @@ two separate projects, it agrees to within a few hundredths of a degree.
 The picker therefore offers **Level using the onboard inclination sensor**,
 which is **on by default**. It rotates each position upright using its own tilt
 reading — typically 1–3°, occasionally 4°, depending on how carefully the
-tripod was levelled.
+tripod was leveled.
 
 This matters more than it sounds. Ground segmentation, [DEM
 generation](generate-dem.md) and any slope measurement all assume the cloud is
 plumb. A 3° tilt displaces a point 50 m away by about 2.6 m vertically, which
 is enough to bend a "ground" surface that should be flat.
 
-!!! warning "Levelled is not aligned"
+!!! warning "Leveled is not aligned"
 
-    Levelling fixes tilt and **nothing else**. It does not rotate scans to
+    Leveling fixes tilt and **nothing else**. It does not rotate scans to
     north and it does not align them to each other — you still need
     [ICP registration](register-compare.md) for that.
 
@@ -349,8 +349,8 @@ is enough to bend a "ground" surface that should be flat.
     reading claiming 0.22° accuracy was 14° out. A heading that wrong is worse
     than none, because it looks aligned.
 
-Positions that recorded no usable tilt simply import unlevelled; the picker
-says how many, and the rest are still levelled.
+Positions that recorded no usable tilt simply import unleveled; the picker
+says how many, and the rest are still leveled.
 
 !!! note "What the Scans panel's **tilt** row means"
 
@@ -360,16 +360,16 @@ says how many, and the rest are still levelled.
 
     | Imported | Panel shows | Because |
     |---|---|---|
-    | **Levelled** | `roll 0° · pitch 0° (level)` | The tilt was rotated out of the points |
-    | **Unlevelled** | the measured tilt, e.g. `roll 1.32° · pitch 2.97°` | The points kept it |
+    | **Leveled** | `roll 0° · pitch 0° (level)` | The tilt was rotated out of the points |
+    | **Unleveled** | the measured tilt, e.g. `roll 1.32° · pitch 2.97°` | The points kept it |
 
     The row is always shown, so `0° (level)` is a statement rather than a gap.
-    Levelling does not discard the measurement — it is what produced the
+    Leveling does not discard the measurement — it is what produced the
     rotation, and it stays with the scan.
 
     If you want the angular model to describe the instrument as it physically
     sat on the tripod (which is what [LAD](../concepts/leaf-area-density.md)
-    wants — see below), import unlevelled.
+    wants — see below), import unleveled.
 
 #### A `.PROJ` usually is, but only partly
 
@@ -383,8 +383,8 @@ one:
 
 | Badge | Meaning |
 | --- | --- |
-| **registered** | Placed by the project's own registration result — accurate to millimetres |
-| **prior only** | Registration failed here. Placed from the scanner's inclinometer, compass and GNSS instead — accurate to about a metre. **Refine with ICP.** |
+| **registered** | Placed by the project's own registration result — accurate to millimeters |
+| **prior only** | Registration failed here. Placed from the scanner's inclinometer, compass and GNSS instead — accurate to about a meter. **Refine with ICP.** |
 | **no pose** | No position information at all (an aborted acquisition). Imports at the origin |
 
 The summary under the list says how many of each you are about to get, and the
@@ -403,7 +403,7 @@ scanner's own frame that description is exact. Once a scan is rotated into the
 project frame, the instrument's real tilt off plumb — under 2° in our reference
 project — is no longer represented, and the LAD raster carries that much error.
 
-So: leave it unticked for a levelled, mutually-aligned scene, which is what
+So: leave it unticked for a leveled, mutually-aligned scene, which is what
 almost every workflow wants. Tick it when you are running LAD on a single
 position and want the angular model to be exact.
 
@@ -438,22 +438,22 @@ To see them, turn on **Show sky/miss points** for the scan.
 | Field | Notes |
 | --- | --- |
 | Position (x, y, z) | Registered into the project frame, or scanner-local offset by the GNSS fix |
-| Reflectance | dB relative to a white diffuse target; drives the default colouring |
+| Reflectance | dB relative to a white diffuse target; drives the default coloring |
 | Amplitude | dB |
 | Deviation | Pulse-shape distortion measure |
 | Target index / count | Per-pulse return numbering, for multi-return analysis |
 | Scan parameters | Sweep and resolution from the position's `.pat` (`.riproject`) or `.scn` (`.PROJ`) file |
 | Scanner heading and tilt | `.PROJ` only, when imported registered: recovered from the pose |
-| Instrument | Named by the file, and used for the scan's marker. The V-Line models have their own entries (VZ-400i, VZ-1000, VZ-2000i); another VZ is marked as **RIEGL VZ-series** rather than being labelled as a model it isn't |
+| Instrument | Named by the file, and used for the scan's marker. The V-Line models have their own entries (VZ-400i, VZ-1000, VZ-2000i); another VZ is marked as **RIEGL VZ-series** rather than being labeled as a model it isn't |
 
 The scanner also records a set of **instrument-diagnostic** scalars —
 Background Radiation, Echo Type, Waveform Available, Pseudo Echo, SW Calculated
 Target, PPS Locked and Mirror Facet. These describe how the scanner arrived at a
 return rather than the surface it hit, so the import wizard lists them with
 **Import unticked**: they are left out by default, keeping the scan lighter and
-the colour-by picker readable. Tick any of them in the wizard to carry them
+the color-by picker readable. Tick any of them in the wizard to carry them
 through — useful when you are separating real returns from multiple-time-around
-artefacts, or auditing GNSS timing on a moving platform. Columns your particular
+artifacts, or auditing GNSS timing on a moving platform. Columns your particular
 instrument never populates (a VZ-1000 records no background radiation) are not
 listed at all.
 
@@ -606,7 +606,7 @@ Windows or Linux.**
 **The picker opens but lists no scan positions.**
 : Positions are found by looking for sub-directories named `ScanPos…`
   (`.riproject`) or `ScanPos….SCNPOS` (`.PROJ`) — the layouts RIEGL's V-Line
-  instruments write. A project organised any other way isn't recognised. A
+  instruments write. A project organized any other way isn't recognized. A
   position whose folder exists but holds no `.rxp` is skipped rather than
   listed as broken.
 
@@ -620,7 +620,7 @@ Windows or Linux.**
 **A `.PROJ` imports, but the scans are not aligned.**
 : Check the badges in the picker. If they say **prior only**, the instrument's
   own registration failed for those positions and they are placed to about a
-  metre; run [ICP](register-compare.md) to refine them. Also check you did not
+  meter; run [ICP](register-compare.md) to refine them. Also check you did not
   leave **Keep scanner-local coordinates** ticked.
 
 **The import finished, but fewer positions arrived than I selected.**

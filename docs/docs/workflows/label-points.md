@@ -21,7 +21,7 @@ label anything you like.
    [Lasso, rectangle or brush?](#lasso-rectangle-or-brush) below).
 5. Paint. With the lasso, click to place each corner of an outline, then press
    `Enter` (or double-click) to close it. With the brush, just drag. Points
-   selected take the active class and recolour straight away.
+   selected take the active class and recolor straight away.
 6. Repeat with different classes as needed. **Undo** (or `Cmd+Z`) removes
    the last stroke, and `Shift+Cmd+Z` puts it back.
 7. Close the panel when you are done.
@@ -84,7 +84,7 @@ size is in screen pixels, so the circle stays the same on screen as you zoom,
 and the sphere it corresponds to grows or shrinks in the cloud to match.
 
 If the cursor is not over any geometry the brush shows nothing and paints
-nothing, rather than guessing a depth and labelling points you cannot see.
+nothing, rather than guessing a depth and labeling points you cannot see.
 
 ### Pick a whole piece with one click
 
@@ -94,11 +94,11 @@ stretch of branch, or a whole plant — instead of tracing it:
 - **Pieces** cuts the cloud into compact pieces about **Size** across. A piece
   never jumps a gap, so a leaf stays separate from the leaf behind it.
 - **Connected** takes everything joined up, bridging gaps up to **Gap**: a
-  plant standing apart from its neighbours, or a fruit hanging clear.
+  plant standing apart from its neighbors, or a fruit hanging clear.
 
 Leave the size at `0` and the first click chooses one from the point spacing
 and fills it in; change it to pick smaller or larger pieces. **Shift+click**
-also takes the neighbouring pieces facing the same way — a flat leaf blade, or
+also takes the neighboring pieces facing the same way — a flat leaf blade, or
 the ground around a stem — and stops at a fold. A drag still turns the view, so
 you can look around between clicks.
 
@@ -129,14 +129,14 @@ paired with a [cross-section](#work-in-a-cross-section), for classifying a cloud
 systematically. Inside a section there is a fourth tool, the
 [line](#paint-above-or-below-a-line) (`P`).
 
-## Choose what you are labelling
+## Choose what you are labeling
 
 The **Column** dropdown at the top of the panel picks which classification your
 strokes write to. Every classification the cloud carries is listed, so a
 classification that came out wrong can be fixed by hand rather than only
 recomputed.
 
-- **Labelling** — the hand-labelling column, where your own classes live. It is
+- **Labeling** — the hand-labeling column, where your own classes live. It is
   offered even on a cloud that has none yet; it is created the first time you
   paint.
 - **Classifications** — the class columns the cloud already has: a
@@ -185,7 +185,7 @@ A class set is a vocabulary for the column you are painting. **Preset** in the
 panel switches between the built-in sets that describe **that column** — it
 never moves you to a different one. A column with no built-in vocabulary (a tree
 segmentation's instance ids, or a classification of your own) has no presets,
-and the button is greyed out; its classes come from the data itself.
+and the button is grayed out; its classes come from the data itself.
 
 The built-in sets are:
 
@@ -194,7 +194,7 @@ The built-in sets are:
   output in the same vocabulary.
 - **Plant organs** — leaf, petiole, shoot, peduncle, fruit, petiolule. These are
   the same organ codes a [simulated scan](simulate-scan.md) carries, so
-  hand-labelled and simulated data can be compared directly.
+  hand-labeled and simulated data can be compared directly.
 - **Ground / non-ground** — matches [Segment ground points](segment-ground.md).
 - **ASPRS standard** — the LAS classification codes (Ground, Low/Medium/High
   Vegetation, Building, Water…), for data that has to line up with other LiDAR
@@ -204,14 +204,14 @@ Every set includes **Unclassified** (class 0), which is what points start as.
 
 Each set belongs to a column: ground / non-ground describes what the
 ground-segmentation tool writes, ASPRS describes an imported LAS classification
-byte, and wood/leaf and organs describe the hand-labelling column. Pick the
+byte, and wood/leaf and organs describe the hand-labeling column. Pick the
 column first, in the **Column** dropdown, and the presets that apply to it
 follow.
 
 ### Define your own classes
 
 The presets are starting points, not the vocabulary. **Edit** in the panel opens
-the class editor, where you can add classes, rename and recolour them, and save
+the class editor, where you can add classes, rename and recolor them, and save
 the result as a palette of your own.
 
 - **Add class** appends a new class in the 64–255 band, which LAS reserves for
@@ -220,8 +220,8 @@ the result as a palette of your own.
   classification the cloud already
   carries, a new class instead continues **that column's** numbering — Tree 3
   after Tree 2 — because those ids are data the segmentation wrote, not a
-  vocabulary you chose. Each new class starts with a colour that is distinct
-  from every class already in the palette (never Unclassified's grey); click
+  vocabulary you chose. Each new class starts with a color that is distinct
+  from every class already in the palette (never Unclassified's gray); click
   its swatch to change it.
 - Class values run from 0 to 255, the range of the LAS classification byte.
   **Instance** columns, which number objects rather than classes (a
@@ -234,24 +234,24 @@ the result as a palette of your own.
   never replaces a palette you saved for another project. A copy of a column's
   classes is named after its cloud and column.
 - **Export / Import** move palettes between projects or collaborators as a JSON
-  file, so a labelling scheme agreed once can be reused by everyone.
+  file, so a labeling scheme agreed once can be reused by everyone.
 
 Two rules the editor enforces, both to protect points you have already painted:
 
 - **Unclassified (class 0) cannot be removed or renumbered.** Points from an
-  unlabelled or merged cloud arrive as 0, so 0 has to mean "unclassified"
+  unlabeled or merged cloud arrive as 0, so 0 has to mean "unclassified"
   everywhere. You can rename it — a tree segmentation's class 0 reads
   "Unassigned" — because only the *number* is the contract.
 - **A class that already has points keeps its value.** The class *number* is
   what gets stored in the file, so repointing a class that is in use would leave
   those points holding a number the palette no longer describes. Renaming and
-  recolouring stay available — only the number is fixed.
+  recoloring stay available — only the number is fixed.
 
 #### Create a new classification
 
 **+ New classification…** in the Column dropdown makes a column of your own,
 alongside the ones the cloud already has, rather than mixing your classes into
-the hand-labelling column. Give it a name — "Row QC" — and the editor shows the
+the hand-labeling column. Give it a name — "Row QC" — and the editor shows the
 name it will carry in the data (`row_qc`) beneath it.
 
 A name is refused if it collides with a standard LAS dimension name or with a
@@ -297,19 +297,19 @@ to check what a class really contains. Alt-click the same row again to show
 every class.
 
 The padlock on each row **locks** a class: no stroke changes its points, and
-unlike hiding it stays on screen. **Protect labelled points**, under the class
+unlike hiding it stays on screen. **Protect labeled points**, under the class
 list, locks every class except Unclassified, so strokes only ever label points
 that have no label yet, which makes it safe to sweep a big lasso over a
 half-finished cloud. Click it again to unlock everything.
 
-## Find what is still unlabelled
+## Find what is still unlabeled
 
-**Find unlabelled points** (or `N`) shows only the Unclassified points and moves
+**Find unlabeled points** (or `N`) shows only the Unclassified points and moves
 the camera to where most of them are. Press `N` again for the next such area,
 largest first, and `Shift+N` to go back; the panel says which area you are on
-and how many unlabelled points are left. Each step re-reads the cloud, so areas
+and how many unlabeled points are left. Each step re-reads the cloud, so areas
 you label drop out as you go, and when nothing is left the panel says so.
-Alt-click a class row to see the labelled points again.
+Alt-click a class row to see the labeled points again.
 
 ## Instances: this tree, that leaf
 
@@ -329,7 +329,7 @@ the instance selected in the list:
 - **Delete** returns every point of this instance to *Unassigned*.
 - **Also set** paints a class in another column with every stroke — say
   *Hand labels: Wood* while you paint *Tree 3* — so an instance and what it is
-  are labelled together. Both columns change in one step, and one undo takes
+  are labeled together. Both columns change in one step, and one undo takes
   both back.
 
 Merge and delete are strokes like any other: undo reverses them, and the id
@@ -362,20 +362,20 @@ the set does not have.
 
 ## What happens to the labels
 
-Labels are stored in whichever column you picked: the hand-labelling column
+Labels are stored in whichever column you picked: the hand-labeling column
 (`manual_class`) by default, the cloud's own classification when you chose one,
 or a column you created. Either way they behave like any other scalar:
 
-- colour the cloud by them (they appear in the colour-by list with your class
-  names and colours),
+- color the cloud by them (they appear in the color-by list with your class
+  names and colors),
 - [filter](clean-point-cloud.md) to particular classes,
 - split the cloud into one cloud per class,
 - [export](import-export.md) them to LAS/LAZ, where they are written both as
   their own named column and into the standard LAS classification byte (classes
   0–255), so other LiDAR software sees them too. The file also carries the
-  class **names and colours**: other programs read the names of the
+  class **names and colors**: other programs read the names of the
   classification byte's classes, and a re-import into Phytograph brings back
-  every labelled column's class set.
+  every labeled column's class set.
 
 ### LAS flags
 
@@ -445,7 +445,7 @@ While a section is active a small indicator sits at the top of the viewport with
 two ways out, so you never have to remember which tool put it there:
 
 - **Show full cloud** — stop clipping temporarily. The section keeps its
-  colours and every point outside it is drawn **grey**, so you see the whole
+  colors and every point outside it is drawn **gray**, so you see the whole
   cloud and still see where the section sits. Its thickness and its place in
   the traverse are all kept, so you can look around and drop straight back
   into it.

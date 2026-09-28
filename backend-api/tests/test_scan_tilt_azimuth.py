@@ -22,7 +22,7 @@ import pytest
 
 import main  # noqa: F401  (ensures backend-api is importable; real app under test)
 
-# Box centred on the Z axis (x,y in [-0.6,0.6], z in [0,0.3]); its faces are
+# Box centered on the Z axis (x,y in [-0.6,0.6], z in [0,0.3]); its faces are
 # invariant under a 90 deg rotation about +z, so the scene matches Rz(90).
 _BOX_VERTS = [
     [-0.6, -0.6, 0.0], [0.6, -0.6, 0.0], [0.6, 0.6, 0.0], [-0.6, 0.6, 0.0],

@@ -71,11 +71,11 @@ export function MlModelControls({
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (ml) return;
-    let cancelled = false;
+    let canceled = false;
     loadMl(task)
-      .then((r) => { if (!cancelled) setMl(r); })
-      .catch((e) => { if (!cancelled) setError(String(e?.message ?? e)); });
-    return () => { cancelled = true; };
+      .then((r) => { if (!canceled) setMl(r); })
+      .catch((e) => { if (!canceled) setError(String(e?.message ?? e)); });
+    return () => { canceled = true; };
   }, [ml, task]);
 
   if (error) {

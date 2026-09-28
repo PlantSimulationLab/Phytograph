@@ -4,7 +4,7 @@ Regression for the same hang class as the DEM (see test_dem_excludes_misses.py):
 the session segmentation endpoints read `positions[~deleted]` but did NOT exclude
 misses (`is_miss != 0`, projected ~1 km out), so on a synthetic-scan cloud the
 ~1 km far field inflated the extent ~1000× and the per-point geometry / CSF cloth
-/ cut-pursuit hung (the killable subprocess merely makes such a hang cancellable —
+/ cut-pursuit hung (the killable subprocess merely makes such a hang cancelable —
 it must not happen in the first place).
 
 The fix mirrors `_do_session_dem`: `_session_survivor_hit_mask` drops the

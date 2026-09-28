@@ -34,7 +34,7 @@ jobs:
   # ---------------- Pre-build gate ----------------
   # Packages UNSIGNED installers on macOS-arm64 + Windows and runs the 28-spec
   # platform E2E subset against them. `build` needs it, so a packaging or
-  # behavioural regression on either OS stops the release before anything is
+  # behavioral regression on either OS stops the release before anything is
   # signed, notarized, or published.
   #
   # It has to run BEFORE `build`, not after. `build` invokes electron-builder
@@ -114,7 +114,7 @@ jobs:
     # whose queue can be slow — a brand-new account's *first* submission has
     # sat "In Progress" for over an hour. The native builds (PyHelios, backend,
     # PotreeConverter) finish well inside 75 min; the headroom is purely to
-    # avoid cancelling a good build while Apple processes notarization.
+    # avoid canceling a good build while Apple processes notarization.
     timeout-minutes: 150
 
     steps:

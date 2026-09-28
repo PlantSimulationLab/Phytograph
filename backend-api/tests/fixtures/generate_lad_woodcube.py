@@ -34,7 +34,7 @@ so the truth is measured off the geometry rather than derived from the nominal
 dimensions (a tube is tessellated, so its true area is slightly under the ideal
 2*pi*r*L, and the tessellated value is what the beams actually saw).
 
-One scan, labelled geometrically
+One scan, labeled geometrically
 --------------------------------
 Nothing in the LiDAR plugin reports which PRIMITIVE a return hit, so the class
 has to be recovered some other way. The obvious shortcut -- scan the leaves and
@@ -44,13 +44,13 @@ over-represented (measured 0.316 of returns against an expected 0.147) and the
 fixture cannot gate the split it exists to test.
 
 So the scene is scanned ONCE, with both populations present and occluding each
-other as they would in a real acquisition, and each return is then labelled by
+other as they would in a real acquisition, and each return is then labeled by
 its distance to the known tube axes. The tubes are vertical cylinders at known
 (x, y) with a known radius, so "within radius + tolerance of an axis, and inside
 the tube's z-span" is exact up to the tessellation -- there is no classifier in
 the loop, and therefore no classifier error folded into the truth.
 
-The labelling tolerance is deliberately tight; a return that cannot be resolved
+The labeling tolerance is deliberately tight; a return that cannot be resolved
 confidently is dropped from the cloud rather than guessed at, and the generator
 reports how many that was.
 
@@ -109,7 +109,7 @@ def _add_leaves(ctx, rng):
 
 def _trunk_axes(rng):
     """(x, y) of each vertical trunk. Returned separately from the geometry so
-    the labelling below uses the SAME numbers the tubes were built from."""
+    the labeling below uses the SAME numbers the tubes were built from."""
     return [tuple(rng.uniform(-0.40, 0.40, 2)) for _ in range(N_TRUNKS)]
 
 
@@ -218,7 +218,7 @@ def main():
             '  Single synthetic scan of a 1x1x1 m box holding BOTH randomly-oriented\n'
             '  leaf patches (spherical leaf angles, G=0.5) and vertical wooden tubes\n'
             '  (all-vertical branch axes). Used to test the leaf/wood split of the\n'
-            '  LAD inversion. Returns are labelled by distance to the known tube\n'
+            '  LAD inversion. Returns are labeled by distance to the known tube\n'
             '  axes, so the wood_class column is exact, not a classifier output.\n'
             '\n'
             f'  True one-sided LEAF area   {leaf_area:.4f} m^2'

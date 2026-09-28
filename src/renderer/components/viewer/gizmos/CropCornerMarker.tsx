@@ -19,7 +19,7 @@ interface CropCornerMarkerProps {
 // Sized in SCREEN space, not world space. The original sized it as 1% of the
 // combined scene bounds, which is fine for one scan but scales with the number
 // and spread of loaded scans — across a multi-scan survey site the diagonal is
-// hundreds of metres, so the dot grew into a sphere that swallowed the view.
+// hundreds of meters, so the dot grew into a sphere that swallowed the view.
 // Pinning it to a pixel radius makes it read identically whether one small
 // scan or a whole plot is loaded, and it can never occlude the points the user
 // is trying to aim at.

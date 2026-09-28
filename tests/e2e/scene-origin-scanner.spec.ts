@@ -10,12 +10,12 @@ import { resetToFreshScene } from './helpers/resetApp';
 //
 //   1. Import seeds it. A scan project knows where its instrument stood, and on
 //      the first import into a blank scene the centroid of those stations is a
-//      better pivot than the point cloud's bounding-box centre.
+//      better pivot than the point cloud's bounding-box center.
 //   2. The panel snaps it. "Snap to scanner" moves the origin exactly onto one
 //      chosen station.
 //
 // Plus the two things that must NOT happen: seeding a scene whose scans record
-// no position (a plain XYZ import keeps the ground-anchored scene centre), and
+// no position (a plain XYZ import keeps the ground-anchored scene center), and
 // re-seeding when scans arrive later (that would yank the pivot, and the camera
 // target with it, out from under a user mid-session).
 //
@@ -95,7 +95,7 @@ test('the first import seeds the origin at the mean of the scanner positions', a
   await expect(page.getByTestId('scene-origin-source-note')).toBeVisible();
   expectClose(await readOrigin(), STATION_MEAN);
 
-  // Not vacuous: the scene centre the origin would otherwise take is metres
+  // Not vacuous: the scene center the origin would otherwise take is meters
   // away in every axis (the stations pull the bounding box out around a
   // 1.6 m-wide cylinder pair sitting on z = 0).
   const viewer = page.locator('[data-scene-bounds-size]');
@@ -104,17 +104,17 @@ test('the first import seeds the origin at the mean of the scanner positions', a
   expect(Math.abs(sceneCenter[1] - STATION_MEAN[1])).toBeGreaterThan(0.5);
 
   // Reset is offered against the seed (it is not the plain default) and lands
-  // on the centre of the POINT DATA at ground level. Laterally that is not the
-  // scene box centre: the box also frames the scanner markers so the camera can
+  // on the center of the POINT DATA at ground level. Laterally that is not the
+  // scene box center: the box also frames the scanner markers so the camera can
   // see them, but scanners and trajectories do not vote on where the pivot goes
   // (a drone leg overshooting the plot once put it 11.7 m off the cloud). The
-  // data centre is read from each scan row's own bounds.
+  // data center is read from each scan row's own bounds.
   const scanBounds = await page.getByTestId('scans-panel').locator('[data-testid="scan-row"]')
     .evaluateAll((rows) => rows.map((r) => r.getAttribute('data-scan-bounds')!.split(',').map(parseFloat)));
   const dataMin = [0, 1].map((a) => Math.min(...scanBounds.map((b) => b[a])));
   const dataMax = [0, 1].map((a) => Math.max(...scanBounds.map((b) => b[a + 3])));
   const dataCenter = [0, 1].map((a) => (dataMin[a] + dataMax[a]) / 2);
-  // Not vacuous either: the stations drag the box centre well away from the data.
+  // Not vacuous either: the stations drag the box center well away from the data.
   expect(Math.hypot(sceneCenter[0] - dataCenter[0], sceneCenter[1] - dataCenter[1])).toBeGreaterThan(1);
 
   const reset = page.getByTestId('scene-origin-clear');
@@ -184,7 +184,7 @@ test('a scene with no recorded scanner positions keeps the default and disables 
 test('scans imported into a populated scene do not move the origin', async () => {
   const { app, page } = session;
   // A plain cloud first: the scene is no longer blank, and the origin is the
-  // ordinary scene-centre default.
+  // ordinary scene-center default.
   await importFiles(app, page, 'import-auto', PLAIN_XYZ);
   await completeImportWizard(page);
   await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'))
@@ -198,7 +198,7 @@ test('scans imported into a populated scene do not move the origin', async () =>
   await importTwoStationXml(3);
 
   await expect(panel).toHaveAttribute('data-origin-source', 'default');
-  // Still the scene-centre default — which legitimately shifts as the scene
+  // Still the scene-center default — which legitimately shifts as the scene
   // grows, so what is asserted is that it did NOT land on the station mean.
   const after = await readOrigin();
   expect(Math.abs(after[2] - STATION_MEAN[2])).toBeGreaterThan(1);

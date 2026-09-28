@@ -55,7 +55,7 @@ point.
 ## Leaf-angle distributions and G(θ)
 
 `G(θ)` is the **mean leaf-projection coefficient**: the fraction of leaf area
-projected onto the plane perpendicular to a beam travelling at zenith angle `θ`,
+projected onto the plane perpendicular to a beam traveling at zenith angle `θ`,
 averaged over the leaves' orientations. It depends on the canopy's **leaf-angle
 distribution** `g_L(θ_L)` (how leaf inclinations are spread between horizontal and
 vertical) and on the beam zenith. For a given distribution,
@@ -222,10 +222,10 @@ the grid in one contiguous segment:
 
 That covers pulses that kept a return inside the grid. Pulses that lost *all*
 their returns have nothing to carry a count, so run **Backfill Misses** on the
-cropped cloud: the gapfill synthesises a miss for every pulse with no return,
+cropped cloud: the gapfill synthesizes a miss for every pulse with no return,
 which restores the beams that crossed the grid and returned only beyond it.
 The limit of that recovery is **occlusion**: a pulse whose only return was on
-something *between* the scanner and the grid (a neighbouring crown, a trunk
+something *between* the scanner and the grid (a neighboring crown, a trunk
 outside the grid) comes back as a miss too, and a miss counts as transmitted,
 so those voxels read **low**. Nothing in the cropped file can tell a blocked
 beam from a transmitted one. For a per-tree profile in a closed stand, crop
@@ -350,7 +350,7 @@ preference:
 1. **Imported misses.** Scans from an [E57 or structured PLY](../reference/file-formats.md#skymiss-points)
    carry real miss points (flagged `is_miss`). The inversion uses them directly.
    Toggle **Show misses** on the scan row to verify they're present — they draw
-   in a distinct colour. Until the scan has a scanner [origin](../workflows/simulate-scan.md),
+   in a distinct color. Until the scan has a scanner [origin](../workflows/simulate-scan.md),
    the misses show at their true (typically far-field) coordinates; once you give
    the scan a scanner origin, they're drawn on a sphere just beyond the farthest
    hit so they stay visible against the cloud.
@@ -397,7 +397,7 @@ Two caveats worth keeping in mind:
 ## Occlusion
 
 Foliage intercepts beams, so a voxel behind dense canopy is reached by few
-beams travelling only a short way through it. Its Beer's-law inversion then
+beams traveling only a short way through it. Its Beer's-law inversion then
 goes wrong in a specific direction: **LAD is overestimated**, increasingly so
 as the probed path shortens.
 
@@ -405,7 +405,7 @@ Phytograph screens for this with the **total probed beam path** through each
 voxel — the sum, over all beams, of the chord each cut through it. Below a
 threshold the voxel is reported as *occluded* rather than measured: excluded
 from the leaf-area total and from the group-scale interval, written as NoData
-in every export, and drawn in its own colour in the viewer. The default
+in every export, and drawn in its own color in the viewer. The default
 threshold is **100 × the voxel side length**, the form the criterion takes in
 Soma, Pimont & Dupuy (2021).
 
@@ -433,7 +433,7 @@ beams can report a confident-looking interval around a wildly inflated value.
 Underneath that is a simpler point: occlusion produces **bias**, and a
 confidence interval describes **variance**. An interval is not obliged to cover
 a systematic offset, and this one does not. The interval remains the right tool
-for what it measures, which is why it is used to *weight* neighbours during
+for what it measures, which is why it is used to *weight* neighbors during
 filling — just not to detect occlusion in the first place.
 
 ### Filling
@@ -441,7 +441,7 @@ filling — just not to detect occlusion in the first place.
 Occluded voxels can optionally be estimated from the reliable ones by
 **LAD-kriging** (Soma et al. 2020), a kriging variant that treats each donor
 voxel's own sampling variance as a known measurement error, so better-measured
-neighbours count for more. Filled voxels stay marked as interpolations and
+neighbors count for more. Filled voxels stay marked as interpolations and
 their leaf area is reported apart from the measured total — treating a fill as
 data is the very bias the screening exists to remove.
 

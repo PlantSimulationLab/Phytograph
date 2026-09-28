@@ -5,7 +5,7 @@ Why this module exists
 Registering two scans of a planting by matching their raw points does not work.
 Rows of similar plants are self-similar by construction: a descriptor computed
 on one tree's foliage looks like every other tree's, so the correspondence set
-is mostly wrong and the estimator cheerfully locks the source onto a NEIGHBOURING
+is mostly wrong and the estimator cheerfully locks the source onto a NEIGHBORING
 plant — a whole row-spacing off — while reporting a healthy score.
 
 The way out is to change the input rather than the estimator. If each cloud is
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 _PLATEAU_PROBE_POINTS = 1500
 
 # Above this, extractors decimate before clustering. Keeps a multi-million-point
-# scan from spending minutes in neighbour search; anchors are one-per-plant, so
+# scan from spending minutes in neighbor search; anchors are one-per-plant, so
 # a decimated cloud locates them equally well.
 _CLUSTER_MAX_POINTS = 60000
 
@@ -71,13 +71,13 @@ def _crown_features(cluster: np.ndarray) -> Tuple[float, float]:
     if len(cluster) == 0:
         return 0.0, 0.0
     height = float(cluster[:, 2].max() - cluster[:, 2].min())
-    centre = cluster[:, :2].mean(axis=0)
-    crown_size = float(np.linalg.norm(cluster[:, :2] - centre, axis=1).mean())
+    center = cluster[:, :2].mean(axis=0)
+    crown_size = float(np.linalg.norm(cluster[:, :2] - center, axis=1).mean())
     return height, crown_size
 
 
 def _point_spacing(points: np.ndarray) -> float:
-    """Median nearest-neighbour distance in XY — the cloud's own sampling scale.
+    """Median nearest-neighbor distance in XY — the cloud's own sampling scale.
 
     Cluster radii must NOT be derived from the scene extent. `_robust_cloud_diagonal`
     measures the whole plot on a dense synthetic cloud but only the canopy on a
@@ -96,7 +96,7 @@ def _point_spacing(points: np.ndarray) -> float:
 
 
 def _cluster_eps(points: np.ndarray, extent: float, spacing_mult: float) -> float:
-    """Neighbour distance that counts as "same plant".
+    """Neighbor distance that counts as "same plant".
 
     Driven by point spacing (see `_point_spacing`) with the extent-relative value
     as a floor, so it stays sane on a cloud too small or too uniform to measure.
@@ -111,9 +111,9 @@ def _cluster_eps(points: np.ndarray, extent: float, spacing_mult: float) -> floa
 def _crown_cluster_eps(points: np.ndarray, extent: float) -> float:
     """Clustering epsilon for grouping a whole crown.
 
-    Crowns are metres wide, so this needs a much larger epsilon than the "few
+    Crowns are meters wide, so this needs a much larger epsilon than the "few
     point spacings" that suits trunks — but one as large as the plant-to-plant
-    gap would fuse neighbouring trees.
+    gap would fuse neighboring trees.
 
     Rather than guess, find the PLATEAU. Sweeping epsilon over a real 5-tree row
     shows cluster count collapsing (73 -> 25 -> 9) and then sitting at exactly 5
@@ -125,7 +125,7 @@ def _crown_cluster_eps(points: np.ndarray, extent: float) -> float:
     automatically.
     """
     # The sweep clusters the cloud once per candidate epsilon, and clustering
-    # cost grows fast with point count (neighbour pairs, then union-find). Doing
+    # cost grows fast with point count (neighbor pairs, then union-find). Doing
     # 14 passes over a full cloud measured 65 s for only 14k points, which would
     # be minutes-to-hours at real scan sizes. The plateau is a property of the
     # PLANT LAYOUT, not of sampling density, so a few thousand points locate it
@@ -165,7 +165,7 @@ def _crown_cluster_eps(points: np.ndarray, extent: float) -> float:
         # Stop once everything has merged. The sweep runs low-to-high and the
         # plateau always sits BELOW the merge point, so later candidates cannot
         # improve the answer — they only cost time, and they are the expensive
-        # ones (a large epsilon makes the neighbour set quadratic; the sweep's
+        # ones (a large epsilon makes the neighbor set quadratic; the sweep's
         # tail was 17 s of an 18 s search). Continue one step past the collapse
         # so a genuine 1-cluster scene is still distinguishable.
         if counts[-1] <= 1 and len(counts) >= 2:
@@ -186,7 +186,7 @@ def _crown_cluster_eps(points: np.ndarray, extent: float) -> float:
         return max(spacing * 8.0, extent * 0.01, 1e-6)
 
     # Geometric middle of the winning run — furthest from both failure modes
-    # (fragmenting below it, merging neighbours above it). Index into the
+    # (fragmenting below it, merging neighbors above it). Index into the
     # EVALUATED prefix only: the sweep may have stopped early once the clusters
     # collapsed, so `candidates` can be longer than `counts`.
     evaluated = candidates[:len(counts)]
@@ -198,7 +198,7 @@ def _decimate(points: np.ndarray, limit: int = _CLUSTER_MAX_POINTS) -> np.ndarra
     """Cap the point count fed to clustering.
 
     Anchors are one per plant, so resolving them does not need every return —
-    but neighbour search does get much more expensive as points grow, and real
+    but neighbor search does get much more expensive as points grow, and real
     scans reach millions. An evenly-strided subsample preserves the spatial
     layout (which is all the clustering keys on) at bounded cost."""
     if len(points) <= limit:
@@ -210,18 +210,18 @@ def _cluster_xy(points: np.ndarray, eps: float, min_samples: int = 5) -> np.ndar
     """Single-link spatial clustering in the XY plane, via scipy only.
 
     scikit-learn is NOT a declared dependency of this backend, so DBSCAN is out.
-    `cKDTree` neighbour pairs + union-find gives the same single-link grouping
+    `cKDTree` neighbor pairs + union-find gives the same single-link grouping
     with a dependency already in the bundle.
 
     MEMORY: `query_pairs` must use `output_type='ndarray'`. The default returns
     a Python SET OF TUPLES — roughly 200 bytes per pair against 16 for an array
     row — and pair count grows as (n * eps)^2. Measured with the default: 635k
     pairs cost 136 MB at 40k points, and ~5M pairs cost ~800 MB at the 60k cap
-    with a metre-scale crown epsilon, in ONE call. `_crown_cluster_eps` sweeps
+    with a meter-scale crown epsilon, in ONE call. `_crown_cluster_eps` sweeps
     up to 14 epsilons, so the set version could allocate gigabytes on a single
     registration — a real risk for a desktop app, not just for tests.
 
-    The union-find is also vectorised over the pair array rather than looped in
+    The union-find is also vectorized over the pair array rather than looped in
     Python, which is where the ~30 s per call went.
     """
     from scipy.spatial import cKDTree
@@ -263,7 +263,7 @@ def _decimate(points: np.ndarray, limit: int = _CLUSTER_MAX_POINTS) -> np.ndarra
     """Cap the point count fed to clustering.
 
     Anchors are one per plant, so resolving them does not need every return —
-    but neighbour search gets much more expensive as points grow, and real
+    but neighbor search gets much more expensive as points grow, and real
     scans reach millions. An evenly-strided subsample preserves the spatial
     layout (all the clustering keys on) at bounded cost."""
     if len(points) <= limit:
@@ -275,7 +275,7 @@ def _drop_ground(points: np.ndarray, extent: Optional[float] = None) -> np.ndarr
     """Return the non-ground points.
 
     Ground is poison for every extractor here: it is one huge connected surface
-    touching every plant, so it merges neighbouring plants into a single cluster
+    touching every plant, so it merges neighboring plants into a single cluster
     or TreeIso instance and collapses the anchor count (measured: 3 instances
     for a 5-tree row when ground was left in).
 
@@ -319,7 +319,7 @@ def _drop_ground(points: np.ndarray, extent: Optional[float] = None) -> np.ndarr
 
 def _anchors_from_labels(points: np.ndarray, labels: np.ndarray,
                          apex: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-    """Collapse labelled per-plant point groups into one anchor each.
+    """Collapse labeled per-plant point groups into one anchor each.
 
     `apex=True` uses the highest point of the group (the treetop — the most
     view-stable landmark for a crown seen from above); otherwise the horizontal
@@ -358,7 +358,7 @@ def _extract_crown(points: np.ndarray, extent: float) -> Tuple[np.ndarray, np.nd
 
     Ground MUST be excluded before TreeIso runs. `/api/segment/trees` does this
     for the same reason: a ground plane connects every plant into one enormous
-    component, so TreeIso merges neighbours and returns far too few instances
+    component, so TreeIso merges neighbors and returns far too few instances
     (measured: 3 instances for a 5-tree row when ground was left in). Both the
     TreeIso path and the geometric fallback therefore work on non-ground points.
     """
@@ -386,7 +386,7 @@ def _extract_crown(points: np.ndarray, extent: float) -> Tuple[np.ndarray, np.nd
     span = z_hi - z_lo
     if span <= 0:
         return np.empty((0, 3)), np.empty((0, 2))
-    # Upper ~45% of the canopy: high enough to be above where neighbouring
+    # Upper ~45% of the canopy: high enough to be above where neighboring
     # crowns merge, low enough to keep a usable number of points per tree.
     upper = points[z >= z_lo + span * 0.55]
     if len(upper) < 6:
@@ -395,7 +395,7 @@ def _extract_crown(points: np.ndarray, extent: float) -> Tuple[np.ndarray, np.nd
         return np.empty((0, 3)), np.empty((0, 2))
 
     # Grouping a whole crown needs an epsilon comparable to the CROWN's own
-    # width, not just the point spacing: a crown is a hollow-ish shell metres
+    # width, not just the point spacing: a crown is a hollow-ish shell meters
     # across, so a spacing-derived epsilon (measured: 0.24 m against a 1.15 m
     # crown radius) splits every tree into several fragments. Estimating the
     # crown scale first, then clustering at a fraction of it, keeps whole crowns
@@ -455,7 +455,7 @@ def _extract_chm(points: np.ndarray, extent: float) -> Tuple[np.ndarray, np.ndar
 
     The classic aerial-LiDAR landmark, and the only extractor here that needs no
     segmentation at all — so it still works when instance segmentation gives up
-    (touching crowns, dense understory). Rasterise the cloud to a top-down
+    (touching crowns, dense understory). Rasterize the cloud to a top-down
     maximum-height grid, then take peaks.
 
     `skimage.feature.peak_local_max` does the peak finding; scikit-image is
@@ -466,7 +466,7 @@ def _extract_chm(points: np.ndarray, extent: float) -> Tuple[np.ndarray, np.ndar
     if len(points) < 10:
         return np.empty((0, 3)), np.empty((0, 2))
 
-    # Cell size is a compromise: fine enough to resolve neighbouring crowns,
+    # Cell size is a compromise: fine enough to resolve neighboring crowns,
     # coarse enough that each cell actually catches returns on sparse scans.
     # Driven by the point spacing rather than the extent — an extent-relative
     # cell is far too fine on a sparse scan and shatters each crown into many
@@ -497,7 +497,7 @@ def _extract_chm(points: np.ndarray, extent: float) -> Tuple[np.ndarray, np.ndar
     #
     # Measure the spacing instead of estimating it. Detect peaks once at a
     # deliberately permissive separation — that over-splits crowns — then take
-    # the median nearest-neighbour distance between those raw peaks as the plant
+    # the median nearest-neighbor distance between those raw peaks as the plant
     # spacing, and re-detect requiring peaks to be ~60% of it apart. Two passes
     # over a small grid are cheap, and the answer comes from the data.
     # Smooth the surface before looking for peaks. A raw canopy grid is bumpy at

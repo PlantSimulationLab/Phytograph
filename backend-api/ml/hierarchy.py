@@ -1,10 +1,10 @@
-"""The multi-resolution neighbour structure one crop is fed through.
+"""The multi-resolution neighbor structure one crop is fed through.
 
 PointNeXt downsamples with farthest-point sampling and groups with ball query,
 both custom CUDA kernels in openpoints. Here both are replaced by CPU-side
 equivalents, computed once per crop before the network runs:
 
-- **Downsampling** is a voxel grid of barycentres, at least ``stride`` (4,
+- **Downsampling** is a voxel grid of barycenters, at least ``stride`` (4,
   PointNeXt's) times fewer points per level. The voxel starts at the level's
   nominal size (the base voxel doubled per level; on a surface that alone is
   ~4x fewer points) and grows until the level is that much smaller. The
@@ -15,8 +15,8 @@ equivalents, computed once per crop before the network runs:
   nor cheap. Like FPS, the grid is uniform per unit area, but it costs a few
   O(n) passes where FPS costs O(n*m) (open3d's C++ FPS takes 0.45 s per
   24k-point crop, which is longer than the network's forward pass).
-- **Grouping** is k nearest neighbours, clamped to a generous radius. Beyond
-  the radius a neighbour is replaced by the query's nearest point, which is
+- **Grouping** is k nearest neighbors, clamped to a generous radius. Beyond
+  the radius a neighbor is replaced by the query's nearest point, which is
   what openpoints' ball query pads with, so an isolated point is not pooled
   with one across a gap. Unclamped kNN is otherwise density-adaptive, which
   matters for the same sparse-crown reason.
@@ -41,19 +41,19 @@ class HierarchySpec:
     """Geometry of the hierarchy, stored in the model package: a model is only
     valid on hierarchies built exactly the way it was trained."""
 
-    voxel: float = 0.01          # level-0 spacing, metres
+    voxel: float = 0.01          # level-0 spacing, meters
     levels: int = 5              # level 0 plus 4 downsampled levels
-    k: int = 16                  # neighbours per group
+    k: int = 16                  # neighbors per group
     radius_factor: float = 2.5   # group radius = factor * level voxel * sqrt(k/8)
     stride: int = 4              # each level has at most 1/stride the points
-    clamp_factor: float = 4.0    # neighbours beyond clamp_factor*radius are dropped
+    clamp_factor: float = 4.0    # neighbors beyond clamp_factor*radius are dropped
 
     def level_voxel(self, i: int) -> float:
         return self.voxel * (2 ** i)
 
     def level_radius(self, i: int) -> float:
         # sqrt(k/8) scales the radius with the group size: on a surface, k
-        # neighbours at spacing s span about s*sqrt(k/pi), and 8 was chosen so
+        # neighbors at spacing s span about s*sqrt(k/pi), and 8 was chosen so
         # that k=16 gives about 3.5 voxels.
         return self.radius_factor * self.level_voxel(i) * float(np.sqrt(self.k / 8.0))
 
@@ -69,9 +69,9 @@ class HierarchySpec:
 
 
 def _knn(tree: cKDTree, queries: np.ndarray, k: int, radius: float, n_support: int) -> np.ndarray:
-    """k nearest neighbours of each query in ``tree``, as an (m, k) int32 array.
+    """k nearest neighbors of each query in ``tree``, as an (m, k) int32 array.
 
-    Neighbours beyond ``radius`` are replaced by the query's nearest neighbour,
+    Neighbors beyond ``radius`` are replaced by the query's nearest neighbor,
     and so is any column past the support's size (cKDTree reports those as
     index n with distance inf).
     """
@@ -88,7 +88,7 @@ def _knn(tree: cKDTree, queries: np.ndarray, k: int, radius: float, n_support: i
 
 
 def _downsample(prev: np.ndarray, voxel: float, target: int) -> np.ndarray:
-    """Barycentres of the coarsest-needed grid: ``voxel`` or larger, grown
+    """Barycenters of the coarsest-needed grid: ``voxel`` or larger, grown
     until at most ``target`` voxels are occupied.
 
     Occupied voxels on a surface scale as 1/v^2, so each step grows ``v`` by
@@ -101,18 +101,18 @@ def _downsample(prev: np.ndarray, voxel: float, target: int) -> np.ndarray:
         if count <= target:
             break
         v *= max(1.05, float(np.sqrt(count / target)) * 1.02)
-    centres, _ = grid_mean(p, v)
-    return centres.astype(np.float32)
+    centers, _ = grid_mean(p, v)
+    return centers.astype(np.float32)
 
 
 def build(xyz: np.ndarray, spec: HierarchySpec, local0: bool = False) -> dict:
     """Build the hierarchy for one crop.
 
-    ``xyz`` is (n, 3), already centred on the crop and grid-sampled at
+    ``xyz`` is (n, 3), already centered on the crop and grid-sampled at
     ``spec.voxel``. The result maps names to lists, one entry per level:
 
     - ``pos[i]``: (n_i, 3) float32 point positions.
-    - ``local[i]``: (n_i, k) neighbours of each level-i point within level i.
+    - ``local[i]``: (n_i, k) neighbors of each level-i point within level i.
       ``local[0]`` is None unless ``local0``: it is the single most expensive
       query (every full-resolution point) and only a model with level-0
       blocks uses it.

@@ -17,7 +17,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // outliers, because nothing could shorten camera→target toward it.)
 //
 // Asserted here:
-//   1. Framing aims at what was framed — the bounds centre — not at the origin.
+//   1. Framing aims at what was framed — the bounds center — not at the origin.
 //   2. Zoom converges on the point under the CURSOR, not on the orbit target,
 //      and a moved origin stays reachable.
 //   3. Rotation still pivots about the origin, even after a pan.
@@ -61,7 +61,7 @@ function toWorld(state: any, v: number[]): number[] {
   return [v[0] + o[0], v[1] + o[1], v[2] + o[2]];
 }
 
-test('framing aims at the bounds centre, and zoom limits are scaled to the scene', async () => {
+test('framing aims at the bounds center, and zoom limits are scaled to the scene', async () => {
   const { page } = session;
   await loadFramedScene(session);
 
@@ -69,7 +69,7 @@ test('framing aims at the bounds centre, and zoom limits are scaled to the scene
   const { min, max } = state.bounds;
   const targetWorld = toWorld(state, state.target);
 
-  // The auto-frame aims at what it framed — the whole-scene bounds centre. It no
+  // The auto-frame aims at what it framed — the whole-scene bounds center. It no
   // longer drops the look-at to the origin's height: zoom-to-cursor, not a bent
   // look-at, is what makes the scene reachable.
   expect(targetWorld[0]).toBeCloseTo((min[0] + max[0]) / 2, 3);
@@ -131,7 +131,7 @@ test('zoom flies toward the point under the cursor, not the orbit target', async
   const axisBefore = viewAxis(before);
   const posBefore = [...before.position];
 
-  // Zoom in with the pointer well OFF-CENTRE, so "toward the cursor" and "along
+  // Zoom in with the pointer well OFF-CENTER, so "toward the cursor" and "along
   // the view axis" are genuinely different directions.
   const offX = box.x + box.width * 0.3;
   const offY = box.y + box.height * 0.35;
@@ -145,7 +145,7 @@ test('zoom flies toward the point under the cursor, not the orbit target', async
   // The camera really did close in on the scene.
   expect(distAfter).toBeLessThan(distBefore * 0.95);
 
-  // And it travelled toward the CURSOR, not straight down the old view axis.
+  // And it traveled toward the CURSOR, not straight down the old view axis.
   // (The look-at stays on the view ray by design — re-seating it laterally would
   // swing the view and would break the pan-step formula, which reads
   // |camera − target| as "how far away is the subject". What makes the zoom
@@ -165,7 +165,7 @@ test('zoom flies toward the point under the cursor, not the orbit target', async
   // ...but measurably off-axis. A stock dolly — or a zoom that fell back to the
   // on-axis anchor because the depth pick missed — pins this at exactly 1.0, so
   // any clear separation from 1 is the signal. The margin is small on purpose:
-  // the fixture is a small cylinder near the centre of frame, so a cursor at
+  // the fixture is a small cylinder near the center of frame, so a cursor at
   // 30%/35% of the viewport subtends only a few degrees off the view axis.
   expect(alongAxis).toBeLessThan(0.999);
   expect(1 - alongAxis).toBeGreaterThan(1e-4);
@@ -254,7 +254,7 @@ test('"Zoom to origin" moves the camera to a moved origin without changing the v
   const readState = () => page.evaluate(() => (window as any).__getCameraState());
   const before = await readState();
 
-  // Move the origin well away from the scene centre, through the real panel.
+  // Move the origin well away from the scene center, through the real panel.
   await page.getByTestId('tool-set-scene-origin').click();
   const panel = page.getByTestId('scene-origin-panel');
   await expect(panel).toBeVisible({ timeout: 10_000 });
@@ -294,7 +294,7 @@ test('"Zoom to origin" moves the camera to a moved origin without changing the v
   expect(targetWorld[2]).toBeCloseTo(movedOrigin[2], 2);
 
   // ...from the same direction it was already looking (framing preserves the
-  // orbit angle; only the centre and distance change).
+  // orbit angle; only the center and distance change).
   const angleAfter = dirBefore(after);
   for (let i = 0; i < 3; i++) expect(angleAfter[i]).toBeCloseTo(angleBefore[i], 2);
 });

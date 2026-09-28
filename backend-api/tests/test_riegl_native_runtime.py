@@ -231,7 +231,7 @@ def test_an_unknown_forced_runtime_is_ignored(monkeypatch):
     """A typo must not silently disable the feature.
 
     Falling through to the host's own answer means a bad value costs nothing;
-    honouring it would strand the user on a runtime that does not exist.
+    honoring it would strand the user on a runtime that does not exist.
     """
     _win(monkeypatch)
     monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", "wasm")
@@ -876,7 +876,7 @@ def test_build_endpoint_refuses_plainly_on_native(client, monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# The reader module's own platform behaviour
+# The reader module's own platform behavior
 # ---------------------------------------------------------------------------
 
 def _reader():
@@ -941,7 +941,7 @@ def test_reader_uri_keeps_windows_paths_intact():
     """RiVLib takes URIs, and `file:` + a native C:\\ path is what it accepts.
 
     Verified against a real .rxp: both `file:C:\\...` and `file:C:/...` open,
-    while `file:///C:/...` does not. Pinned because a "helpful" normalisation to
+    while `file:///C:/...` does not. Pinned because a "helpful" normalization to
     the file:// form would break every Windows import.
     """
     reader = _reader()

@@ -108,7 +108,7 @@ export function PickedPointProjector({
     }
 
     // Pass 2 — place each bubble in a free slot near its anchor. Points a few
-    // centimetres apart project to bubbles that sit on top of each other, and
+    // centimeters apart project to bubbles that sit on top of each other, and
     // the top one then swallows the buttons of everything underneath, making
     // the earlier labels impossible to dismiss or read.
     //
@@ -198,7 +198,7 @@ const LABEL_MARGIN_PX = 8;
 
 // ── DOM overlay ────────────────────────────────────────────────────────────
 
-// Transient "Copied" acknowledgement, matching the 600 ms flash the viewer's
+// Transient "Copied" acknowledgment, matching the 600 ms flash the viewer's
 // other copy-to-clipboard buttons use. Exported so the measurement overlay
 // shares one definition rather than growing a second timer with its own delay.
 export function useCopyFlash(): [string | null, (id: string) => void] {

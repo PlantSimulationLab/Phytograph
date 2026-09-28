@@ -1,7 +1,7 @@
 """DEM (Digital Elevation Model) generation tests.
 
 The DEM engine grids ground elevation by TIN/Delaunay-linear interpolation onto
-a regular cell-centred grid, with a per-cell low-percentile pre-bin for outlier
+a regular cell-centered grid, with a per-cell low-percentile pre-bin for outlier
 robustness and convex-hull void masking. Output is a heightmap surface mesh plus
 the regular grid, which the raster-export endpoint writes as ESRI ASCII / GeoTIFF.
 
@@ -70,7 +70,7 @@ def test_dem_tilted_plane_median_is_accurate():
 
 def test_dem_low_percentile_tracks_bare_earth():
     """The default low percentile (5th) pulls the surface toward the LOWEST
-    returns — the bare-earth behaviour. On a plane it sits at or just below the
+    returns — the bare-earth behavior. On a plane it sits at or just below the
     analytic surface, never above it."""
     pts, (a, b, c) = _plane_cloud()
     r = main._compute_dem(pts, cell_size=0.5, method="tin", ground_percentile=5.0)
@@ -221,7 +221,7 @@ def test_dsm_first_return_masking():
 # --------------------------- DTM scalar layer bundle ---------------------------
 # A DTM now carries a bundle of named scalar layers (elevation + density/intensity
 # gridded from points + hillshade/slope/aspect derived from the elevation grid).
-# One mesh, many layers the renderer colours by and exports.
+# One mesh, many layers the renderer colors by and exports.
 
 def _density_scene(seed=5):
     """A flat ground plane with a DENSE half (x<10, points duplicated) and a SPARSE
@@ -376,7 +376,7 @@ def test_dem_voids_and_fill():
     hull and become voids (no triangles there). `fill_voids` extrapolates them."""
     rng = np.random.default_rng(1)
     n = 6000
-    # uniform disk of radius 4 centred at (5,5), inside a [0,10]² bbox — so the four
+    # uniform disk of radius 4 centered at (5,5), inside a [0,10]² bbox — so the four
     # bbox corners fall OUTSIDE the data's convex hull.
     rad = 4.0 * np.sqrt(rng.uniform(0, 1, n))
     ang = rng.uniform(0, 2 * np.pi, n)
@@ -397,9 +397,9 @@ def test_dem_voids_and_fill():
     gzf = np.asarray(rf["grid_z"]).reshape(rf["grid_ny"], rf["grid_nx"])
     assert not np.isfinite(gzf[0, 0])                # corner NOT fabricated
     assert rf["voids"] > 0                           # exterior stays void
-    # The centre (inside the hull) is meshed either way.
-    centre_j, centre_i = rf["grid_ny"] // 2, rf["grid_nx"] // 2
-    assert np.isfinite(gzf[centre_j, centre_i])
+    # The center (inside the hull) is meshed either way.
+    center_j, center_i = rf["grid_ny"] // 2, rf["grid_nx"] // 2
+    assert np.isfinite(gzf[center_j, center_i])
 
 
 def test_fill_extends_to_scan_footprint_not_just_ground_hull():
@@ -856,7 +856,7 @@ def test_auto_csf_params_on_br04_is_tractable():
     las = laspy.read(str(fixture))
     pts = np.column_stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)])
     params = main._auto_csf_params(pts)
-    # A ~186 m steep tile → slope recipe with a sub-metre cloth, orders of
+    # A ~186 m steep tile → slope recipe with a sub-meter cloth, orders of
     # magnitude coarser than the 5 cm default that caused the hang.
     assert params["cloth_resolution"] >= 0.5
     assert params["slope_smooth"] is True
@@ -902,7 +902,7 @@ def test_dem_prebin_is_exact_per_cell_percentile_across_blocks(monkeypatch):
             zs = np.sort(pts[(ci == i) & (cj == j), 2])
             assert len(zs) > 0
             expect = zs[int(np.floor((len(zs) - 1) * 0.25))]
-            # "nearest" at a populated cell's own centre is that cell's representative.
+            # "nearest" at a populated cell's own center is that cell's representative.
             assert gz[j, i] == pytest.approx(expect)
 
 
@@ -923,7 +923,7 @@ def test_dem_cell_z_order_matches_lexsort():
 
 
 def test_session_dem_is_admitted_against_the_memory_budget(monkeypatch):
-    """A session DEM materialises the hits and two subsets of them, so it is
+    """A session DEM materializes the hits and two subsets of them, so it is
     admitted at `_DEM_BYTES_PER_POINT` per point of the session BEFORE the
     arrays are gathered - two large DEMs queue instead of both peaking."""
     pts, _ = _plane_cloud(n=2000)

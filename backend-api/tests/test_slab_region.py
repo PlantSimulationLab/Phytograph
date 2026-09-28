@@ -54,10 +54,10 @@ def test_matches_the_renderer_predicate_on_golden_vectors():
 
 def test_selects_inside_and_rejects_outside():
     pts = [
-        [5.0, 0.0, 5.0],     # centreline
+        [5.0, 0.0, 5.0],     # centerline
         [5.0, 0.9, 5.0],     # inside the face
         [5.0, 1.1, 5.0],     # past the face
-        [-0.5, 0.0, 5.0],    # before the centreline start
+        [-0.5, 0.0, 5.0],    # before the centerline start
         [10.5, 0.0, 5.0],    # past its end
         [5.0, 0.0, -0.5],    # below
         [5.0, 0.0, 10.5],    # above
@@ -72,9 +72,9 @@ def test_offset_moves_the_slab_along_its_normal():
     assert _mask(stepped, pts).tolist() == [False, True]
 
 
-def test_works_on_a_diagonal_centreline():
+def test_works_on_a_diagonal_centerline():
     region = {**SLAB, "a": [0.0, 0.0], "b": [3.0, 4.0], "depth": 1.0}
-    # Midpoint of the centreline is inside; a point 2 units off its normal is not.
+    # Midpoint of the centerline is inside; a point 2 units off its normal is not.
     assert _mask(region, [[1.5, 2.0, 5.0]]).tolist() == [True]
     assert _mask(region, [[1.5 - 1.6, 2.0 + 1.2, 5.0]]).tolist() == [False]
 
@@ -103,7 +103,7 @@ def test_canonical_region_accepts_a_slab():
     {"depth": 0.0},                                       # non-positive depth
     {"depth": -1.0},
     {"zMax": -5.0},                                       # zMax < zMin
-    {"b": [0.0, 0.0]},                                    # zero-length centreline
+    {"b": [0.0, 0.0]},                                    # zero-length centerline
 ])
 def test_canonical_region_rejects_malformed_slabs(bad):
     from fastapi import HTTPException
@@ -113,7 +113,7 @@ def test_canonical_region_rejects_malformed_slabs(bad):
     assert e.value.status_code == 400
 
 
-def test_a_zero_length_centreline_is_rejected_by_the_mask_too():
+def test_a_zero_length_centerline_is_rejected_by_the_mask_too():
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
         _mask({**SLAB, "b": [0.0, 0.0]}, [[0.0, 0.0, 0.0]])

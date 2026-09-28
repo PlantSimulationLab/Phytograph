@@ -14,7 +14,7 @@ and the client received a 200 with a truncated body. The renderer then failed
 while trying to decode a frame that was never written, so the user saw a
 decode-shaped message rather than the real cause.
 
-The fix mirrors the mechanism `cancelled` already uses: a terminal PHP1 marker
+The fix mirrors the mechanism `canceled` already uses: a terminal PHP1 marker
 carrying `error`, which the client turns into a real thrown error. This is
 shared by all ~15 endpoints built on `_bin_frame_streaming_response`.
 """
@@ -112,9 +112,9 @@ def test_progress_mode_also_reports_errors():
     assert err and err[-1]["error"] == "failed after some progress"
 
 
-def test_cancellation_is_still_reported_as_cancelled_not_error():
+def test_cancellation_is_still_reported_as_canceled_not_error():
     """A user cancel must stay distinguishable from a real failure — the client
-    maps them to different types (ScanCancelledError vs Error)."""
+    maps them to different types (ScanCanceledError vs Error)."""
     run_id, event = main._new_cancel_token()
     started = threading.Event()
 
@@ -122,7 +122,7 @@ def test_cancellation_is_still_reported_as_cancelled_not_error():
         started.set()
         for _ in range(600):  # ~6s cap so a hung test fails fast
             if progress.should_cancel():
-                raise main.ScanCancelled()
+                raise main.ScanCanceled()
             threading.Event().wait(0.01)
         return b"PHB1unused"
 
@@ -144,7 +144,7 @@ def test_cancellation_is_still_reported_as_cancelled_not_error():
         loop.close()
 
     markers = decode_progress_markers(body)
-    assert any(m.get("cancelled") for m in markers)
+    assert any(m.get("canceled") for m in markers)
     assert not any(m.get("error") for m in markers), \
         "a cancel must not be reported as an error"
 

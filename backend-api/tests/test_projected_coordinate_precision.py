@@ -1,9 +1,9 @@
-"""Projected (UTM) clouds must survive a file load without being quantised.
+"""Projected (UTM) clouds must survive a file load without being quantized.
 
 Regression guard: the ASCII and PLY/PCD loaders used to parse positions as
 float32. At a UTM northing of ~5.4e6 the float32 spacing is 0.5 m, so a real
-tile was snapped onto a decimetre lattice AT PARSE TIME — before anything could
-recentre it. On a 1 cm-detail tree scan that collapsed ~99% of distinct
+tile was snapped onto a decimeter lattice AT PARSE TIME — before anything could
+recenter it. On a 1 cm-detail tree scan that collapsed ~99% of distinct
 northings, destroying exactly the geometry the app exists to measure.
 
 The `suggested_shift` machinery does NOT protect this path: it is surfaced on
@@ -18,7 +18,7 @@ import pytest
 from main import PointSource, _load_xyz_arrays, _read_points_from_source
 
 
-# A realistic UTM zone-10N tile with centimetre structure.
+# A realistic UTM zone-10N tile with centimeter structure.
 EASTING, NORTHING = 500_000.0, 5_400_000.0
 
 
@@ -49,7 +49,7 @@ def test_utm_coordinates_survive_the_load(utm_cloud):
     pos, _, _ = _load_xyz_arrays(str(path), "x y z", None)
 
     err = np.abs(pos - xyz).max()
-    assert err < 1e-3, f"coordinates quantised on load (max error {err} m)"
+    assert err < 1e-3, f"coordinates quantized on load (max error {err} m)"
 
 
 def test_distinct_coordinates_are_not_collapsed(utm_cloud):
@@ -62,8 +62,8 @@ def test_distinct_coordinates_are_not_collapsed(utm_cloud):
     assert got == expected, f"northings collapsed: {expected} -> {got}"
 
 
-def test_centimetre_detail_is_resolvable(utm_cloud):
-    """Nearest-neighbour spacing must not be destroyed — this is what every
+def test_centimeter_detail_is_resolvable(utm_cloud):
+    """Nearest-neighbor spacing must not be destroyed — this is what every
     downstream tool (skeleton radius, triangulation spacing, LAD voxels)
     estimates its scale from."""
     path, _ = utm_cloud

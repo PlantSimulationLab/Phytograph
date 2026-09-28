@@ -64,7 +64,7 @@ unambiguously instead of stacking anonymous colorbars.
   members of a merged group. Categorical entries have no picker, since
   their colors come from the classification scheme rather than a ramp.
 
-Colouring by `tree_instance` deliberately shows no legend: tree ids are
+Coloring by `tree_instance` deliberately shows no legend: tree ids are
 arbitrary labels and a scene routinely holds 100+ of them, so neither a
 gradient nor a class list would be readable. The points stay colored.
 
@@ -96,7 +96,7 @@ panel and in the export column picker, and can feed another formula. The same
 tool reports each field's statistics and histogram.
 
 Run it with several clouds checked and each one gets its own copy of the new
-column, and each is set to colour by it — the field belongs to every cloud it
+column, and each is set to color by it — the field belongs to every cloud it
 was computed on, not to a shared result.
 
 ### Scalar fields on imported clouds
@@ -161,7 +161,7 @@ Some scalar attributes are **categorical** — integer class labels rather
 than a continuous measurement. The **Ground Class** attribute produced by
 [Segment ground points](../workflows/segment-ground.md)
 (1 = ground, 2 = non-ground) is the first of these. These render with
-**discrete per-class colours** and a small class legend (ground in brown,
+**discrete per-class colors** and a small class legend (ground in brown,
 non-ground in green) instead of a continuous colormap and colorbar, so each
 class reads as a distinct category rather than a position along a ramp.
 
@@ -173,41 +173,41 @@ and leaf in green, each with its own legend entry.
 The **Noise Class** attribute produced by
 [Remove noise](../workflows/clean-point-cloud.md#remove-noise-stray-points)
 (1 = clean, 2 = noise) is categorical too. It renders clean points in muted
-grey and flagged points in **red** — deliberately the loudest colouring in the
+gray and flagged points in **red** — deliberately the loudest coloring in the
 app, because reviewing the flagged points before removing them is the whole
 point of the two-step workflow.
 
 The **`tree_instance`** attribute produced by
 [Segment individual trees](../workflows/segment-trees.md) (`0` = unassigned,
 `1..N` = individual trees) is also categorical, but its class count isn't fixed:
-each tree's colour is generated on the fly (a perceptually-spaced hue rotation)
-and the legend lists Tree 1, Tree 2, …, with unassigned points in grey.
+each tree's color is generated on the fly (a perceptually-spaced hue rotation)
+and the legend lists Tree 1, Tree 2, …, with unassigned points in gray.
 
 The **Plant organ** attribute produced by
 [Segment plant organs](../workflows/segment-organs.md) (1 = soil, 2 = stem,
 3 = leaf) is categorical with a fixed legend: soil brown, stem gold, leaf
 green. Its companion **Leaflet** attribute (`0` = not a leaflet, `1..N` = one
 number per leaflet, lowest first) is generated on the fly like `tree_instance`:
-every leaflet gets its own colour, and soil and stem are grey. Like
+every leaflet gets its own color, and soil and stem are gray. Like
 `tree_instance`, it draws no legend, because a plant can have more than a
 hundred leaflets.
 
 The **Organ Type** attribute carried by a
 [synthetic scan](../workflows/simulate-scan.md) of a generated plant (when
 **organ type** is checked under **Retained per-hit fields**) is categorical too:
-each hit is labelled with the organ it struck — **Leaf**, **Petiole**,
-**Shoot**, **Peduncle**, or **Fruit** — and renders with a distinct colour per
+each hit is labeled with the organ it struck — **Leaf**, **Petiole**,
+**Shoot**, **Peduncle**, or **Fruit** — and renders with a distinct color per
 organ and a legend. Hits on imported (non-plant) geometry carry no organ data
-and read as **Unknown** (grey).
+and read as **Unknown** (gray).
 
-All of the class columns above are recognised **by name** when a file carrying
+All of the class columns above are recognized **by name** when a file carrying
 them is imported, so a cloud exported from Phytograph and read back keeps its
-discrete colouring rather than arriving as a gradient.
+discrete coloring rather than arriving as a gradient.
 
 You can also **mark a column as categorical yourself** in the
 [import wizard](../workflows/import-export.md#the-import-wizard) — set its role
 to **Label** (rather than **Scalar**) for a column that holds class labels (a
-custom classification, a region id, …). It then colours with the same discrete
+custom classification, a region id, …). It then colors with the same discrete
 per-class scheme (Class 0, Class 1, …) and legend instead of a continuous
 gradient.
 
@@ -273,7 +273,7 @@ clearly distinguishable:
 | **5+** | Pink |
 
 In **Shoot id** mode each shoot's color comes from a perceptually-spaced
-hue rotation, so neighbouring shoots don't collide. In either mode,
+hue rotation, so neighboring shoots don't collide. In either mode,
 clicking a shoot in the results list **highlights that whole axis** and
 dims the rest.
 
@@ -290,7 +290,7 @@ stretching wider as a branch thickens. See
 
 A [leaf area density](../concepts/leaf-area-density.md) result is a grid
 of voxel cells, each colored by its LAD value (m²/m³). A colorbar
-labelled **LAD [m²/m³]** shows the range.
+labeled **LAD [m²/m³]** shows the range.
 
 | Control | What it does |
 |---|---|
@@ -311,4 +311,4 @@ The default colormap (viridis) goes:
 
 Other colormaps preserve order but use different palettes. Viridis is
 the project default because it's perceptually uniform and prints well
-in greyscale — useful for figures.
+in grayscale — useful for figures.

@@ -352,7 +352,7 @@ test.describe('translate cloud', () => {
   //
   // 1. It is sized in SCREEN PIXELS, not off the cloud's bounds. `size` used to
   //    be `bounds.size.length() / 3`, so on a survey-scale cloud the arrows were
-  //    tens of metres long. Framed on the whole cloud that looks fine, but the
+  //    tens of meters long. Framed on the whole cloud that looks fine, but the
   //    moment you zoom in to work on a detail — the normal reason to open
   //    Transform — every handle is far outside the viewport and the tool is
   //    unusable until you zoom back out.
@@ -364,7 +364,7 @@ test.describe('translate cloud', () => {
   // The test sets the origin well away from the cloud's bounds center, zooms in,
   // then grabs the arrow at the fixed pixel offset where a constant-size gizmo
   // draws its head. Either regression puts nothing at that pixel — the head is
-  // metres off screen (1), or it's over by the bounds center (2) — the
+  // meters off screen (1), or it's over by the bounds center (2) — the
   // pointerdown hits empty space and the draft stays at zero.
   test('the Transform gizmo is a fixed on-screen size, anchored on the scene origin', async () => {
     const { app, page } = session;
@@ -420,7 +420,7 @@ test.describe('translate cloud', () => {
     // count — the wheel is zoom-to-cursor with a latched depth anchor, so how far
     // one notch travels depends on what it picked, and a fixed count either
     // undershoots or slams into the minDistance clamp (~3 mm), where even a
-    // centimetre projects off screen and the probes below can't be taken.
+    // centimeter projects off screen and the probes below can't be taken.
     const camDist = async () => {
       const st = await page.evaluate(() => (window as any).__getCameraState?.());
       return Math.hypot(
@@ -445,9 +445,9 @@ test.describe('translate cloud', () => {
     // three-quarter view leaves one axis nearly edge-on, and dragging a
     // few-pixel-long arrow proves nothing.
     const screenCenter = await worldToScreen(ORIGIN);
-    // Step a SMALL distance along each axis: at this zoom a full metre projects
+    // Step a SMALL distance along each axis: at this zoom a full meter projects
     // off screen (which is the whole point), and worldToScreen refuses to return
-    // a point outside the frustum. Only the direction and the px-per-metre ratio
+    // a point outside the frustum. Only the direction and the px-per-meter ratio
     // are used, and both are linear in the step.
     const PROBE_M = finalDist / 50;
     const dirs = await Promise.all([0, 1, 2].map(async (i) => {
@@ -460,13 +460,13 @@ test.describe('translate cloud', () => {
     dirs.forEach((d, i) => {
       if (Math.hypot(d.dx, d.dy) > Math.hypot(dirs[best].dx, dirs[best].dy)) best = i;
     });
-    // Pixels per world METRE along that axis (PROBE_M already divided out).
+    // Pixels per world METER along that axis (PROBE_M already divided out).
     const len = Math.hypot(dirs[best].dx, dirs[best].dy);
     const unit = { x: dirs[best].dx / len, y: dirs[best].dy / len };
 
     // The test is only meaningful if this viewpoint is one where the OLD sizing
     // actually failed. Old arrow length was `bounds.size.length() / 3` world
-    // units; at `len` px per metre it has to overshoot the viewport for the grab
+    // units; at `len` px per meter it has to overshoot the viewport for the grab
     // below to distinguish the two behaviors.
     const oldArrowPx = (extent / 3) * len;
     const canvasBox = (await page.locator('canvas').first().boundingBox())!;
@@ -617,7 +617,7 @@ test.describe('translate cloud', () => {
 
     // First move it +5 and bake (so the recenter has something non-trivial to
     // undo). The Translate tool must be CLOSED before Move to Origin, which is
-    // guarded (greyed out) while the Translate panel is open.
+    // guarded (grayed out) while the Translate panel is open.
     await openTranslateTool();
     await typeTranslate('x', '5');
     await clickOK();
@@ -957,12 +957,12 @@ test.describe('translate cloud', () => {
 
   // The origin marker is drawn as a ring ~12 px in radius, and its PICK target is
   // the ring band only (the middle is deliberately click-through so the marker
-  // can't steal centre clicks from cloud/mesh selection). So click 12 px off the
+  // can't steal center clicks from cloud/mesh selection). So click 12 px off the
   // center, not on it.
   const RING_PX = 12;
 
   // Click the marker the way a HAND does: move onto it, let the pointer settle,
-  // then press and release without travelling.
+  // then press and release without traveling.
   //
   // `page.mouse.click()` teleports the pointer from wherever it last was (here,
   // a panel button hundreds of px away) and fires down/up with no intervening
@@ -1007,7 +1007,7 @@ test.describe('translate cloud', () => {
     const sceneCenter = (await viewerEl.getAttribute('data-scene-center'))!
       .split(',').map(parseFloat);
     const sceneMinZ = parseFloat((await viewerEl.getAttribute('data-scene-min-z'))!);
-    // Laterally the scene centre...
+    // Laterally the scene center...
     // (the data attributes are rounded to 1 dp, hence the loose tolerance)
     expect(Math.abs(origin[0] - sceneCenter[0])).toBeLessThan(0.15);
     expect(Math.abs(origin[1] - sceneCenter[1])).toBeLessThan(0.15);

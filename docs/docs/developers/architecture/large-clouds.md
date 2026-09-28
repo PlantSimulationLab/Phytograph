@@ -9,7 +9,7 @@ sessions, tiled processing, streaming import) builds on these pieces.
 
 ## What a cloud costs
 
-A `CloudSession` stores positions as float64 (24 B/pt), colours as three
+A `CloudSession` stores positions as float64 (24 B/pt), colors as three
 uint16 (6 B/pt), intensity as uint16 (2 B/pt), timestamps as float64
 (8 B/pt), and a one-byte delete mask. A scalar column is float32 (4 B/pt)
 unless every value is a whole number. Then it is stored in the narrowest
@@ -203,8 +203,8 @@ through the generic path's float32 round trip.
 
 What is *not* yet chunked: compute tools still call `positions[keep].copy()`
 through `_read_points_and_extras`, so a tool on a 100 M-point store still
-materialises a full copy of the hits — the tiled runner (next section) is the
-answer for neighbourhood tools, and per-block reads for the point-local ones
+materializes a full copy of the hits — the tiled runner (next section) is the
+answer for neighborhood tools, and per-block reads for the point-local ones
 (C2M, DEM pre-binning).
 
 ### Split and extract children are born in a store
@@ -264,7 +264,7 @@ restore API.
 ## Tiled processing (the lidR engine)
 
 `backend-api/tiled.py` runs a whole-cloud algorithm per XY tile plus a collar
-of neighbouring points, keeps only the tile's own results, and merges — what
+of neighboring points, keeps only the tile's own results, and merges — what
 lidR's `LAScatalog`, LAStools' `lastile -buffer` and PDAL's `filters.splitter`
 do. Points are binned once by cell id (one `argsort`), so a tile's core and
 collar are contiguous ranges of the sorted order rather than a pass over N.
@@ -326,7 +326,7 @@ with a collar of the radius, voxel-count with a collar of the voxel and the
 grid anchored at one origin for every tile (a per-tile minimum would shift
 the grid at every seam). Parameters are resolved once, on every k-th small
 cell of a fine probe grid — spatially contiguous inside each cell, so the
-nearest-neighbour spacing is the true one, and spread across the cloud so a
+nearest-neighbor spacing is the true one, and spread across the cloud so a
 dense tile does not understate the sparse far field. SOR's threshold is a
 mean over the whole cloud by definition and stays untiled.
 
@@ -359,8 +359,8 @@ its name.)
 Three changes make the plan itself cheap:
 
 - XY is stored in cell order, so a cell's points are one contiguous slice.
-  Each of the dense cell's neighbours builds a neighbourhood that contains
-  the dense cell, and random-row gathers over it cost ~1.4 s per neighbour.
+  Each of the dense cell's neighbors builds a neighborhood that contains
+  the dense cell, and random-row gathers over it cost ~1.4 s per neighbor.
 - Cell ids are sorted as `uint16` where they fit, because numpy
   radix-sorts 16-bit keys: 0.45 s against 21.8 s for 36 M int64 keys.
 - `plan.gathered()` yields tiles lazily and drops each split cell's index
@@ -405,7 +405,7 @@ points through only two things:
   XY distance to it (`RasterTerrian`). Slope smoothing reads only those
   heights.
 
-Every other point matters only to the final labelling (`c2cdist`), a
+Every other point matters only to the final labeling (`c2cdist`), a
 bilinear interpolation of the settled cloth. So `segment_ground` hands CSF
 the six bounding-box extremes plus every point within a relative 1e-9 of its
 particle's minimum distance (the slack absorbs a fused multiply-add in the
@@ -458,7 +458,7 @@ than that is picked. A session DEM whose whole-cloud working set would exceed
 `_DEM_STREAM_BUDGET_FRACTION` (15 %) of the memory budget — i.e. that fraction
 divided by the measured `_DEM_BYTES_PER_POINT`, so ~11 M points on a 16 GB
 laptop and ~46 M on 64 GB, with `PHYTOGRAPH_DEM_STREAM_MIN_POINTS` still pinning
-an exact count — no longer materialises the hits, the ground subset and the
+an exact count — no longer materializes the hits, the ground subset and the
 first-return subset (~24 B/pt each). This was a flat 5 M points, which on a
 64 GB workstation took the slower streamed path for a DEM that fit in RAM twenty
 times over, and on an 8 GB laptop took it too late.
@@ -492,7 +492,7 @@ which is the difference between fitting and paging on the 16 GB baseline.
 
 Remaining candidates, each with its natural collar: normals (the search
 radius). **Wood/leaf is left global on purpose.** Its per-point PCA
-features are the only tileable stage (collar = the largest neighbourhood
+features are the only tileable stage (collar = the largest neighborhood
 scale); the GMM threshold, the skeleton segments and the cylinder gate that
 follow are whole-tree operations on the voxel-decimated cloud
 (`PHYTOGRAPH_WOOD_MAX_POINTS`, 1.5 M), so tiling the features alone would
@@ -506,7 +506,7 @@ not raise the cap — it stays a global-decimate tool with its cost stated.
 `_session_to_las(block_lock=…)` now snapshots the survivor set and the array
 *references* once under the lock and takes it again only per 2 M-row block
 for the gather; the laspy encode runs unlocked. Capturing references means a
-bake that replaces `positions` mid-write cannot desynchronise the block
+bake that replaces `positions` mid-write cannot desynchronize the block
 indices from the arrays they index; an in-place edit landing between blocks
 can differ between blocks, which the next rebuild reconciles and the renderer
 masks in the meantime. Pinned by racing a slowed write against a request on
@@ -579,9 +579,9 @@ lattice. Tiling is not free: every block call re-walks every beam of every
 scan. `_lad_block_cells_limit` therefore tiles only when the estimated scratch
 (`_LAD_SCRATCH_BYTES_PER_CELL_THREAD` per voxel per thread) exceeds a quarter
 of the memory budget, and `_lad_lattice_blocks` uses the fewest blocks that
-fit, in whole voxel columns. Each block reports progress and honours cancel.
+fit, in whole voxel columns. Each block reports progress and honors cancel.
 Terrain-following grids are not a regular lattice and keep the single call;
-a large grid Helios does not recognise as a lattice is inverted whole, with a
+a large grid Helios does not recognize as a lattice is inverted whole, with a
 warning. Hidden-return inference is per scan and ignores the block, so the
 cropped-return statistics after the last block are the whole-grid figures.
 `PHYTOGRAPH_LAD_BLOCK_CELLS` pins the block size; `tests/test_lad_blocks.py`
@@ -629,7 +629,7 @@ could not measure RAM at all.
 **Settings → Performance → Synthetic scan memory budget (MB)** is Helios's own
 knob (`setSyntheticScanMemoryBudget`, 4 GiB CPU / 8 GiB GPU by default) and was
 wholly independent of the process budget, so the two adjacent, near-identically
-labelled fields could contradict each other in silence: a 2 GB process budget
+labeled fields could contradict each other in silence: a 2 GB process budget
 left the ray trace on its 4 GiB default, and a 32 GB scan budget on an 8 GB
 machine was accepted without comment. `_synthetic_scan_budget_bytes` now clamps
 an explicit request to the process budget and, when nothing is requested,
@@ -648,7 +648,7 @@ Admission is the opposite — a decision about *now* — so it uses
 `admission_budget_bytes()`: the budget capped at `_AVAILABLE_HEADROOM` (70 %) of
 what the OS reports available, floored at `_MIN_ADMISSION_BYTES` (1 GiB) so a
 machine under pressure still makes progress one job at a time. A **pinned**
-budget is honoured as-is (the user named a number; quietly admitting less would
+budget is honored as-is (the user named a number; quietly admitting less would
 make the setting a lie), and unmeasurable availability falls back to the plain
 budget. This is the laptop case: 16 GB physical is an 8 GB budget, but with
 2.4 GB actually free only ~1.7 GB of concurrent work is admitted instead of
@@ -682,7 +682,7 @@ job nor makes one wait for it.
   `split` and `extract` (survivor slice plus the child's columns). Sized by
   `_session_mutation_bytes`, which reads the columns a session actually carries
   rather than a flat per-point figure, so a bare xyz cloud is not charged for
-  colour, intensity, timestamps and beam origins it does not have.
+  color, intensity, timestamps and beam origins it does not have.
 - **Registration** — `/api/c2c/icp-register`, `/api/c2m/icp-register` and
   `/api/c2c/global-register`, via `_registration_bytes` (both clouds, Open3D's
   own copies and its KD-trees, `_REGISTRATION_COPIES` = 4). `c2m/distance` is
@@ -822,7 +822,7 @@ per point, in its own process. That is the largest single allocation any
 edit makes on a large cloud, and a ground segmentation with split launches
 three of them (parent plus two children). Every build is therefore admitted
 against the memory budget at `_POTREE_BYTES_PER_POINT` (72) per point, which
-serialises concurrent builds on a machine that cannot hold them side by side
+serializes concurrent builds on a machine that cannot hold them side by side
 — on a 16 GB laptop (8 GB budget) the three converts of a 100 M split run
 one after another instead of stacking to 14 GB.
 

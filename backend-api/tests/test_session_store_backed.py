@@ -7,7 +7,7 @@ own; eviction writes back only what is not a map yet plus a small pickle;
 restore hands the maps back; delete removes the directory. A split or
 extract child over the threshold is gathered straight into its own store;
 sessions born with RAM arrays get one at their first eviction. Every
-behaviour is driven through the real HTTP API.
+behavior is driven through the real HTTP API.
 """
 import json
 from pathlib import Path
@@ -195,7 +195,7 @@ def test_memory_pressure_evicts_ram_resident_sessions(client, tmp_path, monkeypa
 
 
 def test_a_store_backed_import_in_feet_is_scaled_on_disk(client, tmp_path, monkeypatch):
-    """Scaling a store-backed import to metres must happen in the store's own
+    """Scaling a store-backed import to meters must happen in the store's own
     column: a RAM copy would put the whole cloud back in memory and leave the
     store holding unscaled coordinates."""
     monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
@@ -226,18 +226,18 @@ def test_scaling_a_memory_mapped_column_does_not_copy_it(tmp_path, monkeypatch):
     """The regression test for the import-time RAM spike: a store-backed
     positions column must be scaled where it lives and returned as itself.
     Returning `positions * f` held a second full copy of the cloud in RAM during
-    import (the end state looked correct only because finalisation wrote the copy
+    import (the end state looked correct only because finalization wrote the copy
     back into the store)."""
     monkeypatch.setattr(main, "_LAS_READ_CHUNK", 3)
     path = tmp_path / "positions.npy"
     col = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float64, shape=(10, 3))
     col[:] = np.arange(30, dtype=np.float64).reshape(10, 3)
-    out = main._scale_positions_to_metres(col, 0.3048)
+    out = main._scale_positions_to_meters(col, 0.3048)
     assert out is col, "a memory-mapped column was copied instead of scaled in place"
     np.testing.assert_allclose(np.load(path, mmap_mode="r"), np.arange(30).reshape(10, 3) * 0.3048)
     # A plain array is still returned as a new, scaled array.
     plain = np.ones((4, 3))
-    scaled = main._scale_positions_to_metres(plain, 2.0)
+    scaled = main._scale_positions_to_meters(plain, 2.0)
     assert scaled is not plain and np.all(plain == 1.0) and np.all(scaled == 2.0)
 
 

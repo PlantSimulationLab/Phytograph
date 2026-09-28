@@ -812,7 +812,7 @@ export const SUPPORTED_FORMATS = [...POINT_CLOUD_FORMATS, ...MESH_FORMATS, ...SK
 
 // Extensions that the renderer parses via the path-based backend endpoint
 // instead of reading into memory. The TS parsers (parseXYZ, parsePLY,
-// parsePCD) all materialise the file as a JS string and throw RangeError
+// parsePCD) all materialize the file as a JS string and throw RangeError
 // past V8's ~512 MB max string size, so the multi-hundred-MB scans that
 // are typical of TLS surveys have to be parsed in Python.
 //
@@ -820,7 +820,7 @@ export const SUPPORTED_FORMATS = [...POINT_CLOUD_FORMATS, ...MESH_FORMATS, ...SK
 // a multipart upload and don't share the string-limit issue (laspy reads
 // binary chunks).
 const BACKEND_PATH_EXTENSIONS = new Set([
-  // ASCII delimited (pandas, honours Helios <ASCII_format>)
+  // ASCII delimited (pandas, honors Helios <ASCII_format>)
   'xyz', 'txt', 'csv', 'pts', 'asc', 'ascii',
   // PLY / PCD (open3d — handles ASCII and binary variants both)
   'ply', 'pcd',
@@ -876,7 +876,7 @@ export async function parsePointCloudFromPath(
   // Only the columns the user changed; empty means pure auto-detection.
   roleOverrides?: Record<string, string> | null,
   // The unit the SOURCE file's coordinates are in, chosen in the import wizard.
-  // The backend scales positions to metres by it at create, so it must ride the
+  // The backend scales positions to meters by it at create, so it must ride the
   // session-create call — there is no second chance to apply it once the
   // session (and its octree) exist.
   sourceUnits?: string | null,
@@ -961,7 +961,7 @@ export async function parsePointCloudsFromPath(
   droppedSlugs?: string[] | null,
   roleOverrides?: Record<string, string> | null,
   // The unit the SOURCE file's coordinates are in, from the import wizard. The
-  // backend scales positions to metres by it at session create; there is no
+  // backend scales positions to meters by it at session create; there is no
   // second chance once the session and its octree exist.
   sourceUnits?: string | null,
   scalarLabels?: Record<string, string> | null,
@@ -1030,8 +1030,8 @@ export interface BuildOctreeCloudOptions {
   sessionId?: string | null;
   worldShift?: [number, number, number] | null;
   /**
-   * The unit the SOURCE file was in and the factor applied to reach metres.
-   * Provenance only — positions are already metres — so this is carried, never
+   * The unit the SOURCE file was in and the factor applied to reach meters.
+   * Provenance only — positions are already meters — so this is carried, never
    * applied. See OctreeRef.sourceUnits.
    */
   sourceUnits?: string | null;
@@ -1090,17 +1090,17 @@ export function buildPointCloudFromOctree(
   // Index attribute ranges by name. The shader needs intensity range
   // and (eventually) other per-attribute extrema to set its gradient
   // uniforms; without them every point maps to the same texel and the
-  // mode renders as a solid colour.
+  // mode renders as a solid color.
   const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
   const attributeLabels: Record<string, string> = {};
   for (const a of meta.attributes ?? []) {
     // NOTE: the attribute name is kept EXACTLY as PotreeConverter wrote it
     // ('gps-time', not the 'timestamp' slug). It is the key into the octree
     // node's GPU buffer (`geometry.attributes[field]` in swapScalarIntoIntensity),
-    // so renaming it here silently breaks colour-by: the lookup misses, the swap
+    // so renaming it here silently breaks color-by: the lookup misses, the swap
     // no-ops, and the shader keeps the previous buffer — the legend reads the
-    // timestamp range while the points are still coloured by intensity.
-    // Display-name and slug normalisation belongs at the presentation layer
+    // timestamp range while the points are still colored by intensity.
+    // Display-name and slug normalization belongs at the presentation layer
     // (octreeAttributeSlug), never on the buffer key.
     const name = a.name;
     if (Array.isArray(a.min) && Array.isArray(a.max)) {
@@ -1258,7 +1258,7 @@ export function buildPointCloudFromBackend(
   }
 
   if (result.intensity) {
-    // Match parseXYZ's behaviour: normalise intensity to 0-1 for the
+    // Match parseXYZ's behavior: normalize intensity to 0-1 for the
     // viewer. Done in place on the view so we don't allocate a fresh
     // Float32Array of the same length.
     const arr = result.intensity;
@@ -1328,7 +1328,7 @@ export async function looksLikeAsciiPointCloud(file: File): Promise<boolean> {
   }
 
   // A binary container decodes to NULs / replacement characters, usually well
-  // before the first newline. Bail without tokenising anything.
+  // before the first newline. Bail without tokenizing anything.
   if (text.includes('\0') || text.includes('�')) return false;
 
   const lines = text.split('\n');

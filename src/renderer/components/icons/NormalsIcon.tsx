@@ -17,7 +17,7 @@ import { createLucideIcon } from 'lucide-react';
 // points on it", i.e. the same surface-plus-dots language as the segmentation
 // icons, because nothing in it pointed anywhere. One unmistakable arrow fixes
 // that, and the two flanking ticks keep the plural "normals of a surface"
-// reading rather than a generic upload glyph (which a lone centred arrow on a
+// reading rather than a generic upload glyph (which a lone centered arrow on a
 // horizontal baseline becomes).
 //
 // Rejected, each judged by rendering at 12/16/20/24 px rather than by eye:
@@ -32,9 +32,9 @@ import { createLucideIcon } from 'lucide-react';
 // Geometry (24-unit lucide grid, y pointing down). The surface runs (3,18) →
 // (21,11), slope −7/18. The unit perpendicular is (7,−18)/|(7,−18)| ≈
 // (−0.3624,−0.9320); every stem is that direction scaled, rooted on the surface
-// at 16% / 50% / 84% of its length. The centre stem is 9 units with a 3-unit
+// at 16% / 50% / 84% of its length. The center stem is 9 units with a 3-unit
 // head whose barbs are the reversed normal rotated ±32°; the flanking ticks are
-// 3.6 units. Ink spans x∈[3,21], y∈[6.1,18] — centred on (12.0,12.1) and inside
+// 3.6 units. Ink spans x∈[3,21], y∈[6.1,18] — centered on (12.0,12.1) and inside
 // lucide's 2-unit safe margin.
 //
 // The perpendicularity is the point of the mark (it is an icon OF

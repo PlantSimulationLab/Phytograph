@@ -133,7 +133,7 @@ same variable to per-session temp dirs.
     *different* bug with the same shape. `<userData>/Cache` is **Chromium's**
     HTTP cache, and the default APFS volume is case-insensitive — so `cache`
     and `Cache` were one and the same directory. Chromium empties that
-    directory when it initialises its disk cache, which means **every app
+    directory when it initializes its disk cache, which means **every app
     launch deleted the entire octree cache**, and a second concurrent instance
     (a dev or E2E app running alongside the packaged one) deleted it out from
     under the running app mid-session.
@@ -169,7 +169,7 @@ the user's desktop app all resolved to one directory
       size, class palettes, rivlib path, synthetic-scan defaults). Any spec or
       dev session that changed a setting through the UI overwrote them for good.
     - **Chromium's profile**, including `<userData>/Cache`, which Chromium
-      **empties** when it initialises its disk cache. Every dev/E2E launch wiped
+      **empties** when it initializes its disk cache. Every dev/E2E launch wiped
       whatever the running desktop app had there — and since the octree cache
       used to live at `<userData>/cache/octrees` (the same directory on a
       case-insensitive volume), starting a dev session destroyed a live desktop
@@ -310,7 +310,7 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
       was writing its arrays* and later restore that torn, pre-edit snapshot
       over the user's work. Pins ride a `ContextVar` installed by the
       `SessionPinScope` middleware (and by `_run_pinned` for executor threads,
-      which do not inherit contextvars and can outlive a cancelled request).
+      which do not inherit contextvars and can outlive a canceled request).
       Resident count can therefore exceed the cap by one request's working
       set, which is unavoidable and logged.
     - A spilled session still pins its octree ids in `_live_session_octree_ids`
@@ -383,14 +383,14 @@ Heavy data never crosses IPC as JSON:
   for array responses) decoded straight into `Float32Array` views, bypassing
   V8's ~512 MB max-string ceiling. LAS/LAZ import (both `import_by_path` and the
   no-path multipart fallback) and text export (`_format_points_as_text`, now
-  vectorised via `np.savetxt`) all go through these fast paths instead of
+  vectorized via `np.savetxt`) all go through these fast paths instead of
   per-point JSON / f-string loops.
 
 ## Compute caps
 
 Several backend endpoints fail fast past a point cap instead of hanging on a
 pathological cloud — `_WOOD_SEGMENT_MAX_POINTS` and `_SKELETON_MAX_POINTS`
-(`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the skeleton neighbour graph is
+(`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the skeleton neighbor graph is
 built with a single batched KD-tree query rather than a per-point Python loop).
 All are environment-overridable.
 
@@ -408,7 +408,7 @@ to wait must always be able to run it, and Cancel works mid-run:
   voxel count (`_count_treeiso_nodes`, at the same auto-scaled voxel size the
   worker will use) exceeds `_TREEISO_MAX_NODES`
   (`PHYTOGRAPH_TREEISO_MAX_NODES`, default 2 M). It is exact rather than
-  modelled: a `(res/spacing)³` density estimate ranged from 0.1× to 49× the true
+  modeled: a `(res/spacing)³` density estimate ranged from 0.1× to 49× the true
   count depending on cloud shape.
 - The inline endpoint returns `success: false` with a `cost_warning` (and **no**
   `error`); the session endpoint raises **409** with
@@ -446,7 +446,7 @@ instead of 1.47 m and the centroid sat 5 km out in Z.
 Two payload shapes reach a compute endpoint, and only one was ever protected:
 
 - **`source`** (session/octree clouds) — filtered **server-side** by
-  `_read_points_from_source(include_misses=False)`, which honours the flag on
+  `_read_points_from_source(include_misses=False)`, which honors the flag on
   both the session branch and the file-path branch (`_file_miss_mask` probes the
   file's own `is_miss` LAS extra-dim / ASCII column).
 - **inline `points`** — passed through **verbatim**. The renderer is the only
@@ -489,8 +489,8 @@ at the source rather than left to the coincidence:
 
 - **`/api/triangulate/check-spacing`** — `_resolve_scan_positions` now excludes
   misses on all three of its branches (session `extras`, inline, file flags). A
-  miss's nearest neighbour is another distant miss, so misses don't widen the
-  spacing distribution, they *define* it: measured median nearest-neighbour
+  miss's nearest neighbor is another distant miss, so misses don't widen the
+  spacing distribution, they *define* it: measured median nearest-neighbor
   distance was 35.65 m with misses versus 0.0143 m without, a ~2,500× error that
   inverts the bridging verdict. The caller's grid crop removed them incidentally
   and today's renderer always sends a grid — but the no-grid branch ("measure the
@@ -532,7 +532,7 @@ Lowercase: electron-log derives the directory from the app name, and
 `app.getName()` returns `phytograph` even though `main.ts` calls
 `app.setName('Phytograph')` — Electron does not recompute cached paths after
 `setName`. The octree cache below is a *different* directory that genuinely is
-capitalised, because the backend hardcodes it. Only Linux shows the difference.
+capitalized, because the backend hardcodes it. Only Linux shows the difference.
 
 Each launch writes to its own `main-<timestamp>-pid<n>.log` (via the file
 transport's `resolvePathFn`), so a bug report carries just that session instead

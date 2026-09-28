@@ -43,7 +43,7 @@ You need geometry in the scene to scan: typically a generated
     The RIEGL miniVUX-3UAV is the **single-channel** spinning case: one
     laser folded through a 45° rotating mirror that sweeps a flat 360°
     **plane** (not a tilted cone — that conical geometry is the separate
-    miniVUX-1DL), modelled as a spinning multibeam with a single 0° beam
+    miniVUX-1DL), modeled as a spinning multibeam with a single 0° beam
     elevation. Its datasheet pins the azimuth resolution (a 0.018°–0.36°
     step, so 1,000–20,000 points per revolution), so unlike the
     terrestrial scanners it also presets a points-per-revolution starting
@@ -245,13 +245,13 @@ the compass icon — on a moving scan's row in the Scans panel) opens the
 drawn at every pose in the 3D view.
 
 - **Table** — one row per pose, kept **ordered by time**, with columns for time
-  `t`, position (`X`/`Y`/`Z`, metres) and orientation (`Roll`/`Pitch`/`Yaw`,
+  `t`, position (`X`/`Y`/`Z`, meters) and orientation (`Roll`/`Pitch`/`Yaw`,
   degrees). Edit a cell to move or re-orient that pose; the scanner model updates
   live. Editing a pose's time re-sorts the rows automatically so the list always
   reads top-to-bottom along the flight.
 - **Add / remove poses** — **Add pose** appends a pose after the last one.
   Hovering the path line in the 3D view reveals a **+** that inserts an
-  interpolated pose (position and orientation half-way between its neighbours) at
+  interpolated pose (position and orientation half-way between its neighbors) at
   that point. The trash icon on a row deletes that pose.
 - **Move / rotate in 3D** — click a scanner model in the view to select that
   pose (its row highlights and the model glows), then press **`t`** to translate
@@ -291,14 +291,14 @@ Once a trajectory is attached:
 
     Trajectory files are often recorded in a **projected coordinate frame**
     (e.g. UTM easting/northing, in the hundreds of thousands to millions of
-    metres). If you add such a trajectory to a scene whose other geometry sits
+    meters). If you add such a trajectory to a scene whose other geometry sits
     near the origin (a ground plane, a generated plant), the two are millions of
-    metres apart — the view would otherwise fit both and show nothing. When
+    meters apart — the view would otherwise fit both and show nothing. When
     Phytograph detects this, it **frames the new trajectory on its own** so it
     stays visible and shows a warning with two choices:
 
     - **Move onto scene** — recenters the trajectory so it sits over the
-      existing content (its first pose is anchored to the scene centre). Undoable.
+      existing content (its first pose is anchored to the scene center). Undoable.
     - **Keep as-is** — leaves the trajectory in its original coordinate frame.
 
 The scan simulates a real spinning sensor: it fires continuously at the
@@ -338,7 +338,7 @@ position, field of view, and resolution — not a uniform random sprinkle
 of points over the surface.
 
 Leaf transparency is honored too. Plant leaves (and textured imported
-meshes) are modelled as flat quads carrying a leaf-shaped texture with a
+meshes) are modeled as flat quads carrying a leaf-shaped texture with a
 transparent background; the scan ray-traces against that texture's alpha
 channel, so rays pass **through** the transparent parts of the quad and
 only return hits where the leaf is actually opaque. A scanned canopy
@@ -472,7 +472,7 @@ long operations). It shows the current stage (loading geometry → configuring
 scanners → ray-tracing → extracting hits → building point clouds) with a
 progress bar and percentage that advance as the scan proceeds, plus a
 **Cancel** button to abandon a long or hung scan without force-quitting the
-app. Cancelling genuinely stops the work: it signals the backend to break out
+app. Canceling genuinely stops the work: it signals the backend to break out
 of the ray trace, so the computation halts and its memory is released within a
 moment rather than running to completion in the background. (A scan with a
 single, very high-resolution scanner finishes the current tracing pass before
@@ -480,7 +480,7 @@ it can stop, so cancellation is near-immediate for typical multi-scanner or
 multi-stage runs and may take a beat on one enormous single scan.) The
 ray-tracing pass reports real progress per scanner: in a multi-scanner scan the
 bar glides steadily and is corrected to each scanner's true fraction as its
-trace completes (labelled *scan i/N*), pacing itself from the scanners already
+trace completes (labeled *scan i/N*), pacing itself from the scanners already
 done so it tracks the scan's actual speed. A single scanner has no per-scan
 checkpoint, so during its one trace the bar advances at an estimated pace
 (scaled to the scan's pulse count) and settles onto the next real stage when it
@@ -501,9 +501,9 @@ app shows a message explaining what's missing instead of scanning.
 !!! note "Scanned colors"
     Point colors come from the surface each ray strikes. Plant organs are
     texture-mapped, so a scanned plant currently takes each organ's solid
-    fallback colour (e.g. leaf green) rather than the per-pixel texture
-    colour; texture-accurate scan colours arrive with a pending Helios
-    update. Colour by *Intensity* in the meantime for the most informative
+    fallback color (e.g. leaf green) rather than the per-pixel texture
+    color; texture-accurate scan colors arrive with a pending Helios
+    update. Color by *Intensity* in the meantime for the most informative
     view.
 
 !!! note "Flat geometry"

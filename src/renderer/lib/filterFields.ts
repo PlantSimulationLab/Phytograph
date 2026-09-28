@@ -61,7 +61,7 @@ export function isIntegerFilterField(field: string | undefined | null): boolean 
 }
 
 /**
- * Format a bound for display, honouring the field's integer-ness.
+ * Format a bound for display, honoring the field's integer-ness.
  *
  * Integer fields round rather than truncate: a float32 `target_index` of 3 can
  * come back as 2.9999998, and `Range: 1 to 2` on a 3-return scan would be a
@@ -157,7 +157,7 @@ export function isNarrowing(
  * caller supplies the predicate rather than bounds because judging a CLASS
  * filter needs the field's class count, which only the caller can resolve.
  * Omit it and every enabled criterion carries over (the pre-narrowing
- * behaviour), which is only safe when the caller has already screened them.
+ * behavior), which is only safe when the caller has already screened them.
  */
 export function projectFilters(
   source: CloudFilters,

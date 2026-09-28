@@ -19,11 +19,11 @@ import * as THREE from 'three';
  * with the same R in both. The pivot term is NOT optional: it is what the render
  * path adds back after rotating, so omitting it displaces the cloud by
  * `pivot − R·pivot` — zero only when the rotation is identity or the pivot is
- * the origin. On a UTM-scale scene, where the pivot is thousands of metres from
+ * the origin. On a UTM-scale scene, where the pivot is thousands of meters from
  * the origin, that error is enormous.
  *
  * The pivot MUST therefore be the one the renderer will actually use (the scene
- * origin, else the cloud's bbox centre) — see the `pivot` prop in
+ * origin, else the cloud's bbox center) — see the `pivot` prop in
  * PointCloudViewer's octree branch. Passing a different pivot here silently
  * draws the cloud in the wrong place until the bake lands and snaps it.
  *

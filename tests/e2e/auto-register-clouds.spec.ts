@@ -32,7 +32,7 @@ const ORCHARD_ROTATED = join(repoRoot, 'tests', 'e2e', 'fixtures', 'orchard-row-
 // rather than declared. Turned 90 deg — far outside the +/-30 deg window a
 // scanner-heading prior would restrict the search to.
 //
-// The quarter turn is about the centre of a SQUARE ground patch, and that is
+// The quarter turn is about the center of a SQUARE ground patch, and that is
 // load-bearing for the assertion below rather than incidental. `data-scan-bounds`
 // on a registered streamed cloud reports the octree's BOUNDING BOX pushed
 // through the stored pose, not the true extent of the points: registration
@@ -42,7 +42,7 @@ const ORCHARD_ROTATED = join(repoRoot, 'tests', 'e2e', 'fixtures', 'orchard-row-
 // fixture turned 35 deg and read 18.6 m "off" while the returned matrix was
 // exactly right to 10 decimal places. A quarter turn of a square footprint
 // leaves the box invariant, so the comparison measures registration rather than
-// that artefact. orchard-row-rotated.xyz gets away with the same thing for the
+// that artifact. orchard-row-rotated.xyz gets away with the same thing for the
 // same reason; this note is here so the next fixture does not have to
 // rediscover it.
 const BUILT = join(repoRoot, 'tests', 'e2e', 'fixtures', 'built-site.xyz');
@@ -215,7 +215,7 @@ test('the dialog offers no setting that does not change the result', async () =>
   await expect(dialog).toBeVisible();
 
   // Scene type, search method, match-on and detail size are all GONE, and this
-  // asserts their absence rather than their behaviour on purpose. Each was
+  // asserts their absence rather than their behavior on purpose. Each was
   // measured to be inert on the path that actually runs: the backend consults
   // the estimator and the anchor method only in its anchors-failed fallback,
   // and `natural` and `agriculture` are literally the same branch. A control
@@ -347,7 +347,7 @@ test('a registered scan is badged in the panel, and only the scan that moved', a
   // Expanding the row spells out what happened. The displacement is the part
   // that distinguishes a real registration from a no-op identity matrix: these
   // fixtures are 90° apart plus a (2, -1.5, 0) shift, so the cloud has to have
-  // travelled a non-trivial distance.
+  // traveled a non-trivial distance.
   await sourceRow.getByTestId(`scan-expand-${sourceId}`).click();
   const detail = page.getByTestId(`scan-registration-${sourceId}`);
   await expect(detail).toBeVisible();
@@ -457,7 +457,7 @@ test('Reset Registration is disabled until something has actually been registere
   // Nothing registered yet: the command must be visibly unavailable rather than
   // live-looking, since it has no dialog in which to explain it had nothing to
   // do. The palette is the surface that renders this state; the native menu
-  // item is greyed via the same predicate, pushed to the main process.
+  // item is grayed via the same predicate, pushed to the main process.
   let row = await paletteRow(page, 'Reset Registration', 'cloud-unregister');
   await expect(row).toHaveAttribute('data-available', 'false');
   await expect(row.getByTestId('command-unavailable-reason')).toBeVisible();

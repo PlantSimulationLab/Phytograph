@@ -13,7 +13,7 @@
 //      afterward. (Whether to simulate an idealized exact scan is a per-run choice
 //      — set rays per pulse to 1 — not an instrument property.)
 //
-// The "generic" model is the default: an unknown or user-customised scanner. It
+// The "generic" model is the default: an unknown or user-customized scanner. It
 // carries no preset (the form keeps DEFAULT_SCAN_PARAMETERS) and renders the
 // neutral sphere marker.
 //
@@ -64,7 +64,7 @@
 //                      scan is the separate miniVUX-1DL, a different model. So it
 //                      is the one-channel degenerate of a spinning multibeam: a
 //                      single beam at 0° elevation whose azimuth sweep IS the
-//                      mirror rotation. Modelled as spinning_multibeam with a
+//                      mirror rotation. Modeled as spinning_multibeam with a
 //                      one-element beamElevationAngles = [0]. Angular step width
 //                      Δφ 0.018°–0.36° selectable → 1,000–20,000 points/rev; we
 //                      preset the ~0.1° mid-setting (3,600 pts/rev). Selectable
@@ -178,10 +178,10 @@ export interface ScannerModel {
   // Marker mesh and its loader format.
   meshUrl: string;
   meshFormat: ScannerMeshFormat;
-  // Real-world height of the instrument body in metres. The marker mesh is
+  // Real-world height of the instrument body in meters. The marker mesh is
   // uniformly scaled so its bounding-box height matches this, regardless of the
   // units the source mesh was authored in (the bundled OBJs are inconsistent —
-  // some metres, the RIEGL mesh millimetres). Anchors visual scale to reality.
+  // some meters, the RIEGL mesh millimeters). Anchors visual scale to reality.
   heightMeters: number;
   // Instrument-fixed acquisition parameters. Empty for 'generic'.
   preset: ScannerModelPreset;
@@ -304,7 +304,7 @@ export const SCANNER_MODELS: ScannerModel[] = [
     // A body for a V-Line scanner we have no specific entry for (VZ-600i,
     // VZ-4000, …). It exists so such a scan gets a plausible instrument marker
     // instead of the neutral sphere, WITHOUT claiming a model number it cannot
-    // support: labelling a VZ-600i "VZ-400i" would put a wrong figure in the
+    // support: labeling a VZ-600i "VZ-400i" would put a wrong figure in the
     // scan info panel and in the exported <scannerModel>. Give it its own
     // entry, and add the real model when one turns up.
     meshUrl: rieglVzUrl,
@@ -436,7 +436,7 @@ export const SCANNER_MODELS: ScannerModel[] = [
       // dual-return mode; its 'multi' is full-waveform (many returns/pulse),
       // which doesn't model the HDL-32E. Single return is the faithful default
       // and matches the single-return pulse rate below (~695 kHz). The datasheet
-      // dual mode keeps strongest+last; the single mode (modelled here) keeps the
+      // dual mode keeps strongest+last; the single mode (modeled here) keeps the
       // strongest.
       returnMode: 'single',
       returnSelection: 'strongest',

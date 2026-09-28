@@ -1339,7 +1339,7 @@ function buildPhb1Frame(meta: Record<string, unknown>, name: string, data: numbe
 }
 
 // Build one PHP1 marker (mirrors _pack_progress_marker in main.py). `extra`
-// carries the optional run_id / cancelled fields the cancellation protocol adds.
+// carries the optional run_id / canceled fields the cancellation protocol adds.
 function buildPhp1Marker(
   progress: number | null,
   message: string,
@@ -1406,11 +1406,11 @@ describe('parseProgressMarkers', () => {
     expect(markers[1].message).toBe('Ray-tracing scene');
   });
 
-  it('flags the terminal cancelled marker', () => {
-    const cancelled = buildPhp1Marker(null, 'Cancelled', { cancelled: true });
-    const { markers } = parseProgressMarkers(cancelled, 0);
-    expect(markers[0].cancelled).toBe(true);
-    expect(markers[0].message).toBe('Cancelled');
+  it('flags the terminal canceled marker', () => {
+    const canceled = buildPhp1Marker(null, 'Canceled', { canceled: true });
+    const { markers } = parseProgressMarkers(canceled, 0);
+    expect(markers[0].canceled).toBe(true);
+    expect(markers[0].message).toBe('Canceled');
   });
 
   // These endpoints stream, so `200 OK` and the headers are already on the wire
@@ -1425,7 +1425,7 @@ describe('parseProgressMarkers', () => {
     });
     const { markers } = parseProgressMarkers(failed, 0);
     expect(markers[0].error).toContain('scan.las');
-    expect(markers[0].cancelled).toBeUndefined();
+    expect(markers[0].canceled).toBeUndefined();
   });
 
   it('keeps progress reported before a failure', () => {
@@ -1441,12 +1441,12 @@ describe('parseProgressMarkers', () => {
   });
 
   it('distinguishes an error marker from a cancellation', () => {
-    // The two map to different client types (Error vs ScanCancelledError), so a
+    // The two map to different client types (Error vs ScanCanceledError), so a
     // user cancel must never be reported as a crash or vice versa.
-    const cancelled = buildPhp1Marker(null, 'Cancelled', { cancelled: true });
+    const canceled = buildPhp1Marker(null, 'Canceled', { canceled: true });
     const failed = buildPhp1Marker(null, '', { error: 'boom' });
-    expect(parseProgressMarkers(cancelled, 0).markers[0].error).toBeUndefined();
-    expect(parseProgressMarkers(failed, 0).markers[0].cancelled).toBeUndefined();
+    expect(parseProgressMarkers(canceled, 0).markers[0].error).toBeUndefined();
+    expect(parseProgressMarkers(failed, 0).markers[0].canceled).toBeUndefined();
   });
 });
 
@@ -1612,7 +1612,7 @@ describe('getRieglStatus', () => {
 
   it('reads docker_state, and defaults to null when a backend omits it', async () => {
     // Forward compatibility in both directions: an older backend (no such
-    // field) must not read as a known state, and an unrecognised value must
+    // field) must not read as a known state, and an unrecognized value must
     // not leak through as one.
     mockFetchOk({ ...ready, docker_state: 'no_cli' });
     expect((await getRieglStatus('/opt/rivlib')).dockerState).toBe('no_cli');
@@ -1794,11 +1794,11 @@ describe('request deadlines', () => {
     expect(timedOut.message).toMatch(/^Wood segmentation timed out\./);
     expect(timedOut.message).toContain('/api/segment/wood');
 
-    const cancelled = describeBackendError(
+    const canceled = describeBackendError(
       new DOMException('signal is aborted without reason', 'AbortError'),
       'Wood segmentation',
     );
-    expect(cancelled.message).toBe('Wood segmentation was cancelled.');
+    expect(canceled.message).toBe('Wood segmentation was canceled.');
   });
 
   it('still rewrites an unreachable backend', () => {

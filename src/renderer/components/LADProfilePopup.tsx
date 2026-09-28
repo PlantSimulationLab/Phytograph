@@ -203,7 +203,7 @@ export function LADProfilePopup({ isOpen, onClose, result }: LADProfilePopupProp
                   dataKey="height"
                   // Height is a real coordinate, so let the data set the domain
                   // rather than anchoring at 0 — a grid that starts 2 m up
-                  // shouldn't render two metres of empty axis.
+                  // shouldn't render two meters of empty axis.
                   domain={['dataMin', 'dataMax']}
                   tick={{ fill: '#a1a1aa', fontSize: 10 }}
                   tickFormatter={(v: number) => v.toFixed(1)}

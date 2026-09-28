@@ -1,7 +1,7 @@
 """Correctness of the normal-estimation core against geometry whose normals are
 known analytically, plus the orientation contract.
 
-The seam/tiling behaviour lives in `test_normals_tiled.py`.
+The seam/tiling behavior lives in `test_normals_tiled.py`.
 """
 
 import numpy as np
@@ -121,7 +121,7 @@ def test_duplicate_points_get_a_zero_normal_not_a_confident_fake():
     assert np.abs(res).max() == 0.0
 
 
-def test_a_point_with_no_neighbours_in_radius_is_not_reported_as_max_curvature():
+def test_a_point_with_no_neighbors_in_radius_is_not_reported_as_max_curvature():
     """The dangerous case. open3d returns the IDENTITY covariance when it cannot
     compute one, whose curvature is 1/(1+1+1) = 1/3 — the theoretical MAXIMUM —
     with verticality 90 deg. A sparse far-field region under a pinned radius
@@ -175,7 +175,7 @@ def test_k_is_clamped_into_range():
     assert meta["k"] == normals.MIN_K
 
 
-def test_radius_search_is_honoured():
+def test_radius_search_is_honored():
     meta = {}
     res = normals.compute_normals(_plane(5000), k=20, radius=0.5, meta=meta)
     assert meta["radius"] == 0.5

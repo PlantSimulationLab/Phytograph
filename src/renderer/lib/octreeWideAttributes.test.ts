@@ -24,7 +24,7 @@ const octree = {
 
 // What potree's decoder actually stores for a wide value: (v - lo) / (hi - lo),
 // then rounded to float32 on the way into the GPU buffer.
-const normalised = (v: number, lo: number, hi: number) => Math.fround((v - lo) / (hi - lo));
+const normalized = (v: number, lo: number, hi: number) => Math.fround((v - lo) / (hi - lo));
 
 describe('isWideOctreeAttribute', () => {
   it('is true only for attributes wider than a float32', () => {
@@ -43,7 +43,7 @@ describe('isWideOctreeAttribute', () => {
 });
 
 describe('wideOctreeAttributeRange', () => {
-  it('returns the normalisation range for a wide attribute and null otherwise', () => {
+  it('returns the normalization range for a wide attribute and null otherwise', () => {
     expect(wideOctreeAttributeRange(octree, 'gps-time')).toEqual([100, 247.5]);
     expect(wideOctreeAttributeRange(octree, 'Deviation')).toBeNull();
   });
@@ -58,7 +58,7 @@ describe('denormalizeWideAttributes', () => {
     // Row 2 of tests/e2e/fixtures/scalars.xyz: Timestamp 105 over [100, 247.5].
     // This is the bubble that read "0.033898" before the fix.
     const values: Record<string, unknown> = {
-      'gps-time': normalised(105, 100, 247.5),
+      'gps-time': normalized(105, 100, 247.5),
       Deviation: 2,
       classification: 0,
       rgba: [0, 0, 0, 255],
@@ -93,7 +93,7 @@ describe('denormalizeWideAttributes', () => {
     const wide = { pcoGeometry: { pointAttributes: { attributes: [
       { name: 'gps-time', type: { size: 8 }, range: [lo, hi] },
     ] } } };
-    const values: Record<string, unknown> = { 'gps-time': normalised(truth, lo, hi) };
+    const values: Record<string, unknown> = { 'gps-time': normalized(truth, lo, hi) };
     denormalizeWideAttributes(wide, values);
     expect(values['gps-time'] as number).toBeCloseTo(truth, 4);
   });

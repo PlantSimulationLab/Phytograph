@@ -134,7 +134,7 @@ describe('computeMeshTriangleScalars', () => {
     expect(a).toBeCloseTo(0, 3);
   });
 
-  // --- DTM 'layer' mode: colour a triangle by the centroid of its 3 vertices'
+  // --- DTM 'layer' mode: color a triangle by the centroid of its 3 vertices'
   //     stored per-vertex layer values (density/intensity/elevation/… bands). ---
 
   it('layer mode averages the 3 vertices’ layer values per triangle', () => {
@@ -593,7 +593,7 @@ describe('octreeScalarFieldOptions', () => {
     expect(octreeScalarFieldOptions(undefined, undefined)).toEqual([]);
   });
 
-  it('filters out only the geometry/colour/intensity builtins', () => {
+  it('filters out only the geometry/color/intensity builtins', () => {
     const ranges = {
       position: { min: [0, 0, 0], max: [1, 1, 1] },
       rgb: { min: [0], max: [255] },
@@ -680,7 +680,7 @@ describe('octreeScalarFieldOptions', () => {
   it('keeps standard LAS dims (the backend carries them as scalars now)', () => {
     // The backend surfaces non-constant standard LAS dimensions under their
     // native slugs (see _read_las_into_arrays); the picker must show them. Only
-    // position/colour/intensity/normal/indices/spacing are still hidden.
+    // position/color/intensity/normal/indices/spacing are still hidden.
     const ranges = {
       position: { min: [0, 0, 0], max: [1, 1, 1] },
       rgb: { min: [0], max: [255] },
@@ -1368,7 +1368,7 @@ describe('gridCropBox', () => {
 });
 
 describe('ladReuseGrid', () => {
-  // The snapped grid the user dialled in: per-column offsets ride the terrain.
+  // The snapped grid the user dialed in: per-column offsets ride the terrain.
   const snapped = {
     center: [0, 0, 1] as [number, number, number],
     size: [2, 2, 1] as [number, number, number],
@@ -1913,7 +1913,7 @@ describe('pointPassesFilters', () => {
     expect([0, 1, 2].map(i => pointPassesFilters(data, f, i))).toEqual([false, true, false]);
   });
 
-  it('honours selectedClasses on a categorical field', () => {
+  it('honors selectedClasses on a categorical field', () => {
     const data = makeData([0, 0, 0, 1, 0, 0, 2, 0, 0], { noise_class: [1, 2, 1] });
     const f = filters({
       // min/max deliberately span the whole class range, exactly as the panel

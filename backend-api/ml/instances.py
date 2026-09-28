@@ -3,7 +3,7 @@
 A model with an offset head (``ml.models.pointnext``) predicts, for every
 point, the metric vector to the centroid of the organ it belongs to. Shifting
 each leaf point by its vote collapses one leaflet's points onto a tight blob
-while a neighbouring leaflet's collapse onto another, even where the two
+while a neighboring leaflet's collapse onto another, even where the two
 blades touch. Clustering the SHIFTED points is therefore easy where clustering
 the points themselves is not.
 
@@ -13,10 +13,10 @@ each vote carries a bandwidth proportional to the instance radius the network
 predicts along with it (``alpha`` x radius, clipped to ``[h_min, h_max]``).
 
 1. **Mean shift.** Real votes scatter (a crop rim, an ambiguous junction), and
-   single-linkage on scattered votes chains neighbouring leaflets together:
+   single-linkage on scattered votes chains neighboring leaflets together:
    with 3 mm of vote noise a soybean trifoliate's three blobs merged into one.
    A few flat-kernel mean-shift iterations pull every vote to its blob's mode
-   first. Votes are summarised as cell means on a grid half their own
+   first. Votes are summarized as cell means on a grid half their own
    bandwidth (one grid per octave of bandwidth), so a kernel sums over at most
    a few dozen cells however large the organ or however tight its blob.
 2. **Linking.** Two cells join when their means are closer than ``link`` x the
@@ -47,7 +47,7 @@ def _cells(v: np.ndarray, h: np.ndarray, h_min: float):
 
 
 def _ball_pairs(means: np.ndarray, r: np.ndarray):
-    """(owner, neighbour) index pairs with |means[n] - means[o]| <= r[o]."""
+    """(owner, neighbor) index pairs with |means[n] - means[o]| <= r[o]."""
     tree = cKDTree(means)
     nbrs = tree.query_ball_point(means, r)
     lens = np.fromiter((len(x) for x in nbrs), np.int64, len(nbrs))
@@ -122,11 +122,11 @@ def cluster(xyz: np.ndarray, offsets: np.ndarray, radii: np.ndarray, is_member: 
         from .grid import grid_sample
         keep, rep_inverse = grid_sample(xyz[members], voxel)
         rows = members[keep]
-    # Point spacing of what is clustered: the median nearest-neighbour gap,
+    # Point spacing of what is clustered: the median nearest-neighbor gap,
     # but never below the sampling voxel. One representative per voxel covers
     # about voxel^2 of surface wherever it sits in the voxel, while two
     # representatives either side of a voxel face can be a fraction of a
-    # millimetre apart: on a 0.07 mm Pheno4D scan the median gap between 3 mm
+    # millimeter apart: on a 0.07 mm Pheno4D scan the median gap between 3 mm
     # representatives was 0.66 mm, and the area threshold then asked a
     # seedling's 83 representatives for 46 per leaflet.
     spacing = voxel
@@ -162,7 +162,7 @@ def cluster(xyz: np.ndarray, offsets: np.ndarray, radii: np.ndarray, is_member: 
     remap = np.full(int(comp.max()) + 1, -1, np.int64)
     remap[order] = np.arange(len(order))
     lab = remap[comp]
-    # Unclaimed members join the instance of their nearest claimed neighbour.
+    # Unclaimed members join the instance of their nearest claimed neighbor.
     claimed = lab >= 0
     if claimed.any() and (~claimed).any():
         _, nb = cKDTree(xyz[rows[claimed]]).query(xyz[rows[~claimed]], k=1)
@@ -179,7 +179,7 @@ def match(truth: np.ndarray, pred: np.ndarray, iou_threshold: float = 0.5,
     counts, plus mean coverage (each true instance's best IoU, averaged): the
     F1 says whether the leaflets were found, coverage how well.
 
-    ``ignore`` marks points whose instances the labeller did not draw (Sugar4D's
+    ``ignore`` marks points whose instances the labeler did not draw (Sugar4D's
     crown holds leaves too young to separate). A predicted instance with most
     of its points there is neither right nor wrong, so it is dropped before
     scoring; otherwise every young leaf the model finds would count against it."""

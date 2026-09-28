@@ -7,19 +7,19 @@ import type { MeasurementKind } from '../../../lib/measure';
 //
 // Four modes, one armed picker:
 //
-//   inspect  — a labelled bubble with the point's coordinates and attributes
+//   inspect  — a labeled bubble with the point's coordinates and attributes
 //   distance — two points, the length between them plus ΔX/ΔY/ΔZ
 //   polyline — N points, each segment's length and the running total
 //   angle    — three points, the angle at the middle one
 //
 // A mode rather than a second tool because they all want the same armed
-// viewport, the same pick path and the same Escape behaviour; two tools would
+// viewport, the same pick path and the same Escape behavior; two tools would
 // have to mutually exclude each other and duplicate all of it.
 //
 // Presentational only — the parent (PointCloudViewer) owns the armed state, the
 // picked-point list, the measurement list, and the clipboard call.
 
-/** 'inspect' is the original point-picker behaviour; the rest are measurements. */
+/** 'inspect' is the original point-picker behavior; the rest are measurements. */
 export type PickerMode = 'inspect' | MeasurementKind;
 
 interface ModeSpec {
@@ -130,7 +130,7 @@ export function PointPickerPanel({
       {/* A TOGGLE for the armed state, not an instruction — the tool opens
           already armed, so this button's job is to pause picking. Pausing hands
           viewport clicks back to mesh selection (which arming blocks) without
-          closing the panel or discarding what is placed. Labelled by what
+          closing the panel or discarding what is placed. Labeled by what
           pressing it DOES, not by the state it is in. */}
       <button
         onClick={onToggleArmed}
@@ -181,7 +181,7 @@ export function PointPickerPanel({
 
       {/* Enabled while a measurement is half-placed too — onClearAll discards
           the pending vertices as well, so gating purely on the committed count
-          greyed the button out when there was still something to clear. */}
+          grayed the button out when there was still something to clear. */}
       <button
         onClick={onClearAll}
         disabled={measuring ? count === 0 && pendingCount === 0 : count === 0}

@@ -119,7 +119,7 @@ surface.
       pre-selected by default, since reusing it skips the redundant
       re-triangulation; pick **Run a new triangulation** if you'd rather not.) A ball-pivot mesh that
       **can't** be reused — merged, not pinned to a grid, or from a scan with no
-      scanner position — appears greyed-out here with the reason, so you can fix
+      scanner position — appears grayed-out here with the reason, so you can fix
       it (re-triangulate per-scan, pinned to a grid) rather than wonder why it's
       missing.
 
@@ -184,8 +184,8 @@ surface.
   outside the method's validity range, it is not reported.
 - The result also reports **occlusion**: how many voxels were probed by too
   little beam path to trust, the threshold applied, and a per-height
-  breakdown. Occluded voxels are drawn in their own colour (amber) rather
-  than the grey used for empty air, and are never hidden by *hide empty
+  breakdown. Occluded voxels are drawn in their own color (amber) rather
+  than the gray used for empty air, and are never hidden by *hide empty
   voxels* — an unmeasured voxel is not an empty one.
 
 ## Occlusion
@@ -212,9 +212,9 @@ Two controls in the LAD dialog:
   value for your grid, and you can type any figure to match a published one.
 - **Fill occluded voxels** — estimates each occluded voxel from the surrounding
   well-sampled ones by **LAD-kriging** (Soma et al. 2020), which weights each
-  neighbour by how reliably it was measured. Filled voxels are marked as
+  neighbor by how reliably it was measured. Filled voxels are marked as
   interpolated, and their leaf area is reported *separately* — never folded
-  into the measured total. Leave it off to report occlusion without modelling
+  into the measured total. Leave it off to report occlusion without modeling
   it.
 
 !!! note "A filled voxel is a model, not a measurement"
@@ -267,7 +267,7 @@ ninety, and the plotted line alone can't show you the difference.
     Levels are grid *cell* levels, not absolute elevations. On a
     [terrain-following](#terrain-following-snap-the-grid-to-the-ground) grid
     each column is lifted to its own ground height, so a level is a constant
-    height *above the terrain* and the axis is labelled that way. That is
+    height *above the terrain* and the axis is labeled that way. That is
     normally what you want on sloped ground — a profile binned by absolute z
     would smear the canopy across levels.
 
@@ -333,8 +333,8 @@ woody *surface* area per m³) and **PAD** (their sum).
 
 What appears once a result carries a split:
 
-- A **Colour by** picker in the result row switches the voxels between LAD, WAD
-  and PAD. The colourbar rescales and its label follows, so the legend always
+- A **Color by** picker in the result row switches the voxels between LAD, WAD
+  and PAD. The colorbar rescales and its label follows, so the legend always
   names the quantity on screen.
 - A **Leaf and wood area** box reports both totals and states the wood G(θ) it
   applied, marked *measured* (read from the triangulation's branch axis, with

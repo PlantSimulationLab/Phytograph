@@ -1,9 +1,9 @@
-// User-definable class palettes for the manual labelling tool.
+// User-definable class palettes for the manual labeling tool.
 //
 // A palette is just a named, ordered list of `ClassDef` — the SAME interface
 // `classification.ts` already uses for its built-in schemes. That reuse is the
 // point: a palette converts to a `CategoricalScheme` with a field rename, so
-// discrete point colouring, the legend, the potree step gradient, scalar
+// discrete point coloring, the legend, the potree step gradient, scalar
 // filtering and split-by-class all work on user-defined classes with no changes
 // downstream.
 //
@@ -26,7 +26,7 @@ export interface ClassPalette {
   /** Stable id, so a rename doesn't break a cloud's binding. */
   id: string;
   name: string;
-  /** The attribute slug this palette colours (e.g. 'manual_class'). */
+  /** The attribute slug this palette colors (e.g. 'manual_class'). */
   slug: string;
   classes: ClassDef[];
   /** Provenance; undefined once the user edits it into something of their own. */
@@ -50,7 +50,7 @@ export interface ClassPalette {
 /**
  * Class 0 is reserved as "Unclassified" in EVERY palette, and this is
  * load-bearing rather than cosmetic: the backend's `merge` zero-fills a column
- * missing from one of its input sessions, so points from a never-labelled cloud
+ * missing from one of its input sessions, so points from a never-labeled cloud
  * arrive as 0. That is only correct if 0 means "unclassified" everywhere.
  * Mirrors ASPRS class 0 and MANUAL_CLASS_UNLABELED in main.py.
  */
@@ -83,7 +83,7 @@ export function classValueMaxFor(slug: string): number {
 /**
  * ASPRS reserves 19–63 for future standard use. Custom classes belong in
  * 64–255, the explicitly user-definable band — keeping them there means a
- * future writer to the real LAS classification byte is pure serialisation with
+ * future writer to the real LAS classification byte is pure serialization with
  * no renumbering of data users already painted.
  */
 export const ASPRS_RESERVED_MIN = 19;
@@ -92,7 +92,7 @@ export const USER_CLASS_MIN = 64;
 
 /**
  * Each class renders in its own texel (lib/categoricalTexture), so no palette
- * size blends colours any more; past this many classes the colours are still
+ * size blends colors any more; past this many classes the colors are still
  * hard to tell apart by eye, so warn.
  */
 export const PALETTE_SOFT_MAX = 48;
@@ -193,7 +193,7 @@ export function validatePalette(palette: ClassPalette): PaletteIssue[] {
       level: 'error',
       value: UNCLASSIFIED_VALUE,
       message: `Class ${UNCLASSIFIED_VALUE} (${UNCLASSIFIED_LABEL}) is required — `
-        + 'merged and unlabelled points arrive as 0.',
+        + 'merged and unlabeled points arrive as 0.',
     });
   }
 
@@ -261,15 +261,15 @@ export function nextFreeClassValue(palette: ClassPalette, startAt?: number): num
 }
 
 /**
- * A colour for a newly added class that stands apart from every colour the
- * palette already uses — above all Unclassified's grey, which a hardcoded
+ * A color for a newly added class that stands apart from every color the
+ * palette already uses — above all Unclassified's gray, which a hardcoded
  * default used to duplicate, so a fresh class painted invisibly over
- * unlabelled points until the user thought to recolour it.
+ * unlabeled points until the user thought to recolor it.
  *
- * Candidates are the golden-angle hues the tree-instance colouring already
- * uses (well spread, saturated, never grey); the one farthest from its nearest
- * existing colour wins. Deterministic, so the same palette always offers the
- * same next colour.
+ * Candidates are the golden-angle hues the tree-instance coloring already
+ * uses (well spread, saturated, never gray); the one farthest from its nearest
+ * existing color wins. Deterministic, so the same palette always offers the
+ * same next color.
  */
 export function distinctClassColor(existing: readonly RGB[], candidates = 64): RGB {
   let best: RGB = treeInstanceColor(1);
@@ -290,7 +290,7 @@ export function distinctClassColor(existing: readonly RGB[], candidates = 64): R
 
 /**
  * A palette IS a categorical scheme; this is the whole reason `ClassDef` is
- * reused rather than redefined. Everything downstream (colourForClassValue,
+ * reused rather than redefined. Everything downstream (colorForClassValue,
  * buildCategoricalGradientStops, the legend, filtering) takes it unchanged.
  */
 export function paletteToScheme(palette: ClassPalette): CategoricalScheme {
@@ -321,7 +321,7 @@ export function paletteIndexMaps(palette: ClassPalette): {
 }
 
 /**
- * The scheme the OVERLAY renders: the same colours, but keyed by dense index so
+ * The scheme the OVERLAY renders: the same colors, but keyed by dense index so
  * it matches the index values written into the per-tile label buffer.
  */
 export function paletteToIndexScheme(palette: ClassPalette): CategoricalScheme {
@@ -340,7 +340,7 @@ function def(value: number, label: string, color: RGB): ClassDef {
 /**
  * ASPRS LAS 1.4 standard classes 0–18.
  *
- * Re-exported from `classification.ts` rather than redefined, so the labelling
+ * Re-exported from `classification.ts` rather than redefined, so the labeling
  * tool's ASPRS preset and the scheme that names an IMPORTED file's
  * `las_classification` column are literally the same list — they cannot drift.
  */
@@ -353,10 +353,10 @@ export const ASPRS_CLASSES: ClassDef[] = ASPRS_CLASS_LIST;
  * conflating the two is a real bug: binding every preset to `manual_class`
  * meant switching to the ASPRS palette read the (empty) manual column while the
  * cloud's real classes sat in `ground_class`, so Ground showed 0 points and
- * nothing coloured.
+ * nothing colored.
  *
  * ASPRS describes an imported LAS classification byte; wood/leaf and organs are
- * hand-labelling vocabularies that live in the manual column. A user editing a
+ * hand-labeling vocabularies that live in the manual column. A user editing a
  * preset into something of their own keeps whatever slug it was bound to.
  */
 export function defaultSlugForPreset(
@@ -375,7 +375,7 @@ export function makePreset(
       return { id: 'preset-asprs', name: 'ASPRS standard', slug,
                classes: ASPRS_CLASSES.map((c) => ({ ...c })), preset, updatedAt: now };
     case 'organ':
-      // Reuses the exact values/colours the Helios synthetic-scan `organ`
+      // Reuses the exact values/colors the Helios synthetic-scan `organ`
       // attribute carries, so hand labels and simulated ground truth share one
       // vocabulary and can be compared directly.
       return { id: 'preset-organ', name: 'Plant organs', slug,
@@ -445,7 +445,7 @@ export function makeEmptyPalette(slug: string, now: number, id: string): ClassPa
 // ── Labelable columns ────────────────────────────────────────────────────────
 
 /**
- * A column the labelling tool can paint into.
+ * A column the labeling tool can paint into.
  *
  * The tool used to be able to reach exactly four columns, because a PRESET
  * named both a vocabulary and its column. That made any other classification a
@@ -458,7 +458,7 @@ export interface LabelableColumn {
   /** Display text: the cloud's own attribute label, else a humanised slug. */
   label: string;
   /**
-   * `manual` — the hand-labelling column, always offered.
+   * `manual` — the hand-labeling column, always offered.
    * `categorical` — a real classification: class-valued, safe to repaint.
    * `scalar` — a continuous measurement. Offered deliberately (see below) but
    *   painting one OVERWRITES measured values, so the caller must confirm.
@@ -513,7 +513,7 @@ function looksLikeClassValues(observed: readonly number[] | undefined, slug: str
 }
 
 /**
- * The columns of one cloud that the labelling tool can paint into.
+ * The columns of one cloud that the labeling tool can paint into.
  *
  * `isCategorical` is INJECTED rather than imported because the real
  * implementation (`isCategoricalAttribute`) consults process-wide registries in
@@ -569,7 +569,7 @@ export function labelableColumnsFor(args: {
     a.kind === b.kind ? a.label.localeCompare(b.label) : (a.kind === 'categorical' ? -1 : 1)
   ));
 
-  // The LAS flags are always offered, like the hand-labelling column: the
+  // The LAS flags are always offered, like the hand-labeling column: the
   // backend creates one on its first stroke, and the LAS writer maps it to the
   // point record's flag bit.
   for (const [slug, name] of Object.entries(LAS_FLAG_COLUMNS)) {
@@ -583,7 +583,7 @@ export function labelableColumnsFor(args: {
     out.push(entry);
   }
 
-  // The hand-labelling column is ALWAYS offered, even on a cloud that has no
+  // The hand-labeling column is ALWAYS offered, even on a cloud that has no
   // such column yet: the backend creates it on the first stroke. Without this
   // the picker would be empty on a fresh import and the tool would regress to
   // less than it could do before.
@@ -651,8 +651,8 @@ export function withPendingLabelColumn(
  * from one of its inputs, so 0 must mean "unclassified" on EVERY column.
  *
  * A column derived from real data often has no 0 — `tree_instance` from a tree
- * segmentation starts at 1. Synthesising one is right anyway, for a reason
- * beyond the merge rule: the labelling tool can WRITE 0, so a palette without
+ * segmentation starts at 1. Synthesizing one is right anyway, for a reason
+ * beyond the merge rule: the labeling tool can WRITE 0, so a palette without
  * it would make "un-assign these mis-grabbed points" unreachable, which is
  * half of what correcting a bad segmentation means.
  */
@@ -671,7 +671,7 @@ export function withRequiredUnclassified(
  *
  * `schemeFor` is `categoricalSchemeForRange`, injected to keep this pure. It
  * already routes every case correctly — `tree_instance` to the Tree-N scheme
- * with its golden-angle colours, a registered slug (ground_class, organ, …) to
+ * with its golden-angle colors, a registered slug (ground_class, organ, …) to
  * its fixed domain names, a wizard-marked column to generic Class-N — so this
  * function derives NO class list of its own. Deriving one here would be a
  * second definition of the same thing, and the two would drift.
@@ -765,7 +765,7 @@ export function validateLabelColumn(
   return [];
 }
 
-// ── Serialisation (for the shareable library / JSON export) ──────────────────
+// ── Serialization (for the shareable library / JSON export) ──────────────────
 
 /** Narrow an untrusted parsed-JSON value to a ClassPalette, or null. */
 export function parsePalette(raw: unknown): ClassPalette | null {

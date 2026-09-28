@@ -127,7 +127,7 @@ def test_miss_mask_probe_never_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# ICP scale robustness — defence in depth for any other far-field stray
+# ICP scale robustness — defense in depth for any other far-field stray
 # ---------------------------------------------------------------------------
 
 def test_robust_diagonal_ignores_far_field_shell():
@@ -143,7 +143,7 @@ def test_robust_diagonal_ignores_far_field_shell():
 
 
 def test_robust_diagonal_matches_aabb_on_clean_input():
-    """No behaviour change for well-formed clouds."""
+    """No behavior change for well-formed clouds."""
     hits, _ = _hits_and_misses(seed=4)
     aabb = float(np.linalg.norm(hits.max(axis=0) - hits.min(axis=0)))
     assert _robust_cloud_diagonal(hits) == pytest.approx(aabb, rel=0.15)

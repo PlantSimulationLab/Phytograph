@@ -91,7 +91,7 @@ function CategoricalBody({ entry }: { entry: LegendEntry }) {
 // A collapsed entry: a colormap-tinted dot plus "Object · Variable" on one
 // line. Clicking promotes it to full size.
 function Sliver({ entry, onPromote }: { entry: LegendEntry; onPromote?: (key: string) => void }) {
-  // For a categorical entry the dot shows the first class colour; for a
+  // For a categorical entry the dot shows the first class color; for a
   // continuous one, a miniature of the gradient.
   const swatch = entry.kind === 'categorical' && entry.scheme?.classes.length
     ? {

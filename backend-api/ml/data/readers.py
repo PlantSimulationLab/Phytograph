@@ -1,4 +1,4 @@
-"""Readers for labelled point clouds, each returning a :class:`Cloud`.
+"""Readers for labeled point clouds, each returning a :class:`Cloud`.
 
 Label conventions disagree between the public datasets, and silently training
 on inverted labels is the easiest mistake to make here. Each reader therefore
@@ -30,8 +30,8 @@ import pandas as pd
 # Unified semantic codes. UNKNOWN is never trained on.
 #
 # 0-3 are the tree corpus's. 4-8 are the herbaceous organ datasets', kept
-# apart because their boundaries are drawn elsewhere: a tree labeller's "leaf"
-# includes the petiole, a phenotyping labeller's "stem" does (Pheno4D tomato,
+# apart because their boundaries are drawn elsewhere: a tree labeler's "leaf"
+# includes the petiole, a phenotyping labeler's "stem" does (Pheno4D tomato,
 # Demeter), and Sugar4D draws no petiole/blade line at all. A task maps each
 # code to the SET of output classes it is consistent with (``ml.tasks``).
 SEM = {"leaf": 0, "wood": 1, "fruit": 2, "ground": 3,
@@ -45,7 +45,7 @@ SEM = {"leaf": 0, "wood": 1, "fruit": 2, "ground": 3,
 SEM_LEAF, SEM_WOOD, SEM_FRUIT, SEM_GROUND, SEM_UNKNOWN = 0, 1, 2, 3, 255
 SEM_STEM, SEM_BLADE, SEM_LEAF_WHOLE, SEM_CROWN, SEM_ROOT, SEM_YOUNG_LEAF = 4, 5, 6, 7, 8, 9
 
-# Synthetic leaves younger than this (days) are unexpanded apex leaves. Hand labellers do not agree
+# Synthetic leaves younger than this (days) are unexpanded apex leaves. Hand labelers do not agree
 # on them: Pheno4D paints the tomato shoot tip stem, Sugar4D folds young beet leaves into its crown.
 # They are coded young_leaf, which the organ task trains as "stem or leaf" so exact synthetic labels
 # do not contradict the human convention the real data then teaches.
@@ -102,13 +102,13 @@ def read_helios_synthetic(path: str | Path, human_wood_min_length: float = 0.0) 
     """A SyntheticLiDAR_Organs scene: 14 named columns. Requires the header,
     because the column order is only defined there.
 
-    ``human_wood_min_length`` > 0 relabels wood the way a person labelling a
+    ``human_wood_min_length`` > 0 relabels wood the way a person labeling a
     real scan would (``ml.data.relabel.human_visible_wood``): only connected
     runs of visible wood at least that long stay wood."""
     path = Path(path)
     cols = _header_columns(path)
     if not cols or "class_id" not in cols:
-        raise ValueError(f"{path}: no '# x y z ... class_id' header; not a labelled Helios scene")
+        raise ValueError(f"{path}: no '# x y z ... class_id' header; not a labeled Helios scene")
     want = ["x", "y", "z", "class_id"] + [c for c in ("organ_id", "reflectance") if c in cols]
     df = pd.read_csv(path, sep=r"\s+", comment="#", header=None, names=cols,
                      usecols=want, engine="c")
@@ -128,7 +128,7 @@ def read_helios_synthetic(path: str | Path, human_wood_min_length: float = 0.0) 
         n_wood = int((sem == SEM_WOOD).sum())
         sem = human_visible_wood(xyz, sem, SEM_WOOD, SEM_LEAF, human_wood_min_length)
         meta.update(human_wood_min_length=human_wood_min_length,
-                    wood_relabelled_leaf=n_wood - int((sem == SEM_WOOD).sum()))
+                    wood_relabeled_leaf=n_wood - int((sem == SEM_WOOD).sum()))
     return Cloud(xyz, sem, organ, refl, meta)
 
 
@@ -181,7 +181,7 @@ def read_pair(wood_path: str | Path, leaf_path: str | Path) -> Cloud:
 
 def read_wan(path: str | Path) -> Cloud:
     """A Wan et al. plot. Column 7 is binary with per-file polarity; the
-    minority class is wood. Ground and understory are labelled leaf in these
+    minority class is wood. Ground and understory are labeled leaf in these
     files, which is why they are evaluation-only in the benchmark."""
     df = _read_table(Path(path), usecols=[0, 1, 2, 6])
     lab = df[6].to_numpy()
@@ -204,7 +204,7 @@ def read_phytograph_xyz(path: str | Path) -> Cloud:
 
 def read_las_class(path: str | Path, column: str = "wood_class",
                    wood: int = 1, leaf: int = 2) -> Cloud:
-    """A LAS/LAZ labelled in Phytograph (its Label tool or a wood/leaf run)
+    """A LAS/LAZ labeled in Phytograph (its Label tool or a wood/leaf run)
     and exported: the ``wood_class`` extra-dim, 1 = wood, 2 = leaf. Anything
     else (0 = unclassified) is unknown."""
     import laspy
@@ -217,9 +217,9 @@ def read_las_class(path: str | Path, column: str = "wood_class",
 
 
 def read_las_all(path: str | Path, sem_value: int, ground_band: float = 0.0) -> Cloud:
-    """An unlabelled LAS/LAZ whose every point has one known class, such as a
+    """An unlabeled LAS/LAZ whose every point has one known class, such as a
     leaf-off tree (all wood once ground is gone). Points within
-    ``ground_band`` metres of the lowest point are marked unknown, because
+    ``ground_band`` meters of the lowest point are marked unknown, because
     whatever ground a tree crop kept sits there."""
     import laspy
 
@@ -234,8 +234,8 @@ def read_las_all(path: str | Path, sem_value: int, ground_band: float = 0.0) -> 
 
 
 def read_pheno4d(path: str | Path, swap_soil_stem: bool = False) -> Cloud:
-    """A labelled Pheno4D tomato scan (``T0N_MMDD_a.txt``): ``x y z label`` in
-    millimetres, +z up. 0 soil, 1 stem (petioles, rachises and petiolules
+    """A labeled Pheno4D tomato scan (``T0N_MMDD_a.txt``): ``x y z label`` in
+    millimeters, +z up. 0 soil, 1 stem (petioles, rachises and petiolules
     included), >= 2 one instance per leaflet. ``swap_soil_stem`` is for the one
     scan whose 0/1 codes are exchanged (T02_0325_a): nothing in the file says
     so, only the geometry does (see organ_corpus.py)."""
@@ -248,7 +248,7 @@ def read_pheno4d(path: str | Path, swap_soil_stem: bool = False) -> Cloud:
     sem[lab >= 2] = SEM_BLADE
     inst = np.where(lab >= 2, lab, -1).astype(np.int32)
     # The stem grows out of the soil, so its top must be above the soil's.
-    # Over all 77 labelled tomato scans the worst correct one clears it by
+    # Over all 77 labeled tomato scans the worst correct one clears it by
     # 9 mm and the swapped one fails by 96 mm, so a swap nobody listed fails
     # here rather than training a model to call the pot "stem".
     z = df[2].to_numpy()
@@ -272,7 +272,7 @@ def read_demeter(plant_dir: str | Path, ignore_organs: tuple = (), drop_organs: 
     """A Demeter soybean plant: ``raw/NNN.ply`` holds organ NNN, ``info/class.txt``
     its class (0 leaflet blade, 1 stem incl. petioles/petiolules, 2 flower,
     3 pod), and ``transform.json``'s ``T_raw2canonical`` puts the main-stem base
-    at the origin with +z up. Units are metres as far as anyone can tell (see
+    at the origin with +z up. Units are meters as far as anyone can tell (see
     the audit notes: plausible, not documented).
 
     Pure-black points are hand-drawn stem repairs on no scanned surface; the
@@ -325,7 +325,7 @@ def read_demeter(plant_dir: str | Path, ignore_organs: tuple = (), drop_organs: 
 
 
 def read_sugar4d(path: str | Path) -> Cloud:
-    """A Sugar4D sugar-beet cloud: binary PLY in metres, +z up, soil and pot
+    """A Sugar4D sugar-beet cloud: binary PLY in meters, +z up, soil and pot
     already removed. ``label_semantic`` 0 taproot, 1 core (the crown: petiole
     bases and leaves too young to separate), 2 leaf; ``label_instance`` is the
     leaf id, in order of emergence and stable across visits. A leaf instance is
@@ -350,21 +350,21 @@ def read_sugar4d(path: str | Path) -> Cloud:
 # Petiolules as LEAF (joined to their leaflet) was tried on 2026-09-27, since
 # Pheno4D's annotators seemed to draw them that way: semantics did not move
 # (tomato stem IoU 0.763 -> 0.759) and leaflet F1 fell ~0.05 on tomato and
-# soybean, so the real labellers are not consistent either way and stem stays.
+# soybean, so the real labelers are not consistent either way and stem stays.
 # research/ml/README.md, "Joint synthetic + real training".
 HELIOS_ORGAN_TO_SEM = {0: SEM_BLADE, 1: SEM_STEM, 2: SEM_STEM, 3: SEM_STEM, 4: SEM_STEM, 5: SEM_FRUIT, 6: SEM_GROUND,
                        7: SEM_FRUIT, 8: SEM_FRUIT, 9: SEM_FRUIT, 10: SEM_BLADE, 11: SEM_GROUND}
 
 
 def read_helios_herb(path: str | Path) -> Cloud:
-    """A herbaceous SyntheticLiDAR_Organs scene, labelled by fine organ rather
+    """A herbaceous SyntheticLiDAR_Organs scene, labeled by fine organ rather
     than by the tree-oriented ``class_id`` (which puts petioles in the leaf).
     Leaf blades carry their compound-object id as the instance (one per
     leaflet) and the leaf's age in days, when the scene exported it."""
     path = Path(path)
     cols = _header_columns(path)
     if not cols or "organ_id" not in cols:
-        raise ValueError(f"{path}: no '# x y z ... organ_id' header; not a labelled Helios scene")
+        raise ValueError(f"{path}: no '# x y z ... organ_id' header; not a labeled Helios scene")
     want = ["x", "y", "z", "organ_id", "instance_id"] + [c for c in ("leaf_age",) if c in cols]
     df = pd.read_csv(path, sep=r"\s+", comment="#", header=None, names=cols, usecols=want, engine="c")
     organ = df["organ_id"].to_numpy().astype(np.int64)

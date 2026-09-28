@@ -370,13 +370,13 @@ def test_endpoint_world_shift_returns_world_frame_center():
 
 
 def test_cancel_interrupts_the_fit_before_any_tree_is_fitted():
-    """A cancelled run must NOT keep fitting silently. With the cancel Event
-    already set, the worker raises ScanCancelled at its first checkpoint and fits
+    """A canceled run must NOT keep fitting silently. With the cancel Event
+    already set, the worker raises ScanCanceled at its first checkpoint and fits
     nothing — proving cancellation actually interrupts the compute (cooperative,
     since the numpy/open3d fit runs off-thread and can't be force-killed)."""
     sess = _make_session(two_trees=True)
     _register(sess)
-    # A reporter whose run is already cancelled (mirrors the client POSTing
+    # A reporter whose run is already canceled (mirrors the client POSTing
     # /api/cancel/{run_id} the instant Fit starts).
     event = main.threading.Event()
     event.set()
@@ -386,7 +386,7 @@ def test_cancel_interrupts_the_fit_before_any_tree_is_fitted():
         shape="ellipsoid", strictness=0.2, use_leaf_only=True,
         tree_instance_ids=[1, 2], ground_baseline="ground_class",
     )
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._do_crown_fit(req, progress=reporter)
 
 
@@ -461,7 +461,7 @@ def test_cone_params_reproduce_its_volume_and_height():
 
 def test_alpha_reports_the_radius_it_actually_used():
     """An auto-grown alpha is chosen by the fit, not the user, so it must be
-    reported — it's the only scalar that characterises the hull. An explicit
+    reported — it's the only scalar that characterizes the hull. An explicit
     override is echoed back verbatim with alpha_auto False."""
     import crown_fit as cf
     rng = np.random.default_rng(6)
@@ -470,7 +470,7 @@ def test_alpha_reports_the_radius_it_actually_used():
     auto = cf.fit_crown(pts, "alpha", 0.2, 0.0)["params"]
     assert auto["alpha_auto"] is True
     assert auto["alpha_m"] > 0
-    # Auto-grow searches multiples of the mean NN spacing; the blob is metres
+    # Auto-grow searches multiples of the mean NN spacing; the blob is meters
     # across with ~1500 points, so a sane radius is well under the crown size.
     assert auto["alpha_m"] < 10.0
 

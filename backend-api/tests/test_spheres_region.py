@@ -40,7 +40,7 @@ def test_matches_brute_force_distance():
 
 
 def test_is_depth_limited_not_an_extrusion():
-    # THE point of the sphere brush. A screen-space square stamp centred here
+    # THE point of the sphere brush. A screen-space square stamp centered here
     # would also take the far point, because it extrudes through the cloud.
     region = {"kind": "spheres_union", "centers": [[0.0, 0.0, 0.0]], "radii": [1.0]}
     pos = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.5], [0.0, 0.0, 50.0]])
@@ -104,7 +104,7 @@ def test_canonical_form_is_stable_and_distinguishing():
 @pytest.mark.parametrize("region,why", [
     ({"kind": "spheres_union", "centers": [[0, 0, 0]], "radii": []}, "length mismatch"),
     ({"kind": "spheres_union", "centers": [], "radii": []}, "no spheres"),
-    ({"kind": "spheres_union", "centers": [[0, 0]], "radii": [1]}, "2-D centre"),
+    ({"kind": "spheres_union", "centers": [[0, 0]], "radii": [1]}, "2-D center"),
     ({"kind": "spheres_union", "centers": [[0, 0, 0]], "radii": [0]}, "zero radius"),
     ({"kind": "spheres_union", "centers": [[0, 0, 0]], "radii": [-1]}, "negative radius"),
     ({"kind": "spheres_union", "centers": "nope", "radii": [1]}, "centers not a list"),

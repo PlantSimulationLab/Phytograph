@@ -4,7 +4,7 @@ The fixtures (tests/fixtures/organs/, written by
 research/ml/organ_make_fixtures.py) were never trained on: a Helios synthetic
 potted tomato from the val_synth split, with exact soil / stem / leaf and
 leaflet labels, and a real Sugar4D sugar beet (CC BY 4.0) from the test split,
-written in millimetres so the default ``units="auto"`` has to notice.
+written in millimeters so the default ``units="auto"`` has to notice.
 """
 from __future__ import annotations
 
@@ -71,14 +71,14 @@ def test_leaflet_ids_are_dense_and_numbered_by_height(tomato):
     assert np.all(np.diff(z) >= 0)
 
 
-def test_bundled_model_finds_the_real_beet_leaves_in_millimetres():
+def test_bundled_model_finds_the_real_beet_leaves_in_millimeters():
     xyz, organ, leaflet = _load("sugar_beet_real")
     po, pl, meta = organs.label_plant(xyz, device="cpu")
     assert meta["units"] == "mm" and not meta["warnings"]
     m = match(np.where(leaflet > 0, leaflet, -1), np.where(pl > 0, pl, -1), ignore=organ == 9)
     print(f"\nbeet leaves: F1 {m['f1']:.3f}, {m['n_pred']} of {m['n_true']}")
     assert m["f1"] >= 0.75 and m["mcov"] >= 0.8
-    # The same plant told it is in metres is a 0.4 km "plant": the result is
+    # The same plant told it is in meters is a 0.4 km "plant": the result is
     # nonsense, but the user is told why.
     _, warnings = organs.resolve_units(xyz, "m")
     assert warnings and "not the size of a plant" in warnings[0]
@@ -86,11 +86,11 @@ def test_bundled_model_finds_the_real_beet_leaves_in_millimetres():
 
 # (diagonal in the cloud's units, units auto picks, warning it gives or None)
 AUTO_CASES = [
-    (0.4, "m", None),                             # a 40 cm plant in metres
+    (0.4, "m", None),                             # a 40 cm plant in meters
     (12.0, "m", "not the size of a plant"),       # a 12 m plot: not what the model is for
-    (100.0, "mm", "pick Centimetres"),            # 10 cm in mm, or 1 m in cm: say which was taken
+    (100.0, "mm", "pick Centimeters"),            # 10 cm in mm, or 1 m in cm: say which was taken
     (450.0, "mm", None),                          # a 45 cm plant in mm
-    (9000.0, "mm", "not the size of a plant"),    # 9 m in mm (or a metre cloud 9 km across)
+    (9000.0, "mm", "not the size of a plant"),    # 9 m in mm (or a meter cloud 9 km across)
 ]
 
 
@@ -158,7 +158,7 @@ def tomato_session_with_misses():
     """The synthetic tomato as a session, plus a shell of sky/miss points ~1 km
     out, tagged the way import tags them and SHUFFLED among the hits, with 5 %
     of the rows deleted. A miss that reached the model would make "auto" read
-    the cloud as a 2 km object in millimetres; a scatter that ignored the miss
+    the cloud as a 2 km object in millimeters; a scatter that ignored the miss
     or deletion masks would put the labels on the wrong points, which the
     per-point comparison with the truth below catches."""
     xyz, organ, _ = _load("potted_tomato_synth")

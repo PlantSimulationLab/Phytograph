@@ -1,10 +1,10 @@
 name: organ_S_joint_v4pl_s2
-description: "Plant organ PointNeXt-S trained jointly on the three hand-labelled dicot sets (60 %) and v4 synthetic scans with petiolules labelled leaf (40 %). (seed 2)"
+description: "Plant organ PointNeXt-S trained jointly on the three hand-labeled dicot sets (60 %) and v4 synthetic scans with petiolules labeled leaf (40 %). (seed 2)"
 task: plant_organ
 cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache_organ
 out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs
 model: {variant: S}
-# Herbaceous organs are millimetre-scale (a tomato petiolule is ~1 mm across),
+# Herbaceous organs are millimeter-scale (a tomato petiolule is ~1 mm across),
 # so the base voxel is 2 mm where trees use 1 cm. Level radii run 7 mm - 11 cm.
 hierarchy: {voxel: 0.002, levels: 5, k: 16}
 channels: [dxyz]

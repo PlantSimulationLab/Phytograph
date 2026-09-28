@@ -10,7 +10,7 @@ Why these particular scenes: Phytograph's hard case is a REPETITIVE canopy —
 rows of near-identical plants with no broad unique surface. That geometry breaks
 naive FPFH+RANSAC on raw points, because descriptors computed on foliage look
 the same everywhere and the estimator happily snaps the source onto a
-neighbouring plant (a whole row-spacing off) while reporting a good fit. So:
+neighboring plant (a whole row-spacing off) while reporting a good fit. So:
 
   * `_orchard_row` / `_orchard_grid` are cheap synthetic stand-ins with exactly
     that pathology (identical plants on a regular lattice). They run in
@@ -65,7 +65,7 @@ def _pose_error(recovered_flat, applied: np.ndarray):
     identity. If registration inverted exactly what we applied, the residual
     rotation is 0° and the residual translation is 0 m.
 
-    Returns (rotation_error_degrees, translation_error_metres)."""
+    Returns (rotation_error_degrees, translation_error_meters)."""
     R_rec = np.asarray(recovered_flat, dtype=np.float64).reshape(4, 4)
     resid = R_rec @ applied
     Rr = resid[:3, :3]
@@ -270,7 +270,7 @@ def _register(target: np.ndarray, source: np.ndarray, **kw) -> dict:
 # --------------------------------------------------------------------------
 
 def test_recovers_known_rotation_on_orchard_row():
-    """The headline case: a 25° yaw + metre-scale shift between two views of the
+    """The headline case: a 25° yaw + meter-scale shift between two views of the
     same orchard row is undone. Plain ICP cannot do this (identity init +
     centroid pre-align only), so this test is the reason the coarse stage
     exists."""
@@ -408,7 +408,7 @@ def test_coarse_result_feeds_icp_and_refines():
 
 
 def test_init_transform_is_backwards_compatible():
-    """Omitting `init_transform` must reproduce the old identity-init behaviour
+    """Omitting `init_transform` must reproduce the old identity-init behavior
     exactly — the field is additive and existing callers must not shift."""
     target = _orchard_row(count=3)
     source = target + np.array([0.3, -0.2, 0.1])
@@ -462,7 +462,7 @@ def test_grid_alignment_is_not_off_by_one_plant():
     # lattice-shifted fit lands plant-on-plant, so RMSE is low and ICP fitness
     # is high while the answer is wrong.
     # Correlation RESOLVES this lattice where landmark matching could not, and
-    # the reason is instructive: it rasterises the whole cloud including the
+    # the reason is instructive: it rasterizes the whole cloud including the
     # ground, whose rectangular footprint is not 90-degree symmetric even when
     # the plant positions are. Measured 0.08 deg with a healthy 0.43 margin.
     # So the requirement is the safety property, not a specific verdict: get it
@@ -625,7 +625,7 @@ def test_sky_returns_are_dropped_even_when_they_outnumber_real_points(miss_fract
     hits — routine, not exotic. The obvious guard ("drop anything beyond k x the
     99th-percentile distance") silently stops working there, because the misses
     define that percentile themselves: measured at 52% misses the reference
-    centre landed at (828, 835, 805), i.e. inside the sky cluster, and the
+    center landed at (828, 835, 805), i.e. inside the sky cluster, and the
     cloud's extent stayed at 2324 m instead of 22 m. Everything downstream
     scales off that extent, so the result is a HANG rather than an error."""
     real = np.random.default_rng(0).normal(0.0, 2.0, (500, 3))
@@ -644,7 +644,7 @@ def test_sky_returns_are_dropped_even_when_they_outnumber_real_points(miss_fract
         np.random.default_rng(2).uniform(0, 400, 3000),
         np.random.default_rng(3).uniform(0, 20, 3000),
         np.random.default_rng(4).uniform(0, 5, 3000)])),
-    # Two survey blocks half a kilometre apart — a real spatial gap that looks
+    # Two survey blocks half a kilometer apart — a real spatial gap that looks
     # exactly like the miss signature and must NOT be cut. An earlier threshold
     # discarded one whole block.
     ("two blocks 500m apart", np.vstack([
@@ -756,7 +756,7 @@ def test_crown_anchors_work_without_visible_trunks():
 # --------------------------------------------------------------------------
 
 def test_progress_fractions_are_monotonic_and_complete():
-    """The cancellable pill needs a reporter that only ever advances and ends at
+    """The cancelable pill needs a reporter that only ever advances and ends at
     1.0. Mirrors the assertion the ICP suite makes, because the coarse stage
     inserts new phases into the same progress band."""
     target = _with_ground(_orchard_row(count=4))
@@ -887,7 +887,7 @@ def test_yaw_prior_constrains_the_search_instead_of_skipping_it():
     the registration report -- a reconstruction later proved wrong.
 
     Measured against ground truth recovered exactly (per-return gps_time
-    correspondence, sub-millimetre), skipping the search leaves 3 of 5 real
+    correspondence, sub-millimeter), skipping the search leaves 3 of 5 real
     peach-orchard pairs a full 180 degrees flipped: unseeded ICP cannot tell
     which end of a near-symmetric row it started from, and a flipped row still
     lands canopy-on-canopy so residual-based checks rate it as fine.

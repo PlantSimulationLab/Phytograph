@@ -111,7 +111,7 @@ def test_the_particle_choice_keeps_near_ties():
 def test_points_on_the_far_edge_of_a_grid_aligned_cloud():
     """A cloud whose extent is (nearly) a whole number of cloth cells puts its
     far-corner points on col0 + 1 == width; CSF reads past its row there and,
-    on the last row, past its array. Labelling must not raise, and must agree
+    on the last row, past its array. Labeling must not raise, and must agree
     with CSF wherever CSF's own read is defined."""
     xs = np.arange(20) * 0.1
     g = np.array([(x, y, 0.0) for x in xs for y in xs])

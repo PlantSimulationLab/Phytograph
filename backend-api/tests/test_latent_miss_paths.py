@@ -16,10 +16,10 @@ import main
 
 # ── /api/triangulate/check-spacing ─────────────────────────────────────────
 #
-# A miss is a ray that hit nothing, ~1 km out, so its nearest neighbour is
+# A miss is a ray that hit nothing, ~1 km out, so its nearest neighbor is
 # another distant miss: misses do not merely widen the spacing distribution,
 # they DEFINE it. Measured on a real vineyard scan the pooled median
-# nearest-neighbour distance was 35.65 m with misses vs 0.0143 m without --
+# nearest-neighbor distance was 35.65 m with misses vs 0.0143 m without --
 # a ~2,500x error, which inverts the bridging verdict this feeds.
 #
 # The caller crops to the grid first (`_points_inside_grid`), which removes

@@ -186,7 +186,7 @@ test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (d
 
 // The strongest of the three: a lasso over only the LEFT half of the
 // viewport must keep a STRICT SUBSET — neither all 60 nor 0. The cylinder
-// straddles the viewport centre, so a half-cut splits it. This is what
+// straddles the viewport center, so a half-cut splits it. This is what
 // would fail if the polygon's pixel space and the crop projection's pixel
 // space diverged again (the original bug): the surviving count would jump
 // to 0 or 60 instead of landing in between.
@@ -238,7 +238,7 @@ test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', 
   await expect(panel).toHaveCount(0, { timeout: 10_000 });
   await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
 
-  // Strict subset: 0 < kept < 60. A half-plane through a centred cloud
+  // Strict subset: 0 < kept < 60. A half-plane through a centered cloud
   // can't keep everything or nothing unless projection broke.
   await expect
     .poll(async () => {

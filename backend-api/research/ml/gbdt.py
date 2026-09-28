@@ -7,13 +7,13 @@ answer whether a network is needed at all. If PointNeXt cannot clearly beat
 it on held-out real trees, the network is not worth shipping.
 
 It works at the same 1 cm base voxel as the network. Features are computed per
-voxel point at k = 10, 20, 40, 80 neighbours:
+voxel point at k = 10, 20, 40, 80 neighbors:
 
 - linearity, planarity, sphericity
 - omnivariance, eigenentropy
 - change of curvature
 - verticality (1 - |n_z|)
-- neighbourhood radius (a density and scale cue)
+- neighborhood radius (a density and scale cue)
 
 That is 32 features. Predictions go back to full resolution through the grid
 inverse, exactly like ``ml.infer``.
@@ -33,7 +33,7 @@ NAMES = [f"{f}_k{k}" for k in SCALES for f in
 
 def features(xyz: np.ndarray, rows: np.ndarray | None = None, chunk: int = 100_000) -> np.ndarray:
     """(len(rows), 32) float32 multi-scale covariance features of ``xyz[rows]``
-    (all points when ``rows`` is None), with neighbourhoods drawn from all of
+    (all points when ``rows`` is None), with neighborhoods drawn from all of
     ``xyz``."""
     n = len(xyz)
     tree = cKDTree(xyz)
@@ -80,7 +80,7 @@ class GBDT:
 
     def fit(self, xs: list[np.ndarray], ys: list[np.ndarray], per_item: int = 60_000, seed: int = 0):
         """``xs``: per-item xyz; ``ys``: per-item output index (-1 = ignore).
-        Each item contributes at most ``per_item`` labelled voxels, drawn
+        Each item contributes at most ``per_item`` labeled voxels, drawn
         class-balanced, so big items do not dominate and wood is not starved."""
         rng = np.random.default_rng(seed)
         F, Y = [], []

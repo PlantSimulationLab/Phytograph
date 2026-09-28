@@ -78,9 +78,9 @@ async function waitForTiles(page: LaunchedApp['page']) {
  * two screenshots of the same frame — one normal, one with the cloud hidden.
  *
  * A single screenshot cannot answer this. The crop overlay tints its interior
- * and the panels carry their own blues, so an absolute colour threshold counts
+ * and the panels carry their own blues, so an absolute color threshold counts
  * chrome as cloud (it reported a "leftover" that was really the overlay fill).
- * Differencing cancels everything that is not the cloud, whatever its colour.
+ * Differencing cancels everything that is not the cloud, whatever its color.
  *
  * `limit` restricts the comparison to a page-space rect. Pass the open part of
  * the viewport: the floating panels are translucent, so hiding the cloud also

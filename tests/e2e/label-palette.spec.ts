@@ -118,7 +118,7 @@ test('a user-defined class can be created and painted', async () => {
     .toBe(60);
 });
 
-test('editing a class: Backspace deletes text, and a new class gets its own colour', async () => {
+test('editing a class: Backspace deletes text, and a new class gets its own color', async () => {
   const { page } = await openLabelTool();
   await openEditor(page);
 
@@ -126,8 +126,8 @@ test('editing a class: Backspace deletes text, and a new class gets its own colo
   const rows = page.getByTestId('palette-class-row');
   const newRow = rows.last();
 
-  // A new class must not reuse Unclassified's grey (or any sibling's colour),
-  // or it paints invisibly over unlabelled points.
+  // A new class must not reuse Unclassified's gray (or any sibling's color),
+  // or it paints invisibly over unlabeled points.
   const newColor = await newRow.getByTestId('palette-class-color').inputValue();
   const others = await rows.evaluateAll((els) => els.slice(0, -1).map((el) =>
     (el.querySelector('[data-testid="palette-class-color"]') as HTMLInputElement).value));
@@ -191,8 +191,8 @@ test('validation blocks a save that would corrupt the palette', async () => {
 test('a class that already has points cannot be repointed', async () => {
   // The backend column stores real class VALUES. Changing the value of a class
   // that already has points would leave them holding a number the palette no
-  // longer describes — they would read as unlabelled, with no warning and no
-  // undo. Renaming and recolouring stay available, because those are safe.
+  // longer describes — they would read as unlabeled, with no warning and no
+  // undo. Renaming and recoloring stay available, because those are safe.
   const { page, panel } = await openLabelTool();
 
   // Paint with the first non-Unclassified class so it genuinely has points.
@@ -243,7 +243,7 @@ test('saved palettes are reusable from the library', async () => {
   await expect(page.getByTestId('label-panel')).toContainText('Deadwood');
 });
 
-// ── Labelling a column the cloud already carries ─────────────────────────────
+// ── Labeling a column the cloud already carries ─────────────────────────────
 //
 // The gap these close: the tool could only paint the four columns its presets
 // named, so a cloud whose OWN classification was wrong — the motivating case is
@@ -287,13 +287,13 @@ async function openLabelToolOnTreeCloud(
 test('the tool opens on the cloud own classification, with its real classes', async () => {
   const { page, panel } = await openLabelToolOnTreeCloud();
 
-  // Opened on tree_instance, not on the empty hand-labelling column. This is
+  // Opened on tree_instance, not on the empty hand-labeling column. This is
   // the whole feature: before it, this cloud offered wood/leaf over an empty
   // manual_class and the tree instances were unreachable.
   await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
   await expect(page.getByTestId('label-column-select')).toHaveValue('tree_instance');
 
-  // The classes are the column's REAL values, with Unassigned synthesised.
+  // The classes are the column's REAL values, with Unassigned synthesized.
   await expect(panel.getByTestId('label-class-0')).toContainText('Unassigned');
   await expect(panel.getByTestId('label-class-1')).toContainText('Tree 1');
   await expect(panel.getByTestId('label-class-3')).toContainText('Tree 3');
@@ -465,7 +465,7 @@ test('a user class (64+) survives a LAS export in the classification byte', asyn
   await expect.poll(async () => (await counts(panel))[String(value)], { timeout: 30_000 })
     .toBe(60);
 
-  const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-label-las-')), 'labelled.las');
+  const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-label-las-')), 'labeled.las');
   await stubSaveDialog(app, savePath);
   await page.evaluate(() => (window as any).__openExportPanel?.());
   await expect(page.getByTestId('export-modal')).toBeVisible();
@@ -482,9 +482,9 @@ test('a user class (64+) survives a LAS export in the classification byte', asyn
 });
 
 /**
- * The colour each of the fixture's points is DRAWN in, read from a screenshot
+ * The color each of the fixture's points is DRAWN in, read from a screenshot
  * at the point's own projected position (so the label panel's and the legend's
- * swatches of the same colours cannot be counted). Points under the label panel
+ * swatches of the same colors cannot be counted). Points under the label panel
  * are skipped. Returns how many points read as magenta and as cyan.
  */
 async function pointHues(page: LaunchedApp['page']) {
@@ -527,11 +527,11 @@ async function pointHues(page: LaunchedApp['page']) {
   }, { src: `data:image/png;base64,${png.toString('base64')}`, box, pts });
 }
 
-test('committed labels keep their colour when the class numbers have gaps', async () => {
+test('committed labels keep their color when the class numbers have gaps', async () => {
   // The overlay's buffer holds palette POSITIONS (0, 1, 2…) but a commit's
   // octree holds class VALUES (0, 64, 65). Copied straight in, a committed 64
   // was drawn as position 64 — past the end of a 3-class gradient, so as the
-  // LAST class's colour. Painted as 64 (magenta) it must stay magenta, not
+  // LAST class's color. Painted as 64 (magenta) it must stay magenta, not
   // turn into 65's cyan.
   const { page, panel } = await openLabelTool();
   const editor = await openEditor(page);
@@ -612,11 +612,11 @@ test('tree ids above 255 can be added and painted, 300 then 301', async () => {
   await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
 });
 
-test('a hundred trees each draw in their own colour', async () => {
-  // potree-core bakes class colours into a 64-pixel, linearly filtered
-  // gradient. Past ~64 classes, neighbouring trees shared a pixel and drew as
-  // an averaged colour that belongs to neither. The fixture's 100 trees sit in
-  // a 10x10 grid; each must be drawn in the colour its class row shows.
+test('a hundred trees each draw in their own color', async () => {
+  // potree-core bakes class colors into a 64-pixel, linearly filtered
+  // gradient. Past ~64 classes, neighboring trees shared a pixel and drew as
+  // an averaged color that belongs to neither. The fixture's 100 trees sit in
+  // a 10x10 grid; each must be drawn in the color its class row shows.
   const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'hundred-trees.xyz');
   const { page, panel } = await openLabelToolOnTreeCloud(fixture, 'hundred-trees', 500);
   await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
@@ -630,14 +630,14 @@ test('a hundred trees each draw in their own colour', async () => {
   for (let k = 1; k <= 100; k++) {
     expected[k] = (await page.getByTestId(`label-class-${k}`).getAttribute('data-color'))!;
   }
-  const centres = Array.from({ length: 100 }, (_, k) =>
+  const centers = Array.from({ length: 100 }, (_, k) =>
     ({ id: k + 1, w: [(k % 10) * 0.3, 0, Math.floor(k / 10) * 0.3] as [number, number, number] }));
 
   const canvas = page.locator('canvas').first();
   const read = async () => {
     const box = (await canvas.boundingBox())!;
     const png = await canvas.screenshot();
-    return page.evaluate(async ({ src, box, centres, expected }) => {
+    return page.evaluate(async ({ src, box, centers, expected }) => {
       const img = new Image();
       await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = src; });
       const c = document.createElement('canvas');
@@ -649,7 +649,7 @@ test('a hundred trees each draw in their own colour', async () => {
       const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
       const panel = document.querySelector('[data-testid="label-panel"]')?.getBoundingClientRect();
       let checked = 0; const wrong: number[] = [];
-      for (const { id, w } of centres) {
+      for (const { id, w } of centers) {
         const p = (window as any).__worldToScreen(w);
         if (!p.visible) continue;
         if (panel && p.x >= panel.left - 6 && p.x <= panel.right + 6
@@ -665,7 +665,7 @@ test('a hundred trees each draw in their own colour', async () => {
         if (best > 40) wrong.push(id);
       }
       return { checked, wrong };
-    }, { src: `data:image/png;base64,${png.toString('base64')}`, box, centres, expected });
+    }, { src: `data:image/png;base64,${png.toString('base64')}`, box, centers, expected });
   };
 
   await expect.poll(async () => {
@@ -716,8 +716,8 @@ test('editing the stock preset in two projects keeps both in the library', async
 });
 
 test('instances: new, merge, delete and frame, each undoable', async () => {
-  // tree_instance holds 1 (24 points, centred z = 0.1875) and 3 (36 points,
-  // centred z = 1.125).
+  // tree_instance holds 1 (24 points, centered z = 0.1875) and 3 (36 points,
+  // centered z = 1.125).
   const { page, panel } = await openLabelToolOnTreeCloud();
   await expect.poll(async () => await counts(panel), { timeout: 30_000 })
     .toEqual({ '1': 24, '3': 36 });
@@ -730,7 +730,7 @@ test('instances: new, merge, delete and frame, each undoable', async () => {
   await expect(panel.getByTestId('label-class-4')).toContainText('Tree 4');
   await expect(panel).toHaveAttribute('data-active-class', '4');
 
-  // Frame: the view centres on the selected instance's points.
+  // Frame: the view centers on the selected instance's points.
   await panel.getByTestId('label-class-3').click();
   await page.getByTestId('label-instance-frame').click();
   await expect.poll(async () => page.evaluate(() => (window as any).__getCameraState().target as number[]))
@@ -760,7 +760,7 @@ test('an instance stroke can set a semantic class too, in one undo step', async 
   await expect.poll(async () => await counts(panel), { timeout: 30_000 })
     .toEqual({ '1': 24, '3': 36 });
 
-  // "Also set" the hand-labelling column's Wood on every stroke.
+  // "Also set" the hand-labeling column's Wood on every stroke.
   const pair = page.getByTestId('label-instance-pair');
   const wood = await pair.locator('option', { hasText: 'Wood' }).first().getAttribute('value');
   expect(wood).toMatch(/^manual_class:\d+$/);
@@ -770,7 +770,7 @@ test('an instance stroke can set a semantic class too, in one undo step', async 
   await paintWholeViewport(page);
   await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '1': 60 });
 
-  // The hand-labelling column got the same points as Wood.
+  // The hand-labeling column got the same points as Wood.
   const woodValue = wood!.split(':')[1];
   await page.getByTestId('label-column-select').selectOption('manual_class');
   await expect(panel).toHaveAttribute('data-label-slug', 'manual_class');
@@ -838,7 +838,7 @@ test('pre-label seeds a column from another column, through a class map, in one 
   const { page, panel } = await openLabelToolOnTreeCloud();
   await expect.poll(async () => await counts(panel), { timeout: 30_000 })
     .toEqual({ '1': 24, '3': 36 });
-  // Edit the hand-labelling column (wood/leaf), seeded from tree_instance.
+  // Edit the hand-labeling column (wood/leaf), seeded from tree_instance.
   await page.getByTestId('label-column-select').selectOption('manual_class');
   await expect(panel).toHaveAttribute('data-label-slug', 'manual_class');
   const woodValue = await panel.locator('[data-testid^="label-class-"]:not([data-testid="label-class-list"])', { hasText: 'Wood' }).first()

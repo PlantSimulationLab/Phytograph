@@ -105,7 +105,7 @@ describe('classifyBackendFailure', () => {
     "/lib/x86_64-linux-gnu/libm.so.6: version `GLIBC_2.38' not found",
   ];
 
-  it('recognises the real glibc loader error and names the version needed', () => {
+  it('recognizes the real glibc loader error and names the version needed', () => {
     const cause = classifyBackendFailure(REAL_GLIBC_FAILURE);
     expect(cause).toBeTruthy();
     expect(cause).toContain('GLIBC_2.38');
@@ -121,14 +121,14 @@ describe('classifyBackendFailure', () => {
     expect(classifyBackendFailure(REAL_GLIBC_FAILURE)).toContain('ldd --version');
   });
 
-  it('recognises a libstdc++ (GLIBCXX) mismatch too', () => {
+  it('recognizes a libstdc++ (GLIBCXX) mismatch too', () => {
     const cause = classifyBackendFailure([
       "./phytograph_backend: /lib/libstdc++.so.6: version `GLIBCXX_3.4.32' not found",
     ]);
     expect(cause).toContain('GLIBCXX_3.4.32');
   });
 
-  it('recognises a missing shared library', () => {
+  it('recognizes a missing shared library', () => {
     const cause = classifyBackendFailure([
       './phytograph_backend: error while loading shared libraries: libGL.so.1: cannot open shared object file',
     ]);

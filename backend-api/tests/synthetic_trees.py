@@ -18,7 +18,7 @@ import numpy as np
 class SyntheticTree:
     base_xy: Tuple[float, float] = (0.0, 0.0)
     dbh_m: float = 0.30               # diameter at 1.3 m ALONG the axis
-    taper_m_per_m: float = 0.01       # diameter lost per metre along the axis
+    taper_m_per_m: float = 0.01       # diameter lost per meter along the axis
     lean_deg: float = 0.0
     lean_azimuth_deg: float = 0.0     # clockwise from +y
     stem_length_m: float = 8.0        # along the axis
@@ -62,7 +62,7 @@ class SyntheticTree:
         n_stem = int(self.stem_density * math.pi * self.dbh_m * self.stem_length_m)
         s = rng.uniform(-0.3, self.stem_length_m, n_stem)
         half = math.radians(self.arc_deg) / 2
-        th = rng.uniform(-half, half, n_stem) - math.pi / 2  # centred on facing -y
+        th = rng.uniform(-half, half, n_stem) - math.pi / 2  # centered on facing -y
         r = np.maximum(0.01, np.array([self.diameter_at(x) for x in s]) / 2)
         r = r + rng.normal(0, self.noise_m, n_stem) if self.noise_m > 0 else r
         # Express the angle in world x/y so "facing -y" means a real direction.

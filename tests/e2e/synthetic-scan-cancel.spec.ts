@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { launchApp } from './helpers/launchApp';
 
-// Cancelling a synthetic LiDAR scan must actually stop the backend and free its
+// Canceling a synthetic LiDAR scan must actually stop the backend and free its
 // memory — not just hide the UI. This drives the live backend (/api/lidar/scan +
 // /api/cancel/{run_id}) through the real DOM: generate a plant, start a HEAVY
 // scan (high resolution × many rays/pulse so it runs long enough to cancel),
@@ -12,7 +12,7 @@ import { launchApp } from './helpers/launchApp';
 // The "memory is freed" guarantee is covered by the backend unit test
 // (test_cancel.py: the C++ ray loop short-circuits and the Context/LiDARCloud
 // `with` blocks unwind). This E2E proves the user-facing cancel path end-to-end.
-test('cancelling a heavy synthetic scan abandons the run and leaves the UI usable', async () => {
+test('canceling a heavy synthetic scan abandons the run and leaves the UI usable', async () => {
   const { page, close } = await launchApp();
 
   try {

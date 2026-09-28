@@ -578,7 +578,7 @@ def test_import_qsm_malformed_csv_400(client, tmp_path):
     assert "radius" in resp.json()["detail"]
 
 
-# ── Guards: the point cap and real cancellability ────────────────────────────
+# ── Guards: the point cap and real cancelability ────────────────────────────
 #
 # /api/qsm/build ran the same extract_skeleton as /api/skeleton/extract but had
 # none of its protections: no cap (measured 38 s / 2.6 GB at 2 M points) and no
@@ -614,13 +614,13 @@ def test_build_emits_a_run_id_the_cancel_endpoint_can_address(client, cloud_poin
             off += 4
         else:
             break
-    assert run_ids, "no run_id in any progress marker; the run is uncancellable"
+    assert run_ids, "no run_id in any progress marker; the run is uncancelable"
 
 
-def test_a_cancelled_run_stops_at_a_checkpoint(client, cloud_points, monkeypatch):
+def test_a_canceled_run_stops_at_a_checkpoint(client, cloud_points, monkeypatch):
     """Cancel must actually unwind, not run to completion and discard the result.
     Fire the event as soon as the build asks for it, then assert the stream ends
-    in a `cancelled` marker rather than a QSM."""
+    in a `canceled` marker rather than a QSM."""
     import main
     real = main._new_cancel_token
 
@@ -632,7 +632,7 @@ def test_a_cancelled_run_stops_at_a_checkpoint(client, cloud_points, monkeypatch
     monkeypatch.setattr(main, "_new_cancel_token", _prefired)
     resp = client.post("/api/qsm/build", json={"points": cloud_points})
     assert resp.status_code == 200
-    assert b"cancelled" in resp.content, "the cancel was not honoured"
+    assert b"canceled" in resp.content, "the cancel was not honored"
 
 
 # ── The binary transport for the triangulation ───────────────────────────────
@@ -733,7 +733,7 @@ def test_binary_frame_maps_the_outside_grid_sentinel(client, built_qsm):
 
     Half the mesh is in cell 0 and half is outside, so a sentinel that leaked
     into the measurement would change what cell 0 fits. Note this holds for two
-    independent reasons -- the decoder normalises 0xffffffff to -1, AND
+    independent reasons -- the decoder normalizes 0xffffffff to -1, AND
     `compute_cell_targets` filters both spellings -- so it pins the OUTCOME
     rather than either mechanism; removing just one of them keeps it green.
     """

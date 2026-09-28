@@ -91,7 +91,7 @@ describe('StitchDialog origin warning', () => {
 
 // "Keep original clouds" makes the merge non-destructive: the sources stay in
 // the scene (hidden) instead of being removed. It defaults OFF so the
-// destructive behaviour is unchanged unless the user opts in, and it is not
+// destructive behavior is unchanged unless the user opts in, and it is not
 // persisted — every open starts from the safe-to-assume default.
 describe('StitchDialog retain-originals option', () => {
   it('defaults to unchecked, so the destructive path is unchanged', () => {

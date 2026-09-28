@@ -74,7 +74,7 @@ describe('quit confirmation', () => {
 
   it('omits the labels line when there are none', () => {
     setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
-    expect(confirmDetail(currentSceneDirty())).not.toMatch(/labelling/i);
+    expect(confirmDetail(currentSceneDirty())).not.toMatch(/labeling/i);
   });
 
   it('says the session is unsaved, since that is the reason to warn at all', () => {
@@ -129,7 +129,7 @@ describe('quit confirmation wiring', () => {
     const stopAt = handler.indexOf('stopBackend()');
     expect(confirmAt).toBeGreaterThan(-1);
     expect(stopAt).toBeGreaterThan(-1);
-    // Cancelling a quit must leave a WORKING app. stopBackend() first would
+    // Canceling a quit must leave a WORKING app. stopBackend() first would
     // kill the sidecar holding every cloud session, so "cancel" would hand the
     // user a live window over a dead backend.
     expect(confirmAt).toBeLessThan(stopAt);

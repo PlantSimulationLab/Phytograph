@@ -5,7 +5,7 @@ distance from the scanner. Finding that distance used to be
 
     np.max(np.linalg.norm(positions[hits] - origin, axis=1))
 
-which materialises the whole hit selection and then three more arrays the same
+which materializes the whole hit selection and then three more arrays the same
 size — the broadcast subtraction, norm's internal square, and the reduced
 column. On the reference VZ-1000 position's 18.6 M hits that is 1,636 MB of
 transient to produce ONE NUMBER, on top of a session already holding ~1.4 GB of
@@ -120,7 +120,7 @@ def test_einsum_is_not_a_valid_substitute():
     assert disagreements > 0, "einsum now agrees — see _farthest_from_origin"
 
 
-def test_it_never_materialises_the_whole_selection(monkeypatch):
+def test_it_never_materializes_the_whole_selection(monkeypatch):
     """The point of the change. Measured as peak allocation, because that is the
     property — the old form's cost was memory, not time."""
     import tracemalloc
@@ -147,7 +147,7 @@ def test_it_never_materialises_the_whole_selection(monkeypatch):
         f"{selection_bytes / 1e6:.0f} MB selection"
     )
     assert reference_peak > blocked_peak * 4, (
-        "the reference no longer costs what this optimisation was for"
+        "the reference no longer costs what this optimization was for"
     )
 
 

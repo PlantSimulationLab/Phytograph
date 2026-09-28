@@ -60,7 +60,7 @@ describe('no compute path serializes raw positions', () => {
     const end = src.indexOf('}, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits', start);
     expect(end).toBeGreaterThan(start);
     const block = src.slice(start, end);
-    // A miss ~1 km out would make units="auto" read the plant as millimetres.
+    // A miss ~1 km out would make units="auto" read the plant as millimeters.
     expect(block).toMatch(/const \{ points, hitIndices \} = ps\.hits;/);
     expect(block).not.toContain('ps.data.positions');
     // Results are indexed against the hit subset: both columns must be scattered.

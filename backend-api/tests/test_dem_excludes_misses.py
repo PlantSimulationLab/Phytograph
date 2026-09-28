@@ -90,7 +90,7 @@ def test_session_dem_finishes_and_grids_hits_only(client, leafcube_session):
     assert res.status_code == 200
     body, buffers = decode_bin_frame(res.content)
     assert body["success"] is True, body.get("error")
-    # A real surface mesh came out over the ~1 m cube, not a kilometre-wide grid.
+    # A real surface mesh came out over the ~1 m cube, not a kilometer-wide grid.
     verts = buffers["vertices"].reshape(-1, 3)
     span = float(np.max(verts.max(axis=0)[:2] - verts.min(axis=0)[:2]))
     assert span < 3.0, f"DEM spans {span} m — misses leaked into the grid"

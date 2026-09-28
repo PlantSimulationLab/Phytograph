@@ -66,7 +66,7 @@ const SURFACE_META: Record<DemSurfaceType, { title: string; blurb: string; needs
 
 // Display order for the checkbox list (bottom-up: terrain, surface, canopy height).
 // The Terrain (DTM) also carries density / intensity / hillshade / slope / aspect
-// as colour-by layers — no separate checkboxes; pick them from the mesh's Color by.
+// as color-by layers — no separate checkboxes; pick them from the mesh's Color by.
 const SURFACE_ORDER: DemSurfaceType[] = ['dtm', 'dsm', 'chm'];
 
 export function DEMPanel({
@@ -179,7 +179,7 @@ export function DEMPanel({
           <InfoHint
             data-testid="dem-cell-size-help"
             label="Cell size"
-            text="Horizontal resolution of the DEM grid, in metres. Smaller resolves finer terrain but runs slower and leaves more gaps where ground is sparse; larger is coarser and smoother. Seeded from the cloud's extent — a few centimetres for close-range scans, larger for field-scale tiles."
+            text="Horizontal resolution of the DEM grid, in meters. Smaller resolves finer terrain but runs slower and leaves more gaps where ground is sparse; larger is coarser and smoother. Seeded from the cloud's extent — a few centimeters for close-range scans, larger for field-scale tiles."
           />
         </label>
         <DebouncedNumberInput
@@ -211,7 +211,7 @@ export function DEMPanel({
           <InfoHint
             data-testid="dem-method-help"
             label="Interpolation method"
-            text="How elevation is filled between ground points. TIN (linear) builds a triangulated surface through the ground returns — the most faithful, and the default. IDW (inverse-distance) smooths across neighbours. Nearest snaps each cell to the closest ground point (blocky, gap-free)."
+            text="How elevation is filled between ground points. TIN (linear) builds a triangulated surface through the ground returns — the most faithful, and the default. IDW (inverse-distance) smooths across neighbors. Nearest snaps each cell to the closest ground point (blocky, gap-free)."
           />
         </label>
         <select
@@ -266,7 +266,7 @@ export function DEMPanel({
             data-testid="dem-compute-hag-help"
             label="Compute height above ground"
             align="right"
-            text="Also subtract the DEM from each point to add a 'height above ground' scalar to the cloud (a canopy-height-model precursor). The cloud recolours by this height. Off by default. For a rasterised canopy height model use the Canopy height (CHM) surface instead."
+            text="Also subtract the DEM from each point to add a 'height above ground' scalar to the cloud (a canopy-height-model precursor). The cloud recolors by this height. Off by default. For a rasterized canopy height model use the Canopy height (CHM) surface instead."
           />
         </div>
       )}

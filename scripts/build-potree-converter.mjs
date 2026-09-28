@@ -226,7 +226,7 @@ function install() {
     // makes the failure mode so slippery: on the build machine the stale path
     // still resolves, so a binary that is broken everywhere else tests fine
     // here — and it breaks the moment `tmp/` is cleaned. Removing it makes
-    // @loader_path the only search path, so local behaviour matches shipped.
+    // @loader_path the only search path, so local behavior matches shipped.
     for (const stale of machoRpaths(dstBin).filter((p) => p !== '@loader_path')) {
       const r = spawnSync('install_name_tool', ['-delete_rpath', stale, dstBin], { encoding: 'utf8' });
       if (r.status === 0) console.log(`removed stale rpath ${stale}`);

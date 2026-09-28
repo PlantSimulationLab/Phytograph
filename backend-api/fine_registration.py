@@ -6,7 +6,7 @@ Ground truth for this is RiSCAN PRO's Multi Station Adjustment. Every
 paired dataset here ships the same scans twice, unregistered and registered,
 so the surveyed pose of each scan is recoverable exactly: match returns
 between the two exports and solve Kabsch, which lands on 0.5 mm -- the LAZ
-quantisation step, i.e. an exact answer.
+quantization step, i.e. an exact answer.
 
 Measured that way on the four-scan UC Davis farm set, the shipped pipeline's
 COARSE raster stage placed every scan within 2.8-7.6 cm, and the ICP
@@ -18,7 +18,7 @@ Three causes, which compound:
 
 1. STRIDE DECIMATION IS NOT A SPATIAL SAMPLE. A terrestrial scanner samples in
    ANGLE, so return density falls as 1/r^2 -- on this set the median
-   nearest-neighbour spacing runs 4 mm at 5-15 m against 103 mm beyond 40 m.
+   nearest-neighbor spacing runs 4 mm at 5-15 m against 103 mm beyond 40 m.
    Taking every k-th point preserves that bias exactly, so near-field geometry
    outvotes the far field no matter how many points are kept, and ICP's
    equally-weighted correspondences hand the pose to whatever surface happens
@@ -35,11 +35,11 @@ Three causes, which compound:
    window should have been all along: start wide enough to pull in the coarse
    stage's error, then tighten geometrically, re-matching at each step.
 
-3. NORMALS AVERAGED OVER METRES. `diagonal * 0.02` is 1.99 m here. A
-   point-to-plane residual measured against a plane fitted through two metres
+3. NORMALS AVERAGED OVER METERS. `diagonal * 0.02` is 1.99 m here. A
+   point-to-plane residual measured against a plane fitted through two meters
    of canopy is not a surface constraint; it is noise with a direction. The
    local surface belongs to the sampling scale, not to the plot -- see
-   `_COVARIANCE_NEIGHBOURS`, which also explains why it is a neighbour COUNT
+   `_COVARIANCE_NEIGHBORS`, which also explains why it is a neighbor COUNT
    and not a radius.
 
 What replaced it
@@ -107,7 +107,7 @@ DO NOT drop the finest level to save time, despite what that table suggests in
 isolation. It looks like a rotation-only refinement on this single pair and is
 not: removed, olive's median displacement doubles (0.46 -> 0.95 cm, worst 0.57
 -> 1.26 cm) and the UC Davis set's worst scan goes 1.68 -> 2.25 cm. Coarsening
-the ladder itself is likewise an accuracy trade rather than an optimisation
+the ladder itself is likewise an accuracy trade rather than an optimization
 (UCD anchor 0.0662 -> 0.10 m costs 1.64 -> 2.1 cm). The levels are not the
 place to look for speed; the iteration budget was.
 """
@@ -124,7 +124,7 @@ import numpy as np
 # half the scale.
 _CORR_PER_VOXEL = 3.0
 
-# Neighbours per local surface fit. A COUNT, not a radius, and that is a
+# Neighbors per local surface fit. A COUNT, not a radius, and that is a
 # correction rather than a preference: a radius of 3 voxels looks reasonable
 # at the sampling scale and quietly starves in the far field, where the real
 # spacing is 100 mm against 4 mm near the tripod, so a sphere sized for the
@@ -132,13 +132,13 @@ _CORR_PER_VOXEL = 3.0
 # returns is noise. Since keeping the far field is the entire point of the
 # uniform sampling above, that is the worst place to be degenerate -- measured,
 # it put scan 4 of the UC Davis set 10.2 cm out against 1.3 cm with a count.
-# A count adapts: 30 neighbours span millimetres in the near field and metres
+# A count adapts: 30 neighbors span millimeters in the near field and meters
 # in the far one, and describe a surface in both.
-_COVARIANCE_NEIGHBOURS = 30
+_COVARIANCE_NEIGHBORS = 30
 
-# The finest voxel, as a multiple of the cloud's median nearest-neighbour
+# The finest voxel, as a multiple of the cloud's median nearest-neighbor
 # spacing. Below ~4x a voxel holds one point on average, so downsampling stops
-# equalising density and just deletes returns.
+# equalizing density and just deletes returns.
 _FINEST_PER_SPACING = 4.0
 
 # Bounds on the finest voxel GUESS. The floor keeps a dense close-range scan
@@ -186,7 +186,7 @@ _MAX_LEVELS = 6
 # RMSE plateau, and a level that needs fewer takes fewer.
 _MAX_ITERATIONS_PER_LEVEL = 5
 
-# A level stops when its RMSE improves by less than this, in metres. Absolute
+# A level stops when its RMSE improves by less than this, in meters. Absolute
 # rather than relative because what matters is whether the remaining motion is
 # below the accuracy the level can resolve at all.
 _RMSE_PLATEAU_M = 1e-6
@@ -198,7 +198,7 @@ _RMSE_PLATEAU_M = 1e-6
 # `InitializePointCloudForGeneralizedICP` -- but ONLY to covariances it
 # computed, and it computes them only when the cloud has none.
 #
-# So supplying raw covariances does not merely skip an optimisation, it hands
+# So supplying raw covariances does not merely skip an optimization, it hands
 # the estimator a matrix of the wrong shape, and it fails SILENTLY: measured on
 # a small synthetic pair, raw covariances gave fitness 0.0 (no correspondences
 # at all, no error raised, the pose returned unchanged) where letting Open3D
@@ -263,16 +263,16 @@ _ITERATION_BATCH = _MAX_ITERATIONS_PER_LEVEL
 # Re-balancing the gate across normal-orientation buckets removed the blowups
 # but still scored WORSE than not gating at all (2.9 cm median against 1.7 cm).
 #
-# So the density equalisation above is the whole of the selection here. Do not
+# So the density equalization above is the whole of the selection here. Do not
 # re-add a planarity gate without measuring the horizontal error specifically;
 # a global RMSE hides this failure completely.
 
 
 # Above this many points `median_spacing` measures a SPATIAL subset -- whole
 # 0.5 m columns, one in `_SPACING_BLOCK_KEEP` -- instead of building a tree over
-# the entire cloud. A nearest neighbour lies millimetres away, so keeping whole
-# columns keeps every probe's true neighbour except within a spacing of a
-# column wall; a RANDOM subset would not, since it thins the very neighbours
+# the entire cloud. A nearest neighbor lies millimeters away, so keeping whole
+# columns keeps every probe's true neighbor except within a spacing of a
+# column wall; a RANDOM subset would not, since it thins the very neighbors
 # being measured. Many small columns rather than a few large ones, because
 # density varies with range: 2 m columns / 1-in-8 missed the full-cloud
 # median by up to 18% on real scans, 0.5 m / 1-in-4 by 2-3%. The full tree was
@@ -294,12 +294,12 @@ def _block_subset(points: np.ndarray) -> np.ndarray:
 
 
 def median_spacing(points: np.ndarray, sample: int = 20000) -> Optional[float]:
-    """Median nearest-neighbour distance, sampled. None when unmeasurable.
+    """Median nearest-neighbor distance, sampled. None when unmeasurable.
 
     The tree is built with `compact_nodes=False, balanced_tree=False` and a
     large leaf. Those switch cKDTree's construction from median-splitting to
     midpoint-splitting; the tree stays EXACT, so every query returns the same
-    neighbour, and on a 10 M-point scan the build drops from 4.2 s to 0.9 s
+    neighbor, and on a 10 M-point scan the build drops from 4.2 s to 0.9 s
     (verified bit-identical, 2.4495 mm either way). It is the right trade here
     because the build is paid once for only `sample` queries -- the balanced
     tree's advantage is query speed, which this never spends.
@@ -477,7 +477,7 @@ def trim_to_anchor(points: np.ndarray, voxel: float,
 def plan_levels(finest: float, pull_in: float) -> List[Tuple[float, float]]:
     """(voxel, correspondence distance), coarse -> fine.
 
-    `pull_in` is how far the initial pose may be wrong, in metres: the coarsest
+    `pull_in` is how far the initial pose may be wrong, in meters: the coarsest
     level's window is at least that, so the first pass can still reach the true
     partner. The ladder then halves the voxel down to `finest`, which should be
     the WIDEST voxel among the clouds involved -- a level finer than the
@@ -553,7 +553,7 @@ class Pyramid:
         # cheaper and self-consistent.
         current = o3d.geometry.PointCloud()
         current.points = o3d.utility.Vector3dVector(pts)
-        # The finest level is voxelised even when `points` is already a working
+        # The finest level is voxelized even when `points` is already a working
         # copy on that same grid, which looks like a 1.1 s no-op. It is not
         # quite one -- `voxel_down_sample` returns cell CENTROIDS, so a second
         # pass shifts points slightly and merges a few (1,765,169 -> 1,765,146
@@ -581,7 +581,7 @@ class Pyramid:
             # for them once; the reference of a multi-scan set is in every pair,
             # and the estimator is re-entered once per iteration batch.
             level.estimate_normals(
-                o3d.geometry.KDTreeSearchParamKNN(_COVARIANCE_NEIGHBOURS))
+                o3d.geometry.KDTreeSearchParamKNN(_COVARIANCE_NEIGHBORS))
             level.covariances = o3d.utility.Matrix3dVector(
                 _plane_shaped(np.asarray(level.normals)))
             self._clouds.append(level)
@@ -619,7 +619,7 @@ def align(target: Pyramid, source: Pyramid,
 
     `progress`, when given, is called as `progress(level_index, level_count,
     voxel)` after each batch of iterations; raising from it (which is how
-    cancellation is signalled) aborts the run between batches.
+    cancellation is signaled) aborts the run between batches.
     """
     import open3d as o3d
 
@@ -813,9 +813,9 @@ class PyramidFeed:
 #     peach 0.77/1.25 cm -- a dense voxel of trunk or branch constrains the fit
 #     usefully even when it is not flat.
 #   * no inheritance (thin -> isotropic): UC Davis 2.17 cm.
-#   * pool a thin voxel's 3x3x3 neighbourhood (a centred k-NN analogue):
+#   * pool a thin voxel's 3x3x3 neighborhood (a centered k-NN analog):
 #     UC Davis 1.61 cm, peach 0.79/0.98 cm, and 2.4x slower.
-#   * each voxel's real covariance shape (normalised, eps-floored) in place of
+#   * each voxel's real covariance shape (normalized, eps-floored) in place of
 #     a plane: UC Davis 2.06 cm, peach unchanged.
 
 # Raw returns a voxel needs before its own covariance is trusted as a plane.
@@ -923,7 +923,7 @@ def _smallest_eigen(cov6: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     1/3 for an isotropic blob.
 
     Closed form (trigonometric eigenvalues, then the largest cross product of
-    two rows of C - lambda*I), vectorised: batched `numpy.linalg.eigh` was
+    two rows of C - lambda*I), vectorized: batched `numpy.linalg.eigh` was
     measured at 3.1 s per level on a real scan. The vector's sign is
     arbitrary, which `_plane_shaped` does not see. Degenerate inputs come back
     as +z with variation 1/3; callers decide trust from the point count.

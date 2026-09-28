@@ -12,7 +12,7 @@ import { resetToFreshScene } from './helpers/resetApp';
 // E57 export -> import round trip, through the real UI both ways.
 //
 // The property under test is the one that used to be broken: our E57 writer
-// emitted x/y/z + intensity + colour and nothing else, so an exported miss was
+// emitted x/y/z + intensity + color and nothing else, so an exported miss was
 // an ordinary point parked ~1 km out with NOTHING marking it. Re-importing our
 // own export therefore read the whole miss shell as genuine returns — the
 // extent-inflation failure CLAUDE.md warns about. The writer now marks misses
@@ -22,7 +22,7 @@ import { resetToFreshScene } from './helpers/resetApp';
 // A file count proves none of that, so this spec reads the bytes it wrote. An
 // E57 carries a plain-text XML section naming every per-point field it stores,
 // which is exactly where the difference shows: the old writer's file lists only
-// cartesianX/Y/Z (+ colour/intensity), the new one also lists
+// cartesianX/Y/Z (+ color/intensity), the new one also lists
 // cartesianInvalidState and rowIndex/columnIndex. The file is then re-imported
 // through the real UI to confirm it still loads as a scan.
 //

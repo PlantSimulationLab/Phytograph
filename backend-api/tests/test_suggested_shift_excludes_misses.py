@@ -6,7 +6,7 @@ suggester used to read those header mins directly, which on a real RIEGL
 vineyard scan (`grapex_unregistered_ScanPos001.laz`: hits within ~500 m of the
 origin, misses out to +/-20 km) suggested a shift of about (-20018, -20000).
 Ticking "apply the suggested offset" then SUBTRACTED 20 km from a cloud that was
-already centred on the origin, teleporting it to (+19997, +20001) -- which reads
+already centered on the origin, teleporting it to (+19997, +20001) -- which reads
 to the user as "the offset was not applied" when in fact it was applied
 faithfully to a nonsense value.
 

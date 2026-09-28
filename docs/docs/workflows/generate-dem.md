@@ -26,7 +26,7 @@ a single click):
 ### Terrain layers (density, intensity, hillshade, slope, aspect)
 
 A generated **Terrain (DTM)** doesn't just carry elevation — it comes with a set of
-**scalar layers** you colour the same surface by and export individually. No
+**scalar layers** you color the same surface by and export individually. No
 checkboxes and no extra runs: the layers are computed automatically with the DTM.
 Expand the DTM in the **Meshes** panel and pick a band from **Color by**:
 
@@ -64,11 +64,11 @@ you write any subset of these layers to `.asc` / GeoTIFF.
     - **Cell size (m)** — the horizontal resolution of the grid. Smaller
       resolves finer terrain but runs slower and leaves more gaps where the
       ground is sparsely sampled; larger is coarser and smoother. It's seeded
-      from the cloud's extent each time the panel opens — a few centimetres for a
+      from the cloud's extent each time the panel opens — a few centimeters for a
       close-range scan, larger for a field-scale tile.
     - **Interpolation** — how elevation is filled between ground points. **TIN
       (linear)** builds a triangulated surface through the ground returns; it's
-      the most faithful and the default. **IDW** smooths across neighbours.
+      the most faithful and the default. **IDW** smooths across neighbors.
       **Nearest** snaps each cell to the closest ground point (blocky but
       gap-free).
     - **Fill data gaps** — off by default, so cells with no ground return stay
@@ -81,7 +81,7 @@ you write any subset of these layers to `.asc` / GeoTIFF.
       rotated survey tile).
     - **Compute height above ground** (Terrain/DTM only) — also subtract the DEM
       from each point to add a `height_above_ground` scalar to the cloud (a
-      per-point canopy-height precursor). Off by default. For a *rasterised*
+      per-point canopy-height precursor). Off by default. For a *rasterized*
       canopy height model, use the **Canopy height (CHM)** surface instead.
 6. Click the run button. Its label follows your selection: **Generate DEM**,
    **Generate DSM**, or **Generate CHM** for a single surface, or
@@ -108,15 +108,15 @@ first-pass pit-fill so isolated within-canopy dips don't read as holes.
 ## Inspect and use the result
 
 The surface appears as a new **surface mesh** in the scene, named `… DEM`,
-`… DSM`, or `… CHM`, coloured by **elevation** (for a CHM, that gradient reads as
-canopy height). Like any mesh you can change its colour mode, opacity, and
+`… DSM`, or `… CHM`, colored by **elevation** (for a CHM, that gradient reads as
+canopy height). Like any mesh you can change its color mode, opacity, and
 transform from the **Meshes** panel, and hide or delete it. A **DTM** additionally
 lets you switch its **Color by** dropdown between the terrain
 [layers](#terrain-layers-density-intensity-hillshade-slope-aspect) — the same
-mesh recolours by density, intensity, hillshade, and so on.
+mesh recolors by density, intensity, hillshade, and so on.
 
 If you built a DTM with **Compute height above ground** ticked, the source cloud
-gains a continuous `height_above_ground` attribute and recolours by it (a
+gains a continuous `height_above_ground` attribute and recolors by it (a
 gradient with a numeric colorbar). Switch back to it any time from the **Color
 by** picker.
 

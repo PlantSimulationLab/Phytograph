@@ -19,13 +19,13 @@ export function LabelBrushCursor({
   color,
   displayOffset,
 }: {
-  /** World-space centre of the brush. */
+  /** World-space center of the brush. */
   center: THREE.Vector3;
   /** World-space radius, already converted from the on-screen pixel size. */
   radius: number;
   /** True while the button is held — the cursor fills in to confirm painting. */
   painting: boolean;
-  /** The active class colour, so the cursor shows WHAT it will paint. */
+  /** The active class color, so the cursor shows WHAT it will paint. */
   color: string;
   displayOffset?: { x: number; y: number; z: number };
 }) {

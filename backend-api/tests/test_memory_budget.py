@@ -2,7 +2,7 @@
 
 `memory_budget` is what every large-cloud threshold in the backend derives
 from, so its contract is pinned here: the budget is a fraction of physical RAM
-unless pinned by env, admission serialises jobs whose working sets do not fit
+unless pinned by env, admission serializes jobs whose working sets do not fit
 together, and a job larger than the whole budget is admitted alone rather than
 refused (refusing is the cost advisory's job, before any work starts).
 """
@@ -106,7 +106,7 @@ def test_estimate_session_bytes_counts_every_array_it_holds():
     assert mb.estimate_session_bytes(Sess()) == 24000 + 6000 + 1000 + 2000 + 4000 + 240
 
 
-def test_admission_serialises_jobs_that_do_not_fit_together():
+def test_admission_serializes_jobs_that_do_not_fit_together():
     logs = []
     adm = mb.Admission(lambda: 100, log=logs.append, log_after_s=0.05)
     order = []
@@ -186,7 +186,7 @@ def test_admission_budget_is_capped_by_available_memory(monkeypatch):
     )
 
 
-def test_admission_budget_never_starves_and_honours_a_pin(monkeypatch):
+def test_admission_budget_never_starves_and_honors_a_pin(monkeypatch):
     monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_FRACTION", raising=False)
     monkeypatch.setattr(mb, "physical_ram_bytes", lambda: 16 * mb.GiB)
     # Almost nothing free: floored, so work still proceeds one job at a time
@@ -197,7 +197,7 @@ def test_admission_budget_never_starves_and_honours_a_pin(monkeypatch):
     # Unmeasurable availability degrades to the plain budget, never to the floor.
     monkeypatch.setattr(mb, "available_bytes", lambda: 0)
     assert mb.admission_budget_bytes() == 8 * mb.GiB
-    # A PINNED budget is honoured exactly: the user named a number, and quietly
+    # A PINNED budget is honored exactly: the user named a number, and quietly
     # admitting less would make the Settings field a lie.
     monkeypatch.setenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", str(6 * mb.GiB))
     monkeypatch.setattr(mb, "available_bytes", lambda: 1 * mb.GiB)

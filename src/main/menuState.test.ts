@@ -1,7 +1,7 @@
 // Enablement of scene-dependent native menu items.
 //
 // The native menu is built in the MAIN process and cannot see renderer state,
-// so anything that greys out on a scene condition ("Reset Registration" is dead
+// so anything that grays out on a scene condition ("Reset Registration" is dead
 // unless something has been registered) depends on the renderer pushing that
 // state over IPC and applyMenuState landing it on the right MenuItem. E2E can't
 // cover this: the suite installs an inert chrome (Menu.setApplicationMenu(null))
@@ -60,7 +60,7 @@ describe('applyMenuState', () => {
   });
 
   it('leaves unreported items alone', () => {
-    // The safe default: a wrongly-greyed item is unreachable with no
+    // The safe default: a wrongly-grayed item is unreachable with no
     // explanation, whereas a wrongly-enabled one still runs and reports.
     applyMenuState({ enabled: { 'cloud-unregister': false } });
     expect(items.get('cloud-auto-register')!.enabled).toBe(true);

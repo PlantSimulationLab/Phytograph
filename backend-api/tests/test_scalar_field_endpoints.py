@@ -168,10 +168,10 @@ def test_restored_points_keep_their_derived_value(client, sess):
 
 def test_aggregates_are_measured_over_visible_points_only(client, sess):
     """`mean(z)` inside a formula must equal the mean the Stats tab shows."""
-    res = compute(client, sess, "z - mean(z)", "centred")
+    res = compute(client, sess, "z - mean(z)", "centered")
     assert res.status_code == 200, res.text
     # Visible mean of z is 2.5 (see test_stats_exclude_misses_and_deleted_points).
-    assert sess.extras["centred"][0] == pytest.approx(-2.5)
+    assert sess.extras["centered"][0] == pytest.approx(-2.5)
 
 
 def test_compute_returns_stats_for_the_new_field(client, sess):
@@ -571,13 +571,13 @@ def test_pooled_label_comes_from_the_first_session_carrying_the_field(
 
 @pytest.mark.parametrize("name", ["GPS_Time", "Reflectance[dB]", "target-index",
                                   "Scan Row", "x", "Return  Number", "col_5"])
-def test_slug_alias_check_normalises_exactly_like_import(name):
+def test_slug_alias_check_normalizes_exactly_like_import(name):
     """The alias guard in scalar_fields and the importer in main each fold a
     name to its comparison form. If the two ever drift, a name the guard lets
     through is re-resolved on import — the exact collision the guard exists to
     prevent — so they are pinned to agree."""
     import scalar_fields
-    assert scalar_fields.normalise_column_name(name) == main._normalise_column_name(name)
+    assert scalar_fields.normalize_column_name(name) == main._normalize_column_name(name)
 
 
 def test_rename_to_reflectance_is_allowed(client, sess):

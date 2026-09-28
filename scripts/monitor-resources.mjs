@@ -368,7 +368,7 @@ function summarizePerSpec() {
 
   // Per spec FILE, not per test: two workers overlap, so a sample is credited
   // to every spec in flight at that instant. Concurrency is reported alongside
-  // so a spec that only ever ran next to a heavy neighbour is obvious.
+  // so a spec that only ever ran next to a heavy neighbor is obvious.
   const spans = events.filter((e) => e.type === 'test' && e.start && e.end);
   const byFile = new Map();
   for (const s of spans) {

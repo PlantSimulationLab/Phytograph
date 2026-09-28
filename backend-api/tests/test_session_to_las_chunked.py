@@ -1,6 +1,6 @@
 """Chunked LAS-writer correctness for `_session_to_las` / `_miss_positions_to_las`.
 
-Both writers were changed from materialising ONE laspy record for all N points
+Both writers were changed from materializing ONE laspy record for all N points
 to writing in `_LAS_WRITE_CHUNK`-row blocks (caps the transient record to one
 block instead of the whole cloud — the synthetic-scan memory blow-up). These
 tests force a TINY chunk size so a small fixture spans several blocks plus a
@@ -120,7 +120,7 @@ def test_session_to_las_writes_gps_time(tmp_path, monkeypatch, n, chunk):
 
     That is not a silent cosmetic loss: PotreeConverter then reports an all-zero
     range for `gps-time`, and the renderer's degenerate-range filter drops such a
-    column from the export picker and the colour-by list on purpose (it is how a
+    column from the export picker and the color-by list on purpose (it is how a
     bare XYZ import avoids advertising a fake all-zero `classification`). So a
     RIEGL scan's real timestamps were carried all the way to the LAS and then
     discarded downstream as if they had never existed — and `timestamp` is also

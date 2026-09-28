@@ -68,9 +68,9 @@ count.
 
     Statistics cover the points that are **visible and are real returns** —
     hidden points and sky/miss points are excluded. That is the same population
-    the colour scale uses, so the numbers always agree with the legend beside
+    the color scale uses, so the numbers always agree with the legend beside
     them. A sky/miss point is a laser pulse that hit nothing, recorded about a
-    kilometre out along the beam; including those would make a mean or a
+    kilometer out along the beam; including those would make a mean or a
     histogram meaningless.
 
     The panel says so under the table whenever the two counts differ.
@@ -132,7 +132,7 @@ so `z - height_above_ground` never mixes frames.
 | Constants | `pi` `e` `nan` `inf` |
 
 A comparison produces 1 where it holds and 0 where it does not, so
-`ifelse(curvature > 0.1, 1, 2)` builds a two-class column you can then colour
+`ifelse(curvature > 0.1, 1, 2)` builds a two-class column you can then color
 by or filter on.
 
 ### Whole-field values
@@ -155,14 +155,14 @@ reports, so `mean(intensity)` is the mean you can see there.
 
 Dividing by zero or taking the log of a negative gives infinity or NaN rather
 than failing the whole field. Phytograph counts them, says so in the toast, and
-excludes them from the statistics. They are also excluded from the colour scale,
+excludes them from the statistics. They are also excluded from the color scale,
 so those points render at the end of the ramp.
 
 ## Rename, duplicate and delete
 
 The **Fields** tab lists every field on the cloud. Hover a row for its menu:
 
-- **Rename** — the field keeps its values, and the viewer keeps colouring by it.
+- **Rename** — the field keeps its values, and the viewer keeps coloring by it.
   Type the name you want to see; it appears as typed in this list, the
   **Color by** picker and the Scans panel. Formulas need a plain identifier, so
   a name like `Height [m]` is used in formulas as `Height_m`, and the box shows
@@ -172,7 +172,7 @@ The **Fields** tab lists every field on the cloud. Hover a row for its menu:
 
 Some fields are marked **locked** and have no menu. Other tools read those by
 name — `is_miss` is what leaf area density uses to know which pulses returned
-nothing, and the class columns are what the segmentation tools and the colour
+nothing, and the class columns are what the segmentation tools and the color
 palettes look for — so renaming or removing one would quietly break them.
 `x`, `y`, `z` and `intensity` are marked **built-in**: you can use them in a
 formula, but they are not columns to be renamed.
@@ -198,7 +198,7 @@ Field names are limited to letters, digits and underscores, and must start with
 a letter or underscore, because the name has to survive as a LAS dimension name
 and an ASCII column header. Phytograph also refuses a name that import would
 read back as a different column — `time`, `elevation`, `row`, `target_index` and
-similar, in any capitalisation — since a field called `Time` would come back as
+similar, in any capitalization — since a field called `Time` would come back as
 the GPS time column. `reflectance` is the exception: naming a column that says
 what it is, and a round trip reads it back as the cloud's reflectance.
 
@@ -206,7 +206,7 @@ what it is, and a round trip reads it back as the cloud's reflectance.
 
 On a cloud over about 5 million points the new column is written immediately but
 the display catches up in the background: the field is usable for export, for
-another formula and for every other tool right away, while the recolouring
+another formula and for every other tool right away, while the recoloring
 finishes shortly after.
 
 Rename and delete are instant at any size: they change only the field's name in

@@ -15,7 +15,7 @@
 # position takes ~50 s end to end -- ~4 s metadata, ~14 s decode, the rest miss
 # recovery and writing ~1.2 GB of columns to the transport directory.
 #
-# RIVLIB IS NEVER BAKED IN. Its licence reads:
+# RIVLIB IS NEVER BAKED IN. Its license reads:
 #
 #     "You may NOT distribute or modify the software for the use in commercial
 #      applications without the written consent of RLMS."
@@ -23,7 +23,7 @@
 # so the library is bind-mounted read-only at run time from a copy the user
 # downloaded themselves with their own RIEGL account. There is no COPY of it
 # here, this image is safe to rebuild and (if it ever mattered) to publish, and
-# `docker history` will never show licensed bytes. Do not "optimise" this by
+# `docker history` will never show licensed bytes. Do not "optimize" this by
 # vendoring the .so.
 #
 # BASE IMAGE IS PINNED TO THE ABI, NOT TO TASTE. RiVLib is distributed per
@@ -56,7 +56,7 @@ RUN pip install --no-cache-dir numpy==2.2.1 laspy==2.5.4
 # g++ compiles rxp_shim.cpp, which reads the NO-RETURN shots that the plain C
 # scanifc API cannot see (see the shim's header comment). It cannot be compiled
 # at image-build time because it links against libscanifc.so, and that library
-# is bind-mounted at RUN time — its licence forbids us baking it in. So the
+# is bind-mounted at RUN time — its license forbids us baking it in. So the
 # toolchain ships and the shim is built on first use, into /tmp inside the
 # container. It is ~90 KB of source and compiles in about a second.
 #
@@ -82,7 +82,7 @@ COPY rxp_reader.py /opt/riegl/rxp_reader.py
 # rather than in a lump when the process exits.
 ENV PYTHONUNBUFFERED=1
 
-# THIS reader is the containerised one. The reader also runs natively now
+# THIS reader is the containerized one. The reader also runs natively now
 # (Windows, and Linux), and two of its decisions differ between the two while
 # sys.platform cannot tell them apart -- the container and a native Linux host
 # are both "linux". Namely: the built shim is cached in a throwaway /tmp here

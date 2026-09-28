@@ -24,7 +24,7 @@ import { createLucideIcon } from 'lucide-react';
 // also distinguishes it in a toolbar row that is otherwise all outlines.
 //
 // Rejected, each judged by rendering at 12/14/16/20/24 px next to the real
-// neighbouring toolbar icons rather than by eye:
+// neighboring toolbar icons rather than by eye:
 //   - a leaf with a petiole/stalk: reads unmistakably as a PAINTBRUSH, and
 //     collides with `Brush` (Label Points) two slots away
 //   - leaf left + branch right: the pair reads as the letters "q Y"
@@ -55,7 +55,7 @@ import { createLucideIcon } from 'lucide-react';
 //   - dashed cut:  x=12, two 4-unit dashes at y=5.5 and 14.5
 //   - leaf blade:  a filled cubic almond, tip (21.2,3.4) -> base (14.4,20.4),
 //                  half width 3.8 at 22%/70% along the axis (asymmetric, so it
-//                  is widest below centre like a real blade, not an oval)
+//                  is widest below center like a real blade, not an oval)
 //
 // Two clearances are load-bearing and must be re-measured if any endpoint
 // moves, because both fail silently — the mark just looks wrong at small sizes:

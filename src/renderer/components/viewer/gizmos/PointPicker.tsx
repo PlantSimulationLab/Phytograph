@@ -154,12 +154,12 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       delete values.pointCloud;
       delete values.position;
       // potree stores any attribute wider than a float32 (the double `gps-time`)
-      // pre-normalised to 0..1 in the GPU buffer, and its picker reads that
+      // pre-normalized to 0..1 in the GPU buffer, and its picker reads that
       // buffer back verbatim — so a timestamp of 105 arrived here as 0.033898.
       // Map wide entries back onto their real range before anything formats
       // them (see lib/octreeWideAttributes.ts).
       denormalizeWideAttributes(owner.octree, values);
-      // Undo the scalar-colour alias: while `colorMode === 'scalar'` the tile's
+      // Undo the scalar-color alias: while `colorMode === 'scalar'` the tile's
       // `intensity` slot points at the selected scalar's buffer, so the pick's
       // `intensity` would be that scalar's value under the wrong name. The real
       // buffer was stashed alongside it (see OctreePointCloud), and the aliased
@@ -181,8 +181,8 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
     // a foreground twig could return a trunk far behind it, purely because the
     // trunk's splat covered a pixel one step closer to the cursor.
     //
-    // The centre probe is a CANDIDATE, not a short-circuit. Returning early on
-    // it was the obvious optimisation and it is wrong: potree's centre probe
+    // The center probe is a CANDIDATE, not a short-circuit. Returning early on
+    // it was the obvious optimization and it is wrong: potree's center probe
     // has already searched its own 13 px window by 2D distance, so a click that
     // misses the foreground can come back holding the background — the exact
     // hit this function exists to overrule. It has to be ranked against the
@@ -206,7 +206,7 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       const probeRay = new THREE.Raycaster();
       const ndc = new THREE.Vector2();
 
-      for (const off of offsets.slice(1)) { // centre already probed by the caller
+      for (const off of offsets.slice(1)) { // center already probed by the caller
         const x = clientX + off.dx;
         const y = clientY + off.dy;
         // A probe pushed outside the canvas would clamp back onto the edge and
@@ -268,7 +268,7 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
         // three.js tests this threshold as a world-space radius around the ray
         // and, under a perspective camera, applies it UNSCALED at every depth.
         // So the distance it is sized from decides which part of the cloud is
-        // clickable. Sizing it from the bounding-sphere CENTRE — as this did —
+        // clickable. Sizing it from the bounding-sphere CENTER — as this did —
         // is wrong for any cloud that is deep along the view axis: a 100 m scan
         // viewed end-on got a tolerance computed for its midpoint, leaving the
         // near half under-tolerant (too tight to click) and the far half
@@ -286,7 +286,7 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
         let dist: number;
         if (sphere) {
           center.copy(sphere.center).applyMatrix4(target.matrixWorld);
-          // Radius has to travel through the same matrix as the centre: a
+          // Radius has to travel through the same matrix as the center: a
           // scaled cloud's world-space radius is not its local one.
           dist = nearSurfaceDistance(
             camera.position.distanceTo(center),
@@ -381,7 +381,7 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
     const handlePointerUp = (e: PointerEvent) => {
       if (e.button !== 0 || !pressRef.active) return;
       pressRef.active = false;
-      // Drag guard: a press that travelled was an orbit, not a pick.
+      // Drag guard: a press that traveled was an orbit, not a pick.
       if (Math.hypot(e.clientX - pressRef.x, e.clientY - pressRef.y) > DRAG_SLOP_PX) return;
       doPick(e.clientX, e.clientY);
     };

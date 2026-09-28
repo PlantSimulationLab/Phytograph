@@ -27,7 +27,7 @@ Layout of a store directory:
     columns/<name>.npy        one array per column, first axis == n
 
 Column names are restricted to `[A-Za-z0-9_.-]` so a slug from a file can
-never escape the directory. Attributes (`attrs`) are small JSON-serialisable
+never escape the directory. Attributes (`attrs`) are small JSON-serializable
 values - world shift, provenance, edit generation - never per-point data.
 """
 from __future__ import annotations

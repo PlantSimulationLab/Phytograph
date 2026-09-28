@@ -3,7 +3,7 @@
 // A LiDAR trajectory (or scan) imported in a projected CRS carries huge absolute
 // coordinates — e.g. UTM easting/northing in the 10^5–10^6 range. When the scene
 // already holds origin-based geometry (a ground plane at 0,0,0), the two are
-// millions of metres apart: the viewport auto-fits to the union bounding box and
+// millions of meters apart: the viewport auto-fits to the union bounding box and
 // everything collapses to sub-pixel size ("auto-fits to nothing"). This module
 // holds the pure math that (a) decides whether the new entity is in a
 // disagreeing frame and (b) computes the shift that would move it onto the
@@ -37,7 +37,7 @@ export interface ExistingContent {
   diagonal: number;
 }
 
-// Absolute distance (metres) past which a new entity is "far" regardless of the
+// Absolute distance (meters) past which a new entity is "far" regardless of the
 // existing content's own size. Mirrors computeDisplayOffset's threshold in
 // pointCloudHelpers.ts (the point at which the renderer already treats coords as
 // far from the origin): a projected/UTM cloud is well past this.
@@ -48,7 +48,7 @@ export const FRAME_MISMATCH_ABS_THRESHOLD = 1e4;
 // scans side-by-side in a plot span a few diagonals at most) without
 // false-positiving on a legitimately large scene, while the abs threshold above
 // still catches a small scene (a 25×25 m plane, diag≈35 → K·diag≈350) against a
-// millions-of-metres offset.
+// millions-of-meters offset.
 export const FRAME_MISMATCH_K = 10;
 
 // Decide whether `newAnchor` sits in a coordinate frame that disagrees with the

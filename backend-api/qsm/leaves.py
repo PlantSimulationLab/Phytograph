@@ -471,7 +471,7 @@ def build_leaf_obj_geometry(placements: List[LeafPlacement], template: dict) -> 
     # Reorder so the long axis maps to +x (tip), matching the canonical leaf frame.
     # Build a permutation putting long_axis first. An odd permutation mirrors the
     # mesh (flipping handedness), so negate the last axis to keep it a proper
-    # rotation -- otherwise an uploaded leaf modelled along Y/Z would come out
+    # rotation -- otherwise an uploaded leaf modeled along Y/Z would come out
     # mirrored. (For the canonical Helios assets long_axis==0 -> identity.)
     order = [long_axis] + [a for a in (0, 1, 2) if a != long_axis]
     perm = np.array(order)

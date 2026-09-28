@@ -9,7 +9,7 @@ has been edited since.
 
 Two modes:
 
-- ``connected``: connected components of the occupied voxels (26-neighbour).
+- ``connected``: connected components of the occupied voxels (26-neighbor).
   `size` is the voxel edge, so it is the widest gap still bridged.
 - ``pieces``: compact supervoxels about `size` across. Voxels are a quarter of
   that (never finer than twice the point spacing, or the voxels themselves
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# 13 of the 26 neighbour offsets: every undirected edge is found exactly once.
+# 13 of the 26 neighbor offsets: every undirected edge is found exactly once.
 _HALF_OFFSETS = np.array(
     [(dx, dy, dz)
      for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
@@ -57,7 +57,7 @@ def _pack(keys: np.ndarray, dims: np.ndarray) -> np.ndarray:
 
 
 def median_spacing(points: np.ndarray, sample: int = 5000) -> float:
-    """Median nearest-neighbour distance, from an even sample, corrected to the
+    """Median nearest-neighbor distance, from an even sample, corrected to the
     full density (sampling thins the cloud, which stretches the spacing)."""
     from scipy.spatial import cKDTree
     n = points.shape[0]
@@ -73,7 +73,7 @@ def median_spacing(points: np.ndarray, sample: int = 5000) -> float:
 
 
 def _voxel_edges(codes: np.ndarray, keys: np.ndarray, dims: np.ndarray):
-    """Undirected 26-neighbour edges between occupied voxels, i < j by index."""
+    """Undirected 26-neighbor edges between occupied voxels, i < j by index."""
     ii, jj = [], []
     for off in _HALF_OFFSETS:
         nb = keys + off
@@ -106,7 +106,7 @@ def segment(points: np.ndarray, size: float, mode: str) -> Segmentation:
     voxel = size if mode == "connected" else max(size / 4.0, 2.0 * median_spacing(points))
     origin = points.min(axis=0)
     ijk = np.floor((points - origin) / voxel).astype(np.int64)
-    dims = ijk.max(axis=0) + 2   # +1 headroom so a +1 neighbour never wraps
+    dims = ijk.max(axis=0) + 2   # +1 headroom so a +1 neighbor never wraps
     codes_all = _pack(ijk, dims)
     codes, inverse, counts = np.unique(codes_all, return_inverse=True, return_counts=True)
     keys = np.stack(np.unravel_index(codes, tuple(int(d) for d in dims)), axis=1).astype(np.int64)

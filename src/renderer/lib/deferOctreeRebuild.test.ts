@@ -5,7 +5,7 @@
  * Three copies of one policy is a policy that drifts: changing the trade meant
  * finding all three, and nothing would have failed if one had been missed. The
  * source-level test at the bottom is the part that actually prevents the drift
- * coming back -- the unit tests below only pin the function's behaviour, and a
+ * coming back -- the unit tests below only pin the function's behavior, and a
  * fourth inlined copy would pass them all.
  */
 import { describe, expect, it } from 'vitest';
@@ -31,7 +31,7 @@ describe('shouldDeferOctreeRebuild', () => {
   });
 
   it('does not defer when the point count is unknown', () => {
-    // Deferring hides the recolour behind the refresh queue. Doing that to a
+    // Deferring hides the recolor behind the refresh queue. Doing that to a
     // cloud that might be small trades a visible wait for an invisible one, so
     // an absent count must fall back to NOT deferring.
     expect(shouldDeferOctreeRebuild(null)).toBe(false);

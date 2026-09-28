@@ -163,7 +163,7 @@ describe('groundSegmentDefaultsForExtent', () => {
     });
 
     it('does NOT call a small sparse cloud airborne', () => {
-      // Spacing alone is not enough: 3D nearest-neighbour distance measures
+      // Spacing alone is not enough: 3D nearest-neighbor distance measures
       // spatial separation, so a volume-filling cloud reads far sparser than a
       // surface scan of the same size — 2000 points in a 5 m cube measure
       // 0.219 m, past the spacing cutoff. A 0.75 m cloth on a 5 m cloud would

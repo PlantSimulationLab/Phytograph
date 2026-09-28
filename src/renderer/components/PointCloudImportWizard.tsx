@@ -19,7 +19,7 @@ import {
   UNIT_LABELS,
   UNIT_ORDER,
   isLengthUnit,
-  metresPerUnit,
+  metersPerUnit,
   unitLabel,
   unitSummary,
   wouldConvert,
@@ -46,7 +46,7 @@ export interface WizardResult {
   asciiFormat: string | null;
   columnPlan: ColumnPlan | null;   // null → let the backend auto-detect
   categoricalSlugs: string[];
-  // Slugs the user forced to "Scalar" that would otherwise colour categorically
+  // Slugs the user forced to "Scalar" that would otherwise color categorically
   // by name (e.g. a Miss Flag downgraded to Scalar — it keeps the is_miss slug
   // for LAD, but the user wants a continuous gradient, not the Hit/Miss scheme).
   // App registers these as continuous overrides after import.
@@ -73,8 +73,8 @@ export interface WizardResult {
   // preview for large (e.g. UTM) clouds; the user can edit or disable it.
   worldShift: [number, number, number] | null;
   // The unit the SOURCE file's coordinates are in. The backend scales positions
-  // to metres at import using this, so it is a scale factor, not a label.
-  // Always set — 'm' when the format declared metres, when the user left the
+  // to meters at import using this, so it is a scale factor, not a label.
+  // Always set — 'm' when the format declared meters, when the user left the
   // default, or when nothing could be detected.
   units: LengthUnit;
   // Mobile-platform trajectory to attach to this scan, or null for a static
@@ -94,8 +94,8 @@ interface PointCloudImportWizardProps {
 // a named scalar field; 'skip' = drop. r/g/b scale is handled by a separate
 // per-scan toggle, so the dropdown only exposes the generic 'rgb' members.
 // 'extra' = a continuous scalar field (gradient); 'label' = a categorical
-// class field (discrete colours + legend). Both become an octree extra dim;
-// they differ only in how the renderer colours them. 'skip' = drop. RGB scale
+// class field (discrete colors + legend). Both become an octree extra dim;
+// they differ only in how the renderer colors them. 'skip' = drop. RGB scale
 // is handled by a separate per-scan toggle, so the dropdown exposes plain r/g/b.
 const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'x', label: 'X' },
@@ -123,7 +123,7 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // columns: the GPS/scan time of each return, its 1-based index within its pulse
 // (1st/2nd/… return), and the pulse's total return count. LAS auto-maps these
 // from return_number/number_of_returns/gps_time, but a header-less or oddly
-// labelled ASCII column won't auto-detect (the backend only recognises exact
+// labeled ASCII column won't auto-detect (the backend only recognizes exact
 // aliases like Timestamp/TargetIndex/ReturnNumber/NumberOfReturns), so these
 // dropdown roles let the user assign them explicitly. Like the grid/miss roles
 // they pass straight through buildColumnPlan as their own role token; the backend
@@ -143,8 +143,8 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // indicator that the laser returned nothing. Like the grid indices it passes
 // through as its own role token; the backend pins the canonical 'is_miss' slug
 // (regardless of the source spelling is_miss/miss/sky) so the LAD path and the
-// renderer's fixed Hit/Miss colour scheme find it by name. It is NOT a scalar
-// (no rename box) and NOT categorical-toggleable — the renderer always colours
+// renderer's fixed Hit/Miss color scheme find it by name. It is NOT a scalar
+// (no rename box) and NOT categorical-toggleable — the renderer always colors
 // it with the dedicated Hit/Miss scheme, so it's excluded from SCALAR_ROLES.
 //
 // 'origin_x'/'origin_y'/'origin_z' are the per-pulse beam-emission origin (the
@@ -180,7 +180,7 @@ const NAMED_CHANNEL_ROLES = new Set([
 // these fields are often dead weight (an all-zero is_miss on a hits-only
 // export) and forcing them into every import would be its own bug.
 const PROTECTED_SLUGS: Record<string, string> = {
-  is_miss: 'sky/miss handling — leaf-area density and the Hit/Miss colour scheme',
+  is_miss: 'sky/miss handling — leaf-area density and the Hit/Miss color scheme',
   row_index: 'structured-scan gap filling and miss recovery',
   column_index: 'structured-scan gap filling and miss recovery',
   timestamp: 'the trajectory join for moving-platform leaf-area density',
@@ -211,7 +211,7 @@ function canonicalSlugOf(col: ColumnConfig): string {
 // would be a lie: the user could tick it, type an offset, and nothing would
 // happen.
 //
-// A RIEGL raw project is scanner-local metres — each position sits at its own
+// A RIEGL raw project is scanner-local meters — each position sits at its own
 // origin, offset only by a centroid-anchored ENU prior — so coordinates are
 // always small and there is nothing to shift away. The extract endpoint has no
 // world_shift parameter at all, unlike create_cloud_session.
@@ -249,7 +249,7 @@ const EXCLUSIVE_ROLES = new Set([
 interface ColumnConfig {
   index: number;
   headerName: string | null;
-  role: string;            // one of ROLE_OPTIONS values (RGB normalised to r/g/b)
+  role: string;            // one of ROLE_OPTIONS values (RGB normalized to r/g/b)
   slug: string;            // editable for extra/label columns
   label: string;           // rename target
   typeHint: string;
@@ -272,7 +272,7 @@ interface ColumnConfig {
   // Untick the header's "Import" checkbox to drop the column. The two format
   // families need different machinery, so this flag drives both:
   //   - remappable (ASCII): unticking also sets role 'skip', which the backend
-  //     already honours positionally (a unique `skip:N` placeholder that the
+  //     already honors positionally (a unique `skip:N` placeholder that the
   //     pandas `usecols` filter drops). `prevRole` restores the role on re-tick.
   //   - in-file (LAS/PLY/E57/PTX): roles are fixed by the file, so the column
   //     travels in `droppedSlugs` instead and the backend filters it out of the
@@ -303,12 +303,12 @@ interface ScanConfig {
   // the same batch cannot overwrite their choice with the shared suggestion.
   shiftTouched?: boolean;
   // The length unit this scan's SOURCE coordinates are in. Positions are scaled
-  // to metres at import, so this decides the scale factor — and defaults to
-  // metres, which is exactly what every import implicitly assumed before units
+  // to meters at import, so this decides the scale factor — and defaults to
+  // meters, which is exactly what every import implicitly assumed before units
   // existed.
   //
   // Seeded from the preview's `detected_units`; when `unitsCertain` the format
-  // itself declared it (a LAS CRS, or E57/RIEGL which are metres by spec) and
+  // itself declared it (a LAS CRS, or E57/RIEGL which are meters by spec) and
   // the control states a fact rather than offering a guess.
   units: LengthUnit;
   unitsCertain: boolean;
@@ -326,10 +326,10 @@ interface ScanConfig {
   trajectoryError: string | null;
 }
 
-// Normalise a backend-detected role to the wizard's RGB convention: the backend
+// Normalize a backend-detected role to the wizard's RGB convention: the backend
 // reports r255/g255/b255, but the wizard models RGB scale with a single toggle
 // and the plain r/g/b roles.
-function normaliseRole(role: string): string {
+function normalizeRole(role: string): string {
   if (role === 'r255') return 'r';
   if (role === 'g255') return 'g';
   if (role === 'b255') return 'b';
@@ -337,10 +337,10 @@ function normaliseRole(role: string): string {
 }
 
 function configFromColumn(c: PreviewColumn): ColumnConfig {
-  let role = normaliseRole(c.detected_role);
-  // The backend reports an unrecognised ASCII column as 'skip', but auto-detect
+  let role = normalizeRole(c.detected_role);
+  // The backend reports an unrecognized ASCII column as 'skip', but auto-detect
   // import CARRIES it as a scalar field (it has a suggested slug). Default such
-  // columns to 'extra' so the wizard's no-edit behaviour matches the old
+  // columns to 'extra' so the wizard's no-edit behavior matches the old
   // auto-detect — otherwise a default import would silently drop scalars.
   if (role === 'skip' && c.remappable && c.suggested_slug) {
     role = 'extra';
@@ -351,13 +351,13 @@ function configFromColumn(c: PreviewColumn): ColumnConfig {
     // A column the backend reported as 'skip' and that was NOT promoted to a
     // carried scalar above has nothing to import, so it starts unticked. Every
     // other column starts ticked, keeping a no-edit import byte-identical to
-    // the old auto-detect behaviour — unless the preview explicitly asked for it
+    // the old auto-detect behavior — unless the preview explicitly asked for it
     // to start off (`import_by_default: false`, the RIEGL diagnostic scalars).
     // That flag only ever UNTICKS: a 'skip' column stays unticked regardless.
     imported: role !== 'skip' && c.import_by_default !== false,
     prevRole: null,
     // Default a carried scalar to 'extra' (continuous), never 'label', so a
-    // no-edit import matches the old auto-detect colouring — a field that used
+    // no-edit import matches the old auto-detect coloring — a field that used
     // to render as a gradient shouldn't silently become discrete. The type hint
     // instead suggests switching to 'Label' when the values look categorical.
     role,
@@ -396,7 +396,7 @@ function blankScanConfig(): ScanConfig {
     preview: null, loading: true, error: null, warning: null,
     columns: [], rgbIs255: true, autoOnly: false,
     shiftEnabled: false, shift: { x: 0, y: 0, z: 0 },
-    // Metres until a preview says otherwise: the same assumption every import
+    // Meters until a preview says otherwise: the same assumption every import
     // made implicitly before units existed, so an untouched workflow is
     // unchanged.
     units: DEFAULT_UNIT, unitsCertain: false,
@@ -455,7 +455,7 @@ function buildColumnPlan(cfg: ScanConfig): ColumnPlan | null {
 }
 
 // Slugs mapped to the 'Label' role for a scan — registered for categorical
-// (discrete) colouring after import. Unticked columns are excluded: they never
+// (discrete) coloring after import. Unticked columns are excluded: they never
 // reach the cloud, so registering a scheme for them would be dead state.
 function categoricalSlugs(cfg: ScanConfig): string[] {
   return cfg.columns
@@ -467,7 +467,7 @@ function categoricalSlugs(cfg: ScanConfig): string[] {
 // Slugs to drop on an IN-FILE format, where the file fixes the layout so the
 // positional ColumnPlan can't express the choice (buildColumnPlan returns null
 // for these scans entirely). ASCII skips are deliberately NOT included — they
-// travel as role 'skip' inside the plan, which the backend already honours.
+// travel as role 'skip' inside the plan, which the backend already honors.
 export function droppedSlugs(cfg: ScanConfig): string[] {
   return cfg.columns
     .filter((c) => !c.imported && !c.remappable)
@@ -484,7 +484,7 @@ export function droppedSlugs(cfg: ScanConfig): string[] {
 // byte-identical.
 //
 // `extra`/`label`/`skip` are not canonical roles: 'extra' and 'label' differ
-// only in how the renderer colours the field (and are already expressed by the
+// only in how the renderer colors the field (and are already expressed by the
 // rename box), and a dropped column travels in `droppedSlugs`.
 export function roleOverrides(cfg: ScanConfig): Record<string, string> {
   const out: Record<string, string> = {};
@@ -528,10 +528,10 @@ export function protectedDropWarnings(cfg: ScanConfig): string[] {
 
 // Slugs the user set to 'Scalar' (role 'extra') whose name carries a registered
 // categorical scheme (e.g. a Miss Flag → Scalar keeps slug 'is_miss'). These
-// would otherwise colour with the fixed by-name scheme (Hit/Miss), ignoring the
+// would otherwise color with the fixed by-name scheme (Hit/Miss), ignoring the
 // Scalar choice — so they're registered as continuous overrides after import to
 // force the gradient path. The backend still pins the canonical slug, so LAD is
-// unaffected; only the renderer's colouring changes.
+// unaffected; only the renderer's coloring changes.
 function continuousSlugs(cfg: ScanConfig): string[] {
   return cfg.columns
     .filter((c) => c.role === 'extra' && hasRegisteredScheme(c.slug))
@@ -594,8 +594,8 @@ export function propagateSettings(src: ScanConfig, target: ScanConfig): ScanConf
     shiftTouched: true,
     // Units are deliberately NOT carried when the target scan detected its
     // own. A unit is a property of the individual FILE — a batch can mix a
-    // metre LAS with a feet one — and a detected unit is a fact read from
-    // that file, so overwriting it with a neighbour's choice would rescale
+    // meter LAS with a feet one — and a detected unit is a fact read from
+    // that file, so overwriting it with a neighbor's choice would rescale
     // real data on the strength of a UI convenience. Scans that could not
     // detect one do inherit, which is the case apply-to-all is for: a
     // directory of unit-less ASCII exports that are all in the same unit.
@@ -641,7 +641,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   // Furthest scan the user has reached via Next. For a multi-scan import we only
   // enable the Import button once they've either stepped through every scan
   // (maxStepReached === last) or checked "apply to all" — otherwise it's too easy
-  // to import without realising the per-scan choices on later scans went unseen.
+  // to import without realizing the per-scan choices on later scans went unseen.
   const [maxStepReached, setMaxStepReached] = useState(0);
 
   const total = inputs.length;
@@ -655,12 +655,12 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   // Preview reads only a file header + a few rows, so N parallel previews stay
   // cheap. Runs once per `inputs` identity.
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
     inputs.forEach((input, i) => {
       (async () => {
         try {
           const preview = await previewPointCloud(input.path, input.asciiFormatHint ?? null);
-          if (cancelled) return;
+          if (canceled) return;
           const columns = dedupeExclusiveRoles(preview.columns.map(configFromColumn));
           // Seed the global shift from the backend's suggestion (present only for
           // large/UTM coords). Default Z to keep (0) — elevation is rarely huge —
@@ -681,23 +681,23 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             // which is what the shift is for.
             //
             // A suggestion arrives in RAW FILE UNITS, but the shift is applied
-            // to points already scaled to metres — so every suggestion is
+            // to points already scaled to meters — so every suggestion is
             // converted by its OWN scan's unit before being compared or shared.
-            // Skipping this lands a feet-unit UTM cloud millions of metres from
+            // Skipping this lands a feet-unit UTM cloud millions of meters from
             // the origin (see `setUnits`).
             const unitOf = (c: ScanConfig, idx: number): LengthUnit =>
               idx === i
                 ? (isLengthUnit(preview.detected_units) ? preview.detected_units : DEFAULT_UNIT)
                 : c.units;
-            const shiftInMetres = (c: ScanConfig, idx: number): [number, number] | null => {
+            const shiftInMeters = (c: ScanConfig, idx: number): [number, number] | null => {
               const s = idx === i ? sug : (c.preview?.suggested_shift ?? null);
               if (!s) return null;
-              const f = metresPerUnit(unitOf(c, idx)) ?? 1;
+              const f = metersPerUnit(unitOf(c, idx)) ?? 1;
               return [Math.floor(s[0] * f), Math.floor(s[1] * f)];
             };
 
             // Sharing one frame is only valid when the scans agree on a UNIT: a
-            // batch mixing a metre scan with a feet one describes two different
+            // batch mixing a meter scan with a feet one describes two different
             // sites far more often than one site recorded twice, and min()-ing
             // across them would drag one cloud's frame to the other's.
             //
@@ -716,7 +716,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
               || resolved.every(({ c, idx }) => unitOf(c, idx) === unitOf(resolved[0].c, resolved[0].idx));
 
             const shared = !unitsAgree ? null : prev.reduce<[number, number] | null>((acc, c, idx) => {
-              const s = shiftInMetres(c, idx);
+              const s = shiftInMeters(c, idx);
               if (!s) return acc;
               return acc ? [Math.min(acc[0], s[0]), Math.min(acc[1], s[1])]
                          : [s[0], s[1]];
@@ -727,7 +727,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                     columns, autoOnly: columns.length === 0 }
                 : c;
               // Seed this scan's unit from what its own format declared. Per
-              // scan, never shared: a batch can legitimately mix a metre LAS
+              // scan, never shared: a batch can legitimately mix a meter LAS
               // with a feet one, and guessing across them would rescale real
               // data. Untouched scans only, like the shift.
               if (idx === i && !base.unitsTouched) {
@@ -755,7 +755,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             return applyToAllRef.current ? propagateFrom(seeded, sourceIdxRef.current) : seeded;
           });
         } catch (e) {
-          if (cancelled) return;
+          if (canceled) return;
           const msg = e instanceof Error ? e.message : 'Preview failed';
           setConfigs((prev) => prev.map((c, idx) => idx === i ? {
             ...c, loading: false, error: msg, autoOnly: true,
@@ -763,7 +763,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         }
       })();
     });
-    return () => { cancelled = true; };
+    return () => { canceled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputs]);
 
@@ -851,7 +851,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   }, [editCurrent]);
 
   // Choosing a unit by hand clears `unitsCertain`: whatever the file declared,
-  // the value shown is now the user's choice, and labelling it "detected from
+  // the value shown is now the user's choice, and labeling it "detected from
   // file" would be a lie. `unitsTouched` keeps a still-loading preview from
   // overwriting it, exactly as with the shift.
   const setUnits = useCallback((u: LengthUnit) => {
@@ -861,21 +861,21 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
       // ── Re-derive the suggested shift in the NEW unit ──────────────────
       //
       // The shift is SUBTRACTED from positions that have already been scaled to
-      // metres, so it must itself be in metres. The backend only pre-scales its
+      // meters, so it must itself be in meters. The backend only pre-scales its
       // suggestion when the FORMAT declared a unit — for an ASCII/PLY/PCD/PTX
       // source it cannot, so `suggested_shift` arrives in RAW FILE UNITS and
       // this is the only place that can put it right.
       //
       // Getting it wrong is silent and severe: a UTM .xyz in US survey feet
       // (min ≈ 6,500,000 ft) scales to ≈ 1,981,204 m but keeps a 6,500,000
-      // shift, landing the cloud 4.5 MILLION metres from the origin — framed on
+      // shift, landing the cloud 4.5 MILLION meters from the origin — framed on
       // empty space, with float32 precision destroyed.
       //
       // Only a shift the user has NOT hand-edited is re-derived; once they type
       // a value it is theirs, in whatever frame they meant it.
       const raw = c.preview?.suggested_shift;
       if (!c.shiftTouched && raw) {
-        const f = metresPerUnit(u) ?? 1;
+        const f = metersPerUnit(u) ?? 1;
         next.shift = {
           x: Math.floor(raw[0] * f),
           y: Math.floor(raw[1] * f),
@@ -896,7 +896,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   const importTrajectory = useCallback(async () => {
     try {
       const stream = await pickAndParseTrajectory();
-      if (!stream) return; // user cancelled the picker
+      if (!stream) return; // user canceled the picker
       setConfigs((prev) => {
         const next = prev.map((c, i) => {
           if (i === stepIdx) {
@@ -1094,7 +1094,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                                 in-file formats (PLY/PCD/LAS/E57) the file fixes
                                 the layout, so roles can't be reassigned — EXCEPT a
                                 scalar column can still toggle Scalar↔Label, since
-                                that's a renderer-side colouring choice, not a
+                                that's a renderer-side coloring choice, not a
                                 re-mapping of the file. A fixed non-scalar role
                                 (X/Y/Z/Intensity/RGB) shows its OWN role as a lone
                                 disabled option, so the select displays "X" rather
@@ -1112,7 +1112,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                                   // A fixed-layout SCALAR: the layout is the
                                   // file's, but the column's meaning is not —
                                   // an ExtraBytes name is a vendor string we may
-                                  // not recognise. Offer the full role list
+                                  // not recognize. Offer the full role list
                                   // minus the geometry roles, which genuinely
                                   // are fixed by the reader.
                                   ? ROLE_OPTIONS.filter((o) => !GEOMETRY_ROLES.has(o.value))
@@ -1198,8 +1198,8 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
 
               {/* RGB scale toggle — shown only when an RGB role is present AND
                   the layout is remappable (ASCII). For in-file formats (E57/PLY/
-                  PCD/LAS) the colour scale is known from the file — the converter
-                  normalises it — so the toggle would be misleading dead UI:
+                  PCD/LAS) the color scale is known from the file — the converter
+                  normalizes it — so the toggle would be misleading dead UI:
                   buildColumnPlan returns null for non-remappable scans, so
                   rgbIs255 is never even sent. */}
               {cfg.columns.some((c) => (c.role === 'r' || c.role === 'g' || c.role === 'b') && c.remappable) && (
@@ -1261,7 +1261,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           {/* In-file format note (PLY/PCD/LAS/LAZ): roles fixed, rename/categorical only. */}
           {cfg && !cfg.loading && !cfg.autoOnly && cfg.preview && cfg.columns.every((c) => !c.remappable) && cfg.columns.length > 0 && (
             <div className="text-[10px] text-neutral-500">
-              This format defines its own column layout, so X/Y/Z and colour roles can't be
+              This format defines its own column layout, so X/Y/Z and color roles can't be
               reassigned. You can still untick <span className="text-neutral-400">Import</span> to
               leave a field out, rename scalar fields, and switch any scalar between
               <span className="text-neutral-400"> Scalar</span> (gradient) and
@@ -1271,13 +1271,13 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
 
           {/* Source units. Placed ABOVE the global shift because a unit logically
               precedes a shift magnitude — and literally so here: the backend
-              scales positions to metres BEFORE subtracting the shift, and the
-              suggested shift shown below is already expressed in metres.
+              scales positions to meters BEFORE subtracting the shift, and the
+              suggested shift shown below is already expressed in meters.
 
-              Phytograph works in metres throughout (LAD's m²/m³, QSM's radii,
-              CSF's cloth resolution), so a non-metre cloud is converted at
+              Phytograph works in meters throughout (LAD's m²/m³, QSM's radii,
+              CSF's cloth resolution), so a non-meter cloud is converted at
               import rather than carried. When the format declared the unit
-              this states a fact; otherwise it is a choice, defaulted to metres
+              this states a fact; otherwise it is a choice, defaulted to meters
               — which is what every import assumed implicitly before this
               existed, so leaving it alone changes nothing. */}
           {/* Rendered even when the preview FAILED, unlike the shift and
@@ -1315,7 +1315,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
               </select>
               <p className="text-[10px] text-neutral-500 leading-snug">
                 {unitSummary(cfg.units, cfg.unitsCertain)}
-                {' '}Phytograph works in metres, so every scan is converted at import.
+                {' '}Phytograph works in meters, so every scan is converted at import.
               </p>
             </div>
           )}
@@ -1353,12 +1353,12 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 viewport renders cleanly. The original (global) coordinates are restored
                 when you export.
                 {/* Only the SHIFT is undone on export — the unit conversion is
-                    not, so a converted cloud exports as metres. Saying
+                    not, so a converted cloud exports as meters. Saying
                     "original coordinates are restored" unqualified would be a
                     false promise for exactly the files this feature touches. */}
                 {wouldConvert(cfg.units) && (
-                  <> Values here are in <strong className="text-neutral-400">metres</strong>,
-                  like the converted cloud; exports are in metres, not the file’s
+                  <> Values here are in <strong className="text-neutral-400">meters</strong>,
+                  like the converted cloud; exports are in meters, not the file’s
                   original {unitLabel(cfg.units).toLowerCase()}.</>
                 )}
               </p>

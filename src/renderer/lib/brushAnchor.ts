@@ -26,7 +26,7 @@ export interface BrushAnchorArgs {
   gl: THREE.WebGLRenderer;
   camera: THREE.Camera;
   ray: THREE.Ray;
-  /** Pick window centre in drawing-buffer pixels (see `pickPixelForNdc`). */
+  /** Pick window center in drawing-buffer pixels (see `pickPixelForNdc`). */
   pixelPosition: THREE.Vector3;
   /** Camera-to-cloud distance, which scales the CPU raycast's point threshold. */
   viewDist: number;
@@ -75,7 +75,7 @@ export function brushAnchorAt(a: BrushAnchorArgs): THREE.Vector3 | null {
       if (hit) return hit.point.clone();
     }
   } catch { /* a raycast failure must not take the renderer down */ }
-  // Nothing of the target under the cursor. NULL, not a ray-to-centre guess:
+  // Nothing of the target under the cursor. NULL, not a ray-to-center guess:
   // a guessed depth lands in the gap between surfaces and the stroke silently
   // selects nothing, where refusing to stamp at least hides the cursor.
   return null;

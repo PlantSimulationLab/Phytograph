@@ -39,7 +39,7 @@ def test_finds_every_stem_once_at_breast_height():
     assert len(seeds) == len(TREES)
     for t in TREES:
         a = t.axis()
-        # The stem centre at 1.3 m above its ground: base + axis * (1.3 / a_z).
+        # The stem center at 1.3 m above its ground: base + axis * (1.3 / a_z).
         c = t.base() + a * (1.3 / a[2])
         s = min(seeds, key=lambda s: math.hypot(s["x"] - c[0], s["y"] - c[1]))
         assert math.hypot(s["x"] - c[0], s["y"] - c[1]) < 0.03

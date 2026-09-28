@@ -12,12 +12,12 @@ import { wheelNotches } from './helpers/wheel';
 // Two symptoms, one root cause. Zoom used to dolly along camera→orbit-target
 // only, and nothing could move that target toward what you were looking at
 // (pan slides sideways, perpendicular to the view). With far outliers the
-// target sat at the inflated bounding-box centre, so:
+// target sat at the inflated bounding-box center, so:
 //   1. Zooming in bottomed out against a fixed minDistance with the content
 //      still far away, and panning at that range moved the view by a
 //      sub-pixel amount — the view read as frozen.
 //   2. A user-placed origin near the real content was unreachable: zoom went
-//      to the box centre, and panning never got you closer.
+//      to the box center, and panning never got you closer.
 //
 // Zoom-to-cursor plus scene-scaled limits fix both. These tests assert against
 // the CONTENT, which is what the user cares about, not the outlier-inflated box.
@@ -27,7 +27,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'outlier-extent.xyz')
 // The dense plot occupies roughly this volume; the outliers are ~500 m out.
 const CONTENT_MIN = [0, 0, 0];
 const CONTENT_MAX = [6, 6, 3];
-const CONTENT_CENTRE = [3, 3, 1.5];
+const CONTENT_CENTER = [3, 3, 1.5];
 
 let session: LaunchedApp;
 test.beforeAll(async () => {
@@ -55,9 +55,9 @@ async function loadFramedScene() {
 
 const readState = () => session.page.evaluate(() => (window as any).__getCameraState());
 
-// Distance from the camera to the real content centre (world coords).
+// Distance from the camera to the real content center (world coords).
 function distToContent(s: any): number {
-  const c = CONTENT_CENTRE.map((v, i) => v - s.displayOffset[i]);
+  const c = CONTENT_CENTER.map((v, i) => v - s.displayOffset[i]);
   return Math.hypot(s.position[0] - c[0], s.position[1] - c[1], s.position[2] - c[2]);
 }
 
@@ -92,7 +92,7 @@ test('import frames the content, not the empty space between the outliers', asyn
   const s = await readState();
 
   // The camera lands a short way off the CONTENT — a few times its size — rather
-  // than hundreds of metres out where the raw bounding box's corners are. This
+  // than hundreds of meters out where the raw bounding box's corners are. This
   // is the framing half of the fix: a dolly moves along the view ray and can
   // never correct a lateral offset, so if import aims the camera at the empty
   // space between the strays, no amount of zooming or panning recovers it.
@@ -101,10 +101,10 @@ test('import frames the content, not the empty space between the outliers', asyn
   expect(d).toBeLessThan(contentSpan * 5);
   expect(d).toBeGreaterThan(0);
 
-  // And it is aimed at the content, not at the raw box centre — with these
-  // outliers the two are hundreds of metres apart.
+  // And it is aimed at the content, not at the raw box center — with these
+  // outliers the two are hundreds of meters apart.
   const targetWorld = s.target.map((v: number, i: number) => v + s.displayOffset[i]);
-  const offAxis = Math.hypot(...CONTENT_CENTRE.map((v, i) => targetWorld[i] - v));
+  const offAxis = Math.hypot(...CONTENT_CENTER.map((v, i) => targetWorld[i] - v));
   expect(offAxis).toBeLessThan(contentSpan);
 });
 
@@ -129,11 +129,11 @@ test('you can zoom right into the content and still pan — the view never freez
   const distZoomed = distToContent(zoomed);
 
   // The camera genuinely closed on the CONTENT — the old behavior stalled with
-  // the content still far off because the target was out at the box centre.
+  // the content still far off because the target was out at the box center.
   //
-  // Measured against the content BOX, not its centre. Zoom-to-cursor converges
+  // Measured against the content BOX, not its center. Zoom-to-cursor converges
   // on the surface under the pointer, and that surface is on the near face of
-  // the plot — so the distance to the centre bottoms out at roughly the box's
+  // the plot — so the distance to the center bottoms out at roughly the box's
   // half-diagonal no matter how far in you fly, and asserting a fraction of it
   // really asserts that the camera drifted THROUGH the near surface toward the
   // middle. (It used to, because the anchor was re-picked every notch and
@@ -219,7 +219,7 @@ test('pan sensitivity scales with zoom — a drag moves the same fraction of the
   // The pan step shrank with it. Before this was fixed, zoom translated camera
   // and target rigidly, so |camera − target| was INVARIANT under zoom and the
   // pan step stayed at its wide-view value — a 100 px drag threw the view
-  // metres while you were centimetres from a leaf.
+  // meters while you were centimeters from a leaf.
   expect(close.moved).toBeLessThan(wide.moved * 0.5);
 
   // And it shrank proportionally: the same drag covers the same fraction of the
@@ -234,7 +234,7 @@ test('an origin placed near the scanners is reachable: "Zoom to origin" gets you
   const { page } = session;
 
   // Put the origin on the real content — the "somewhere near where the scanners
-  // were" case, far from the outlier-inflated box centre.
+  // were" case, far from the outlier-inflated box center.
   await page.getByTestId('tool-set-scene-origin').click();
   const panel = page.getByTestId('scene-origin-panel');
   await expect(panel).toBeVisible({ timeout: 10_000 });
@@ -325,7 +325,7 @@ async function distancesPerNotch(x: number, y: number, n: number): Promise<numbe
 }
 
 // Camera POSITION after each notch. Distance-to-content is a projection of the
-// real motion onto one axis, so for an off-centre aim its per-notch deltas are
+// real motion onto one axis, so for an off-center aim its per-notch deltas are
 // not the camera's actual movement and can swing sharply while the camera glides
 // smoothly. Judging smoothness needs the true displacement.
 async function positionsPerNotch(x: number, y: number, n: number): Promise<number[][]> {
@@ -345,7 +345,7 @@ test('a sustained scroll burst never reverses direction mid-gesture', async () =
   const { page } = session;
   const box = (await page.locator('canvas').first().boundingBox())!;
 
-  // Dead centre, over the drawn plot — the "freezes in the middle of the scene"
+  // Dead center, over the drawn plot — the "freezes in the middle of the scene"
   // report. Enough notches to outlast several probe-miss windows.
   const d = await distancesPerNotch(box.x + box.width / 2, box.y + box.height / 2, 25);
 
@@ -372,8 +372,8 @@ test('zooming at the periphery still closes on what is under the cursor', async 
   // fallback anchor does the work. It must lie along the CURSOR ray: an anchor
   // on the camera→target axis (the old behavior) degrades every one of these
   // notches to a plain on-axis dolly whose step shrinks toward zero as the
-  // camera nears the centre plane, which is the "lag" the user saw.
-  // Off-centre but genuinely ON THE CANVAS. The viewport does not span the
+  // camera nears the center plane, which is the "lag" the user saw.
+  // Off-center but genuinely ON THE CANVAS. The viewport does not span the
   // window — a sidebar and floating panels overlay its right and bottom edges,
   // and a wheel event over one of those scrolls a DOM list instead of reaching
   // the viewer, which is indistinguishable from a frozen camera. (An earlier
@@ -389,9 +389,9 @@ test('zooming at the periphery still closes on what is under the cursor', async 
   expect(overEl, `pointer is over ${overEl}, not the viewport`).toBe('CANVAS');
   const pos = await positionsPerNotch(PX, PY, 20);
 
-  // NOT asserted as "distance to the content centre falls every notch". Aiming
+  // NOT asserted as "distance to the content center falls every notch". Aiming
   // off to one side and flying at it legitimately increases the distance to the
-  // CENTRE — that is what zoom-to-cursor is for, and demanding otherwise would
+  // CENTER — that is what zoom-to-cursor is for, and demanding otherwise would
   // assert the feature away. What must hold is that the burst makes real,
   // continuing progress instead of decaying to a standstill (the reported
   // "lags, then momentarily freezes"), so measure how far the CAMERA actually
@@ -418,12 +418,12 @@ test('zooming at the periphery still closes on what is under the cursor', async 
   }
 
   // And the camera genuinely ended up somewhere new.
-  const travelled = Math.hypot(
+  const traveled = Math.hypot(
     pos[pos.length - 1][0] - pos[0][0],
     pos[pos.length - 1][1] - pos[0][1],
     pos[pos.length - 1][2] - pos[0][2],
   );
-  expect(travelled, 'the peripheral burst went nowhere').toBeGreaterThan(0);
+  expect(traveled, 'the peripheral burst went nowhere').toBeGreaterThan(0);
 });
 
 test('zoom stays responsive after a deep zoom — no permanent freeze', async () => {
@@ -435,7 +435,7 @@ test('zoom stays responsive after a deep zoom — no permanent freeze', async ()
 
   // Drive in deep. This is what used to re-seat the orbit target closer than
   // OrbitControls' own minDistance, after which update() clamped the spherical
-  // radius and shoved the camera straight back out — cancelling every
+  // radius and shoved the camera straight back out — canceling every
   // subsequent dolly permanently. (Batched — see helpers/wheel.ts; still
   // several events land AFTER the clamp engages, which is where the bug bit.
   // 50 single-notch events put this test at 2.7 min of its 3 min CI budget.)
@@ -474,15 +474,15 @@ test('zoom stays responsive after a deep zoom — no permanent freeze', async ()
 // so import LOOKED right — but the scene origin's lateral position came from
 // `staticBounds.contentCenter`, which excluded the scanner markers and the
 // platform trajectory yet still took each cloud's RAW AABB. On that scan the
-// raw box centre is (1605, -978) while the content is at (59, 20): the pivot
+// raw box center is (1605, -978) while the content is at (59, 20): the pivot
 // landed ~1.8 km away. A rotation about a pivot that far off is very nearly a
 // translation of everything near the camera, so the first small drag swept the
 // cloud out of the frustum with no way back short of Reset View.
 //
 // This runs on its OWN fixture, not outlier-extent.xyz: that one's strays sit
 // on opposite sides (+500/-480 in x, +505/-495 in y) and very nearly cancel in
-// the midpoint, so it displaces the raw centre by only ~7 m. A real scan's halo
-// is ONE-SIDED — see outlier-halo.xyz, which puts the raw centre ~960 m off the
+// the midpoint, so it displaces the raw center by only ~7 m. A real scan's halo
+// is ONE-SIDED — see outlier-halo.xyz, which puts the raw center ~960 m off the
 // content, the magnitude actually reported.
 const HALO_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'outlier-halo.xyz');
 
@@ -500,37 +500,37 @@ test('the default scene origin sits on the content, so a small orbit keeps the c
 
   const s = await readState();
 
-  // The raw box centre really is far from the content — otherwise the pivot
+  // The raw box center really is far from the content — otherwise the pivot
   // could pass this test by accident and it would prove nothing.
-  const rawCentre = s.bounds.min.map((v: number, i: number) => (v + s.bounds.max[i]) / 2);
-  const rawOff = Math.hypot(...CONTENT_CENTRE.map((v, i) => rawCentre[i] - v));
+  const rawCenter = s.bounds.min.map((v: number, i: number) => (v + s.bounds.max[i]) / 2);
+  const rawOff = Math.hypot(...CONTENT_CENTER.map((v, i) => rawCenter[i] - v));
   const contentSpan = Math.max(...CONTENT_MAX.map((v, i) => v - CONTENT_MIN[i]));
-  expect(rawOff, 'fixture no longer has a one-sided halo displacing the raw centre')
+  expect(rawOff, 'fixture no longer has a one-sided halo displacing the raw center')
     .toBeGreaterThan(500);
 
   // The pivot is the thing under test: laterally it must be ON the plot, not
   // out with the halo. (Vertically it is deliberately the GROUND level, not the
-  // mid-height, so only x/y are compared against the content centre.)
+  // mid-height, so only x/y are compared against the content center.)
   expect(s.orbitPivot, '__getCameraState exposes no orbitPivot').not.toBeNull();
   const lateralOff = Math.hypot(
-    s.orbitPivot[0] - CONTENT_CENTRE[0],
-    s.orbitPivot[1] - CONTENT_CENTRE[1],
+    s.orbitPivot[0] - CONTENT_CENTER[0],
+    s.orbitPivot[1] - CONTENT_CENTER[1],
   );
   expect(
     lateralOff,
-    `orbit pivot ${JSON.stringify(s.orbitPivot)} is off the content (centre ${JSON.stringify(CONTENT_CENTRE)})`,
+    `orbit pivot ${JSON.stringify(s.orbitPivot)} is off the content (center ${JSON.stringify(CONTENT_CENTER)})`,
   ).toBeLessThan(contentSpan);
   // And it is at the plot's height, not floating up among the strays.
   expect(s.orbitPivot[2]).toBeGreaterThan(CONTENT_MIN[2] - contentSpan);
   expect(s.orbitPivot[2]).toBeLessThan(CONTENT_MAX[2] + contentSpan);
 
-  // The consequence the user actually reported. Project the content centre to
+  // The consequence the user actually reported. Project the content center to
   // the screen before and after a modest orbit drag: it must stay in frame.
   // With the pivot ~960 m out, a 60 px drag is a few degrees about a distant
   // axis, which sweeps the content clean off the viewport.
   const onScreen = () => page.evaluate(
     (w) => (window as any).__worldToScreen(w),
-    CONTENT_CENTRE as [number, number, number],
+    CONTENT_CENTER as [number, number, number],
   );
 
   const before = await onScreen();

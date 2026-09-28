@@ -1,7 +1,7 @@
 """Smoke test for the leaf-triangulation separation research harness.
 
 This keeps ``research/leaf_triangulation_separation.py`` from rotting: it exercises the
-full pipeline end-to-end on a small plant at low resolution and asserts the *labelling
+full pipeline end-to-end on a small plant at low resolution and asserts the *labeling
 and classification machinery works* -- not any particular separation outcome (that's the
 research question the harness answers, not a fixed pass/fail). Specifically:
 
@@ -47,7 +47,7 @@ _RES = 160
 
 
 def test_organ_labels_populate_on_hits():
-    """Every leaf is its own Helios object, so labelling by parent object then sampling
+    """Every leaf is its own Helios object, so labeling by parent object then sampling
     via column_format must come back with multiple distinct organ ids on the hits."""
     ctx = None
     try:
@@ -60,7 +60,7 @@ def test_organ_labels_populate_on_hits():
 
     assert len(xyz) >= 50, f"scan returned too few hits: {len(xyz)}"
     finite = organ[np.isfinite(organ)]
-    # The vast majority of hits land on labelled plant geometry...
+    # The vast majority of hits land on labeled plant geometry...
     assert len(finite) >= 0.9 * len(organ), "too many hits without an organ_id"
     # ...and they span more than one organ (otherwise classification is trivial).
     assert len(np.unique(finite)) >= 2
@@ -69,7 +69,7 @@ def test_organ_labels_populate_on_hits():
 def test_pipeline_detects_valid_and_erroneous_triangles():
     """Full pipeline: scan -> triangulate (unfiltered) -> classify. Both intra-organ
     (valid) and inter-organ (erroneous) triangles must appear, and every counted
-    triangle's vertices must resolve to an organ (n_unlabelled stays small)."""
+    triangle's vertices must resolve to an organ (n_unlabeled stays small)."""
     ctx = None
     try:
         ctx, uuids, n_org, (lo, hi) = harness.build_labeled_plant(_MODEL, _AGE)
@@ -78,11 +78,11 @@ def test_pipeline_detects_valid_and_erroneous_triangles():
     finally:
         harness.close_context(ctx)
 
-    edges, erroneous, n_unlabelled = harness.triangulate_candidates(
+    edges, erroneous, n_unlabeled = harness.triangulate_candidates(
         xyz, organ, sid, scanners, _RES, _RES)
 
     assert len(edges) >= 20, f"too few candidate triangles: {len(edges)}"
-    assert n_unlabelled <= 0.1 * (len(edges) + n_unlabelled), "too many unlabelled triangles"
+    assert n_unlabeled <= 0.1 * (len(edges) + n_unlabeled), "too many unlabeled triangles"
     n_err = int(erroneous.sum())
     assert 0 < n_err < len(edges), (
         f"classifier degenerate: {n_err}/{len(edges)} erroneous")
@@ -92,7 +92,7 @@ def test_pipeline_detects_valid_and_erroneous_triangles():
 
 def test_leaflet_granularity_is_per_object():
     """Ground-truth granularity sanity for compound (trifoliate) leaves like bean: the
-    labelling groups by Helios compound object, and each leaflet is its OWN object (the
+    labeling groups by Helios compound object, and each leaflet is its OWN object (the
     leaf prototype is built once per leaflet -- see label_organs() docstring). So a
     trifoliate plant must yield many distinct leaf objects, several of which sit at nearly
     the same base point (the three leaflets of one compound leaf radiating from a shared
@@ -124,7 +124,7 @@ def test_leaflet_granularity_is_per_object():
     max_near = max(len(tree.query_ball_point(c, r=0.02)) for c in centroids)
     assert max_near >= 3, (
         "no cluster of >=3 coincident leaf objects found -- compound-leaf leaflets may be "
-        "merged into a single object rather than labelled separately")
+        "merged into a single object rather than labeled separately")
 
 
 def test_statistics_return_sane_values():

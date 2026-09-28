@@ -14,7 +14,7 @@ export type ToolRequires =
   /**
    * Either a cloud or a mesh will do. Transform is the case: one toolbar button
    * fronts two different panels (the cloud Transform draft and the mesh
-   * TransformPanel), so gating it on `cloud` alone greyed it out for a mesh
+   * TransformPanel), so gating it on `cloud` alone grayed it out for a mesh
    * whose transform machinery was fully built and reachable only from the mesh
    * row's own button.
    */
@@ -45,7 +45,7 @@ export interface ToolCommand {
   /**
    * Multi-input tools open a dialog that picks their own inputs, so they stay
    * clickable with nothing selected (the dialog explains what's missing).
-   * Single-input/gizmo tools grey out via `requires` until a target exists.
+   * Single-input/gizmo tools gray out via `requires` until a target exists.
    */
   multiInput?: boolean;
   /**
@@ -61,7 +61,7 @@ export interface ToolCommand {
    * Hard override that forces the command unavailable regardless of selection,
    * checked BEFORE `requires`/`multiInput`. Used to lock every other tool while
    * a modal-ish tool (e.g. Translate with a pending draft) must be resolved
-   * first. Returns true → the command greys out and its action is suppressed.
+   * first. Returns true → the command grays out and its action is suppressed.
    */
   isDisabled?: () => boolean;
   /**

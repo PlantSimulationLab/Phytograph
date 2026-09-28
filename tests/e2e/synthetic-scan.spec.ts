@@ -192,7 +192,7 @@ test('retained per-hit fields appear in Color by even when constant', async () =
   // The retained (constant) timestamp must now be selectable. Its option value
   // is the octree BUFFER key, PotreeConverter's `gps-time`: the time column is
   // written to the LAS standard float64 gps_time field rather than a float32
-  // extra dim (which quantises GPS-magnitude times to 32 s), and the picker
+  // extra dim (which quantizes GPS-magnitude times to 32 s), and the picker
   // labels that buffer "Timestamp".
   expect(optionValues).toContain('scalar:gps-time');
   // …and the unchecked target_count must NOT be.

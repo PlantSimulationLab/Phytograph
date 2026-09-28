@@ -59,10 +59,10 @@ export function BulkImportProgress({
   cancelLabel = 'Cancel',
 }: Props) {
   // Reset to the idle label whenever a new operation starts, so a second import
-  // doesn't open with "Cancelling…" left over from the one before it.
-  const [cancelling, setCancelling] = useState(false);
+  // doesn't open with "Canceling…" left over from the one before it.
+  const [canceling, setCanceling] = useState(false);
   useEffect(() => {
-    if (!progress) setCancelling(false);
+    if (!progress) setCanceling(false);
   }, [progress]);
 
   if (!progress) return null;
@@ -126,11 +126,11 @@ export function BulkImportProgress({
             <button
               type="button"
               data-testid="bulk-import-cancel"
-              disabled={cancelling}
+              disabled={canceling}
               onClick={() => {
                 // Latch immediately: the backend takes a moment to unwind, and a
                 // second click would fire a duplicate cancel at a finished run.
-                setCancelling(true);
+                setCanceling(true);
                 onCancel();
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border
@@ -139,7 +139,7 @@ export function BulkImportProgress({
                          transition-colors"
             >
               <X className="h-3.5 w-3.5" />
-              {cancelling ? 'Cancelling…' : cancelLabel}
+              {canceling ? 'Canceling…' : cancelLabel}
             </button>
           </div>
         )}

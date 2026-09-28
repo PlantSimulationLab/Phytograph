@@ -250,7 +250,7 @@ class TestTheKeySurvivesBeingRead:
         RECENCY RUNS OPPOSITE TO NAME ORDER here, and that is the whole point.
         A flattened key degenerates to whatever the filesystem enumerates
         first — sha1 order — so a test that plants oldest-first in ascending
-        name order agrees with the broken behaviour by accident and proves
+        name order agrees with the broken behavior by accident and proves
         nothing. These four are planted newest-first.
         """
         for i, cid in enumerate(IDS[:4]):

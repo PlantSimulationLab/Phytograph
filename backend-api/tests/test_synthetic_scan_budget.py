@@ -39,7 +39,7 @@ def _cpu_host(monkeypatch):
 
 def test_an_explicit_request_is_clamped_to_the_process_budget(budget):
     budget(8)
-    # Under the budget: honoured exactly. The user asked for less, and less is
+    # Under the budget: honored exactly. The user asked for less, and less is
     # a legitimate thing to want (it bounds a single trace, not the machine).
     assert main._synthetic_scan_budget_bytes(2048) == 2 * GiB
     # Over the budget: clamped, rather than silently allocating past the number

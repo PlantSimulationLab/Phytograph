@@ -4,11 +4,11 @@ The flag must reflect the image bytes, not the file extension:
 
 - a JPEG never has transparency, even named ".png" (bark rendered as a cutout
   was the bug that introduced byte-sniffing in the first place);
-- an RGBA / grey+alpha PNG has it in the IHDR colour type;
-- an INDEXED (colour type 3) or colour-keyed PNG carries it in a `tRNS` chunk
-  instead, and reading only the colour type misses it. Roughly a quarter of the
+- an RGBA / gray+alpha PNG has it in the IHDR color type;
+- an INDEXED (color type 3) or color-keyed PNG carries it in a `tRNS` chunk
+  instead, and reading only the color type misses it. Roughly a quarter of the
   bundled plantarchitecture leaf textures are palette PNGs, so that miss showed
-  up as opaque grey rectangles on some leaves of a generated bean while the
+  up as opaque gray rectangles on some leaves of a generated bean while the
   RGBA leaflets on the same plant cut out correctly.
 """
 import struct
@@ -21,7 +21,7 @@ import main
 
 
 def _png(color_type: int, *, trns: bool, depth: int = 8) -> bytes:
-    """Build a minimal 1x1 PNG with the given colour type, optionally + tRNS."""
+    """Build a minimal 1x1 PNG with the given color type, optionally + tRNS."""
 
     def chunk(tag: bytes, payload: bytes) -> bytes:
         return (
@@ -37,8 +37,8 @@ def _png(color_type: int, *, trns: bool, depth: int = 8) -> bytes:
         out += chunk(b"PLTE", b"\x00\xff\x00")  # single green entry
     if trns:
         payload = {
-            0: b"\x00\x00",          # grey: 2-byte transparent sample
-            2: b"\x00\x00\x00\x00\x00\x00",  # truecolour: RGB key
+            0: b"\x00\x00",          # gray: 2-byte transparent sample
+            2: b"\x00\x00\x00\x00\x00\x00",  # truecolor: RGB key
             3: b"\x00",              # indexed: per-entry alpha
         }[color_type]
         out += chunk(b"tRNS", payload)
@@ -55,17 +55,17 @@ JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 @pytest.mark.parametrize(
     "name, data, expected",
     [
-        # IHDR alpha bit set — detected by the colour type alone.
+        # IHDR alpha bit set — detected by the color type alone.
         ("rgba", _png(6, trns=False), True),
-        ("grey_alpha", _png(4, trns=False), True),
+        ("gray_alpha", _png(4, trns=False), True),
         # tRNS-only transparency — the regression this test guards.
         ("indexed_trns", _png(3, trns=True), True),
-        ("grey_trns", _png(0, trns=True), True),
-        ("truecolour_trns", _png(2, trns=True), True),
+        ("gray_trns", _png(0, trns=True), True),
+        ("truecolor_trns", _png(2, trns=True), True),
         # Genuinely opaque.
         ("indexed_opaque", _png(3, trns=False), False),
         ("rgb_opaque", _png(2, trns=False), False),
-        ("grey_opaque", _png(0, trns=False), False),
+        ("gray_opaque", _png(0, trns=False), False),
     ],
 )
 def test_texture_has_alpha_reads_the_bytes(tmp_path, name, data, expected):
@@ -132,7 +132,7 @@ def test_palette_leaf_textures_report_alpha():
 
     BeanLeaf_tip is the concrete case from the bug report: a bean's trifoliate
     leaflets mix RGBA (left/right) with palette+tRNS (tip), so only the tip
-    rendered as an opaque grey quad.
+    rendered as an opaque gray quad.
     """
     palette_leaves = [
         "BeanLeaf_tip.png",
@@ -156,7 +156,7 @@ def test_palette_leaf_textures_report_alpha():
 @pytest.mark.skipif(not ASSETS.is_dir(), reason="plantarchitecture assets not checked out")
 def test_every_bean_leaf_texture_cuts_out():
     """All of a bean's leaf textures must be cutouts — that is the user-visible
-    symptom: some leaves transparent, some opaque grey, on the same plant."""
+    symptom: some leaves transparent, some opaque gray, on the same plant."""
     beans = sorted(ASSETS.glob("BeanLeaf*.png"))
     assert len(beans) >= 4, f"expected several bean leaf textures, found {beans}"
     opaque = [p.name for p in beans if not main._texture_has_alpha(str(p))]

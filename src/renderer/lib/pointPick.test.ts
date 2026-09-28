@@ -68,7 +68,7 @@ describe('frame conversion', () => {
 });
 
 describe('formatting', () => {
-  it('prints coordinates at millimetre resolution, including UTM magnitudes', () => {
+  it('prints coordinates at millimeter resolution, including UTM magnitudes', () => {
     expect(formatCoord(61.4472)).toBe('61.447');
     expect(formatCoord(4271883.9019)).toBe('4271883.902');
     expect(formatCoord(-0.0004)).toBe('-0.000');
@@ -113,9 +113,9 @@ describe('buildAttributeRows', () => {
     expect(rows.map((r) => r.slug)).toEqual(['intensity']);
   });
 
-  it('keeps intensity, which the colour-by dropdown deliberately hides', () => {
+  it('keeps intensity, which the color-by dropdown deliberately hides', () => {
     // octreeScalarFieldOptions filters `intensity` out of the Color by list
-    // because it owns a dedicated colour mode — but a point picker that hid a
+    // because it owns a dedicated color mode — but a point picker that hid a
     // point's intensity would be missing the point.
     const rows = buildAttributeRows({ intensity: 1200 });
     expect(rows).toHaveLength(1);
@@ -170,7 +170,7 @@ describe('buildAttributeRows', () => {
     expect(rows[0].display).toBe('3 (Tree 3)');
   });
 
-  it('honours a wizard-marked categorical slug via its observed range', () => {
+  it('honors a wizard-marked categorical slug via its observed range', () => {
     registerCategoricalSlug('deviation');
     const rows = buildAttributeRows(
       { deviation: 2 },
@@ -179,12 +179,12 @@ describe('buildAttributeRows', () => {
     expect(rows[0].display).toBe('2 (Class 2)');
   });
 
-  it('honours a wizard "Scalar" override over a registered scheme', () => {
+  it('honors a wizard "Scalar" override over a registered scheme', () => {
     registerContinuousSlug('is_miss');
     expect(buildAttributeRows({ is_miss: 1 })[0].display).toBe('1');
   });
 
-  it('rounds a float32-quantised class value to its class', () => {
+  it('rounds a float32-quantized class value to its class', () => {
     // Class labels round-trip through float32 buffers, so 2 can come back as
     // 1.9999999.
     expect(buildAttributeRows({ ground_class: 1.9999999 })[0].display).toBe('2 (Non-ground)');
@@ -250,7 +250,7 @@ describe('flat-cloud sampling', () => {
   });
 });
 
-describe('clipboard serialisation', () => {
+describe('clipboard serialization', () => {
   const a: PickedPoint = {
     id: 'p1',
     seq: 0,
@@ -284,7 +284,7 @@ describe('clipboard serialisation', () => {
     expect(lines).toHaveLength(3);
   });
 
-  it('writes coordinates at millimetre precision and leaves absent cells empty', () => {
+  it('writes coordinates at millimeter precision and leaves absent cells empty', () => {
     const lines = pickedPointsToCsv([a, b]).split('\n');
     expect(lines[1]).toBe('scalars.xyz,412037.184,4271883.902,61.447,37.184,883.902,61.447,4,2,0.5,');
     // b has no index and none of a's attributes.
@@ -370,26 +370,26 @@ describe('worldPerPixel', () => {
 });
 
 describe('nearSurfaceDistance', () => {
-  it('measures to the near surface, not the centre', () => {
-    // Camera 100 m from the centre of a 40 m-radius cloud: the closest visible
+  it('measures to the near surface, not the center', () => {
+    // Camera 100 m from the center of a 40 m-radius cloud: the closest visible
     // points are 60 m out, not 100.
     expect(nearSurfaceDistance(100, 40)).toBeCloseTo(60, 12);
   });
 
   it('keeps the near half of a deep cloud clickable', () => {
     // The regression this exists for. A 100 m-deep scan viewed end-on, camera
-    // 10 m off its near face: centre-based sizing computed the tolerance for a
+    // 10 m off its near face: center-based sizing computed the tolerance for a
     // point 60 m away, ~6x too large in world terms for the near face — which
     // in practice meant the pixel tolerance the user experienced at the near
     // points was far off the intended one.
     const cameraToCenter = 60;
     const radius = 50;
-    const centreBased = cameraToCenter;
+    const centerBased = cameraToCenter;
     const nearBased = nearSurfaceDistance(cameraToCenter, radius);
 
     expect(nearBased).toBeCloseTo(10, 12);
-    // Sizing from the centre over-states the near-face distance six-fold.
-    expect(centreBased / nearBased).toBeCloseTo(6, 10);
+    // Sizing from the center over-states the near-face distance six-fold.
+    expect(centerBased / nearBased).toBeCloseTo(6, 10);
   });
 
   it('scales the radius by the object matrix', () => {
@@ -398,7 +398,7 @@ describe('nearSurfaceDistance', () => {
   });
 
   it('stays positive when the camera is inside the cloud', () => {
-    // Camera 5 m from the centre of a 50 m-radius cloud is deep inside it; a
+    // Camera 5 m from the center of a 50 m-radius cloud is deep inside it; a
     // naive subtraction gives -45, which would invert the tolerance.
     const d = nearSurfaceDistance(5, 50);
     expect(d).toBeGreaterThan(0);
@@ -428,7 +428,7 @@ describe('pickProbeOffsets', () => {
     expect(new Set(dirs).size).toBe(8);
   });
 
-  it('collapses to the centre alone for a zero radius', () => {
+  it('collapses to the center alone for a zero radius', () => {
     expect(pickProbeOffsets(0)).toEqual([{ dx: 0, dy: 0 }]);
   });
 });
@@ -492,7 +492,7 @@ describe('chooseNearestCandidate', () => {
 describe('a picked point reads back the class name the USER gave it', () => {
   // The palette is per-cloud; the by-name schemes in classification.ts are
   // process-wide and cannot express "on THIS cloud, tree 1 is the north row".
-  // Before this was wired, the labelling panel showed the user's name while the
+  // Before this was wired, the labeling panel showed the user's name while the
   // picker (and the legend, and the filter) still showed the built-in one.
   const palettes = {
     tree_instance: {

@@ -9,20 +9,20 @@ const slab = (over: Partial<SlabRegion> = {}): SlabRegion => ({
 });
 
 describe('slabFootprint', () => {
-  it('is the centreline widened by the depth', () => {
+  it('is the centerline widened by the depth', () => {
     const c = slabFootprint(slab());
     expect(c).toEqual([
       { x: 0, y: -1 }, { x: 10, y: -1 }, { x: 10, y: 1 }, { x: 0, y: 1 },
     ]);
   });
 
-  it('moves with the step offset, across the centreline', () => {
+  it('moves with the step offset, across the centerline', () => {
     const ys = slabFootprint(slab({ offset: 5 })).map((p) => p.y);
     expect(Math.min(...ys)).toBeCloseTo(4);
     expect(Math.max(...ys)).toBeCloseTo(6);
   });
 
-  it('follows a diagonal centreline', () => {
+  it('follows a diagonal centerline', () => {
     const c = slabFootprint(slab({ b: { x: 3, y: 4 }, depth: 0 }));
     expect(c[1].x).toBeCloseTo(3);
     expect(c[1].y).toBeCloseTo(4);

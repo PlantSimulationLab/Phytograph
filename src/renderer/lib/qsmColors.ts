@@ -32,7 +32,7 @@ export const RANK_COLOR_HEXES = [
   '#ff5fa8', // rank 5+ - pink
 ];
 
-/** Parse '#rrggbb' (or '#rgb') into an 0..1 RGB triple. Unparseable -> mid grey. */
+/** Parse '#rrggbb' (or '#rgb') into an 0..1 RGB triple. Unparseable -> mid gray. */
 export function hexToRgb(hex: string): Rgb {
   const h = hex.trim().replace(/^#/, '');
   const full =

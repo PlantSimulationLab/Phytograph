@@ -51,7 +51,7 @@ def resolve_params(points: np.ndarray, p) -> Tuple[object, Optional[float]]:
     3x the median spacing for stage 1 and twice that for stage 2, raised only
     from the paper defaults (as `_auto_treeiso_decimation` does), but without
     its whole-cloud node-count coarsening - each tile is bounded instead.
-    Measured on a spatially compact sample (the centre of the plot), since
+    Measured on a spatially compact sample (the center of the plot), since
     spacing is a local property and a full-plot KD-tree is what tiling avoids.
     Returns (p, spacing or None)."""
     import main
@@ -214,7 +214,7 @@ def segment_tiled(points: np.ndarray, params: dict, seeds: Optional[np.ndarray],
             _merge(t_no, idx, labels, anchors)
 
     # Truncation is judged on the OUTCOME, not on the claims: inside a tile the
-    # segmenter routinely attaches neighbours' crown pieces, cut off at the
+    # segmenter routinely attaches neighbors' crown pieces, cut off at the
     # buffer, to the tree it keeps, and those points are then won by their own
     # tree's claim from deeper inside its tile. A tree is at risk only if
     # points it finally KEEPS were seen solely from near a buffer edge.

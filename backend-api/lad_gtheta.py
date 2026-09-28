@@ -5,7 +5,7 @@ Background
 ----------
 The leaf-area-density (LAD) inversion converts beam attenuation into leaf area via
 Beer's law, in which G(theta) is the mean fraction of leaf area projected onto the
-plane perpendicular to a beam travelling at zenith angle ``theta``. Normally G(theta)
+plane perpendicular to a beam traveling at zenith angle ``theta``. Normally G(theta)
 is estimated per voxel from a triangulated leaf surface. This module instead computes
 G(theta) analytically from a *prescribed* leaf-inclination distribution g_L(theta_L)
 (de Wit classical families, or a Goel-Strebel Beta), so a user with a known or assumed
@@ -200,7 +200,7 @@ def beam_zenith_samples(dirs: np.ndarray) -> np.ndarray:
     NOTE: the LAD pipeline's `_directions_from_origin` returns SPHERICAL triples
     ``[radius, elevation, azimuth]``, NOT Cartesian vectors — passing those here
     computes ``|azimuth| / ||[r, elev, az]||``, which divides an angle by a range in
-    metres and collapses every beam toward 90 degrees. Use
+    meters and collapses every beam toward 90 degrees. Use
     `beam_zenith_from_spherical` for that array instead.
     """
     d = np.asarray(dirs, dtype=float)

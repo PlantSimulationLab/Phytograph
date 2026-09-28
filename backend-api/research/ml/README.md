@@ -36,7 +36,7 @@ Splits are fixed and made by tree, never by point:
 - **test_synth**: both orchard-row scenes. `_v2` regenerates the same scene, so neither can be
   used for training.
 - **leafoff**: nine leaf-off almond trees. Everything above a 20 cm ground band is wood. This split
-  measures the false-leaf rate on the target crop, which has no hand-labelled leaf-on trees yet.
+  measures the false-leaf rate on the target crop, which has no hand-labeled leaf-on trees yet.
 
 Eight of the GBSeparation trees are copies of LeWoS and Weiser trees and are skipped. Every real
 score is reported twice: once over all points, and once with a 2 cm band around label boundaries
@@ -49,7 +49,7 @@ removed (`core`), because that band is where hand labels are least reliable.
 | regime | trained on |
 |---|---|
 | `synth` | synthetic scenes only (exact labels, not reality) |
-| `real` | hand-labelled real trees only (reality, noisy labels) |
+| `real` | hand-labeled real trees only (reality, noisy labels) |
 | `finetune` | `synth`'s package, then 15k steps on real trees at a quarter of the learning rate |
 | `joint` | both at once: 40% of crops synthetic, 60% real |
 
@@ -96,21 +96,21 @@ Other findings:
   | 8-thread CPU | 61 s | 93 s |
   | RTX 6000 Ada | about 7 s | about 7 s |
 
-- **Open gap:** no hand-labelled leaf-on orchard tree exists yet. Leaf-on
+- **Open gap:** no hand-labeled leaf-on orchard tree exists yet. Leaf-on
   almond, pistachio and redbud accuracy is only measured indirectly (forest
-  trees plus leaf-off almond). A few labelled orchard trees would be the most
+  trees plus leaf-off almond). A few labeled orchard trees would be the most
   informative addition to the test set.
 
 ## Dense crowns and hand-label-like synthetic wood (2026-09-25/26)
 
 The v1 model called leaf clumps wood in the crown of a dense leaf-on redbud. Two redbuds
-were hand-labelled for this (`real_labeled/redbud`, splits `dense_eastern` / `dense_western`).
+were hand-labeled for this (`real_labeled/redbud`, splits `dense_eastern` / `dense_western`).
 The eastern one is 0.8 % wood, with 78 % of its leaf points more than 30 cm from any
-labelled wood. v1 called 6.8 % of it wood, at wood precision 0.06, with the false wood in the
+labeled wood. v1 called 6.8 % of it wood, at wood precision 0.06, with the false wood in the
 top of the crown and a median 66 cm from real wood.
 
 - **It was a training-data gap.** Around each false-wood point, the model's crop held no
-  labelled wood at all. That almost never happens in training: under 4 % of real-tree crops
+  labeled wood at all. That almost never happens in training: under 4 % of real-tree crops
   and 0 % of synthetic ones have < 1 % wood. A stricter threshold could not fix it, because it
   wrecked recall on the other redbud.
 - **Clear-of-wood crop seeding alone does not fix it** (`crop.clear_seed_prob`). The public
@@ -118,19 +118,19 @@ top of the crown and a median 66 cm from real wood.
   is neutral to slightly positive everywhere (`dense_clear`).
 - **Exact synthetic labels cannot teach it.** Across 8 woody library species and 20 scans,
   including crowns grown past the library's age cap (the generator's `<max_age>`), no synthetic
-  leaf point is more than 30 cm from labelled wood. Helios labels every scanned shoot, while a
+  leaf point is more than 30 cm from labeled wood. Helios labels every scanned shoot, while a
   person labels only wood they can see and follow.
 - **Hand-label-like synthetic wood does** (`ml/data/relabel.py`, reader argument
   `human_wood_min_length`). Wood stays wood only in a connected visible run at least 0.5 m
   long. That one threshold makes an open synthetic redbud look like the western tree (25-30 %
   vs 33 % of leaf > 30 cm from wood) and a dense one like the eastern (65-69 % vs 78 %). All
   17 original scenes plus 59 new ones (every woody library species, redbud and almond grown
-  past the cap) are cached relabelled as `*_hl` / `synthdense_*_hl`.
-- **Leaf-off trees must be in the mix.** The relabelling teaches "short visible wood is leaf",
+  past the cap) are cached relabeled as `*_hl` / `synthdense_*_hl`.
+- **Leaf-off trees must be in the mix.** The relabeling teaches "short visible wood is leaf",
   which leafless twigs also look like: synthetic-only leaf-off recall was 0.59. Five of the
   nine leaf-off almonds now train (`leafoff_train`); four stay the test.
 
-Both redbuds held out (`hl_ft`: the shipped recipe's fine-tune, plus 30 % relabelled synthetic
+Both redbuds held out (`hl_ft`: the shipped recipe's fine-tune, plus 30 % relabeled synthetic
 crops, leaf-off almonds and clear seeding):
 
 | model | 59 trees mIoU | Wan | GBSep | leaf-off recall (4) | eastern redbud: predicted wood (truth 0.82 %) |
@@ -147,7 +147,7 @@ The shipped **v2** (`final2_s0`, `resources/ml_models/wood-leaf-pointnext-s-v2`)
 | **v2** | 0.831 | 0.787 | 0.913 | 1.000 | 0.779 / 0.701 / 1.000 |
 
 The 59-tree score is within seed noise of v1 (seeds 0.829-0.831). With the redbuds now in
-training, the next hand-labelled tree is the independent test.
+training, the next hand-labeled tree is the independent test.
 
 # Plant organs (herbaceous plants)
 
@@ -162,7 +162,7 @@ The six candidate datasets were audited on 2026-09-23. The audit, the per-file
 error lists and the downloads are in `/group/bnbaileygrp/bnbailey/phytograph_ml/organ_data/`
 (`SUMMARY.md`). Three are used, all dicots; grasses are deferred:
 
-| dataset | plants | labels | licence |
+| dataset | plants | labels | license |
 |---|---|---|---|
 | Pheno4D tomato | 7 x ~11 days, laser arm, 0.07 mm | soil / stem / leaflet | none stated (used with the authors' agreement) |
 | Demeter soybean | 78, photogrammetry | stem / leaflet / flower / pod | Apache-2.0 |
@@ -204,7 +204,7 @@ Inference on a full-resolution 3.4 M-point Pheno4D scan takes about 7 s on
 What mattered, in the order it was found:
 
 - **The offset loss has to be in units of the organ.** The first run
-  measured the centroid-offset Huber loss in metres, about 50x smaller than
+  measured the centroid-offset Huber loss in meters, about 50x smaller than
   the class loss. The network learned offsets a third of their true length,
   and leaflet F1 stayed at 0.3. Measured relative to each instance's radius,
   F1 was 0.7 by step 2500.
@@ -213,11 +213,11 @@ What mattered, in the order it was found:
   uses a bandwidth of 0.75 radii (`ml/instances.py`; chosen on val).
 - **Partial labels beat ignoring.** With the beet taproot ignored, the model
   called 90 % of it leaf and every beet shoulder became a phantom leaflet.
-  Labelled "soil or stem", beet leaflet F1 went 0.88 -> 0.94.
+  Labeled "soil or stem", beet leaflet F1 went 0.88 -> 0.94.
 - **Minimum instance size is an area, not a point count.** A fixed count
   drops whole leaflets on a sparse cloud. It must be measured at the spacing
   of the cluster representatives, floored at their voxel: the raw nearest-
-  neighbour gap of voxel representatives is far below the voxel, and it made
+  neighbor gap of voxel representatives is far below the voxel, and it made
   full-resolution Pheno4D seedlings lose every leaflet.
 
 ## Synthetic herbaceous scans (2026-09-24)
@@ -249,7 +249,7 @@ fraction is on target for all four (0.24-0.38 vs 0.31 measured); synthetic-only 
 (median abs error 0.11 vs 0.16 real-only) but no model tracks per-leaf variation (r ~0.1), and
 adding real beet (trained only as "stem or leaf") leaves more leaves with no predicted petiole
 (45 % vs 31 %). The first version of that script scored a found petiole as zero whenever a
-neighbouring blade overlapped the leaf base; it now measures how far the predicted stem reaches.
+neighboring blade overlapped the leaf base; it now measures how far the predicted stem reaches.
 
 ### Where the synthetic-to-real gap comes from (`organ_gap.py`, 2026-09-24)
 
@@ -272,7 +272,7 @@ neighbouring blade overlapped the leaf base; it now measures how far the predict
   reason). Soybean, bean and cowpea build them (`build_petiolule`; PyHelios soybean at 30 d: 8,798
   petiolule primitives) but at a scale a scanner cannot resolve: 3-8 hits in a whole synthetic
   soybean scan. Real petiolules are 3-15 mm long and the human labels call them stem, so a
-  synthetic-trained model has never seen what the labellers mean by the stem at a leaflet base.
+  synthetic-trained model has never seen what the labelers mean by the stem at a leaflet base.
 
 ### v3: the tracer fix, soil mounds and young-leaf partial labels (2026-09-25)
 
@@ -287,7 +287,7 @@ v3 (`herb_*_v3.xml`) keeps v2 and adds three things the error analysis above poi
   petiolules (library geometry, also fixed upstream).
 - **Soil mounds and clods** in pots (`<soil_mound_max>`): 5-15 mm heaps at the stem base.
 - **Young synthetic leaves** (< 3 days, `YOUNG_LEAF_DAYS`) are coded `young_leaf` and trained as
-  "stem or leaf", so exact synthetic labels no longer fight Pheno4D's stem-labelled shoot tips.
+  "stem or leaf", so exact synthetic labels no longer fight Pheno4D's stem-labeled shoot tips.
 
 Held-out real plants, 1 mm (single seed each):
 
@@ -322,7 +322,7 @@ everywhere except leaflet F1 on tomato and soybean (within one SD), and varies l
 The beet-petiole metric is too seed-noisy to rank anything (share of leaves with no predicted
 petiole: 23-48 % within one recipe). These three test sets are in-distribution for the real-only
 model, so they cannot show the benefit synthetic data is for (species and scanners the real sets
-do not cover); revisit with an out-of-domain labelled set, or once Helios 1.3.89 adds tomato
+do not cover); revisit with an out-of-domain labeled set, or once Helios 1.3.89 adds tomato
 petiolules.
 
 **Model of record: `organ_S_real_s1`** (`phytograph_ml/runs/organ_S_real_s1/package`), best of the
@@ -348,8 +348,8 @@ mean ± SD on the test plants at 1 mm unless marked:
 Fine-tuned v4 closes most of v3's soybean deficit (0.889 -> 0.902) and is still within noise of
 real-only everywhere. Synthetic-only v4 is WORSE than v3 on tomato: stem precision falls 0.90 ->
 0.81-0.84 while stem recall rises, i.e. it calls stem on points Pheno4D labels leaf. The likely
-cause is the new tomato petiolules, which the synthetic labeller calls stem and Pheno4D's
-annotators appear to include in the leaflet: a labelling convention, not a rendering error, and
+cause is the new tomato petiolules, which the synthetic labeler calls stem and Pheno4D's
+annotators appear to include in the leaflet: a labeling convention, not a rendering error, and
 the choice matters for PlantCloudFit (whose model has petiolules). Synthetic-only v4 places beet
 petioles best of anything so far (median fraction error 0.098 on all three seeds, 27-31 % of
 leaves with none), fine-tuned v4 worse (0.14-0.16).
@@ -362,7 +362,7 @@ are LEAF, joined to the leaflet they carry (`readers._join_petiolules`), cached 
 `synth_herb_{potted,field}_v4pl` (symlinks to the v4 scene directories). The runs above used the
 old stem convention from `synth_herb_*_v4`.
 
-### Leave one dataset out: synthetic data is what generalises (2026-09-26)
+### Leave one dataset out: synthetic data is what generalizes (2026-09-26)
 
 The in-distribution benchmarks above cannot show what synthetic data is for, so each real dataset
 was held out in turn: `organ_lodo_<held-out>_{real,ftv4}_s{0,1,2}` train on the OTHER two real
@@ -397,8 +397,8 @@ three recipes): tomato and soybean carry petiole labels.
 
 ### Joint synthetic + real training, and petiolules as leaf (2026-09-27)
 
-Petiolules relabelled leaf (above), then three recipes, three seeds each: synthetic-only on the
-relabelled scenes (`organ_S_synth_v4pl_s*`), and joint training, 60 % real / 40 % synthetic
+Petiolules relabeled leaf (above), then three recipes, three seeds each: synthetic-only on the
+relabeled scenes (`organ_S_synth_v4pl_s*`), and joint training, 60 % real / 40 % synthetic
 throughout, both in-distribution (`organ_S_joint_v4pl_s*`, all three real sets) and with each real
 set held out (`organ_lodo_<fold>_joint_s*`). Leaflet F1 / mIoU, mean of three seeds at 1 mm
 (`bench/organ_joint_seeds.json`, `bench/lodo_joint_<fold>.json`):
@@ -452,7 +452,7 @@ and the best sparse-cloud tomato leaflets of any recipe. Held out, tomato gives 
 (0.762 -> 0.743, within one SD; soil kept at 0.95). What it costs is beet at full resolution
 (0.840 -> 0.728): any real leaflet-annotated data teaches the model to cut an undivided beet leaf
 into pieces (count error +0.33 -> +0.72), which disappears at 3-5 mm. More real data past 10 %
-keeps trading generalisation for in-distribution scores, with no point dominating another.
+keeps trading generalization for in-distribution scores, with no point dominating another.
 
 **Shipped (2026-09-28): `organ_S_joint_r10_s1`**, best of the three 10 % seeds by validation
 score (0.8796 vs 0.8778 / 0.8794), bundled as `resources/ml_models/plant-organ-pointnext-s-v1`
@@ -477,7 +477,7 @@ The floor cannot simply go: on the model's votes it is what removes fragments (~
 test plants without it). Two tests to tell a small leaflet from a fragment were tried, tuned on
 the VALIDATION plants of all three real-only seeds (`organ_tune_cluster.py`, votes saved per seed):
 
-- **Spatial coherence** (share of a cluster's neighbours that carry its own label): made every
+- **Spatial coherence** (share of a cluster's neighbors that carry its own label): made every
   setting worse. A leaflet the model splits in two gives two contiguous halves, as coherent as
   two real leaflets.
 - **Radius consistency** (`radius_ratio_min`: measured RMS radius over the radius the members

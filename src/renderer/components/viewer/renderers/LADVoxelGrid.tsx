@@ -27,7 +27,7 @@ export interface LADVoxelGridProps {
   opacity: number;        // 0..1 cell translucency
   hideEmpty: boolean;
   // Which per-voxel density drives the color. 'lad' is one-sided LEAF area
-  // (the historical behaviour and the default); 'wad' is TOTAL woody SURFACE
+  // (the historical behavior and the default); 'wad' is TOTAL woody SURFACE
   // area; 'pad' is their sum. Only meaningful on a result that carries a
   // leaf/wood split — a voxel with no wood fields reads 0 for wad/pad, which is
   // correct (no wood was attributed there).

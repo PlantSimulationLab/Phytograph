@@ -457,9 +457,9 @@ function FieldsTab({
             data-testid={`scalar-field-colorby-${f.slug}`}
             onClick={(e) => { e.stopPropagation(); onColorBy(f.slug); }}
             className="text-[9px] px-1 py-0.5 rounded bg-neutral-600/60 hover:bg-neutral-600 text-neutral-300 opacity-0 group-hover:opacity-100 shrink-0"
-            title="Colour the cloud by this field"
+            title="Color the cloud by this field"
           >
-            colour
+            color
           </button>
         </div>
 
@@ -756,7 +756,7 @@ function StatsTab({
           {visibleCount < pointCount && (
             <div className="mt-1 text-[9px] text-neutral-500">
               Measured over {formatCount(visibleCount)} of {formatCount(pointCount)} points
-              — hidden and sky/miss points are excluded, exactly as the colour scale excludes them.
+              — hidden and sky/miss points are excluded, exactly as the color scale excludes them.
             </div>
           )}
           <div className="sr-only">{label}</div>
@@ -806,7 +806,7 @@ function ComputeTab({
         <InfoHint
           data-testid="scalar-compute-expression-help"
           label="Expression"
-          text="A formula over this cloud's existing fields, evaluated once per point. Use a field by name (intensity, z, curvature), the usual operators, and functions like sqrt or ifelse. Whole-field values such as mean(intensity) are measured over the visible points, so (intensity - mean(intensity)) / std(intensity) normalises the field."
+          text="A formula over this cloud's existing fields, evaluated once per point. Use a field by name (intensity, z, curvature), the usual operators, and functions like sqrt or ifelse. Whole-field values such as mean(intensity) are measured over the visible points, so (intensity - mean(intensity)) / std(intensity) normalizes the field."
         />
       </label>
       {/* A raw textarea bound to a string draft, not a numeric input: this is

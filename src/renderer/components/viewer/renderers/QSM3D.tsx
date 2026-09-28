@@ -85,10 +85,10 @@ export interface QSM3DProps {
 // brighter branches".
 // Each adjacent rank pair must be clearly DISTINGUISHABLE. The previous brown
 // trunk + amber scaffold were nearly the same hue (20deg vs 22deg, RGB dist 0.23),
-// so a rank-0 trunk and its rank-1 scaffold read as the same colour. This palette
+// so a rank-0 trunk and its rank-1 scaffold read as the same color. This palette
 // keeps the trunk a neutral wood-tan but makes rank 1 a clearly different
 // red-orange, and cycles well-separated hues after (every adjacent pair RGB dist
-// >= 0.42), while keeping every colour bright enough for the dark background.
+// >= 0.42), while keeping every color bright enough for the dark background.
 export const RANK_COLORS = RANK_COLOR_HEXES.map((h) => new THREE.Color(h));
 
 // Thin THREE wrappers over the shared palette/hue math in lib/qsmColors. The math

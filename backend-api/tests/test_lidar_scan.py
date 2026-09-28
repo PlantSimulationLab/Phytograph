@@ -386,13 +386,13 @@ class TestScanOptions:
         # points must be HITS ONLY. syntheticScan() places miss points ~1 km out
         # along each beam (LIDAR_RAYTRACE_MISS_T = 1001 m). If they leak into the
         # primary point array, the cloud's bounding box spans ~2 km, the camera
-        # auto-fit (distance = 2 * maxDim) parks the view ~4 km from a sub-metre
+        # auto-fit (distance = 2 * maxDim) parks the view ~4 km from a sub-meter
         # target, and the user can't zoom back in. The misses are preserved in the
         # session (for the overlay + LAD), so the render array must exclude them.
         pts = np.asarray(res["points"], dtype=np.float64)
         assert res["num_points"] == pts.shape[0]
         # The pyramid spans <1 m about the origin; every hit must be within a few
-        # metres. A miss leaking in would push this to ~1000 m. Use a tight bound
+        # meters. A miss leaking in would push this to ~1000 m. Use a tight bound
         # (10 m) so even one stray far point fails — not the 1 km miss distance.
         assert np.abs(pts).max() < 10.0, "miss point (~1 km) leaked into render cloud"
 
@@ -409,7 +409,7 @@ class TestScanOptions:
     def test_session_created_even_without_misses(self, client):
         # Every synthetic scan with hits is routed through a cloud session (not
         # just miss-recording ones) so triangulation / LAD / edits read its points
-        # by session_id instead of serialising the whole cloud as an uncapped
+        # by session_id instead of serializing the whole cloud as an uncapped
         # inline JSON `points` body — which overflows the JS string limit
         # ("Invalid string length") / OOMs the pydantic parse on a large scan.
         body = self._scan_full(client, [_scanner("n")])
@@ -779,7 +779,7 @@ _FAR_Z = 0.0
 
 
 def _slab(half, z, thick=0.05):
-    """A square slab of side 2*half centred on the origin in xy, top face at z.
+    """A square slab of side 2*half centered on the origin in xy, top face at z.
 
     A thin box (not a coplanar quad) so the engine's AABB is non-degenerate.
     """

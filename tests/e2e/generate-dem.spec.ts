@@ -250,10 +250,10 @@ test('generates DTM, DSM and CHM together in one run', async () => {
 });
 
 // Layers: a single DTM carries scalar bands (elevation / point density / intensity
-// / hillshade / slope / aspect). The user colours the ONE terrain mesh by any band
+// / hillshade / slope / aspect). The user colors the ONE terrain mesh by any band
 // via "Color by", and exports the selected band as a raster. This replaces the old
 // "separate mesh per product" model.
-test('a DTM carries colour-by layers and exports the selected one as a raster', async () => {
+test('a DTM carries color-by layers and exports the selected one as a raster', async () => {
   const { app, page } = session;
   const ascPath = join(tmpdir(), `phytograph_pd_e2e_${Date.now()}.asc`);
   if (existsSync(ascPath)) rmSync(ascPath);
@@ -293,7 +293,7 @@ test('a DTM carries colour-by layers and exports the selected one as a raster', 
     for (const band of ['point_density', 'hillshade', 'slope', 'aspect', 'intensity']) {
       await expect(modeSelect.locator(`option[value="layer:${band}"]`)).toHaveCount(1);
     }
-    // Colour the terrain by point density; the colorbar caption reflects it.
+    // Color the terrain by point density; the colorbar caption reflects it.
     await modeSelect.selectOption('layer:point_density');
     await expect(modeSelect).toHaveValue('layer:point_density');
     await expect(page.getByTestId('mesh-colorbar')).toContainText(/point density/i);

@@ -2,13 +2,13 @@
 
 A **crown fit** approximates a tree's foliage envelope with a simple
 geometric shape and derives structural metrics from it. It answers
-questions a bounding box or raw point cloud can't summarise at a glance:
+questions a bounding box or raw point cloud can't summarize at a glance:
 *how tall is the tree, how much space does its crown occupy, where is it
-centred, and how wide is it?*
+centered, and how wide is it?*
 
 Crown fitting is the geometric counterpart to a
 [QSM](qsm.md): a QSM reconstructs the **woody** structure cylinder by
-cylinder, while a crown fit characterises the **foliage** as a single
+cylinder, while a crown fit characterizes the **foliage** as a single
 bounding solid. Both are computed per tree.
 
 ## The shapes
@@ -34,7 +34,7 @@ four shapes):
 
 - **Tree height** — the crown top minus the **ground baseline**. When the
   scan carries `ground_class` labels the baseline is the minimum height of
-  the labelled ground; otherwise it's the tree's own lowest point. (This
+  the labeled ground; otherwise it's the tree's own lowest point. (This
   is measured from the crown *points* — the real tree height — since a
   fitted shape's top can clip, e.g. a cone tip.)
 - **Crown volume** — the fitted shape's volume (see the table above).

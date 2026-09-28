@@ -26,7 +26,7 @@ orientations* is the thing that has to be right.
     Methods that produce a *better-looking* surface do so by resampling and
     smoothing — and that is exactly what destroys leaf-orientation statistics.
     The dropdown says so out loud: Poisson, Alpha Shape, and Delaunay are
-    each labelled **"not recommended for leaf angle"**. A watertight Poisson
+    each labeled **"not recommended for leaf angle"**. A watertight Poisson
     mesh can be the right answer for reconstruction and the wrong answer for
     measurement, from the same cloud.
 
@@ -85,7 +85,7 @@ Method-specific parameters:
 === "Ball Pivot"
 
     - **Auto radius** *(default on)* — the ball-pivot radius is computed
-      from the median nearest-neighbour spacing of the cloud. Points that
+      from the median nearest-neighbor spacing of the cloud. Points that
       share an exact coordinate are ignored when measuring that spacing
       (see *Duplicate points* below).
     - Untick it to set the **radius** manually (in meters). A good value
@@ -463,7 +463,7 @@ Phytograph, both reflecting the **currently visible** cells:
   over bins × bin width equals 1.
 
 Both files also include the cell's **center** and **dimensions** (each an
-*(x, y, z)* triple in metres) read from the triangulation grid, so every row is
+*(x, y, z)* triple in meters) read from the triangulation grid, so every row is
 located in space. These are blank for a non-grid **Whole mesh** mesh and for the
 combined **All visible** row, which span no single grid box.
 

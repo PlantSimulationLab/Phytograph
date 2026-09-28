@@ -29,14 +29,14 @@ The terrain elevation at any point under a tree comes from the first source that
    the stem and below 1 m, evaluated at the stem. A median is not used,
    because on a slope the stem points around the base sit unevenly up- and
    downslope of it, which biases a median.
-2. **Ground-labelled points.** If only
+2. **Ground-labeled points.** If only
    [ground segmentation](../workflows/segment-ground.md) has run, the
    ground points are averaged on a 0.5 m grid. The elevation at the stem is
    that grid, inverse-distance weighted over the occupied cells within 2 m.
 3. **The tree's own lowest point.** This is the last resort. The row is
    flagged `ground_from_tree_min`, because the value is biased on slopes.
 
-The stem base elevation (the terrain at the stem centre) is the reference
+The stem base elevation (the terrain at the stem center) is the reference
 for tree height and for the stem curve's heights. Breast height has its own
 reference, the uphill side of the stem (see [DBH](#diameter-at-breast-height-dbh)).
 
@@ -48,27 +48,27 @@ which source gave the stem base.
 ## Stem axis, stem base and lean
 
 **Stem curve.** A stem curve is the list of stem diameters, and their
-centre positions, at a series of heights up the stem. Liang et al. (2014)
+center positions, at a series of heights up the stem. Liang et al. (2014)
 measure it from TLS by fitting circles to thin cross-sections of the stem.
 We do the same in two passes.
 
 1. **Horizontal pass (to find the axis).** Take 0.10 m thick horizontal
    slices every 0.25 m, from 0.5 m to 2.5 m above ground. Fit a circle to
-   each slice (see [Circle fitting](#circle-fitting)). The median centre of
+   each slice (see [Circle fitting](#circle-fitting)). The median center of
    the successful fits is the **seed**. Then track the stem upward: each
-   slice is searched only within `1.5·r + 0.10 m` of the previous centre,
+   slice is searched only within `1.5·r + 0.10 m` of the previous center,
    and a fit is accepted only if its radius stays within 0.5–1.5× the
    previous one and it is not flagged `high_residual`. Tracking stops after two failed slices in a row.
-2. **Stem axis.** Fit a straight line through the accepted slice centres
-   up to 4 m above ground, by least squares of centre x and y on height.
-   With fewer than three accepted centres, the axis is vertical through
+2. **Stem axis.** Fit a straight line through the accepted slice centers
+   up to 4 m above ground, by least squares of center x and y on height.
+   With fewer than three accepted centers, the axis is vertical through
    the seed.
 3. **Perpendicular pass (the reported stem curve).** Cut slices
    **perpendicular to the axis** every 0.5 m of distance along it,
    starting at 0.5 m. A horizontal cut through a leaning cylinder is an
    ellipse, not a circle, and a circle fitted to it overstates the diameter
    by 1/cos(lean). A cut perpendicular to the axis is a true circle. The
-   search window follows the previous centre, so a gently curved stem is
+   search window follows the previous center, so a gently curved stem is
    still tracked.
 
 **Stem base position.** The stem base is where the stem axis meets the
@@ -80,7 +80,7 @@ Olofsson et al. (2014).
 
 **Lean** is the angle between the stem axis and the vertical:
 `lean = atan(√(bx² + by²))`, where `bx`, `by` are the axis slopes
-(metres of horizontal offset per metre of height). The **lean azimuth** is
+(meters of horizontal offset per meter of height). The **lean azimuth** is
 the compass direction the stem leans toward: degrees clockwise from +y
 (grid north). It is left blank when the lean is below 0.5°.
 
@@ -99,7 +99,7 @@ are followed:
   `breast_height_ref_z`.
 - **On a leaning tree**, breast height is measured parallel to the lean,
   and the diameter perpendicular to the stem's axis (Kershaw et al., 2016).
-  The DBH slice is therefore centred on the stem axis, 1.3 m **along the
+  The DBH slice is therefore centered on the stem axis, 1.3 m **along the
   axis** from the axis point level with the uphill ground, and cut
   **perpendicular to the axis**.
 
@@ -138,7 +138,7 @@ search that finds the stem's points, then a precise fit to those points.
       Taubin's fit has a much smaller bias (Al-Sharadqah & Chernov, 2009),
       which matters for TLS stems, where the far side of the trunk is
       always occluded.
-    - The **geometric fit** then minimises the sum of squared orthogonal
+    - The **geometric fit** then minimizes the sum of squared orthogonal
       distances `Σ(‖pᵢ − c‖ − r)²` by Levenberg–Marquardt, starting from
       Taubin's circle (Chernov & Lesort, 2005; Chernov, 2010). This is
       the reported circle.
@@ -151,15 +151,15 @@ Every circle (DBH and each stem-curve slice) reports:
 
 | Field | Meaning |
 |-------|---------|
-| `rms_m` | Root-mean-square orthogonal residual of the inliers, in metres. |
-| `arc_coverage` | Fraction of 36 angular sectors (10° each) around the fitted centre that hold at least one inlier. 1.0 = the whole circumference was seen. |
+| `rms_m` | Root-mean-square orthogonal residual of the inliers, in meters. |
+| `arc_coverage` | Fraction of 36 angular sectors (10° each) around the fitted center that hold at least one inlier. 1.0 = the whole circumference was seen. |
 | `max_gap_deg` | Largest empty angular gap between inliers, in degrees. |
 | `n_points`, `n_inliers` | Points in the slice, and inliers of the fit. |
 
 A circle fitted to a short arc is poorly constrained. As the arc shrinks,
 the bias and instability of every circle fit grow (Chernov & Lesort, 2005;
 Al-Sharadqah & Chernov, 2009), and the radius can trade off against the
-position of the centre. Arc coverage is therefore reported for every fit.
+position of the center. Arc coverage is therefore reported for every fit.
 Arc coverage and the flag thresholds below are our own quality measures,
 tuned on synthetic stems; they are not taken from a published standard.
 DBH carries these flags:
@@ -177,7 +177,7 @@ not silently dropped.
 A stem-curve row is `ok = false` when its fit has `few_points` or
 `high_residual`, or when its radius is outside 0.5–1.5× the previous ok
 slice's radius (a jump no stem makes in 0.5 m, usually a branch or a
-neighbour's stem). `partial_arc` does **not** make a slice not-ok. Seeing
+neighbor's stem). `partial_arc` does **not** make a slice not-ok. Seeing
 about half of each stem is the normal case for a single scan position, and
 the fits stay accurate there. Only ok slices steer the tracking up the
 stem, and only ok slices define the stem radius that separates stem from
@@ -254,10 +254,10 @@ result.
 
 ## Derived per-tree values
 
-- **Basal area** `g = π/4 · DBH²` (m², DBH in metres). This is the
+- **Basal area** `g = π/4 · DBH²` (m², DBH in meters). This is the
   cross-sectional area of the stem at breast height (Kershaw et al., 2016).
 - **Slenderness** is the ratio of total height to DBH
-  (Wang, Titus & LeMay, 1998), both in metres, so it has no units.
+  (Wang, Titus & LeMay, 1998), both in meters, so it has no units.
 
 Both are left blank when DBH has the `no_stem` flag.
 

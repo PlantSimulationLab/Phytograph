@@ -86,7 +86,7 @@ interface LADPopupProps {
   // the Meshes pane), then reuses that mesh for the inversion — so the user can
   // see and refine the surface G(theta) was computed on. It carries the source
   // scans + grid + the dialog's Lmax/aspect (the triangulation seeds its own
-  // Otsu default but honours an explicit override). Null/absent for the
+  // Otsu default but honors an explicit override). Null/absent for the
   // reuse-existing-mesh and moving-platform paths.
   onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string,
                reuseMesh: ReuseMeshPayload | null,
@@ -220,7 +220,7 @@ export function LADPopup({
   const [elementWidthStr, setElementWidthStr] = useState('0.05');
   // Occlusion screening. Blank = use the backend's grid-derived default
   // (100x the mean voxel side length; Soma, Pimont & Dupuy 2021). A typed
-  // value is in metres of total probed beam path, matching the published
+  // value is in meters of total probed beam path, matching the published
   // parameter so a user can enter a literature value directly.
   const [occlusionThresholdStr, setOcclusionThresholdStr] = useState('');
   const [fillOccluded, setFillOccluded] = useState(false);
@@ -305,7 +305,7 @@ export function LADPopup({
   // backend applies (`_lad_labels_vals`: multi iff timestamp + target_index +
   // target_count are all present). Previously this read `params.returnMode`, a
   // user-declared label the inversion never consulted, so an imported multi-return
-  // cloud could be summarised here as single while the backend correctly ran it as
+  // cloud could be summarized here as single while the backend correctly ran it as
   // multi. Nothing to set: it's a property of the data.
   const returnTypes = useMemo(
     () => new Set(
@@ -445,7 +445,7 @@ export function LADPopup({
         && (!Number.isFinite(parsedOcclusion) || parsedOcclusion < 0)) {
       // Silently falling back to the auto default here would show one number in
       // the field while a different one ran.
-      setError('Occlusion threshold must be a number of metres, 0 or greater '
+      setError('Occlusion threshold must be a number of meters, 0 or greater '
                + '(leave it blank to use the automatic value).');
       return;
     }
@@ -1077,7 +1077,7 @@ export function LADPopup({
                   <InfoHint
                     data-testid="lad-lmax-help"
                     label="Max edge length (Lmax)"
-                    text="Longest triangle edge (metres) allowed when triangulating each scan into the surface used to derive the G-function (the leaf-projection coefficient). Leave blank for Auto — the edge length is estimated from the data (Otsu over the candidate edge-length distribution), the same estimate the standalone Triangulate tool seeds. Enter a value to force it: lower keeps only tight, well-sampled triangles; higher bridges sparser regions. Too small drops valid leaf surface; too large spans gaps between separate leaves."
+                    text="Longest triangle edge (meters) allowed when triangulating each scan into the surface used to derive the G-function (the leaf-projection coefficient). Leave blank for Auto — the edge length is estimated from the data (Otsu over the candidate edge-length distribution), the same estimate the standalone Triangulate tool seeds. Enter a value to force it: lower keeps only tight, well-sampled triangles; higher bridges sparser regions. Too small drops valid leaf surface; too large spans gaps between separate leaves."
                   />
                 </label>
                 <input
@@ -1147,7 +1147,7 @@ export function LADPopup({
                 <InfoHint
                   data-testid="lad-element-width-help"
                   label="Element width"
-                  text="Characteristic width of a single foliage element — leaf for broadleaf, needle for conifer (metres). It sets the spatial scale at which beams resolve the canopy, feeding the Pimont et al. (2018) sampling-uncertainty interval reported with each result. It does not change the LAD value itself, only its confidence bounds. Use the presets as starting points: broadleaf ≈ 0.05 m, conifer needle ≈ 0.002 m."
+                  text="Characteristic width of a single foliage element — leaf for broadleaf, needle for conifer (meters). It sets the spatial scale at which beams resolve the canopy, feeding the Pimont et al. (2018) sampling-uncertainty interval reported with each result. It does not change the LAD value itself, only its confidence bounds. Use the presets as starting points: broadleaf ≈ 0.05 m, conifer needle ≈ 0.002 m."
                 />
               </label>
               <div className="flex items-center gap-2">
@@ -1189,7 +1189,7 @@ export function LADPopup({
                 <InfoHint
                   data-testid="lad-occlusion-help"
                   label="Occlusion threshold"
-                  text="Total length of laser beam path that must pass through a voxel before its leaf-area estimate is trusted. Below this the inversion is not just noisy but biased HIGH, so the voxel is reported as occluded rather than as a measurement, and is left out of the leaf-area total. Leave blank to use 100× the voxel side length (Soma, Pimont & Dupuy 2021) — the right default because total path length scales with voxel size, so no fixed number suits every grid. Enter a value in metres to match a published figure."
+                  text="Total length of laser beam path that must pass through a voxel before its leaf-area estimate is trusted. Below this the inversion is not just noisy but biased HIGH, so the voxel is reported as occluded rather than as a measurement, and is left out of the leaf-area total. Leave blank to use 100× the voxel side length (Soma, Pimont & Dupuy 2021) — the right default because total path length scales with voxel size, so no fixed number suits every grid. Enter a value in meters to match a published figure."
                 />
               </label>
               <input
@@ -1217,7 +1217,7 @@ export function LADPopup({
                 <InfoHint
                   data-testid="lad-fill-help"
                   label="Fill occluded voxels"
-                  text="Estimate each occluded voxel from the surrounding well-sampled ones by LAD-kriging (Soma et al. 2020), which weights each neighbour by how reliably it was measured. Filled voxels are marked as interpolated and their leaf area is reported separately — never folded into the measured total. Leave off to report occlusion without modelling it."
+                  text="Estimate each occluded voxel from the surrounding well-sampled ones by LAD-kriging (Soma et al. 2020), which weights each neighbor by how reliably it was measured. Filled voxels are marked as interpolated and their leaf area is reported separately — never folded into the measured total. Leave off to report occlusion without modeling it."
                 />
               </label>
             </div>
@@ -1235,7 +1235,7 @@ export function LADPopup({
               <InfoHint
                 data-testid="lad-grid-help"
                 label="Voxel grid"
-                text="LAD is computed independently for every voxel, so an explicit grid is the basis of the calculation, not just a bounding region. Pick a voxel box created in the viewer; its bounds set the analysed volume and its subdivisions set the grid resolution. Finer grids give more spatial detail but spread the same beams over more voxels, so each gets fewer hits — balance resolution against Min Voxel Hits."
+                text="LAD is computed independently for every voxel, so an explicit grid is the basis of the calculation, not just a bounding region. Pick a voxel box created in the viewer; its bounds set the analyzed volume and its subdivisions set the grid resolution. Finer grids give more spatial detail but spread the same beams over more voxels, so each gets fewer hits — balance resolution against Min Voxel Hits."
               />
             </label>
             {gridOptions.length === 0 ? (

@@ -15,7 +15,7 @@ table. Getting them wrong silently distorts the reconstruction — the sweep set
 raster every recovered miss is placed on — so they are explicit arguments rather
 than guesses. Read them off the scanner's own metadata export.
 
-The output is a LAS carrying the original returns plus the synthesised misses, with
+The output is a LAS carrying the original returns plus the synthesized misses, with
 an `is_miss` extra dimension (0 = return, 1 = sky). That is exactly the shape
 Phytograph's own E57 reader produces, so re-importing it gives a cloud that already
 has its misses and needs no backfill step before Leaf Area Density.
@@ -103,7 +103,7 @@ def main(argv=None) -> int:
              f"uses first hits only")
 
     # Per-return beam direction from the scanner head. A zero-length vector (a point
-    # exactly at the origin) has no direction; nudge it so normalisation is defined.
+    # exactly at the origin) has no direction; nudge it so normalization is defined.
     d = xyz - origin
     norm = np.linalg.norm(d, axis=1, keepdims=True)
     n_degenerate = int((norm[:, 0] == 0).sum())
@@ -155,7 +155,7 @@ def main(argv=None) -> int:
         return 1
     _log(f"  done in {time.time() - t:.1f}s")
 
-    # Slice out the synthesised misses. gapfillMisses APPENDS them to the cloud and
+    # Slice out the synthesized misses. gapfillMisses APPENDS them to the cloud and
     # flags each one, so every miss-flagged row is new (the input was returns only).
     miss_flag = np.asarray(cloud.getHitMissArray(), dtype=np.int32)
     all_xyz, _rgb = cloud.getHitsXYZRGBArrays()
@@ -188,7 +188,7 @@ def main(argv=None) -> int:
     record.x = out_xyz[:, 0]
     record.y = out_xyz[:, 1]
     record.z = out_xyz[:, 2]
-    # Carry gps_time through for the returns; synthesised misses get 0 (their own
+    # Carry gps_time through for the returns; synthesized misses get 0 (their own
     # reconstructed times are not exposed by the bulk getters).
     gps_out = np.concatenate([gps, np.zeros(n_miss, dtype=np.float64)]) if n_miss else gps
     record.gps_time = gps_out

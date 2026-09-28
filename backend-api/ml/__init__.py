@@ -13,7 +13,7 @@ benchmark is byte-for-byte the model users run:
 Layout:
 
 - ``grid``: voxel grid sampling, shared by the training crops and inference.
-- ``hierarchy``: the multi-resolution neighbour structure a crop is fed through.
+- ``hierarchy``: the multi-resolution neighbor structure a crop is fed through.
   It is built in numpy/scipy on the CPU, so the network itself is only gathers
   and matmuls and runs unchanged on CUDA, Apple MPS or a plain CPU. No compiled
   extension ships, unlike openpoints' ball-query and FPS kernels.

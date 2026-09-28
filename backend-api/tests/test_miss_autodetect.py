@@ -13,7 +13,7 @@ downstream consumer works unchanged. Two real assertions:
 
   - misses are tagged (`has_misses`, correct count), AND
   - they are EXCLUDED from the hits-only octree, so `tight_bounds` is the real
-    ~metre-scale geometry, NOT the ~1001 m far field.
+    ~meter-scale geometry, NOT the ~1001 m far field.
 
 The end-to-end case uses the `leafcube_multi.xyz` fixture (the exact file the bug
 was reported against), committed at 360 KB under
@@ -80,7 +80,7 @@ def test_target_index_sentinel_is_primary_signal(leafcube_arrays):
     meta = []
     count = main._autodetect_misses(positions, extras, meta, origin=LEAFCUBE_ORIGIN)
     assert count == EXPECTED_MISS_COUNT
-    # The synthesised flag is exactly target_index == 99.
+    # The synthesized flag is exactly target_index == 99.
     assert np.array_equal(extras[main._MISS_SLUG], (tindex == 99).astype(np.float32))
     # And the is_miss dim is registered so the LAS/octree pipeline carries it.
     assert any(ed["slug"] == main._MISS_SLUG for ed in meta)
@@ -147,7 +147,7 @@ def cache_root(tmp_path, monkeypatch) -> Path:
                     reason="PotreeConverter binary not found; npm run build:potree-converter")
 def test_import_autodetects_misses_and_keeps_bbox_tight(client, cache_root):
     """Importing the real leafcube scan (no is_miss column) tags its 2779 misses
-    AND keeps them out of the octree, so the bounding box is metre-scale — the
+    AND keeps them out of the octree, so the bounding box is meter-scale — the
     fix for the ground-grid flicker."""
     res = client.post(
         "/api/cloud/session/create",
@@ -170,7 +170,7 @@ def test_import_autodetects_misses_and_keeps_bbox_tight(client, cache_root):
 
     # The hits-only octree's tight bounds must be the ~5 m geometry, NOT the
     # 1001 m far field. Diagonal of a ~1 m leaf cube + ~5 m standoff is a few
-    # metres; assert it's well under 50 m (a 1001 m miss would blow it to ~2000).
+    # meters; assert it's well under 50 m (a 1001 m miss would blow it to ~2000).
     tb = body["tight_bounds"]
     span = max(tb["max"][i] - tb["min"][i] for i in range(3))
     assert span < 50.0, f"bbox span {span} m — misses leaked into the octree"

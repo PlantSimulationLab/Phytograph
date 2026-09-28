@@ -243,7 +243,7 @@ describe('labelEdit action', () => {
   });
 
   it('round-trips the stroke stack and preserves order', () => {
-    // Order is load-bearing: labelling is not commutative, so undo must restore
+    // Order is load-bearing: labeling is not commutative, so undo must restore
     // the exact sequence rather than a set.
     let s = makeInitialSceneState();
     const before = labelState([stroke('s1', 1)]);
@@ -288,7 +288,7 @@ describe('labelEdit action', () => {
     s = run(s, { c: 'commit', tx: tx('paint', [{ t: 'labelEdit', id: 'c1', slug: 'manual_class', before: labelState([]), after: labelState([stroke('s1', 1)]) }]) });
     s = run(s, { c: 'commit', tx: tx('erase', [{ t: 'maskEdit', id: 'c1', before: editState([]), after: editState([7]) }]) });
 
-    // Undoing the erase must leave the labelling alone.
+    // Undoing the erase must leave the labeling alone.
     s = run(s, { c: 'undo' });
     expect([...s.editStates.get('c1')!.erasedIndices]).toEqual([]);
     expect(s.labelStates.get('c1')!.strokes).toHaveLength(1);

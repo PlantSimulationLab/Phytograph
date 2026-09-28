@@ -5,7 +5,7 @@
 //
 // The reason this module exists: an OBJ carrying `usemtl` groups is only half a
 // model. Without the sibling `.mtl` (and the images it names) a generated plant
-// re-imports as untextured grey geometry — the export doesn't round-trip. So the
+// re-imports as untextured gray geometry — the export doesn't round-trip. So the
 // OBJ writer here emits the whole bundle: geometry + material library + texture
 // images, all cross-referenced by name.
 
@@ -40,7 +40,7 @@ export function sanitizeMeshName(name: string, fallback = 'mesh'): string {
  * that made bark textures ship as `.png` when the bytes were JPEG. Downstream
  * readers (Helios, Blender, three.js) pick a decoder from the suffix, so a
  * mismatch is a hard load error. Returns null for anything we can't identify —
- * the caller then writes the material's flat colour and skips `map_Kd` rather
+ * the caller then writes the material's flat color and skips `map_Kd` rather
  * than naming a file no reader can open.
  */
 export function imageExtFromBytes(bytes: Uint8Array): string | null {
@@ -70,7 +70,7 @@ export function decodeBase64(data: string): Uint8Array | null {
   }
 }
 
-// A material resolved for writing: its sanitized (unique) MTL name, its colour,
+// A material resolved for writing: its sanitized (unique) MTL name, its color,
 // and — when it carries a usable image — the texture file to write beside the OBJ.
 // Exported so the QSM exporter can reuse this resolver for a QSM's leaves rather
 // than growing a second copy of the texture-decode / alpha rules.
@@ -82,7 +82,7 @@ export interface ResolvedMaterial {
   triangleIndices: number[];
 }
 
-// Quantisation for grouping untextured triangles by vertex colour. Colours come
+// Quantization for grouping untextured triangles by vertex color. Colors come
 // from float arrays, so exact equality would split visually identical organs into
 // separate materials on a float wobble; 1/1000 is far finer than the eye (and
 // than an 8-bit channel) while still collapsing that noise.
@@ -94,20 +94,20 @@ function colorKey(r: number, g: number, b: number): string {
 
 /**
  * Build materials for the triangles no supplied material claims, grouping them by
- * their vertex colour.
+ * their vertex color.
  *
  * Why this is needed: on a generated plant, only textured organs (leaves) get a
- * material — the backend deliberately leaves flat-coloured organs (petioles,
+ * material — the backend deliberately leaves flat-colored organs (petioles,
  * internodes, stems, flowers) out of `material_groups` because they render from
- * vertex colours. On a bean that is ~72% of the triangles. OBJ has no portable
- * per-vertex colour (the `v x y z r g b` extension is an unofficial dialect our
- * own importer doesn't read), and the importer reconstructs colour from each
+ * vertex colors. On a bean that is ~72% of the triangles. OBJ has no portable
+ * per-vertex color (the `v x y z r g b` extension is an unofficial dialect our
+ * own importer doesn't read), and the importer reconstructs color from each
  * triangle's material `Kd` — so `Kd` via `usemtl` is the only channel that
- * actually round-trips. Writing these under one flat grey `default` was what made
- * petioles and internodes come back the wrong colour.
+ * actually round-trips. Writing these under one flat gray `default` was what made
+ * petioles and internodes come back the wrong color.
  *
- * Real plants use a handful of distinct organ colours (3 on a 20-day bean), so
- * this stays compact. Returns [] when there are no vertex colours to group by,
+ * Real plants use a handful of distinct organ colors (3 on a 20-day bean), so
+ * this stays compact. Returns [] when there are no vertex colors to group by,
  * leaving the caller's `default` fallback in charge.
  */
 function materialsForUnclaimed(
@@ -121,7 +121,7 @@ function materialsForUnclaimed(
   const byColor = new Map<string, { color: [number, number, number]; tris: number[] }>();
   for (let t = 0; t < triangleCount; t++) {
     if (claimed[t]) continue;
-    // Flat-shaded organs carry one colour across the triangle, so the first
+    // Flat-shaded organs carry one color across the triangle, so the first
     // vertex is representative (this is exactly how the importer rebuilds it).
     const v = indices[t * 3];
     const r = vertexColors[v * 3], g = vertexColors[v * 3 + 1], b = vertexColors[v * 3 + 2];
@@ -142,27 +142,27 @@ function materialsForUnclaimed(
 }
 
 /**
- * The mean vertex colour over a material's triangles, or undefined when the mesh
- * carries no usable vertex colours.
+ * The mean vertex color over a material's triangles, or undefined when the mesh
+ * carries no usable vertex colors.
  *
- * Used as the `Kd` for a material that declares no colour of its own. Generated
+ * Used as the `Kd` for a material that declares no color of its own. Generated
  * plants set `color` only on UNtextured materials — a textured leaf arrives with
- * `color: null` — so without this the leaf materials would be written as the grey
- * 0.8 fallback, and re-import grey.
+ * `color: null` — so without this the leaf materials would be written as the gray
+ * 0.8 fallback, and re-import gray.
  *
  * Note we deliberately do NOT write the conventional `Kd 1 1 1` for a textured
  * material (the "let map_Kd pass through unmodified" idiom, since renderers
- * multiply the two). Our importer copies `Kd` straight into per-vertex colours
+ * multiply the two). Our importer copies `Kd` straight into per-vertex colors
  * whether or not the material is textured (see `/api/mesh/import` in main.py), and
- * those vertex colours are the viewer's fallback when a texture isn't applied — so
+ * those vertex colors are the viewer's fallback when a texture isn't applied — so
  * `1 1 1` would round-trip every leaf as WHITE. What this value has to answer is
- * "what colour is this organ when you can't see its texture", and the geometry
+ * "what color is this organ when you can't see its texture", and the geometry
  * already knows.
  *
  * Sampling the first vertex of each triangle matches how the importer reconstructs
- * colour. Mean rather than mode: for every material we actually emit, all triangles
- * share one flat colour, so the two agree — and where they wouldn't, an average is
- * a better answer than one arbitrarily-chosen triangle's colour. The pass is one
+ * color. Mean rather than mode: for every material we actually emit, all triangles
+ * share one flat color, so the two agree — and where they wouldn't, an average is
+ * a better answer than one arbitrarily-chosen triangle's color. The pass is one
  * read of three floats per triangle: ~0.04 ms for a 15k-triangle plant, ~2 ms at a
  * million, against tens of ms of string building in the writer below.
  */
@@ -210,8 +210,8 @@ export function resolveMaterials(
     if (mat.textureData) {
       const bytes = decodeBase64(mat.textureData);
       const ext = bytes ? imageExtFromBytes(bytes) : null;
-      // Both must hold: undecodable data or an unrecognised format means we
-      // write the flat colour instead of pointing map_Kd at an unreadable file.
+      // Both must hold: undecodable data or an unrecognized format means we
+      // write the flat color instead of pointing map_Kd at an unreadable file.
       if (bytes && ext) {
         textureFile = { name: `${baseName}_${mtlName}${ext}`, bytes };
       }
@@ -220,7 +220,7 @@ export function resolveMaterials(
     const triangleIndices = mat.triangleIndices ?? [];
     return {
       mtlName,
-      // Fall back to the material's own geometry when it declares no colour.
+      // Fall back to the material's own geometry when it declares no color.
       color: mat.color ?? meanTriangleColor(data, triangleIndices),
       hasAlpha: mat.hasAlpha,
       textureFile,
@@ -233,21 +233,21 @@ export function resolveMaterials(
 const f6 = (n: number): string => (Number.isFinite(n) ? n : 0).toFixed(6);
 
 /**
- * linear -> sRGB, for a colour on its way into an MTL `Kd`.
+ * linear -> sRGB, for a color on its way into an MTL `Kd`.
  *
  * `MeshData.vertexColors` and `PlantMaterialDef.color` are held in three.js's
  * LINEAR working space (the import path converts them on the way in — see
  * `srgbChannelToLinear` in utils/backendApi.ts — and that is what three.js
  * expects of a `color` BufferAttribute). An MTL's `Kd`, by contrast, is an sRGB
- * display colour. Writing the linear value straight out makes the exported model
+ * display color. Writing the linear value straight out makes the exported model
  * darker and over-saturated, and re-importing it compounds the error on every
  * trip. This is the exact inverse of the import conversion, so a round-trip is
- * now colour-stable.
+ * now color-stable.
  */
 const linearChannelToSrgb = (c: number): number =>
   c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
 
-/** Format a linear colour channel as an sRGB `Kd`/`Ka` component. */
+/** Format a linear color channel as an sRGB `Kd`/`Ka` component. */
 const kd6 = (n: number): string => f6(linearChannelToSrgb(Number.isFinite(n) ? n : 0));
 
 /**
@@ -263,8 +263,8 @@ const kd6 = (n: number): string => f6(linearChannelToSrgb(Number.isFinite(n) ? n
  *    space into three.js's V-up on the way in (see qsm/obj_loader.py), so the
  *    export must undo it or every texture lands upside down on re-import.
  *  - Faces are emitted grouped by material (`usemtl` per group). Triangles no
- *    supplied material claims are grouped by their VERTEX COLOUR into generated
- *    materials, because `Kd` is the only colour channel that survives the OBJ
+ *    supplied material claims are grouped by their VERTEX COLOR into generated
+ *    materials, because `Kd` is the only color channel that survives the OBJ
  *    round-trip — see materialsForUnclaimed. Anything still unaccounted for goes
  *    in a trailing `default` group, so no triangle is ever lost.
  */
@@ -281,7 +281,7 @@ export function serializeMeshObj(
   const { vertices, indices, normals, uvCoordinates, vertexCount, triangleCount } = data;
   const baseName = sanitizeMeshName(opts.baseName);
 
-  // Material names must be unique across BOTH sets (supplied + colour-derived),
+  // Material names must be unique across BOTH sets (supplied + color-derived),
   // since they share one MTL namespace.
   const usedNames = new Set<string>();
 
@@ -300,8 +300,8 @@ export function serializeMeshObj(
     }
   }
 
-  // Everything else gets a material derived from its vertex colour, so flat-
-  // coloured organs come back the right colour instead of a flat grey.
+  // Everything else gets a material derived from its vertex color, so flat-
+  // colored organs come back the right color instead of a flat gray.
   const colorMaterials = materialsForUnclaimed(data, claimed, usedNames);
   const resolved = [...supplied, ...colorMaterials];
 
@@ -369,8 +369,8 @@ export function serializeMeshObj(
         lines.push(faceLine(t));
       }
     }
-    // Only reachable when the mesh has no vertex colours to derive a material
-    // from (colour grouping otherwise covers every unclaimed triangle).
+    // Only reachable when the mesh has no vertex colors to derive a material
+    // from (color grouping otherwise covers every unclaimed triangle).
     const orphans: number[] = [];
     for (let t = 0; t < triangleCount; t++) if (!written[t]) orphans.push(t);
     if (orphans.length > 0) {
@@ -389,7 +389,7 @@ export function serializeMeshObj(
 }
 
 /**
- * Serialize the material library. Each material gets a diffuse colour (`Kd`) and,
+ * Serialize the material library. Each material gets a diffuse color (`Kd`) and,
  * when it has a usable image, `map_Kd`. Alpha-carrying textures also get `map_d`
  * pointing at the same image plus `d 1.0`, which is how OBJ readers pick up a
  * cutout mask — without it a leaf re-imports as an opaque quad.
@@ -398,7 +398,7 @@ function serializeMtl(materials: ResolvedMaterial[], includeDefault: boolean): s
   const lines: string[] = ['# Material library exported from Phytograph', ''];
   for (const mat of materials) {
     lines.push(`newmtl ${mat.mtlName}`);
-    // A resolved colour is LINEAR and gets encoded to sRGB; the fallback grey is
+    // A resolved color is LINEAR and gets encoded to sRGB; the fallback gray is
     // already an sRGB display value (it matches the `default` material below and
     // the 0.8 the importer fills in), so it is written through untouched.
     const kd = mat.color

@@ -4,7 +4,7 @@ The property under test is not "ICP converges" -- the stage it replaced
 converged too, onto a pose 3-12x worse than the one it started from. What
 matters is that the fit is decided by geometry across the WHOLE scan rather
 than by whatever happens to be nearest the tripod, so these exercise the
-density equalisation directly and then check that a pose is recovered from a
+density equalization directly and then check that a pose is recovered from a
 realistic pair of scans of the same scene.
 """
 import os
@@ -56,8 +56,8 @@ def _scan_from(surface, station, rng, count=250_000):
     return surface[index] + rng.normal(0, 0.004, (count, 3))
 
 
-def test_working_copy_equalises_density_across_range():
-    """The whole point of voxelising instead of striding.
+def test_working_copy_equalizes_density_across_range():
+    """The whole point of voxelizing instead of striding.
 
     A stride cap keeps the scanner's 1/r^2 sampling exactly as it found it, so
     the near field outvotes the far field at any point count. A metric voxel
@@ -82,7 +82,7 @@ def test_working_copy_equalises_density_across_range():
         "a stride sample reproduces the raw density bias at any size -- if it "
         "does not, this test is no longer measuring what it claims to")
     assert near_share(reduced) < 0.5 * raw, (
-        f"voxelising left {near_share(reduced):.2f} of the points inside 8 m "
+        f"voxelizing left {near_share(reduced):.2f} of the points inside 8 m "
         f"against {raw:.2f} raw; the near field still dominates")
     assert voxel > 0
 
@@ -289,7 +289,7 @@ def test_a_level_costs_one_open3d_call():
     so every extra call is ~1.13 s at the finest level against 0.35 s for an
     extra iteration. A level that has converged must therefore not be split
     across several calls to notice -- measured, doing exactly that (batch=1)
-    ran SLOWER than the unoptimised original.
+    ran SLOWER than the unoptimized original.
 
     Counts the real calls into Open3D rather than reading the constant, so it
     fails if `align`'s loop is restructured in a way that reintroduces the
@@ -434,7 +434,7 @@ def test_median_spacing_block_subset_tracks_the_full_cloud(monkeypatch):
 
 def test_pyramid_skips_only_a_redundant_finest_pass():
     """`gridded_at` lets a caller whose points already sit on the finest grid
-    skip re-voxelising them. The levels must match an unskipped build to
+    skip re-voxelizing them. The levels must match an unskipped build to
     within the handful of cells a second centroid pass merges."""
     rng = np.random.default_rng(7)
     pts = _scene(rng, count=200_000)

@@ -17,7 +17,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'forest-plot.xyz');
 //   import -> Segment Ground (a computed column + a rebuilt octree)
 //          -> a voxel-grid mesh -> File > Save Project
 //          -> File > Open Project (replaces the scene; confirmation asked)
-//          -> the cloud is back with its point count and ground colouring, the
+//          -> the cloud is back with its point count and ground coloring, the
 //             mesh is back, and a DEM runs on the reopened cloud using the
 //             SAVED ground labels (proof its backend session came back whole).
 //

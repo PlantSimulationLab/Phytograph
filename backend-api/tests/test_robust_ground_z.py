@@ -2,7 +2,7 @@
 
 `positions[:, 2].min()` is what the UI used to treat as "ground" — the default
 scene origin's height, the ground grid, the fallback pick plane. A single
-erroneous return below the terrain (multipath, a bird, a scanner artefact) drags
+erroneous return below the terrain (multipath, a bird, a scanner artifact) drags
 that arbitrarily far down, visibly sinking the ground reference on real scans.
 
 `_robust_ground_z` takes a low percentile instead, with a guard so it can never
@@ -76,7 +76,7 @@ class TestPreservesRealTerrain:
 
     def test_a_dense_low_tail_is_kept_as_terrain(self):
         # A third of the cloud lies in a lower tier (a terrace, a pit, a lower
-        # storey). That is structure, not noise: the estimate must stay at the
+        # story). That is structure, not noise: the estimate must stay at the
         # true floor rather than jumping up to the dense upper tier.
         rng = np.random.default_rng(5)
         lower = rng.uniform(0.0, 1.0, 6_000)

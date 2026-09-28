@@ -53,7 +53,7 @@ GROUND_CELL_M = 5.0
 #   cell            = S / CELL_DIVISOR        (clamped to CELL_MIN/MAX)
 #   smoothing sigma = one cell
 # and S = 2.5 m is at or near the best on every stand measured, not one site:
-#   poplar ALS tile, 6 hand-labelled trees (bad_segment_example_handlabels.laz):
+#   poplar ALS tile, 6 hand-labeled trees (bad_segment_example_handlabels.laz):
 #       S 2.0-2.5 -> 6/6 at IoU 0.80-0.86; 2.75 merges a pair, 3.0 three
 #   synthetic plantation 3.5 x 4 m: S 3.0-3.5 -> 20/20; 2.5 -> 20-25 (splits)
 #   synthetic uniform stand, 3.1 m apart, 8-12 m tall: S 2.0-3.5 -> 99-100%
@@ -80,24 +80,24 @@ DEFAULT_CROWN_SCALE_M = 2.5
 # A seed takes over the automatic treetops within this share of the crown
 # scale, so the tops it replaces are those of its own crown.
 SEED_TAKEOVER_PER_SCALE = 0.5
-# Watershed compactness, in metres of canopy height per metre from the marker
+# Watershed compactness, in meters of canopy height per meter from the marker
 # (see the watershed call). Small: it only has to break ties on flat tops.
 COMPACTNESS_PER_M = 0.03
-# Widest CHM hole (m) filled from its neighbours rather than read as a gap.
+# Widest CHM hole (m) filled from its neighbors rather than read as a gap.
 HOLE_FILL_M = 1.0
 
 
 def pit_fill_chm(chm: np.ndarray) -> np.ndarray:
     """First-pass pit-free CHM smoothing: fill the 'pits' where a DSM cell dipped
     because a pulse penetrated the canopy to a lower return. Runs a NaN-aware 3×3
-    grey-closing (dilation then erosion) over finite cells, which lifts isolated
-    low cells to their neighbourhood max without inflating the overall surface.
+    gray-closing (dilation then erosion) over finite cells, which lifts isolated
+    low cells to their neighborhood max without inflating the overall surface.
     A full Khosravipour spiral pit-free CHM is a future refinement."""
     from scipy.ndimage import maximum_filter, minimum_filter
     finite = np.isfinite(chm)
     if not finite.any():
         return chm
-    # Grey-closing = max-filter then min-filter. Feed NaNs as -inf into the max
+    # Gray-closing = max-filter then min-filter. Feed NaNs as -inf into the max
     # pass (so real cells win) and +inf into the min pass, then restore voids.
     filled = np.where(finite, chm, -np.inf)
     filled = maximum_filter(filled, size=3, mode="nearest")
@@ -131,8 +131,8 @@ def _ground_surface(xy_origin: np.ndarray, extent: np.ndarray, src: np.ndarray,
 
     `lowest=True` (no ground points): the minimum z per GROUND_CELL_M cell, then
     a 3×3 minimum filter so a cell under an unbroken crown borrows the lowest
-    return of its neighbours instead of the crown's underside. `lowest=False`
-    (ground-labelled points): the median z per cell. Both are gap-filled from
+    return of its neighbors instead of the crown's underside. `lowest=False`
+    (ground-labeled points): the median z per cell. Both are gap-filled from
     the nearest occupied cell and smoothed. Returns (grid, cell)."""
     from scipy.ndimage import gaussian_filter, minimum_filter
 
@@ -174,7 +174,7 @@ def height_above_ground(points: np.ndarray, ground: Optional[np.ndarray] = None)
     origin = both.min(axis=0)
     extent = both.max(axis=0) - origin
     grid, cell = _ground_surface(origin, extent, src, lowest=not use_ground)
-    # Bilinear, in cell-centre coordinates.
+    # Bilinear, in cell-center coordinates.
     fx = (pts[:, 0] - origin[0]) / cell - 0.5
     fy = (pts[:, 1] - origin[1]) / cell - 0.5
     z0 = map_coordinates(grid, [fx, fy], order=1, mode="nearest")
@@ -206,7 +206,7 @@ def segment_trees_chm(
         min_height: canopy lower than this above ground is not a tree.
         crown_scale: roughly the width of the smaller crowns in the stand
             (m). The main knob, and it sets the treetop window, the cell and
-            the smoothing: lower it if neighbouring trees are merged, raise it
+            the smoothing: lower it if neighboring trees are merged, raise it
             if one crown is split. Not the trunk spacing (see
             WINDOW_PER_SCALE).
         smooth_sigma: Gaussian smoothing of the CHM (m); None = one cell (the
@@ -281,8 +281,8 @@ def segment_trees_chm(
         seeds_xy = np.asarray(seeds, dtype=np.float64)[:, :2]
         sij = np.clip(np.floor((seeds_xy - origin) / cell).astype(int), 0, shape - 1)
         if n_auto:
-            centres = np.array(ndi.center_of_mass(peaks, auto, range(1, n_auto + 1)))
-            d = np.linalg.norm(centres[:, None, :] - sij[None, :, :], axis=2) * cell
+            centers = np.array(ndi.center_of_mass(peaks, auto, range(1, n_auto + 1)))
+            d = np.linalg.norm(centers[:, None, :] - sij[None, :, :], axis=2) * cell
             drop = np.flatnonzero((d < SEED_TAKEOVER_PER_SCALE * crown_scale).any(axis=1)) + 1
             auto[np.isin(auto, drop)] = 0
         for k, (i, j) in enumerate(sij, start=1):
@@ -294,9 +294,9 @@ def segment_trees_chm(
 
     # Compact watershed: a cell also pays for its distance from the marker, so
     # a tall crown's flood cannot run across a shallow valley and take half of
-    # a suppressed neighbour's flat top (measured on the fixture: a seeded 9 m
+    # a suppressed neighbor's flat top (measured on the fixture: a seeded 9 m
     # tree beside an 11 m one kept only 74% of its top without this, 100%
-    # with). Per metre, so it means the same at any cell size.
+    # with). Per meter, so it means the same at any cell size.
     crowns = watershed(-chm, markers, mask=canopy,
                        compactness=COMPACTNESS_PER_M * cell)
     labels = crowns.ravel()[flat].astype(np.int64)

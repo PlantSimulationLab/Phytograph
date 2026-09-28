@@ -268,7 +268,7 @@ function SpacingCheck({
       </button>
       {check && check.status !== 'running' && check.message && (
         // `select-text` rather than leaning on the global error/warning rule in
-        // App.css: that rule keys on the text colour, so the error (red) and
+        // App.css: that rule keys on the text color, so the error (red) and
         // bridging-warning (amber) verdicts are already selectable and only the
         // GOOD (green) one would not be. A verdict is a measurement either way,
         // and the passing case is the one a user is most likely to want to
@@ -400,7 +400,7 @@ interface MeshesListPanelProps {
   renamingMeshValue: string;
   colorPopoverMeshId: string | null;
   meshColorModes: Map<string, MeshColorMode>;
-  // Which DTM scalar layer each DEM mesh is coloured by (mode === 'layer').
+  // Which DTM scalar layer each DEM mesh is colored by (mode === 'layer').
   selectedMeshLayer: Map<string, string>;
   meshOpacities: Map<string, number>;
   meshRotations: Map<string, Vec3>;
@@ -942,7 +942,7 @@ export function MeshesListPanel({
                 >
                   <option value="solid">Solid color</option>
                   {/* A DTM's scalar layers (elevation / density / intensity / hillshade
-                      / slope / aspect) — colour the terrain by any band. */}
+                      / slope / aspect) — color the terrain by any band. */}
                   {mesh.demLayers && (
                     <optgroup label="Layers">
                       {DEM_LAYER_ORDER.filter((name) => mesh.demLayers?.[name]).map((name) => (

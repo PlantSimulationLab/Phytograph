@@ -15,7 +15,7 @@ TreeIso (Xi & Hopkinson, 2022) runs in three stages:
    clusters into candidate trees. The **2D reg. strength (λ₂)** controls how
    large these groups grow.
 3. **Merging by similarity.** Groups that look like fragments (no stem-like
-   base, a small height span) are merged into the neighbour they most resemble.
+   base, a small height span) are merged into the neighbor they most resemble.
 
 It relies on seeing trunks and branches, which a terrestrial scan records well.
 An airborne scan of a closed canopy records almost none of either. Stage 2 is
@@ -31,27 +31,27 @@ The canopy height (CHM) method finds each tree where an airborne scan sees it
 best, at the top of its crown:
 
 1. **Height above ground.** Every point's height above the terrain. The terrain
-   comes from the cloud's labelled ground points when it has them. Otherwise it
+   comes from the cloud's labeled ground points when it has them. Otherwise it
    comes from its lowest returns on a 5 m grid, taking the lowest return within
    one cell in each direction, so a cell under an unbroken crown borrows a
-   neighbour's ground return instead of reading the crown's underside as ground.
+   neighbor's ground return instead of reading the crown's underside as ground.
 2. **Canopy height model (CHM).** A grid holding the highest point in each
    cell. The cell is one twelfth of **Crown scale**, fine enough to resolve
-   the dip between two neighbouring crowns. It follows the crown size, not the
+   the dip between two neighboring crowns. It follows the crown size, not the
    point density: a coarser cell for sparser data would merge exactly the trees
    a sparse scan most needs kept apart. Cells no return landed in are filled
-   from their nearest neighbour when the hole is at most 1 m wide; wider holes
+   from their nearest neighbor when the hole is at most 1 m wide; wider holes
    are real gaps in the canopy. Small pits, where a pulse slipped through the
    canopy, are filled, and the grid is lightly smoothed (one cell).
 3. **Treetops.** Every cell that is the highest in a small window around
    itself, and taller than **Min tree height**, is a treetop. The window is
-   0.55 × **Crown scale** across. Two neighbouring tops are kept apart by the
+   0.55 × **Crown scale** across. Two neighboring tops are kept apart by the
    smoothing and the valley between them as much as by the window, so the
    window is smaller than a crown. A flat top counts as one.
 4. **Crowns.** A *watershed* grows each crown outward and downward from its
-   treetop until it meets a neighbouring crown in the valley between them. A
+   treetop until it meets a neighboring crown in the valley between them. A
    small distance penalty keeps a tall crown from spilling across a shallow
-   valley into a shorter neighbour's top.
+   valley into a shorter neighbor's top.
 5. **Points.** Every point takes the ID of the crown above it, so trunks and
    understory under a crown join that tree. Points under no crown (lower than
    **Min tree height**, or in a gap) stay unassigned (`0`).
@@ -69,10 +69,10 @@ truth on one real stand and four synthetic ones, so that the default is not
 tuned to one site:
 
 - **A poplar plantation, airborne** (8.4 M points, trunks 2.4–2.7 m apart),
-  scored against six hand-labelled trees by per-tree intersection-over-union
+  scored against six hand-labeled trees by per-tree intersection-over-union
   (IoU). S = 2.0–2.5 m kept all six separate at IoU 0.80–0.86, the ceiling set
   by one-cell crown boundaries. S = 2.75 m merged one pair and 3.0 m merged
-  three. TreeIso on the same scan scored IoU 0.04: each labelled tree was a
+  three. TreeIso on the same scan scored IoU 0.04: each labeled tree was a
   small part of a much larger instance.
 - **A synthetic plantation** of touching crowns at 3.5 × 4 m, at 8–60
   returns/m²: S = 3.0–3.5 m recovered all 20 trees; 2.5 m found 20–25 (a
@@ -109,7 +109,7 @@ merged a pair. Hence the advice to err low.
   the taller tree. It is invisible from above, and the CHM is built from above.
 - **Crown boundaries are one cell wide.** Points are assigned by the grid cell
   they fall in, so a strip about one **CHM cell** wide along each boundary can
-  land in the neighbouring tree.
+  land in the neighboring tree.
 
 ### Seeds
 
@@ -128,7 +128,7 @@ join pieces but cannot split a segment that already holds several trees.
 | | TreeIso | Canopy height |
 |---|---|---|
 | Needs | Visible stems and branches | Visible crown tops |
-| Suits | Terrestrial / mobile scans; understorey trees | Airborne / drone scans; closed canopies |
+| Suits | Terrestrial / mobile scans; understory trees | Airborne / drone scans; closed canopies |
 | Fails when | Crowns touch and stems are unseen — trees merge | Trees overtop each other; multi-leader crowns split |
 | Speed | Tens of seconds to minutes; tiles large plots | Seconds, any size |
 | Main knob | 2D reg. strength (λ₂) | Crown scale |

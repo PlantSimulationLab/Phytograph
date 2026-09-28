@@ -83,7 +83,7 @@ def test_asc_headerless_file_returns_positions(client, tmp_path: Path):
     assert _unpack_header(res.content)["count"] == 2
 
 
-def test_helios_ascii_format_normalises_rgb_and_keeps_reflectance(client, tmp_path: Path):
+def test_helios_ascii_format_normalizes_rgb_and_keeps_reflectance(client, tmp_path: Path):
     """Matches the BPPtree fixture format: 'x y z r255 g255 b255 reflectance'.
 
     This is the case the bug report hit — r255 means the 0-255 byte range and
@@ -234,7 +234,7 @@ def test_ascii_ply_via_open3d(client, tmp_path: Path):
     pts = _positions(body, 3)
     assert pts.tolist() == [[0, 0, 0], [1, 2, 3], [4, 5, 6]]
     cols = _colors(body, 3)
-    # open3d normalises 0-255 to 0-1 on read for PLY uchar color channels.
+    # open3d normalizes 0-255 to 0-1 on read for PLY uchar color channels.
     assert cols[0].tolist() == pytest.approx([1.0, 0.0, 0.0])
     assert cols[1].tolist() == pytest.approx([0.0, 1.0, 0.0])
     assert cols[2].tolist() == pytest.approx([0.0, 0.0, 1.0])
@@ -364,7 +364,7 @@ def test_las_file_imports_via_binary_path(client, tmp_path: Path):
 
 
 def test_text_export_is_byte_identical_to_reference(client):
-    """The vectorised _format_points_as_text must match the prior per-point
+    """The vectorized _format_points_as_text must match the prior per-point
     f-string loop exactly (precision, separators, headers, no trailing newline)."""
     import numpy as np
     import main

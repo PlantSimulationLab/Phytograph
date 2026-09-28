@@ -1,5 +1,5 @@
 {
- "_note": "Real VZ-1000 scanner_pose_hr (id_main=72) records and the RiSCAN PRO SOPs for the same scan positions. Field order is fixed by the bit offsets in RiVLib ridataspec.hpp. The leading all-NaN row is verbatim from the instrument, not an artefact: it is a pose written before the GNSS fix resolves and every position emits one.",
+ "_note": "Real VZ-1000 scanner_pose_hr (id_main=72) records and the RiSCAN PRO SOPs for the same scan positions. Field order is fixed by the bit offsets in RiVLib ridataspec.hpp. The leading all-NaN row is verbatim from the instrument, not an artifact: it is a pose written before the GNSS fix resolves and every position emits one.",
  "_baseline_note": "riscan_sop is the FINAL SOP from project.rsp, not the SOPV. That project ran plane-based Multi-Station Adjustment, but MSA applied ONE shared VOP to the whole block (V = SOP @ inv(SOPV) identical across all three registered positions to 2.7e-15), so it re-framed rather than re-solving any position's attitude. The final SOP therefore still carries the instrument's true attitude; comparing against SOPV instead shows a spurious 0.7-0.9 deg roll/pitch error.",
  "nan_row": "scanner_pose_hr (72.0), nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan",
  "positions": {

@@ -34,7 +34,7 @@ import * as THREE from 'three';
  * state, not undoable scene data, and it must not ride along in the deep clone
  * the store makes of `editStates` on every transform drag.
  *
- * ── Serialisation ─────────────────────────────────────────────────────────
+ * ── Serialization ─────────────────────────────────────────────────────────
  * Bakes run ONE AT A TIME. Each rotation bake spawns PotreeConverter, and
  * running N concurrently would contend on the converter and multiply peak
  * memory — the same reasoning that already made the registration-reset loop

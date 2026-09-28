@@ -80,9 +80,9 @@ export interface LabelBrushOctreeProps {
   cloudCenter: { x: number; y: number; z: number };
   /** Called once per completed stroke (mouse up), with everything stamped. */
   onStroke: (stroke: BrushSphereStroke) => void;
-  /** Live cursor sphere, or null when off-canvas. World centre + world radius. */
+  /** Live cursor sphere, or null when off-canvas. World center + world radius. */
   onCursorChange: (cursor: { center: THREE.Vector3; radius: number } | null) => void;
-  /** True while the button is held — drives the cursor colour and orbit suppression. */
+  /** True while the button is held — drives the cursor color and orbit suppression. */
   onPaintingChange: (painting: boolean) => void;
 }
 
@@ -99,7 +99,7 @@ export function LabelBrushOctree({
   // Props the DOM handlers need at event time. The listeners are registered
   // once (re-registering per radius change would drop an in-flight drag), so
   // reading these from the closure would freeze them at their first-render
-  // values — the stale-closure trap that has bitten this file's neighbours
+  // values — the stale-closure trap that has bitten this file's neighbors
   // repeatedly.
   const radiusPxRef = useRef(brushRadiusPx);
   radiusPxRef.current = brushRadiusPx;
@@ -156,20 +156,20 @@ export function LabelBrushOctree({
      * answer. Two fallbacks, in order: a CPU raycast (cheap exactly when the
      * GPU pick is unreliable, i.e. on sparse clouds), then null.
      *
-     * Null, and not a ray-to-cloud-centre guess. EraseBrushOctree can guess
+     * Null, and not a ray-to-cloud-center guess. EraseBrushOctree can guess
      * because its stamp extrudes through the whole cloud, so depth barely
      * matters; a sphere is depth-limited, and a guessed depth lands in the GAP
      * between surfaces — the stroke then succeeds while selecting nothing.
      *
      * rayForNdc rather than Raycaster.setFromCamera: under an ortho override
      * (a cross-section) the camera is still a PerspectiveCamera instance, and
-     * setFromCamera would collapse every pick toward the view centre.
+     * setFromCamera would collapse every pick toward the view center.
      */
     const anchorAt = (ndc: THREE.Vector2): THREE.Vector3 | null => brushAnchorAt({
       octree: getOctreeRef.current() as unknown as PickableOctree | null,
       gl, camera, ray: rayForNdc(camera, ndc),
       // The pick window, given rather than left to potree to derive from the
-      // ray — its derivation collapses to the view centre under the
+      // ray — its derivation collapses to the view center under the
       // cross-section's ortho override. See `pickPixelForNdc`.
       pixelPosition: pickPixelForNdc(gl, ndc),
       viewDist: camera.position.distanceTo(

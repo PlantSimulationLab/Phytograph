@@ -88,7 +88,7 @@ export function VoxelGridOverlay({ subdivisions, color = '#94a3b8', columnLocalO
   // faces (renderOrder 1) and the surface mesh (0), so the wireframe stays
   // crisply on top in the transparent pass.
   // NOT a pick target. three.js raycasts lines within `raycaster.params.Line
-  // .threshold` — a WORLD-space distance that defaults to 1 (metre) and is
+  // .threshold` — a WORLD-space distance that defaults to 1 (meter) and is
   // never configured here — so every wireframe line carried a ~1 m hit halo.
   // Worse, Line.raycast divides that threshold by the object's mean scale, and
   // this overlay is a child of the group scaled to the grid's SIZE, so on a

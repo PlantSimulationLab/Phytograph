@@ -16,7 +16,7 @@ The obvious fill -- the mean LAD of the reliable voxels in the same horizontal l
 is what VoxLAD does, and it is the fallback here. But it ignores both horizontal
 structure and the fact that some donor voxels are far better measured than others.
 Soma et al. (2020, RSE 245:111836) introduced "LAD-kriging", a generalization of
-binomial kriging, which estimates an occluded voxel from its neighbours *weighted by
+binomial kriging, which estimates an occluded voxel from its neighbors *weighted by
 their reliability* and reported RMSE 0.92 -> 0.42 m^-1 in poorly-sampled volumes,
 being "less sensitive to clumping and sampling heterogeneity than methods using mean
 values calculated over a layer".
@@ -226,7 +226,7 @@ def fill_occluded(
 
     P, Z, V = pos[di], z[di], v[di]
 
-    # Bin lags from the donors' OWN nearest-neighbour spacing rather than the nominal
+    # Bin lags from the donors' OWN nearest-neighbor spacing rather than the nominal
     # voxel size. On a terrain-following grid whole columns are dropped, so the cells
     # that remain can sit further apart than one voxel side; binning from the nominal
     # size then leaves the first several lags empty, the fit fails, and every terrain
@@ -301,7 +301,7 @@ def fill_occluded(
     #
     # The band is deliberately GENEROUS rather than the exact donor range: a sound
     # interpolation across a sharp edge legitimately overshoots a little (Gibbs-like
-    # ringing), and rejecting those would discard good predictions in favour of a
+    # ringing), and rejecting those would discard good predictions in favor of a
     # layer mean that is usually worse. What must be caught is the pathological case
     # -- an estimate orders of magnitude beyond the data -- so allow one full donor
     # range of headroom on each side and refuse only what leaves it.

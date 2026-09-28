@@ -297,7 +297,7 @@ describe('buildLegendEntries', () => {
   });
 
   it('treats a caller-supplied scheme as categorical even for an unregistered palette', () => {
-    // A mesh coloured by source scan uses the scans' own identifier swatches,
+    // A mesh colored by source scan uses the scans' own identifier swatches,
     // which classification.ts knows nothing about. Deriving the kind from the
     // field slug alone called this continuous and silently dropped the class
     // list, so the legend disappeared entirely.
@@ -341,7 +341,7 @@ describe('cssColorToRgb', () => {
     expect(cssColorToRgb('rgb(255, 0, 0)')).toEqual([1, 0, 0]);
   });
 
-  it('falls back to mid-grey rather than throwing on junk', () => {
+  it('falls back to mid-gray rather than throwing on junk', () => {
     // A legend swatch is not worth crashing a render over.
     expect(cssColorToRgb('chartreuse')).toEqual([0.5, 0.5, 0.5]);
     expect(cssColorToRgb('')).toEqual([0.5, 0.5, 0.5]);

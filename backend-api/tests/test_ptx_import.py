@@ -208,7 +208,7 @@ def test_azimuth_seam_and_full_revolution(tmp_path, az_lo, az_hi):
 
 def test_empty_interior_row_and_column_are_interpolated(tmp_path):
     """A wholly-empty row and column, both bracketed by data, must recover
-    exactly: interpolation between measured neighbours is bounded on both sides,
+    exactly: interpolation between measured neighbors is bounded on both sides,
     however wide the gap."""
     rows, cols = 40, 50
     zen, az = _simple(rows, cols)
@@ -329,11 +329,11 @@ def test_pose_uses_the_row_vector_convention(tmp_path):
     # 2e-6: the fixture itself writes coordinates at %.6f, so that — not the
     # importer — is the precision floor here.
     np.testing.assert_allclose(full_xyz, expect, atol=2e-6)
-    # And the LAS itself agrees to its 1 mm quantisation.
+    # And the LAS itself agrees to its 1 mm quantization.
     np.testing.assert_allclose(_read(out).positions, expect, atol=2e-3)
 
 
-def test_full_xyz_beats_the_las_quantisation(tmp_path):
+def test_full_xyz_beats_the_las_quantization(tmp_path):
     """`full_xyz` is the session's source of truth precisely because the LAS is
     1 mm-quantized; prove the two differ and that the float64 one is exact."""
     rows, cols = 10, 12
@@ -394,7 +394,7 @@ def test_identity_4x4_falls_back_to_the_axis_lines(tmp_path):
 
 
 def test_uniform_scale_in_the_transform_leaves_directions_unit(tmp_path):
-    """A PTX exported in millimetres carries a uniform scale. Points scale;
+    """A PTX exported in millimeters carries a uniform scale. Points scale;
     recovered miss rays must stay unit and land at exactly the miss distance."""
     rows, cols = 20, 24
     zen, az = _simple(rows, cols)
@@ -478,7 +478,7 @@ def test_four_and_seven_token_rows(tmp_path, tokens):
 @pytest.mark.parametrize("miss_intensity", [0.0, 0.5])
 def test_misses_are_detected_by_zero_xyz_whatever_the_intensity(tmp_path, miss_intensity):
     """The spec says a miss carries intensity 0.5; RiSCAN PRO writes 0. Detection
-    keys on the coordinates alone, so both are recognised identically."""
+    keys on the coordinates alone, so both are recognized identically."""
     rows, cols = 10, 12
     zen, az = _simple(rows, cols)
     miss = np.zeros((rows, cols), bool)
@@ -691,7 +691,7 @@ def test_preview_is_fixed_schema_and_omits_is_miss(tmp_path):
     assert "sky/miss" in resp.warning and f"{cols} x {rows}" in resp.warning
     # Fixed schema does NOT mean no preview: PTX is plain ASCII behind a 10-line
     # header, so the rows are free to read, and seeing them is how a user checks
-    # the column count and the intensity/colour scales before committing.
+    # the column count and the intensity/color scales before committing.
     assert resp.sample_rows, "no preview rows for a plain-ASCII format"
     assert all(len(r) == 7 for r in resp.sample_rows)
     # Real returns, not the all-zero sentinel.

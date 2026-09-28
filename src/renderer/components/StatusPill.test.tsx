@@ -25,7 +25,7 @@ describe('StatusPill inside a host', () => {
     expect(stack.contains(b)).toBe(true);
     expect(Array.from(stack.children)).toEqual([a, b]);
     // The column positions them; a pill that still positioned itself would sit
-    // on top of its neighbour again.
+    // on top of its neighbor again.
     for (const pill of [a, b]) {
       expect(pill.className).not.toMatch(/\babsolute\b/);
       expect(pill.className).toMatch(/pointer-events-auto/);
@@ -49,11 +49,11 @@ describe('StatusPill inside a host', () => {
   it('offers a cancel button only when the caller supplies one', () => {
     render(
       <StatusPillHost>
-        <StatusPill testId="cancellable" label="Cropping…" onCancel={() => {}} />
+        <StatusPill testId="cancelable" label="Cropping…" onCancel={() => {}} />
         <StatusPill testId="plain" label="Updating display…" />
       </StatusPillHost>,
     );
-    expect(screen.queryByTestId('cancellable-cancel')).not.toBeNull();
+    expect(screen.queryByTestId('cancelable-cancel')).not.toBeNull();
     expect(screen.queryByTestId('plain-cancel')).toBeNull();
   });
 });

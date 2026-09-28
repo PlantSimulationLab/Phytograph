@@ -87,7 +87,7 @@ describe('evaluateScanForCrownFit — hard-disable rules', () => {
 });
 
 describe('evaluateScanForCrownFit — warnings for missing labels (never hard-block)', () => {
-  it('fully labelled scan is eligible with no warning', () => {
+  it('fully labeled scan is eligible with no warning', () => {
     const scan = makeScan([GC, WC, TI], { treeMax: 1 });
     const e = evaluateScanForCrownFit(scan);
     expect(e.eligible).toBe(true);
@@ -212,7 +212,7 @@ describe('coerceCrownFitOptions', () => {
   });
 });
 
-describe('crown colours', () => {
+describe('crown colors', () => {
   it('crownColorForTreeId returns null for the whole-cloud sentinel (id 0)', () => {
     expect(crownColorForTreeId(0)).toBeNull();
     expect(crownColorForTreeId(-1)).toBeNull();
@@ -223,7 +223,7 @@ describe('crown colours', () => {
     const [r, g, b] = treeInstanceColor(3);
     const to = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0');
     expect(crownColorForTreeId(3)).toBe(`#${to(r)}${to(g)}${to(b)}`);
-    // Distinct ids get distinct colours.
+    // Distinct ids get distinct colors.
     expect(crownColorForTreeId(1)).not.toBe(crownColorForTreeId(2));
   });
 

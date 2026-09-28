@@ -46,15 +46,15 @@ def _parse_points(text: str) -> int:
     return int(float(text.replace("_", "")))
 
 
-def _tree_centres(rng: np.random.Generator, extent: float, n_trees: int) -> np.ndarray:
+def _tree_centers(rng: np.random.Generator, extent: float, n_trees: int) -> np.ndarray:
     """Orchard-like grid of trees with a little jitter."""
     per_side = max(1, int(round(math.sqrt(n_trees))))
     xs = np.linspace(extent * 0.1, extent * 0.9, per_side)
     ys = np.linspace(extent * 0.1, extent * 0.9, per_side)
     gx, gy = np.meshgrid(xs, ys)
-    centres = np.column_stack([gx.ravel(), gy.ravel()])
-    centres += rng.normal(0, extent * 0.01, size=centres.shape)
-    return centres[:n_trees]
+    centers = np.column_stack([gx.ravel(), gy.ravel()])
+    centers += rng.normal(0, extent * 0.01, size=centers.shape)
+    return centers[:n_trees]
 
 
 def _sample_ranges(rng: np.random.Generator, n: int, r_min: float, r_max: float) -> np.ndarray:
@@ -64,7 +64,7 @@ def _sample_ranges(rng: np.random.Generator, n: int, r_min: float, r_max: float)
     return r_min * (r_max / r_min) ** u
 
 
-def generate_chunk(rng: np.random.Generator, n: int, extent: float, centres: np.ndarray,
+def generate_chunk(rng: np.random.Generator, n: int, extent: float, centers: np.ndarray,
                    ground_fraction: float, miss_fraction: float, scanner: np.ndarray):
     """One chunk of points with attributes. Returns a dict of column arrays."""
     n_miss = int(round(n * miss_fraction))
@@ -84,23 +84,23 @@ def generate_chunk(rng: np.random.Generator, n: int, extent: float, centres: np.
 
     # Vegetation: pick a tree per point, sample an ellipsoidal crown, weight the
     # tree choice by proximity to the scanner (nearer trees get more returns).
-    d = np.linalg.norm(centres - scanner[:2], axis=1)
+    d = np.linalg.norm(centers - scanner[:2], axis=1)
     w = 1.0 / np.maximum(d, 1.0) ** 2
     w /= w.sum()
-    which = rng.choice(len(centres), size=n_veg, p=w)
+    which = rng.choice(len(centers), size=n_veg, p=w)
     crown_r = 1.6
     crown_h = 3.2
     # Rejection-free ellipsoid sampling: direction on a sphere, radius ~ cbrt(u).
     v = rng.normal(size=(n_veg, 3))
     v /= np.linalg.norm(v, axis=1, keepdims=True)
     rad = np.cbrt(rng.random(n_veg))
-    vx = centres[which, 0] + v[:, 0] * rad * crown_r
-    vy = centres[which, 1] + v[:, 1] * rad * crown_r
+    vx = centers[which, 0] + v[:, 0] * rad * crown_r
+    vy = centers[which, 1] + v[:, 1] * rad * crown_r
     vz = 1.2 + crown_h / 2 + v[:, 2] * rad * crown_h / 2
     # Trunk points for a fraction of the vegetation.
     trunk = rng.random(n_veg) < 0.08
-    vx[trunk] = centres[which[trunk], 0] + rng.normal(0, 0.06, trunk.sum())
-    vy[trunk] = centres[which[trunk], 1] + rng.normal(0, 0.06, trunk.sum())
+    vx[trunk] = centers[which[trunk], 0] + rng.normal(0, 0.06, trunk.sum())
+    vy[trunk] = centers[which[trunk], 1] + rng.normal(0, 0.06, trunk.sum())
     vz[trunk] = rng.uniform(0.0, 1.4, trunk.sum())
     veg = np.column_stack([vx, vy, vz])
 
@@ -146,7 +146,7 @@ def write_cloud(out: Path, n_points: int, *, extent: float = 60.0, n_trees: int 
     import laspy
 
     rng = np.random.default_rng(seed)
-    centres = _tree_centres(rng, extent, n_trees)
+    centers = _tree_centers(rng, extent, n_trees)
     scanner = np.array([extent / 2.0, extent / 2.0, SCANNER_HEIGHT_M])
 
     hdr = laspy.LasHeader(point_format=3, version="1.4")
@@ -163,7 +163,7 @@ def write_cloud(out: Path, n_points: int, *, extent: float = 60.0, n_trees: int 
     with laspy.open(str(out), mode="w", header=hdr) as w:
         while written < n_points:
             n = min(chunk, n_points - written)
-            cols = generate_chunk(rng, n, extent, centres, ground_fraction, miss_fraction, scanner)
+            cols = generate_chunk(rng, n, extent, centers, ground_fraction, miss_fraction, scanner)
             rec = laspy.ScaleAwarePointRecord.zeros(n, header=hdr)
             rec.x = cols["xyz"][:, 0]
             rec.y = cols["xyz"][:, 1]
@@ -192,7 +192,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--points", type=_parse_points, default=10_000_000)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--extent", type=float, default=60.0, help="XY extent in metres")
+    ap.add_argument("--extent", type=float, default=60.0, help="XY extent in meters")
     ap.add_argument("--trees", type=int, default=36)
     ap.add_argument("--ground", type=float, default=0.45, help="fraction of hits on the ground")
     ap.add_argument("--misses", type=float, default=0.0, help="fraction of points that are sky/miss")

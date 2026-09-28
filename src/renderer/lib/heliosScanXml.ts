@@ -35,9 +35,9 @@ import { SCANNER_MODELS, type ScannerModelId } from './scannerModels';
 // unknown value degrades to undefined (→ generic) rather than rendering nothing.
 const SCANNER_MODEL_IDS = new Set<string>(SCANNER_MODELS.map(m => m.id));
 
-// Recognised spellings of the spinning-multibeam <scanPattern> value, matching
+// Recognized spellings of the spinning-multibeam <scanPattern> value, matching
 // helios-core's case-insensitive acceptance (spinning_multibeam /
-// spinning-multibeam / spinningmultibeam). We normalise to alpha-only and
+// spinning-multibeam / spinningmultibeam). We normalize to alpha-only and
 // compare against this single canonical form.
 const MULTIBEAM_PATTERN_NORM = 'spinningmultibeam';
 
@@ -188,7 +188,7 @@ function parseScanElement(
   }
 
   // Scan pattern: 'spinning_multibeam' (any helios spelling) vs the default
-  // 'raster'. Normalise to alpha-only for the case-insensitive compare.
+  // 'raster'. Normalize to alpha-only for the case-insensitive compare.
   const patternRaw = tagText(el, 'scanPattern');
   const isMultibeam =
     patternRaw !== null &&
@@ -272,7 +272,7 @@ function parseScanElement(
         returnSelection = selRaw;
       } else if (selRaw !== null) {
         warnings.push(
-          `${scanName}: unrecognised <returnSelection> "${selRaw}"; defaulted to ` +
+          `${scanName}: unrecognized <returnSelection> "${selRaw}"; defaulted to ` +
           `"${returnSelection}". Set it in Synthetic Scan Options if you re-run this scan.`,
         );
       }

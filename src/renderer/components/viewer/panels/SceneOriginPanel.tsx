@@ -47,7 +47,7 @@ interface SceneOriginPanelProps {
   onMoveToSelection: () => void;
   /** Move the origin onto the given scan's scanner position. */
   onSnapToScanner: (scanId: string) => void;
-  /** Re-centre the camera on the origin, keeping the current viewing angle. */
+  /** Re-center the camera on the origin, keeping the current viewing angle. */
   onFrameOrigin: () => void;
   onReset: () => void;
   onClose: () => void;

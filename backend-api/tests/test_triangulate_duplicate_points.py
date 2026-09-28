@@ -3,7 +3,7 @@
 Open3D's BPA rejects any radius <= 0 and reports it as "got an invalid, negative
 radius as parameter" — naming the wrong value, since the radius it received was
 0. The radius reaches 0 through the AUTO ladder: it is [median, 2x, 4x] of the
-nearest-neighbour spacing, `compute_nearest_neighbor_distance` returns 0.0 for
+nearest-neighbor spacing, `compute_nearest_neighbor_distance` returns 0.0 for
 every point coincident with another, so once MORE THAN HALF the cloud is exact
 duplicates the median collapses to 0 and every rung of the ladder is 0. Open3D
 validates each rung, so one zero fails the whole call.
@@ -12,7 +12,7 @@ That is reachable from ordinary use — merged overlapping scans, a re-imported
 export, a quantizing decimation — and it surfaced as a raw Open3D error with no
 route to a fix.
 
-These pin the three behaviours that close it:
+These pin the three behaviors that close it:
   - duplicates are removed before BPA and REPORTED (`duplicates_dropped`), and
     the surviving mesh is identical to the same cloud without duplicates, so
     dedup provably costs no surface;

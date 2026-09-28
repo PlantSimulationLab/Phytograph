@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  UNIT_TO_METRES,
+  UNIT_TO_METERS,
   UNIT_LABELS,
   UNIT_ORDER,
   DEFAULT_UNIT,
   isLengthUnit,
-  metresPerUnit,
+  metersPerUnit,
   unitLabel,
   wouldConvert,
   unitSummary,
@@ -15,26 +15,26 @@ import {
 } from './units';
 
 describe('the unit table', () => {
-  it('has metres as exactly 1', () => {
-    expect(UNIT_TO_METRES.m).toBe(1.0);
+  it('has meters as exactly 1', () => {
+    expect(UNIT_TO_METERS.m).toBe(1.0);
   });
 
   it('keeps the two feet distinct', () => {
     // ~2 mm over a 1 km survey. US State Plane zones use the survey foot, so
     // collapsing them would be a silent error in exactly the datasets that
     // bother to declare the difference.
-    expect(UNIT_TO_METRES.ftUS).not.toBe(UNIT_TO_METRES.ft);
-    expect(UNIT_TO_METRES.ftUS).toBeCloseTo(0.30480060960121924, 15);
-    expect(UNIT_TO_METRES.ft).toBe(0.3048);
+    expect(UNIT_TO_METERS.ftUS).not.toBe(UNIT_TO_METERS.ft);
+    expect(UNIT_TO_METERS.ftUS).toBeCloseTo(0.30480060960121924, 15);
+    expect(UNIT_TO_METERS.ft).toBe(0.3048);
   });
 
   it('labels and orders every unit it can convert', () => {
-    const slugs = Object.keys(UNIT_TO_METRES).sort();
+    const slugs = Object.keys(UNIT_TO_METERS).sort();
     expect(Object.keys(UNIT_LABELS).sort()).toEqual(slugs);
     expect([...UNIT_ORDER].sort()).toEqual(slugs);
   });
 
-  it('offers metres first, since it is the default', () => {
+  it('offers meters first, since it is the default', () => {
     expect(UNIT_ORDER[0]).toBe('m');
     expect(DEFAULT_UNIT).toBe('m');
   });
@@ -42,7 +42,7 @@ describe('the unit table', () => {
 
 describe('the backend contract', () => {
   // The renderer selects a unit and the BACKEND applies it. If the two tables
-  // disagree, a cloud is scaled by one factor and labelled with another — a
+  // disagree, a cloud is scaled by one factor and labeled with another — a
   // silent, data-corrupting mismatch that no single-language test can see.
   // So this reads main.py's table and asserts agreement, the same way
   // octreeCacheRoot is asserted from both sides.
@@ -52,8 +52,8 @@ describe('the backend contract', () => {
   );
 
   function backendTable(): Record<string, number> {
-    const block = mainPy.match(/_UNIT_TO_METRES:\s*Dict\[str,\s*float\]\s*=\s*\{([\s\S]*?)\n\}/);
-    if (!block) throw new Error('could not find _UNIT_TO_METRES in main.py');
+    const block = mainPy.match(/_UNIT_TO_METERS:\s*Dict\[str,\s*float\]\s*=\s*\{([\s\S]*?)\n\}/);
+    if (!block) throw new Error('could not find _UNIT_TO_METERS in main.py');
     const out: Record<string, number> = {};
     for (const line of block[1].split('\n')) {
       const m = line.match(/^\s*"([A-Za-z]+)":\s*([^,]+),/);
@@ -76,33 +76,33 @@ describe('the backend contract', () => {
   });
 
   it('defines exactly the same units as the backend', () => {
-    expect(Object.keys(backendTable()).sort()).toEqual(Object.keys(UNIT_TO_METRES).sort());
+    expect(Object.keys(backendTable()).sort()).toEqual(Object.keys(UNIT_TO_METERS).sort());
   });
 
   it('agrees with the backend on every conversion factor', () => {
     const t = backendTable();
     for (const [slug, factor] of Object.entries(t)) {
       expect(
-        UNIT_TO_METRES[slug as LengthUnit],
+        UNIT_TO_METERS[slug as LengthUnit],
         `factor for "${slug}" differs between units.ts and main.py`,
       ).toBeCloseTo(factor, 15);
     }
   });
 });
 
-describe('metresPerUnit', () => {
+describe('metersPerUnit', () => {
   it('converts the units it knows', () => {
-    expect(metresPerUnit('mm')).toBe(0.001);
-    expect(metresPerUnit('km')).toBe(1000);
+    expect(metersPerUnit('mm')).toBe(0.001);
+    expect(metersPerUnit('km')).toBe(1000);
   });
 
   it('returns null rather than a silent 1.0 for an unknown unit', () => {
-    // Defaulting an unrecognised slug to metres is how a wrong scale ships
+    // Defaulting an unrecognized slug to meters is how a wrong scale ships
     // unnoticed; the caller must handle the null.
-    expect(metresPerUnit('furlong')).toBeNull();
-    expect(metresPerUnit(null)).toBeNull();
-    expect(metresPerUnit(undefined)).toBeNull();
-    expect(metresPerUnit('')).toBeNull();
+    expect(metersPerUnit('furlong')).toBeNull();
+    expect(metersPerUnit(null)).toBeNull();
+    expect(metersPerUnit(undefined)).toBeNull();
+    expect(metersPerUnit('')).toBeNull();
   });
 });
 
@@ -119,13 +119,13 @@ describe('isLengthUnit', () => {
 });
 
 describe('wouldConvert', () => {
-  it('is false for metres and for anything unrecognised', () => {
+  it('is false for meters and for anything unrecognized', () => {
     expect(wouldConvert('m')).toBe(false);
     expect(wouldConvert('furlong')).toBe(false);
     expect(wouldConvert(null)).toBe(false);
   });
 
-  it('is true for every non-metre unit', () => {
+  it('is true for every non-meter unit', () => {
     for (const slug of UNIT_ORDER) {
       if (slug === 'm') continue;
       expect(wouldConvert(slug), `${slug} should convert`).toBe(true);
@@ -136,7 +136,7 @@ describe('wouldConvert', () => {
 describe('unitSummary', () => {
   it('states the fact when the format declared the unit', () => {
     expect(unitSummary('ftUS', true)).toContain('This file declares');
-    expect(unitSummary('ftUS', true)).toContain('converted to metres');
+    expect(unitSummary('ftUS', true)).toContain('converted to meters');
   });
 
   it('frames it as the user’s choice when the format could not say', () => {
@@ -145,7 +145,7 @@ describe('unitSummary', () => {
     expect(s).not.toContain('This file declares');
   });
 
-  it('does not offer to convert metres into metres', () => {
+  it('does not offer to convert meters into meters', () => {
     expect(unitSummary('m', true)).not.toContain('converted');
     expect(unitSummary('m', false)).not.toContain('converted');
   });

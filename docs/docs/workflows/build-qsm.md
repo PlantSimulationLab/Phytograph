@@ -63,7 +63,7 @@ first:
    continuing through it.
 
     - **Lower** (≈0.6–0.7) ends the trunk more readily — right for
-      **headed** / **open-centre** trees, where a short trunk splits into
+      **headed** / **open-center** trees, where a short trunk splits into
       several co-dominant scaffolds.
     - **Higher** (≈0.85–0.95) traces the trunk through more forks — right
       for a strong **central leader**.
@@ -178,7 +178,7 @@ In **Texture** mode two extra controls appear:
   grape, olive, western redbud). **Upload** picks your own JPEG or PNG
   instead — a photograph of the species you actually scanned, for
   example. A texture that tiles seamlessly gives the best result.
-- **Tile (m)** — the real-world size of one bark tile, in metres
+- **Tile (m)** — the real-world size of one bark tile, in meters
   (default `0.25`). *Smaller* values make the bark pattern finer and
   repeat more often; *larger* values make it coarser. This is a
   physical size, not a repeat count.
@@ -187,7 +187,7 @@ Because the tile is defined in world units, the bark stays at a
 consistent physical scale everywhere on the tree: the pattern on a thick
 trunk looks the same size as the pattern on a thin branch, instead of
 being stretched wider as the branch thickens. Only very thin twigs
-(under a couple of centimetres across) narrow the pattern, where the
+(under a couple of centimeters across) narrow the pattern, where the
 detail is too small to see anyway.
 
 The bark images are read from the backend, so the first switch into
@@ -239,7 +239,7 @@ to keep a QSM: that file imports straight back into Phytograph (see
 | **PLY** | The same tube mesh plus vertex normals, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
 
 !!! note "Coordinates and units"
-    Exports are in the cloud's **world coordinates**, in **metres**. The
+    Exports are in the cloud's **world coordinates**, in **meters**. The
     CSV root cylinder has `parentID = -1`.
 
 !!! note "The mesh exports match the viewport"
@@ -255,17 +255,17 @@ to keep a QSM: that file imports straight back into Phytograph (see
     single radius, start, and end), export **CSV** — that's the format that
     preserves them.
 
-!!! note "OBJ carries the colours too"
-    The OBJ export writes the **colour mode you have selected** into a sibling
+!!! note "OBJ carries the colors too"
+    The OBJ export writes the **color mode you have selected** into a sibling
     `.mtl` file, so the tree opens in Blender looking the way it looks in the
-    viewer rather than as untextured grey. **Rank** mode writes one material per
-    rank, **Shoot** mode one per shoot, **Colour** mode a single material with
-    your picked colour, and **Texture** mode a `bark` material plus the bark
+    viewer rather than as untextured gray. **Rank** mode writes one material per
+    rank, **Shoot** mode one per shoot, **Color** mode a single material with
+    your picked color, and **Texture** mode a `bark` material plus the bark
     image and the UV coordinates that tile it at the size you set.
 
     Keep the exported files together — an `.obj` separated from its `.mtl` (and
-    its images) loses the colours. PLY carries `branch_order` and `radius`
-    per face instead, which is the better choice if you want to colour by
+    its images) loses the colors. PLY carries `branch_order` and `radius`
+    per face instead, which is the better choice if you want to color by
     branching order in a downstream tool.
 
 !!! note "Leaves are exported too"

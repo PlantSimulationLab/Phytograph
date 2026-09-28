@@ -1,4 +1,4 @@
-# Hand-label-like synthetic wood: the shipped recipe's pre-training, on relabelled scenes only.
+# Hand-label-like synthetic wood: the shipped recipe's pre-training, on relabeled scenes only.
 name: hl_pre
 description: "Leaf/wood PointNeXt-S pre-trained on hand-label-like synthetic wood."
 task: wood_leaf

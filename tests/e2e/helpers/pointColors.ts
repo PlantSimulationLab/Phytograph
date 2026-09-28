@@ -8,16 +8,16 @@ export function fixturePoints(path: string): Array<[number, number, number]> {
     .map((l) => l.trim().split(/\s+/).slice(0, 3).map(Number) as [number, number, number]);
 }
 
-/** What a drawn pixel must look like to count — see pointsDrawnIn / pointsDrawnGrey. */
+/** What a drawn pixel must look like to count — see pointsDrawnIn / pointsDrawnGray. */
 type PixelMatch =
   | { kind: 'hex'; hex: string; tol: number }
-  | { kind: 'grey'; maxChroma: number; minLum: number };
+  | { kind: 'gray'; maxChroma: number; minLum: number };
 
 /**
  * How many of `points` are DRAWN in `hex`, read from a screenshot at each
  * point's own projected position (`__worldToScreen`), so swatches of the same
- * colour in panels and legends cannot be counted. A point counts when any
- * pixel within 3 px of it is within `tol` (RGB distance) of the colour. Points
+ * color in panels and legends cannot be counted. A point counts when any
+ * pixel within 3 px of it is within `tol` (RGB distance) of the color. Points
  * under an element matching `skip` (e.g. an open panel) are not sampled.
  */
 export function pointsDrawnIn(
@@ -28,15 +28,15 @@ export function pointsDrawnIn(
 }
 
 /**
- * How many of `points` are drawn GREY: some pixel within 3 px is colourless
+ * How many of `points` are drawn GRAY: some pixel within 3 px is colorless
  * (max − min channel ≤ `maxChroma`) yet bright enough (mean ≥ `minLum`) not to
  * be the dark viewport background.
  */
-export function pointsDrawnGrey(
+export function pointsDrawnGray(
   page: Page, points: Array<[number, number, number]>,
   maxChroma = 12, minLum = 60, skip = '[data-testid="label-panel"]',
 ): Promise<{ matched: number; sampled: number }> {
-  return pointsDrawnMatching(page, points, { kind: 'grey', maxChroma, minLum }, skip);
+  return pointsDrawnMatching(page, points, { kind: 'gray', maxChroma, minLum }, skip);
 }
 
 async function pointsDrawnMatching(

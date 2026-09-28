@@ -10,7 +10,7 @@ Merging them into one generated artifact was considered and rejected: the
 renderer list also carries display labels and the generic 'extra'/'label'/'skip'
 tokens, which have no place in a name→slug table. Instead this test pins the
 invariant that actually matters — every canonical role is offerable, and the
-wizard offers nothing the backend cannot honour.
+wizard offers nothing the backend cannot honor.
 
 Without this, adding a role on one side is silent: a backend-only role can never
 be picked, and a renderer-only role produces an override the importer ignores,
@@ -28,12 +28,12 @@ _WIZARD = (Path(__file__).resolve().parents[2]
            / "src/renderer/components/PointCloudImportWizard.tsx")
 
 # Roles that exist only in the wizard, by design.
-#   extra/label — how the renderer COLOURS a scalar (gradient vs discrete);
+#   extra/label — how the renderer COLORS a scalar (gradient vs discrete);
 #                 not a canonical slug, and never sent as an override.
 #   skip        — a dropped column; travels in `droppedSlugs`.
 #   r/g/b       — the wizard exposes plain channels and handles 0-255 vs 0-1
 #                 with a separate per-scan toggle, so the backend's r255/g255/
-#                 b255 fold onto these (see `_canonicalise_exclusive_role`).
+#                 b255 fold onto these (see `_canonicalize_exclusive_role`).
 _WIZARD_ONLY = {"extra", "label", "skip", "r", "g", "b"}
 # The backend-side spellings those RGB roles correspond to.
 _BACKEND_RGB = {"r255", "g255", "b255"}
@@ -54,10 +54,10 @@ def test_every_canonical_role_is_offerable():
     missing = backend - _wizard_roles()
     assert not missing, (
         f"canonical role(s) {sorted(missing)} are not in ROLE_OPTIONS, so a user "
-        "cannot assign them to an unrecognised column")
+        "cannot assign them to an unrecognized column")
 
 
-def test_wizard_offers_nothing_the_backend_cannot_honour():
+def test_wizard_offers_nothing_the_backend_cannot_honor():
     """A role the wizard offers but the importer does not know produces an
     override that is silently ignored — the user picks it and nothing happens."""
     extra = _wizard_roles() - set(main._CANONICAL_NAME_ALIASES) - _WIZARD_ONLY
@@ -71,7 +71,7 @@ def test_rgb_convention_is_intact():
     r255→r, the wizard's plain r/g/b would stop resolving."""
     for plain, wide in (("r", "r255"), ("g", "g255"), ("b", "b255")):
         assert wide in main._CANONICAL_NAME_ALIASES
-        assert main._canonicalise_exclusive_role(wide) == plain
+        assert main._canonicalize_exclusive_role(wide) == plain
 
 
 @pytest.mark.parametrize("role", sorted(

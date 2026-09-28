@@ -6,7 +6,7 @@
 // 25-28 m apart. Clouds render at `world - displayOffset - worldShift`, so
 // scans that disagree are drawn in different frames: registration aligns them
 // correctly in world coordinates and the viewport re-separates them by the
-// difference. A correct alignment then looks metres wrong.
+// difference. A correct alignment then looks meters wrong.
 import { describe, expect, it } from 'vitest';
 
 /** The batch rule: take the smallest suggestion seen so far, per axis. */

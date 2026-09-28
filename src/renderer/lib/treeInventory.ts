@@ -122,7 +122,7 @@ function num(v: number | null | undefined, digits = 4): string {
 }
 
 // Column order is the contract with anyone parsing the file: append, never
-// reorder. Lengths are metres, areas m², volumes m³, angles degrees;
+// reorder. Lengths are meters, areas m², volumes m³, angles degrees;
 // coordinates are world coordinates.
 export const TREE_LIST_CSV_HEADER = [
   'scan_name', 'tree_id', 'species', 'status', 'label',
@@ -227,9 +227,9 @@ export function buildTreeQsmCsv(scanName: string, results: TreeQSMResult[]): str
 /**
  * The box to frame for one tree, in the frame `__frameSelection` takes: the
  * cloud's STORED frame (world − worldShift), which is where the cloud draws
- * before the display offset. Centred horizontally on the STEM BASE when there
+ * before the display offset. Centered horizontally on the STEM BASE when there
  * is one, not on the points' bounding box: a few stray points from a
- * neighbour (segmentation is never perfect) drag a bbox centre metres away,
+ * neighbor (segmentation is never perfect) drag a bbox center meters away,
  * while the stem base is the tree's position. Null when the tree has no extent.
  */
 export function treeFrameTarget(
@@ -257,7 +257,7 @@ function normalize(a: Vec3): Vec3 {
 /**
  * Line-segment vertices (pairs) for one tree's overlay in DISPLAY space
  * (world − worldShift − displayOffset), computed in float64 before the
- * float32 buffer so UTM-scale coordinates keep millimetre precision:
+ * float32 buffer so UTM-scale coordinates keep millimeter precision:
  *
  *  - the DBH circle, in the plane perpendicular to the stem axis;
  *  - a stem-base cross on the ground, sized to the stem;

@@ -134,14 +134,14 @@ describe('viewer geometry', () => {
     expect(treeFrameTarget(tree(1, { bbox_min: undefined }))).toBeNull();
   });
 
-  it('centres on the stem base, not a bbox dragged by stray points', () => {
+  it('centers on the stem base, not a bbox dragged by stray points', () => {
     const t = tree(1, { bbox_min: [611990, 4269998, 100], bbox_max: [612003, 4270002, 111] });
     const f = treeFrameTarget(t, [612000, 4270000, 0])!;
-    expect(f.center[0]).toBeCloseTo(1);   // stem base x, not the bbox centre (-3.5)
+    expect(f.center[0]).toBeCloseTo(1);   // stem base x, not the bbox center (-3.5)
     expect(f.size[0]).toBe(13);
   });
 
-  it('draws the DBH circle at its radius around its centre, in display space', () => {
+  it('draws the DBH circle at its radius around its center, in display space', () => {
     const t = tree(4);
     const segs = 32;
     const v = treeOverlaySegments(t, [612000, 4270000, 0], [0, 0, 100], segs);

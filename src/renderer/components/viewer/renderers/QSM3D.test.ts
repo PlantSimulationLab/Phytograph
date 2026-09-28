@@ -14,7 +14,7 @@ import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
 
 // Regression: adjacent ranks must be visually DISTINGUISHABLE. The trunk (rank 0)
 // and scaffold (rank 1) were once nearly the same hue (brown vs amber), so a parent
-// and its child branch read as the same colour even though their ranks differed.
+// and its child branch read as the same color even though their ranks differed.
 describe('rank colors are distinguishable', () => {
   const rgbDist = (a: THREE.Color, b: THREE.Color) =>
     Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);

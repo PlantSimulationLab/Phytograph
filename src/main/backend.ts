@@ -72,7 +72,7 @@ export function getBackendStderrTail(): string[] {
 }
 
 /**
- * Recognise failures that are about the MACHINE, not about Phytograph — the ones
+ * Recognize failures that are about the MACHINE, not about Phytograph — the ones
  * where restarting cannot possibly help and the honest answer is "this build
  * can't run here".
  *
@@ -157,7 +157,7 @@ export function setBackendWindowGetter(getter: () => BrowserWindow | null): void
 // this to the native crash dialog. Kept as a callback so the supervisor stays
 // decoupled from the dialog/UI module.
 //
-// `cause` carries a recognised, human-readable reason when there is one (see
+// `cause` carries a recognized, human-readable reason when there is one (see
 // classifyBackendFailure) so the dialog can say what actually went wrong instead
 // of offering a generic "Reload" that, for an unsupported OS, cannot ever work.
 let onBackendFailed: (cause?: string | null) => void = () => {};
@@ -166,7 +166,7 @@ export function setBackendFailedHandler(handler: (cause?: string | null) => void
   onBackendFailed = handler;
 }
 
-/** Report the terminal failure, with a diagnosed cause when one is recognisable. */
+/** Report the terminal failure, with a diagnosed cause when one is recognizable. */
 function reportBackendFailed(): void {
   onBackendFailed(classifyBackendFailure(stderrTail));
 }

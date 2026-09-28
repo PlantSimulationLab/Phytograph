@@ -3,13 +3,13 @@
     PYTHONPATH=backend-api python -m ml.train path/to/config.yaml [--steps N]
 
 The config (YAML) names a task (``ml.tasks``), the training cache, weighted
-groups of training sources, the model size and the optimiser. See
+groups of training sources, the model size and the optimizer. See
 ``research/ml/configs/`` for the benchmark's runs. Outputs go to
 ``<out>/<name>/``:
 
 - ``package/``: the best checkpoint by validation mean IoU, as a model
   package the app can import.
-- ``last.pt``: resumable state (weights, optimiser, schedule, step). A
+- ``last.pt``: resumable state (weights, optimizer, schedule, step). A
   re-run of the same config continues from it, so a preempted or timed-out
   job loses at most ``checkpoint_every`` steps.
 - ``log.jsonl``: one record per log interval and one per validation.
@@ -68,7 +68,7 @@ def _select(items: dict, sel: dict) -> list:
 
 def build_sources(items: dict, groups: list[dict], allowed_lut) -> list[Source]:
     """Each group gets its ``weight`` share of crops, split among its items by
-    the square root of their labelled point count. Square root rather than
+    the square root of their labeled point count. Square root rather than
     linear, so one 17 M-point scene cannot drown fifty small trees."""
     sources = []
     for g in groups:
@@ -78,8 +78,8 @@ def build_sources(items: dict, groups: list[dict], allowed_lut) -> list[Source]:
         sizes = []
         for it in members:
             c = it.meta["counts"]
-            labelled = sum(v for k, v in c.items() if allowed_lut[SEM[k]].any())
-            sizes.append(max(labelled, 1))
+            labeled = sum(v for k, v in c.items() if allowed_lut[SEM[k]].any())
+            sizes.append(max(labeled, 1))
         w = np.sqrt(np.array(sizes, dtype=np.float64))
         w = w / w.sum() * float(g.get("weight", 1.0))
         for it, wi in zip(members, w):
@@ -142,8 +142,8 @@ def evaluate(model, pkg: ModelPackage, items: list, lut: np.ndarray, device: str
         if max_points and len(xyz) > max_points:
             # A contiguous spatial block, not a random subset: a random subset
             # would change the point density the model sees.
-            centre = xyz[np.argmin(np.abs(xyz[:, 2] - np.median(xyz[:, 2])))]
-            keep = np.argsort(((xyz - centre) ** 2).sum(axis=1))[:max_points]
+            center = xyz[np.argmin(np.abs(xyz[:, 2] - np.median(xyz[:, 2])))]
+            keep = np.argsort(((xyz - center) ** 2).sum(axis=1))[:max_points]
             xyz, sem = xyz[keep], sem[keep]
             tinst = None if tinst is None else tinst[keep]
         truth = lut[sem]
@@ -257,7 +257,7 @@ def train(cfg: dict, steps_override: int | None = None) -> Path:
     if cfg.get("init"):
         state = torch.load(Path(cfg["init"]) / "weights.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(state)
-        print(f"initialised from {cfg['init']}", flush=True)
+        print(f"initialized from {cfg['init']}", flush=True)
     print(f"device {device}, {sum(p.numel() for p in model.parameters()):,} parameters", flush=True)
 
     lr = float(opt_cfg.get("lr", 2e-3))
@@ -287,7 +287,7 @@ def train(cfg: dict, steps_override: int | None = None) -> Path:
     # 3 mm is a miss on a 5 mm cotyledon and nothing on a beet leaf. The Huber
     # knee is at ``offset_delta`` radii, and the loss is in units of it, so it
     # is the same order as the classification loss rather than 50x smaller
-    # (the first version measured it in metres and learned offsets 1/3 of the
+    # (the first version measured it in meters and learned offsets 1/3 of the
     # true length).
     offset_delta = float(opt_cfg.get("offset_delta", 0.2))
     size_weight = float(opt_cfg.get("size_weight", 0.5))       # log-radius L1, relative to the offset loss

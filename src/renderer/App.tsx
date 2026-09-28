@@ -8,7 +8,7 @@ import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./compon
 import { scanDisplayName, type Scan, type ScanRegistration, createScanColorAllocator } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, OCTREE_PATH_EXTENSIONS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
-import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
+import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCanceledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
 
 // OCTREE_PATH_EXTENSIONS (imported above) decides whether a dropped file routes
@@ -23,10 +23,10 @@ import { isQsmCsvFile } from "./lib/qsmImport";
 
 // A user cancel is not a failure: it must never land in the per-file `errors[]`
 // list or raise an error toast. Covers all three shapes the abort can take — the
-// backend's terminal `cancelled` marker, an already-aborted signal, and the
+// backend's terminal `canceled` marker, an already-aborted signal, and the
 // DOMException fetch throws when the request is torn down mid-flight.
 function isImportCancel(err: unknown, signal?: AbortSignal): boolean {
-  return err instanceof ScanCancelledError
+  return err instanceof ScanCanceledError
     || signal?.aborted === true
     || (err instanceof Error && err.name === 'AbortError');
 }
@@ -200,13 +200,13 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // Cancellation for the in-flight import. The abort tears down the fetch; the
   // run id is what /api/cancel/{id} targets so the BACKEND actually stops (and
   // kills its PotreeConverter child) instead of finishing the work into a
-  // dismissed dialog. `importCancelledRef` stops the sequential multi-file loop
+  // dismissed dialog. `importCanceledRef` stops the sequential multi-file loop
   // between files — aborting one file's fetch says nothing about the next.
   const importAbortRef = useRef<AbortController | null>(null);
   const importRunIdRef = useRef<string | null>(null);
-  const importCancelledRef = useRef(false);
+  const importCanceledRef = useRef(false);
   const cancelImport = useCallback(() => {
-    importCancelledRef.current = true;
+    importCanceledRef.current = true;
     // Order matters (mirrors cancelScan in PointCloudViewer): tell the backend to
     // stop and free its memory FIRST, then tear down the fetch. Aborting first
     // can drop the connection before the cancel POST lands; the backend's own
@@ -332,7 +332,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // The committed scan list, readable without going through a closure.
   //
   // This ref is the fix for two separately imported scans arriving the same
-  // colour. `scene.state` looks like a live read but is not: the context value
+  // color. `scene.state` looks like a live read but is not: the context value
   // is memoised on the reducer state, so a callback sees whatever `scene`
   // existed when it was last rebuilt — and listing `scans` in the callback's
   // dependency array does not help, because the stale value is read before
@@ -342,8 +342,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // #3b82f6 again and the scene rendered two identical swatches.
   const scansRef = useRef(scans);
   scansRef.current = scans;
-  // Same reason, for the other coloured objects imports create. Seeding from
-  // scans alone gave every mesh imported one at a time the same colour: none of
+  // Same reason, for the other colored objects imports create. Seeding from
+  // scans alone gave every mesh imported one at a time the same color: none of
   // the meshes already on the scene was ever "used", so each separate import
   // restarted the palette at blue (a multi-file drop hid it, since one
   // allocator spans the whole batch).
@@ -352,11 +352,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   const skeletonsRef = useRef(scene.state.skeletons);
   skeletonsRef.current = scene.state.skeletons;
 
-  // A stateful colour generator for ONE import, seeded from the colours of
+  // A stateful color generator for ONE import, seeded from the colors of
   // every scan, mesh and skeleton on the scene at the moment of the call. Call
   // it once per import, and call the returned function once per new object —
   // several built before any is committed (a multi-block PTX, a multi-scan E57,
-  // a mixed drop) is exactly what a plain "first colour not on the scene"
+  // a mixed drop) is exactly what a plain "first color not on the scene"
   // cannot handle.
   const makeScanColorAllocator = useCallback(
     () => createScanColorAllocator([
@@ -369,12 +369,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     [],
   );
 
-  // One colour for ONE new object: the first palette entry not already on the
+  // One color for ONE new object: the first palette entry not already on the
   // scene. Single-shot form of the allocator above, and only safe because the
   // callers using it commit their object before anything else asks for a
-  // colour. Anything creating SEVERAL objects before committing — notably a
+  // color. Anything creating SEVERAL objects before committing — notably a
   // multi-scan file — must hold a makeScanColorAllocator() instead, or they all
-  // come out the same colour.
+  // come out the same color.
   const getNextColor = useCallback(
     () => makeScanColorAllocator()(),
     [makeScanColorAllocator],
@@ -412,7 +412,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // other format yields exactly one element, so callers never branch on it.
   const buildScansFromWizardResult = useCallback(async (
     result: WizardResult,
-    // A GENERATOR, not a colour: a multi-scan file needs a distinct colour per
+    // A GENERATOR, not a color: a multi-scan file needs a distinct color per
     // position, and only the caller knows the scene's palette cursor.
     nextColor: () => string,
     // Cancellation + per-stage progress for this one file's import. Optional so
@@ -424,7 +424,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       roleOverrides, scalarLabels, worldShift, units,
     } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
-    // import so the backend's distance fallback honours it (the primary
+    // import so the backend's distance fallback honors it (the primary
     // target_index==99 signal ignores it).
     const missDistanceThreshold = (await getSettings()).missDistanceThreshold;
     const positions = await parsePointCloudsFromPath(
@@ -458,7 +458,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // group renders at `-displayOffset - worldShift`, and the LAD/backfill paths
     // call `shiftPoseStream(p.trajectory, ws)` before sending to the backend.
     // Pre-shifting here made those conversions fire on already-shifted poses, so
-    // a georeferenced import drew its trajectory ~4.3 million metres off-screen
+    // a georeferenced import drew its trajectory ~4.3 million meters off-screen
     // AND handed LAD doubly-shifted per-beam origins. The bulk-import path
     // (PointCloudViewer.bulkImportScans) never shifted, which is why only
     // drag-drop/single-file imports were affected.
@@ -475,7 +475,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       label: (positions.length === 1 ? input.label : undefined) ?? name
         ?? (data.fileName ? baseNameForLabel(data.fileName) : undefined) ?? 'Scan',
       visible: true,
-      // Likewise: one explicit colour can only claim a single position.
+      // Likewise: one explicit color can only claim a single position.
       color: (positions.length === 1 ? input.color : undefined) ?? nextColor(),
       data,
       params,
@@ -529,7 +529,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // from projected/UTM sources are stored shifted toward the origin (for float
   // precision) and rendered in that shifted frame, while QSM cylinders are always
   // world-frame — so a QSM dropped into such a scene has to subtract the same
-  // shift or it lands hundreds of kilometres away. Every shifted scan in a scene
+  // shift or it lands hundreds of kilometers away. Every shifted scan in a scene
   // shares one shift (it's per-scene georeferencing, not per-file), so the first
   // non-zero one is the scene's frame. Returns null for an unshifted scene, which
   // renders unchanged.
@@ -814,8 +814,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           // the progress modal first so it doesn't sit behind the wizard.
           setImportProgress(null);
           const results = await openImportWizard([{ path: sourcePath, fileName: file.name }]);
-          if (!results || results.length === 0) return; // user cancelled
-          importCancelledRef.current = false;
+          if (!results || results.length === 0) return; // user canceled
+          importCanceledRef.current = false;
           const controller = new AbortController();
           importAbortRef.current = controller;
           setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, fraction: null });
@@ -891,7 +891,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-    // No `scans` dependency: colour allocation now goes through
+    // No `scans` dependency: color allocation now goes through
     // makeScanColorAllocator, which reads scansRef at call time. Listing it
     // would rebuild this callback (and re-subscribe the menu-command effect)
     // on every scan-list change, without making the seed any fresher — the
@@ -915,7 +915,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // the native dialog); synthetic Files have no webUtils path otherwise.
     const explicitPaths = opts?.paths;
 
-    // One colour per object created by this batch — meshes and skeletons
+    // One color per object created by this batch — meshes and skeletons
     // included, so nothing in a mixed drop collides. The allocator accumulates
     // internally, which is what the old `scans` + `newScans` union was for; that
     // union also missed a multi-scan file's positions, since they're only pushed
@@ -1126,16 +1126,16 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // Walk path-backed point clouds through the wizard, then import each with
     // the user's choices. Clear the progress modal so it doesn't sit behind the
     // wizard; re-show per-scan during the actual import.
-    let cancelledAfter = -1;   // index of the file the user cancelled on, if any
+    let canceledAfter = -1;   // index of the file the user canceled on, if any
     if (wizardFiles.length > 0) {
       setImportProgress(null);
       const results = await openImportWizard(wizardFiles);
       if (results) {
-        importCancelledRef.current = false;
+        importCanceledRef.current = false;
         for (let i = 0; i < results.length; i++) {
           // A cancel during file i must also stop files i+1.. — aborting one
           // fetch says nothing about the next.
-          if (importCancelledRef.current) { cancelledAfter = i; break; }
+          if (importCanceledRef.current) { canceledAfter = i; break; }
           // A FRESH controller per file: reusing one would leave every
           // subsequent file's fetch born already-aborted after any cancel.
           const controller = new AbortController();
@@ -1152,7 +1152,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               onRunId: (runId) => { importRunIdRef.current = runId; },
             }));
           } catch (err) {
-            if (isImportCancel(err, controller.signal)) { cancelledAfter = i; break; }
+            if (isImportCancel(err, controller.signal)) { canceledAfter = i; break; }
             errors.push(`${results[i].input.fileName}: ${err instanceof Error ? err.message : 'Failed to import'}`);
           }
         }
@@ -1168,7 +1168,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // reported as a failure) but is left out of the summary parts below, since
     // importQsmCsv already toasts each QSM with its cylinder count.
     const loadedCount = newScans.length + meshCount + skeletonCount + qsmCount;
-    if (cancelledAfter >= 0) {
+    if (canceledAfter >= 0) {
       // Scans imported before the cancel are KEPT — they're complete and correct,
       // and their backend sessions/octrees are already built. Say so explicitly:
       // "the modal vanished and 3 of 8 scans appeared" is otherwise
@@ -1176,8 +1176,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       if (loadedCount > 0) setSettingsOpen(false);
       showToast({
         title: newScans.length > 0
-          ? `Import cancelled — kept ${newScans.length} of ${wizardFiles.length} scan(s)`
-          : 'Import cancelled',
+          ? `Import canceled — kept ${newScans.length} of ${wizardFiles.length} scan(s)`
+          : 'Import canceled',
         type: 'info',
       });
     } else if (loadedCount > 0) {
@@ -1238,7 +1238,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const paths = acceptedFiles.map(f => droppedPathsRef.current.get(fileKey(f)));
     droppedPathsRef.current.clear();
     // Drops always auto-detect. Pass it explicitly rather than trusting the
-    // ref: menu imports no longer touch pendingImportTypeRef, but a cancelled
+    // ref: menu imports no longer touch pendingImportTypeRef, but a canceled
     // import in older flows could leave it stale, which previously routed a
     // dropped .ply through the wrong parser ("Unsupported skeleton format").
     if (acceptedFiles.length === 1) {
@@ -1293,7 +1293,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   }, []);
 
   // Toggle the sky/miss overlay for a scan. Misses are hidden by default; this
-  // lets the user reveal them (in a distinct colour, on the bounding sphere) to
+  // lets the user reveal them (in a distinct color, on the bounding sphere) to
   // verify a scan actually carries miss information for the LAD inversion.
   const handleToggleScanMisses = useCallback((id: string) => {
     setScans(prev => prev.map(s =>
@@ -1492,7 +1492,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // Let the user pick which scalars to keep, as every other path-backed
     // import does. One wizard step covers the whole project: the reader
     // produces the same schema for every position, so per-position choices
-    // would be noise. Cancelling here cancels the import.
+    // would be noise. Canceling here cancels the import.
     const wizard = await openImportWizard([
       { path: picked, fileName: picked.split('/').pop() ?? 'RIEGL project' },
     ]);
@@ -1507,7 +1507,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       ? (wizard[0]?.keptSlugs ?? [])
       : undefined;
 
-    importCancelledRef.current = false;
+    importCanceledRef.current = false;
     const controller = new AbortController();
     importAbortRef.current = controller;
     setImportProgress({
@@ -1536,7 +1536,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             };
           }),
       }, selection.frame);
-      if (importCancelledRef.current) return;
+      if (importCanceledRef.current) return;
 
       // The backend already built a cloud session (and its octree) for every
       // position while streaming, so there is nothing left to import here — no
@@ -1546,12 +1546,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       const okScans = project.scans.filter(
         (s: RieglScanPosition) => s.session && !s.error,
       );
-      // One colour per position. A project with more than 8 setups is ordinary,
+      // One color per position. A project with more than 8 setups is ordinary,
       // so this needs the cycling allocator rather than a per-iteration union
-      // (which freezes on one colour once the palette is used up).
+      // (which freezes on one color once the palette is used up).
       const allocateColor = makeScanColorAllocator();
       for (const s of okScans) {
-        if (importCancelledRef.current) break;
+        if (importCanceledRef.current) break;
         const data = buildPointCloudFromOctree(
           s.session!,
           // Provenance: the project directory, since no per-scan file exists.
@@ -1581,7 +1581,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       // the failure the user cannot diagnose. Named explicitly instead.
       const failed = project.scans.filter((s: RieglScanPosition) => s.error);
 
-      if (newScans.length === 0 && failed.length > 0 && !importCancelledRef.current) {
+      if (newScans.length === 0 && failed.length > 0 && !importCanceledRef.current) {
         showToast({
           title: 'RIEGL import failed',
           message:
@@ -1591,11 +1591,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         });
       }
 
-      if (newScans.length > 0 && !importCancelledRef.current) {
+      if (newScans.length > 0 && !importCanceledRef.current) {
         handleAddScans(newScans);
         const warned = project.scans.filter((s: RieglScanPosition) => s.warning);
         // Say what actually happened. A .PROJ is routinely a MIX — some
-        // positions surveyed, some falling back to a metre-level prior — so a
+        // positions surveyed, some falling back to a meter-level prior — so a
         // blanket "run ICP" is as unhelpful as a blanket "they're aligned".
         const placed = okScans.filter(
           (s: RieglScanPosition) => s.registration === 'registered',
@@ -1604,7 +1604,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         const alignment =
           selection.frame === 'registered' && placed > 0
             ? unplaced > 0
-              ? `${placed} placed by the project's registration; ${unplaced} from a metre-level prior — run ICP on those.`
+              ? `${placed} placed by the project's registration; ${unplaced} from a meter-level prior — run ICP on those.`
               : 'Placed by the project\u2019s own registration — no ICP needed.'
             : 'Scans are unregistered — run ICP to align them.';
         const failedNote = failed.length
@@ -1622,7 +1622,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         });
       }
     } catch (err) {
-      if (!importCancelledRef.current) {
+      if (!importCanceledRef.current) {
         showToast({
           title: 'RIEGL import failed',
           message: describeBackendError(err, 'RIEGL import').message,
@@ -1634,7 +1634,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       importAbortRef.current = null;
       importRunIdRef.current = null;
     }
-    // `scans.length` used to be listed to keep the colour seed fresh; the
+    // `scans.length` used to be listed to keep the color seed fresh; the
     // allocator reads scansRef itself now, and the body has no other
     // scan-list read.
   }, [chooseRieglScans, handleAddScans, makeScanColorAllocator]);
@@ -1784,7 +1784,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             // The SOURCE UNIT is part of the rebuild descriptor: this re-reads
             // the raw file, still in its original unit. Without it a feet scan
             // whose session was swept (30-min idle TTL — routine) comes back
-            // 3.28x larger and is merged at that scale into a metre batch.
+            // 3.28x larger and is merged at that scale into a meter batch.
             // Positions 5-11 are defaults; units is the 12th.
             null, null, undefined, undefined, undefined, null, null,
             octree.sourceUnits ?? null,
@@ -1812,7 +1812,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           worldShift: merged.world_shift ?? null,
           // The backend merges provenance by an all-must-agree rule (a mixed
           // batch reports none), so take the MERGED session's answer rather
-          // than the first input's — every input is already metres, so this is
+          // than the first input's — every input is already meters, so this is
           // only about what to report.
           sourceUnits: merged.source_units ?? null,
           sourceUnitScale: merged.source_unit_scale ?? null,
@@ -1953,7 +1953,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       showToast({ title: err instanceof Error ? err.message : 'Failed to open file dialog', type: 'error' });
       return;
     }
-    if (!selected) return; // user cancelled
+    if (!selected) return; // user canceled
     const paths = Array.isArray(selected) ? selected : [selected];
     await importPathsByType(paths, importType);
   }, [importPathsByType]);
@@ -2353,7 +2353,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           // .rxp/.jpg/.ppm files and the generic importer rejects every one of
           // them ("Unsupported file format: .ppm"). This capture phase sees the
           // un-expanded entry, which is the only place the folder can still be
-          // recognised as a single thing.
+          // recognized as a single thing.
           const rieglDir = files
             .map((f) => {
               let p: string | undefined;

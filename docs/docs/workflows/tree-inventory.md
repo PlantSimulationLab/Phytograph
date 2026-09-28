@@ -2,8 +2,8 @@
 
 Turn a segmented forest plot into a **tree list**: one row per tree with
 its stem position, **DBH**, stem curve, lean, height, crown base height,
-crown size, crown volume and how crowded it is by its neighbours. Then
-summarise the plot (**stems/ha, basal area, QMD, Lorey's height, canopy
+crown size, crown volume and how crowded it is by its neighbors. Then
+summarize the plot (**stems/ha, basal area, QMD, Lorey's height, canopy
 cover, biomass**), and build a QSM for every tree in one run. Each DBH comes with the evidence behind it:
 how well the circle fit and how much of the stem was actually seen. Browse
 and sort the trees in the **Tree Table**, click a tree to fly to it, record
@@ -26,7 +26,7 @@ first, on the same cloud:
 
 !!! warning "Without a DEM, heights are less reliable"
     Without the height-above-ground column, the ground is estimated from the
-    ground-labelled points. Without those either, each tree's own lowest
+    ground-labeled points. Without those either, each tree's own lowest
     point is used, which is biased on slopes. Those trees are flagged
     `ground_from_tree_min`, and the panel says which ground source it will
     use before you run.
@@ -45,7 +45,7 @@ Sky/miss points and deleted points are never measured.
     | **Circle search** | RANSAC | The robust search that finds the stem's points in a slice: RANSAC, or the randomized Hough transform. Both are refined by the same precise fit. |
     | **Crown voxel** | 0.10 m | Only affects crown volume: the number of cubes of this size that hold a point. Smaller cubes report less volume, larger ones approach the crown envelope. Use roughly 2–3× the crown's point spacing, and one value across trees you compare. |
     | **Min points / tree** | 50 | Trees with fewer points are skipped (and counted in a warning). |
-    | **Competition** | 6 m | Search radius of each tree's competition index (the **CI** column). Every neighbour with a DBH within the radius adds its DBH ÷ this tree's DBH ÷ their distance, so bigger, closer neighbours count more. Trees closer than this to the plot edge are marked in the CSV's `edge` column, since their outside neighbours are missing. |
+    | **Competition** | 6 m | Search radius of each tree's competition index (the **CI** column). Every neighbor with a DBH within the radius adds its DBH ÷ this tree's DBH ÷ their distance, so bigger, closer neighbors count more. Trees closer than this to the plot edge are marked in the CSV's `edge` column, since their outside neighbors are missing. |
 
 3. Click **Run inventory**. The bar shows which tree is being measured.
    **Cancel** stops it between trees.
@@ -68,7 +68,7 @@ Each row is one tree:
 | **Lean °** | Stem lean from vertical. |
 | **BA m²** | Basal area. |
 | **H/D** | Slenderness. |
-| **CI** | Hegyi's competition index: higher means larger, nearer neighbours. |
+| **CI** | Hegyi's competition index: higher means larger, nearer neighbors. |
 | **Overlap %** | Share of the crown projection covered by other crowns. |
 | **QSM m³** | Woody volume of the tree's QSM (after **Build QSMs**). |
 | **AGB kg** | Above-ground biomass by the Stand tab's method (when one is chosen). |
@@ -104,12 +104,12 @@ Each row is one tree:
 | `partial_arc` | Less than half the stem's circumference was seen at breast height. | Usual for a single scan position. The DBH is less certain; scanning from more positions fixes it. |
 | `few_points` | Fewer than 20 points on the DBH circle. | Check the stem in the viewer; the scan may be sparse there. |
 | `high_residual` | The circle fit is noisy: branches, ivy, or buttresses at breast height. | Inspect the DBH circle overlay. |
-| `no_stem` | No circle could be fitted at breast height (often an occluded stem). DBH, basal area and slenderness are blank. | Check the segmentation; the tree may be merged with a neighbour or cut off. |
+| `no_stem` | No circle could be fitted at breast height (often an occluded stem). DBH, basal area and slenderness are blank. | Check the segmentation; the tree may be merged with a neighbor or cut off. |
 | `ground_from_tree_min` | No ground data under this tree. | Run Segment Ground and Generate DEM. |
 
 ## Stand summary
 
-The **Stand** tab summarises the plot from the tree list:
+The **Stand** tab summarizes the plot from the tree list:
 
 | Figure | Meaning |
 |--------|---------|
@@ -159,7 +159,7 @@ table in one run:
    after the tree. **Cancel** stops between stages.
 
 Each tree's woody volume joins the table (**QSM m³**) and can feed the QSM
-biomass method. A tree that can't be modelled (too few points, or a
+biomass method. A tree that can't be modeled (too few points, or a
 skeleton that doesn't connect) is counted as failed without stopping the
 others. **QSM metrics CSV** lists every tree, with the reason for each
 failure.

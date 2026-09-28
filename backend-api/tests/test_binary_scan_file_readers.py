@@ -85,7 +85,7 @@ def test_las_header_contains_the_undecodable_byte(las_path):
 
 
 @pytest.mark.parametrize("name", ["scan.las", "scan.laz", "scan.ply", "scan.pcd"])
-def test_binary_extensions_are_recognised(name):
+def test_binary_extensions_are_recognized(name):
     assert _is_binary_scan_file(f"/tmp/{name}") is True
 
 

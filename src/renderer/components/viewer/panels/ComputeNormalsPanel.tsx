@@ -21,7 +21,7 @@ interface ComputeNormalsPanelProps {
   // `acknowledge_cost`. Mirrors GroundSegmentPanel.
   costWarning: string | null;
   // True when this cloud already carries normals that predate a later edit. A
-  // normal is a neighbourhood statistic, so a crop or delete changes the right
+  // normal is a neighborhood statistic, so a crop or delete changes the right
   // answer for every surviving point beside the cut.
   stale: boolean;
   hasNormals: boolean;
@@ -65,9 +65,9 @@ export function ComputeNormalsPanel({
       </div>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-        Fits a plane to each point's neighbourhood to estimate its surface
+        Fits a plane to each point's neighborhood to estimate its surface
         direction, and stores the result on the cloud. Also writes curvature
-        (surface variation) and verticality, which colour foliage, bark and
+        (surface variation) and verticality, which color foliage, bark and
         ground differently. Exported with the cloud as nx/ny/nz.
       </div>
 
@@ -83,13 +83,13 @@ export function ComputeNormalsPanel({
         </div>
       )}
 
-      {/* Neighbours */}
+      {/* Neighbors */}
       <div className="mb-3">
         <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-          Neighbours
+          Neighbors
           <InfoHint
             data-testid="compute-normals-neighbors-help"
-            label="Neighbours"
+            label="Neighbors"
             text="How many nearby points are fitted to estimate each normal. More gives a smoother, noise-tolerant result but blurs fine detail like twigs and leaf edges; fewer follows detail but is noisier. 30 suits most scans."
           />
         </label>
@@ -123,7 +123,7 @@ export function ComputeNormalsPanel({
           data-testid="compute-normals-use-radius-help"
           label="Limit search radius"
           align="right"
-          text="Cap how far the neighbour search may reach, in metres. Off by default: a plain neighbour count adapts on its own to a scan whose density falls with distance, while a fixed radius finds too few points in the far field. Turn it on to stop the search bridging across a gap."
+          text="Cap how far the neighbor search may reach, in meters. Off by default: a plain neighbor count adapts on its own to a scan whose density falls with distance, while a fixed radius finds too few points in the far field. Turn it on to stop the search bridging across a gap."
         />
       </div>
 

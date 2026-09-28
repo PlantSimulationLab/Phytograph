@@ -5,7 +5,7 @@
 // what is valid and is the only thing that ever runs an expression; duplicating
 // its grammar here would be a second source of truth that drifts, and the
 // drift would show up as the panel accepting something the backend then
-// rejects, or — far worse — greying out a formula that would have worked.
+// rejects, or — far worse — graying out a formula that would have worked.
 //
 // What it does instead is catch the two mistakes that are worth reporting
 // BEFORE a round trip, because they are common and unambiguous:

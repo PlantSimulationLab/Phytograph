@@ -47,7 +47,7 @@ test.describe('measurement tool', () => {
   // projects near the canvas floor legitimately lands on that <span> - and
   // failing there says nothing about the projection, which is all the caller
   // wanted. That is precisely how the rigid-transform test failed in CI: the
-  // translate had applied correctly (the viewer's own centre readout showed the
+  // translate had applied correctly (the viewer's own center readout showed the
   // moved cloud) and the test still died, on a pixel it never intended to click.
   async function worldToScreenPx(
     world: [number, number, number],
@@ -170,7 +170,7 @@ test.describe('measurement tool', () => {
     await armIn('distance');
 
     // Two ramp steps: 0.5 exactly. Guards against a measurement that silently
-    // reports the nearest-neighbour spacing regardless of what was clicked.
+    // reports the nearest-neighbor spacing regardless of what was clicked.
     await clickWorld([0.0, 0.0, 0.0]);
     await clickWorld([0.4, 0.0, 0.3]);
 
@@ -272,7 +272,7 @@ test.describe('measurement tool', () => {
   test('a measurement SURVIVES a rigid transform, unchanged, and moves with the cloud', async () => {
     // The carry-along contract. A distance is invariant under a rigid
     // transform, so translating the cloud must not change the number and must
-    // not discard the measurement — the previous behaviour dropped every
+    // not discard the measurement — the previous behavior dropped every
     // anchor on any edit, which silently deleted the user's work.
     await importScalars();
     await armIn('distance');
@@ -498,13 +498,13 @@ test.describe('measurement tool', () => {
 
     // The label survives, and its world X is still a plausible UTM easting.
     // The cloud is ~0.6 m across, so a rotation can move the coordinate by at
-    // most a couple of metres; the bug moved it by millions.
+    // most a couple of meters; the bug moved it by millions.
     await expect(pickLabel).toHaveCount(1);
     const afterX = await readWorldX();
     expect(
       Math.abs(afterX - beforeX),
       `world X jumped from ${beforeX} to ${afterX} under a rotation of a ` +
-      `sub-metre cloud — the world frame was rotated about a local-frame pivot`,
+      `sub-meter cloud — the world frame was rotated about a local-frame pivot`,
     ).toBeLessThan(5);
   });
 
@@ -579,7 +579,7 @@ test.describe('measurement tool', () => {
     await expect(measureLabels()).toHaveCount(0);
   });
 
-  test('converts a FEET survey to metres, so a 10 ft mast measures 3.048 m', async () => {
+  test('converts a FEET survey to meters, so a 10 ft mast measures 3.048 m', async () => {
     // The whole units feature, end to end, through the real UI.
     //
     // feet-mast.las declares EPSG:2229 (CA State Plane V, US survey feet) in a
@@ -631,14 +631,14 @@ test.describe('measurement tool', () => {
     await clickWorld(top);
 
     await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
-    // 10 ft in metres. If the conversion had not happened this would read
+    // 10 ft in meters. If the conversion had not happened this would read
     // "10.000 m" — the exact failure the feature exists to prevent.
     expect(await valueOf(measureLabels().first())).toBe('3.048 m');
   });
 
-  test('an ASCII import defaults to metres and is unchanged by the units feature', async () => {
+  test('an ASCII import defaults to meters and is unchanged by the units feature', async () => {
     // The no-regression case, and the one that matters most: an .xyz carries no
-    // unit metadata, so the wizard defaults to metres — exactly what every
+    // unit metadata, so the wizard defaults to meters — exactly what every
     // import assumed implicitly before units existed. A user who ignores the
     // new control must see no difference at all.
     await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));

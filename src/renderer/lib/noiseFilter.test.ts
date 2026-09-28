@@ -10,7 +10,7 @@ import {
   noiseRemovalConfirmMessage,
 } from './noiseFilter';
 
-describe('noise method catalogue', () => {
+describe('noise method catalog', () => {
   it('offers the safe local method first and labels SOR as advanced', () => {
     // Order is the dropdown order and the default is the first entry, so this
     // pins the deliberate choice NOT to default to the conventional method.
@@ -47,7 +47,7 @@ describe('buildNoiseParams', () => {
       .toEqual({ method: 'sor', std_ratio: 4 });
     expect(buildNoiseParams('sor', false, { nb_neighbors: NaN, std_ratio: 4 }))
       .toEqual({ method: 'sor', std_ratio: 4 });
-    // nb_neighbors has min 2; 1 is not a usable neighbour count.
+    // nb_neighbors has min 2; 1 is not a usable neighbor count.
     expect(buildNoiseParams('sor', false, { nb_neighbors: 1 })).toEqual({ method: 'sor' });
   });
 
@@ -103,7 +103,7 @@ describe('formatResolvedParams', () => {
   it('shows what auto resolved, with units and timing', () => {
     expect(formatResolvedParams({
       params_used: { radius: 0.048, nb_points: 2 }, elapsed_s: 3.14,
-    })).toBe('radius 0.048 m · min neighbours 2 · 3.1 s');
+    })).toBe('radius 0.048 m · min neighbors 2 · 3.1 s');
   });
 
   it('omits the timing when the backend did not report one', () => {

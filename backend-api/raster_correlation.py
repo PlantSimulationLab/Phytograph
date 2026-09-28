@@ -22,11 +22,11 @@ has to pick the SAME ones twice. The whole cloud contributes.
 
 How it works
 ------------
-Both clouds are gravity-aligned (the scanner is levelled), so the unknown is
+Both clouds are gravity-aligned (the scanner is leveled), so the unknown is
 yaw + horizontal translation + a height offset -- 4 degrees of freedom, not 6.
 That reduction is what makes an exhaustive search cheap:
 
-1. Rasterise each cloud to a top-down grid.
+1. Rasterize each cloud to a top-down grid.
 2. Sweep yaw. For each candidate, correlate the two rasters with an FFT, which
    evaluates EVERY translation at once (the correlation theorem) rather than
    searching over them.
@@ -121,7 +121,7 @@ _FINE_STEP_DEG = 0.5
 _RANK_ITERATIONS = 60
 
 # Grid side in cells. 180 keeps the FFT small (~32k cells) while resolving
-# plant-scale structure on plots from a few metres to a few hundred.
+# plant-scale structure on plots from a few meters to a few hundred.
 _TARGET_CELLS = 180
 
 # Radial percentile defining "the plot". High enough to keep the real survey
@@ -150,8 +150,8 @@ def auto_cell_size(points: np.ndarray, extent: Optional[float] = None) -> Tuple[
         # at the coarsest allowed cell, and the correlation was then dominated
         # by empty space -- the true translation peak was unreachable. Using a
         # robust radial percentile instead brought it to rank 0.
-        centre = np.median(points[:, :2], axis=0)
-        radius = float(np.percentile(np.linalg.norm(points[:, :2] - centre, axis=1),
+        center = np.median(points[:, :2], axis=0)
+        radius = float(np.percentile(np.linalg.norm(points[:, :2] - center, axis=1),
                                      _EXTENT_PERCENTILE))
         robust = 2.6 * radius          # diameter, with the same 1.3 margin
         raw = 1.3 * float(max(np.ptp(points[:, 0]), np.ptp(points[:, 1])))
@@ -167,22 +167,22 @@ def auto_cell_size(points: np.ndarray, extent: Optional[float] = None) -> Tuple[
     return cell, extent
 
 
-def rasterise(points: np.ndarray, cell: float, extent: float,
-              centre: np.ndarray, mode: str = "occupancy") -> np.ndarray:
+def rasterize(points: np.ndarray, cell: float, extent: float,
+              center: np.ndarray, mode: str = "occupancy") -> np.ndarray:
     """Top-down grid: occupancy, or mean height per cell.
 
-    Centred on the cloud's own XY median rather than its bounding-box centre --
+    Centered on the cloud's own XY median rather than its bounding-box center --
     a terrestrial scan's bbox is dominated by sparse far-field returns, so its
-    centre can sit hundreds of metres from the actual plot.
+    center can sit hundreds of meters from the actual plot.
     """
-    return _rasterise_xy(points[:, :2], points[:, 2], cell, extent, centre, mode)
+    return _rasterize_xy(points[:, :2], points[:, 2], cell, extent, center, mode)
 
 
-def _rasterise_xy(xy: np.ndarray, z: np.ndarray, cell: float, extent: float,
-                  centre: np.ndarray, mode: str = "occupancy") -> np.ndarray:
-    """`rasterise` over separate XY and Z columns -- see that function."""
+def _rasterize_xy(xy: np.ndarray, z: np.ndarray, cell: float, extent: float,
+                  center: np.ndarray, mode: str = "occupancy") -> np.ndarray:
+    """`rasterize` over separate XY and Z columns -- see that function."""
     n = max(int(round(extent / cell)), 4)
-    ij = np.floor((xy - centre + extent / 2.0) / cell).astype(np.int64)
+    ij = np.floor((xy - center + extent / 2.0) / cell).astype(np.int64)
     inside = (ij[:, 0] >= 0) & (ij[:, 0] < n) & (ij[:, 1] >= 0) & (ij[:, 1] < n)
     ij = ij[inside]
     if len(ij) == 0:
@@ -200,7 +200,7 @@ def _rasterise_xy(xy: np.ndarray, z: np.ndarray, cell: float, extent: float,
 
 def _correlate(target_fft: np.ndarray, target_shape, target_norm: float,
                raster: np.ndarray) -> Tuple[float, Tuple[int, int]]:
-    """Peak normalised cross-correlation and the shift that produces it.
+    """Peak normalized cross-correlation and the shift that produces it.
 
     One FFT multiply evaluates every possible translation simultaneously -- the
     reason this is fast enough to wrap in a yaw sweep.
@@ -255,7 +255,7 @@ def _has_ground(points: np.ndarray, min_floor_fraction: float = 0.35) -> bool:
     work: a synthetic planting on a perfect lattice has a low surface varying by
     0.04 m, flatter than real terrain, so a flatness test calls it ground and
     destroys it. But a ground plane is a dense sheet -- a large share of all
-    returns sit within a metre of the floor -- whereas a canopy-only cloud is
+    returns sit within a meter of the floor -- whereas a canopy-only cloud is
     hollow underneath. Measured: 0.22 of points in the floor+1 m band for the
     canopy-only fixture against 0.54 for a real peach scan and 0.67 for the same
     fixture with a ground plane added.
@@ -269,13 +269,13 @@ def _has_ground(points: np.ndarray, min_floor_fraction: float = 0.35) -> bool:
     return bool(np.mean((z >= floor) & (z < floor + 1.0)) >= min_floor_fraction)
 
 
-def _shift_to_matrix(shift, n, cell, angle_deg, tgt_centre, src_centre,
+def _shift_to_matrix(shift, n, cell, angle_deg, tgt_center, src_center,
                      target, source) -> np.ndarray:
     """Build the 4x4 for one (yaw, FFT shift) candidate.
 
     Kept separate so every candidate in the shortlist is composed by exactly the
     same rule as the single-peak path -- the translation composition here is the
-    bug that once left rotation exact and translation metres out, so it must not
+    bug that once left rotation exact and translation meters out, so it must not
     be duplicated by hand per call site.
     """
     dx = (shift[0] - n if shift[0] > n // 2 else shift[0]) * cell
@@ -285,17 +285,17 @@ def _shift_to_matrix(shift, n, cell, angle_deg, tgt_centre, src_centre,
     R = np.array([[c, -si, 0.0], [si, c, 0.0], [0.0, 0.0, 1.0]])
     M = np.eye(4)
     M[:3, :3] = R
-    # Each raster is centred on its OWN XY median, so the FFT shift is measured
+    # Each raster is centered on its OWN XY median, so the FFT shift is measured
     # between grids with DIFFERENT origins and excludes the offset between them.
-    src_pivot = np.array([src_centre[0], src_centre[1], 0.0])
-    tgt_pivot = np.array([tgt_centre[0], tgt_centre[1], 0.0])
+    src_pivot = np.array([src_center[0], src_center[1], 0.0])
+    tgt_pivot = np.array([tgt_center[0], tgt_center[1], 0.0])
     M[:3, 3] = tgt_pivot - R @ src_pivot + np.array([dx, dy, 0.0])
     M[2, 3] = float(np.median(target[:, 2]) - np.median(source[:, 2]))
     return M
 
 
 def _ranking_cloud(points: np.ndarray, voxel: float = 0.40):
-    """The voxelised, normal-carrying cloud `_best_by_icp` ranks against.
+    """The voxelized, normal-carrying cloud `_best_by_icp` ranks against.
 
     0.40 m, not the 0.15 m used for a final pose. This ICP only has to RANK
     candidates -- the fine stage recomputes the winner at full resolution --
@@ -336,7 +336,7 @@ def _best_by_icp(candidates, target, source):
     selection on every pair of both the peach and olive datasets.
 
     Returns (0, None, None, 0.0) if Open3D is unavailable, i.e. keep the top
-    peak, which is exactly the previous behaviour.
+    peak, which is exactly the previous behavior.
 
     `target` / `source` are arrays or `CoarseCloud`s; the latter carry their
     ranking cloud (see `_ranking_cloud`) so it is built once per scan rather
@@ -414,7 +414,7 @@ class CoarseCloud:
     `register_by_correlation` derives several things from each cloud that do
     not depend on the OTHER cloud or on the variant being tried: whether it has
     a ground sheet, its ground-stripped canopy, its XY median, and the
-    voxelised, normal-carrying copy the shortlist ICP ranks against. A scan set
+    voxelized, normal-carrying copy the shortlist ICP ranks against. A scan set
     registers every graph edge under every variant -- 24 calls on four scans,
     each taking two clouds -- so each of those was recomputed up to twelve
     times per scan. Measured on a real four-scan set, ground stripping plus the
@@ -458,11 +458,11 @@ def _as_coarse(cloud) -> CoarseCloud:
     return cloud if isinstance(cloud, CoarseCloud) else CoarseCloud(cloud)
 
 
-def _rotate_xy(points: np.ndarray, degrees: float, centre: np.ndarray) -> np.ndarray:
+def _rotate_xy(points: np.ndarray, degrees: float, center: np.ndarray) -> np.ndarray:
     th = math.radians(degrees)
     c, s = math.cos(th), math.sin(th)
     out = points.copy()
-    out[:, :2] = (points[:, :2] - centre) @ np.array([[c, -s], [s, c]]).T + centre
+    out[:, :2] = (points[:, :2] - center) @ np.array([[c, -s], [s, c]]).T + center
     return out
 
 
@@ -527,8 +527,8 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
         except (ImportError, ValueError, MemoryError):
             pass          # correlate the raw clouds rather than fail outright
 
-    tgt_centre = np.median(tgt_grid[:, :2], axis=0)
-    src_centre = np.median(src_grid[:, :2], axis=0)
+    tgt_center = np.median(tgt_grid[:, :2], axis=0)
+    src_center = np.median(src_grid[:, :2], axis=0)
     # An explicit `extent` lets the caller pin the grid to a footprint measured
     # BEFORE density filtering. Without that, filtering out sparse far-field
     # returns shrinks the measured spread and silently refines the raster past
@@ -538,7 +538,7 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     else:
         _, extent = auto_cell_size(target, extent)
 
-    tgt_raster = rasterise(tgt_grid, cell, extent, tgt_centre, mode)
+    tgt_raster = rasterize(tgt_grid, cell, extent, tgt_center, mode)
     tgt_raster = tgt_raster - tgt_raster.mean()
     tgt_norm = float(np.linalg.norm(tgt_raster))
     if tgt_norm <= 0:
@@ -546,8 +546,8 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     tgt_fft = np.fft.rfft2(tgt_raster)
     shape = tgt_raster.shape
 
-    # The sweep rasterises the source once per yaw -- ~93 times a call -- so the
-    # per-angle work is trimmed to the XY columns it actually reads, centred
+    # The sweep rasterizes the source once per yaw -- ~93 times a call -- so the
+    # per-angle work is trimmed to the XY columns it actually reads, centered
     # once rather than per angle.
     #
     # The rotation is a COMPLEX MULTIPLY, not `xy @ R.T`, and that is a
@@ -559,15 +559,15 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     # parallel -- could hang the process. Elementwise complex arithmetic never
     # reaches BLAS. It agrees with the matmul to ~3e-14 m, which moves a raster
     # cell assignment only for a point sitting exactly on a cell wall.
-    src_xy_centred = np.ascontiguousarray(src_grid[:, :2] - src_centre)
-    src_xy_complex = src_xy_centred.view(np.complex128).ravel()
+    src_xy_centered = np.ascontiguousarray(src_grid[:, :2] - src_center)
+    src_xy_complex = src_xy_centered.view(np.complex128).ravel()
     src_z = src_grid[:, 2]
 
     def raster_at(angle):
         th = math.radians(angle)
         turned = src_xy_complex * complex(math.cos(th), math.sin(th))
-        xy = turned.view(np.float64).reshape(-1, 2) + src_centre
-        return _rasterise_xy(xy, src_z, cell, extent, src_centre, mode)
+        xy = turned.view(np.float64).reshape(-1, 2) + src_center
+        return _rasterize_xy(xy, src_z, cell, extent, src_center, mode)
 
     def best_over(angles):
         out = []
@@ -579,7 +579,7 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     if yaw_prior_deg is None:
         sweep = np.arange(-180.0, 180.0, _COARSE_STEP_DEG)
     else:
-        # Only the neighbourhood of the recorded heading is physically
+        # Only the neighborhood of the recorded heading is physically
         # plausible; everything else is an alias waiting to be picked.
         sweep = np.arange(yaw_prior_deg - yaw_search_deg,
                           yaw_prior_deg + yaw_search_deg + 1e-9,
@@ -587,9 +587,9 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     coarse = best_over(sweep)
     best_peak, best_angle, best_shift = coarse[0]
 
-    # Runner-up must be a genuinely DIFFERENT pose, not a neighbouring step of
+    # Runner-up must be a genuinely DIFFERENT pose, not a neighboring step of
     # the same peak, or every result would look ambiguous.
-    # Runner-up must be a genuinely DIFFERENT pose, not a neighbouring step of
+    # Runner-up must be a genuinely DIFFERENT pose, not a neighboring step of
     # the same peak, or every result would look ambiguous. With a yaw prior the
     # sweep may be narrower than 20 degrees on one side, in which case there may
     # legitimately be no rival to compare against -- that is a CONSTRAINED
@@ -610,15 +610,15 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
 
     # SHORTLIST, don't commit. At the winning yaw the correlation surface of a
     # regular planting has many near-equal peaks -- one per row spacing -- and
-    # the tallest is often a neighbouring row rather than the true pose. Build
+    # the tallest is often a neighboring row rather than the true pose. Build
     # the top few as candidate matrices and let ICP arbitrate on geometry.
     shortlist = _top_shifts(tgt_fft, shape, tgt_norm, raster_at(best_angle),
                             max(1, int(refine_top_k)))
     if not shortlist:
         shortlist = [(best_peak, best_shift)]
 
-    candidates = [_shift_to_matrix(sh, n, cell, best_angle, tgt_centre,
-                                   src_centre, target, source)
+    candidates = [_shift_to_matrix(sh, n, cell, best_angle, tgt_center,
+                                   src_center, target, source)
                   for _, sh in shortlist]
 
     chosen = 0
@@ -630,8 +630,8 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
         M = candidates[chosen]
         # Return the REFINED pose, not the raw grid candidate. Choosing already
         # cost a full ICP run per candidate, so the aligned result is in hand --
-        # discarding it and handing back the cell-quantised matrix threw away
-        # roughly a metre of accuracy for nothing (measured: 0.02 m refined
+        # discarding it and handing back the cell-quantized matrix threw away
+        # roughly a meter of accuracy for nothing (measured: 0.02 m refined
         # against 1.1 m raw on the same candidate).
         if refined is not None:
             M = refined

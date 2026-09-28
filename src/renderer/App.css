@@ -504,11 +504,11 @@ input[type="number"] {
    render their own inline errors did not, so a failure shown in a modal could
    be read and not copied.
 
-   Keying on the semantic colour classes rather than on a wrapper component or a
+   Keying on the semantic color classes rather than on a wrapper component or a
    data-testid is deliberate: those are the only marker every one of these sites
    already shares (testids exist on well under a third of them, and there is no
    common error component to hook). It also means a NEW error message is
-   selectable the moment it's given the standard colour — the fix can't drift
+   selectable the moment it's given the standard color — the fix can't drift
    out of date the way a hand-maintained list of call sites would.
 
    Matched with attribute selectors rather than a list of exact class names so
@@ -519,9 +519,9 @@ input[type="number"] {
    (`text-red-200/60`) and the backend-startup failure in `BackendSplash`
    (`text-red-200/80`).
 
-   Scoped to text colours only. Amber/red used as a border, background or icon
+   Scoped to text colors only. Amber/red used as a border, background or icon
    tint is unaffected, and an icon carries no selectable text anyway. The
-   `~=`-style prefix match is safe because Tailwind's colour utilities are
+   `~=`-style prefix match is safe because Tailwind's color utilities are
    whole tokens: `text-red-300` and `text-red-300/70` are the only shapes, and
    `border-red-300` / `bg-red-300` do not start with `text-`. */
 [class*="text-red-"],

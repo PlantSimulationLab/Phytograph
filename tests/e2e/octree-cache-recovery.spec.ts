@@ -201,7 +201,7 @@ test('recovers an EDITED cloud from its live session, not from its source file',
     // The octree the filter starts from. The commit itself only deletes the
     // points (the row's count drops behind a per-tile mask) and hands the
     // reconversion to the background refresh queue, so the post-filter octree
-    // is recognised by its id CHANGING, not merely by an id being present.
+    // is recognized by its id CHANGING, not merely by an id being present.
     await expect.poll(() => cloudRow.getAttribute('data-octree-cache-id'), { timeout: 30_000 }).not.toBeNull();
     const importedCacheId = await cloudRow.getAttribute('data-octree-cache-id');
 

@@ -5,7 +5,7 @@
 // inclination (zenith of the face normal) and azimuth, AREA-WEIGHTED — a large
 // leaf face counts more than a sliver. This is distinct from the Helios
 // /api/lad/compute pipeline (which inverts Beer's law for leaf area *density*);
-// here we characterise the angular distribution of the leaf surfaces directly.
+// here we characterize the angular distribution of the leaf surfaces directly.
 //
 // The per-triangle angles/areas come from `triangleGeometry` in
 // pointCloudHelpers.ts — the SAME function that drives the mesh's

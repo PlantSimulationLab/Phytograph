@@ -23,7 +23,7 @@ import { isSceneOverlay } from '../../../lib/sceneOverlay';
 // OrbitControls target live in, so the caller needs no conversion.
 
 // Pick window in pixels. Matches PointPicker's: wide enough that a sparse cloud
-// still registers under the cursor, narrow enough not to grab a neighbour.
+// still registers under the cursor, narrow enough not to grab a neighbor.
 const OCTREE_PICK_WINDOW_PX = 13;
 
 // Above this many loaded octree points, the CPU raycast is skipped and the GPU

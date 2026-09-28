@@ -84,10 +84,10 @@ class SlugError(ValueError):
 MEASUREMENT_ALIAS_TARGETS = frozenset({"reflectance"})
 
 
-def normalise_column_name(name: str) -> str:
+def normalize_column_name(name: str) -> str:
     """The comparison form import uses to match a column to a canonical role.
 
-    Mirrors `_normalise_column_name` in main.py: drop a bracketed unit, lower
+    Mirrors `_normalize_column_name` in main.py: drop a bracketed unit, lower
     case, strip everything but letters and digits — so `GPS_Time`, `Time` and
     `time` are one name to the importer, and must be one name here.
     """
@@ -109,13 +109,13 @@ def validate_slug(slug: str, *, existing: Iterable[str] = (),
       - reserved / a canonical import alias → pick another
 
     The alias check is the subtle one. `aliases` is `_CANONICAL_ALIAS_TO_SLUG`
-    from main.py: normalised source-column SPELLING -> canonical slug. A field
+    from main.py: normalized source-column SPELLING -> canonical slug. A field
     named `time` or `elevation` would be silently re-resolved to `timestamp` /
     `z` if the cloud were ever exported and re-imported — it would come back as
     a different field, or collide with a real one. Refusing the name up front is
     the only place that is cheap to explain.
 
-    Matched on the NORMALISED name, because that is what import matches on: an
+    Matched on the NORMALIZED name, because that is what import matches on: an
     exact comparison let `Time` and `GPS_Time` through while still refusing
     `time`. Roles in `MEASUREMENT_ALIAS_TARGETS` are allowed — see there.
     """
@@ -137,7 +137,7 @@ def validate_slug(slug: str, *, existing: Iterable[str] = (),
     if slug in set(reserved):
         raise SlugError(
             f"{slug!r} is reserved for a built-in field and cannot be reused.")
-    canonical = aliases.get(normalise_column_name(slug))
+    canonical = aliases.get(normalize_column_name(slug))
     if canonical is not None and canonical not in MEASUREMENT_ALIAS_TARGETS:
         raise SlugError(
             f"{slug!r} would be read back as the {canonical!r} column if this "
@@ -454,7 +454,7 @@ def evaluate(parsed: ParsedExpr,
     `columns` maps slug → full-length (N,) array. The result is full-length
     float32, computed for EVERY row including deleted ones — an elementwise
     expression has a defined value on a deleted row, and `reset_edits` can bring
-    that row back. (Contrast a neighbourhood statistic like a normal, which is
+    that row back. (Contrast a neighborhood statistic like a normal, which is
     genuinely undefined for an absent point; that is why `_session_add_extra_
     column` zero-fills deleted rows and why arithmetic must not use it.)
 
@@ -690,7 +690,7 @@ def _auto_bins(f: np.ndarray, lo: float, hi: float) -> int:
     FD (bin width 2·IQR/n^(1/3)) adapts to spread and is robust to the tails,
     which is what we want for LiDAR scalars whose distributions are routinely
     skewed. Its failure mode is a zero IQR — a column where over half the points
-    share one value, which is common for a quantised intensity or a mostly-zero
+    share one value, which is common for a quantized intensity or a mostly-zero
     derived field — and there it divides by zero, so Sturges takes over.
     """
     n = int(f.size)

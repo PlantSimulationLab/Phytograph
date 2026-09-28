@@ -73,7 +73,7 @@ export function sanitizeQsmFilename(name: string): string {
  * Deliberately does NOT strip a trailing `.xyz`, unlike sanitizeQsmFilename: a user
  * who saves as `tree.v2.obj` means the stem `tree.v2`, and eating the `.v2` would
  * make the OBJ's `mtllib tree.mtl` name a file we never wrote — a dangling
- * reference that loads as untextured grey, the very bug the MTL exists to fix.
+ * reference that loads as untextured gray, the very bug the MTL exists to fix.
  * Inner dots are kept for that reason; only leading/trailing ones are trimmed.
  */
 export function sanitizeQsmStem(name: string): string {
@@ -209,7 +209,7 @@ export interface QSMObjAppearance {
 
 // Fallback bark brown, mirroring the viewport's BARK_FALLBACK — used when texture
 // mode is selected but the image is missing/undecodable, so the tree exports a
-// plausible wood colour rather than white.
+// plausible wood color rather than white.
 const BARK_FALLBACK: [number, number, number] = hexToRgb('#8b6f47');
 
 const f6 = (n: number): string => (Number.isFinite(n) ? n : 0).toFixed(6);
@@ -231,9 +231,9 @@ interface QsmMaterial {
    * sRGB before it is written to `Kd`.
    *
    * The two sources genuinely differ, so this can't be assumed either way: the
-   * tube colours come from lib/qsmColors, which defines the palette directly in
+   * tube colors come from lib/qsmColors, which defines the palette directly in
    * **sRGB** (the space a hex swatch and a `Kd` are both written in), while the
-   * leaf colours come from meshExport's resolveMaterials, which reads them off
+   * leaf colors come from meshExport's resolveMaterials, which reads them off
    * `MeshData.vertexColors` — held **linear**, because that is what three.js
    * requires of a `color` BufferAttribute. Getting this wrong is invisible in
    * geometry and shows up only as a wrong shade.
@@ -251,7 +251,7 @@ interface QsmMaterial {
  *
  * Exhaustive switch, not a chain of ifs: the `never` check makes the compiler
  * reject a newly-added QSMColorMode that forgets a case here, rather than
- * silently exporting everything as rank colours.
+ * silently exporting everything as rank colors.
  */
 function materialsForTubes(
   tubes: ShootTube[],
@@ -302,7 +302,7 @@ function materialsForTubes(
       // Extension comes from the MAGIC BYTES, never the declared mime/name — a
       // JPEG written as .png is a hard load error in Blender/three.js (the same
       // trap that bit the plant-mesh textures). An undecodable image degrades to
-      // the flat bark colour rather than naming a file no reader can open.
+      // the flat bark color rather than naming a file no reader can open.
       const bytes = appearance.barkTexture?.data
         ? decodeBase64(appearance.barkTexture.data)
         : null;
@@ -311,7 +311,7 @@ function materialsForTubes(
         bytes && ext ? { name: `${baseName}_bark${ext}`, bytes } : undefined;
       const idx = claim('bark', () => ({
         mtlName: 'bark',
-        // White under a diffuse map so the image shows its true colours (Kd
+        // White under a diffuse map so the image shows its true colors (Kd
         // multiplies map_Kd); the fallback brown only when there is no map.
         color: textureFile ? [1, 1, 1] : BARK_FALLBACK,
         textureFile,
@@ -363,11 +363,11 @@ function serializeQsmMtl(materials: QsmMaterial[]): string {
  * Serialize a QSM's tube mesh to an OBJ bundle: the `.obj`, a sibling `.mtl`, and
  * — in texture mode — the bark image the MTL names.
  *
- * Why a bundle and not just the OBJ: an OBJ carries no colour of its own. Without
- * the MTL the tree arrived in Blender/CloudCompare as untextured grey geometry, so
+ * Why a bundle and not just the OBJ: an OBJ carries no color of its own. Without
+ * the MTL the tree arrived in Blender/CloudCompare as untextured gray geometry, so
  * every distinction the user set up in the viewport — rank palette, per-shoot hues,
- * their chosen tree colour, the bark photo — was silently dropped on export. `Kd`
- * via `usemtl` is the only colour channel that portably survives OBJ.
+ * their chosen tree color, the bark photo — was silently dropped on export. `Kd`
+ * via `usemtl` is the only color channel that portably survives OBJ.
  *
  * Leaves, when the QSM has them, are appended as a final `o leaves` group with
  * their own textured (alpha-cutout) materials — the viewport draws them as part of
@@ -514,7 +514,7 @@ export function qsmToCylinderMeshObjBundle(
       materials.push({
         mtlName: m.mtlName,
         // resolveMaterials reads MeshData.vertexColors, which are LINEAR.
-        color: m.color ?? [0.35, 0.6, 0.25], // a leaf green, not a grey
+        color: m.color ?? [0.35, 0.6, 0.25], // a leaf green, not a gray
         colorIsLinear: true,
         textureFile: m.textureFile,
         hasAlpha: m.hasAlpha,

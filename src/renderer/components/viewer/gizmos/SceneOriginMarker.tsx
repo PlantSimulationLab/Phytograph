@@ -45,7 +45,7 @@ const PIXEL_RADIUS = 12;
 const RING_WIDTH = 2.25;
 const CROSS_WIDTH = 1.5;
 const HALO_WIDTH = 1.75;
-// Pick target: an ANNULUS around the ring, not a disc. The origin defaults to
+// Pick target: an ANNULUS around the ring, not a disk. The origin defaults to
 // the scene center, which is usually dead-center in the viewport, so a filled
 // hit target would steal the clicks that select whatever is under it. Leaving
 // the middle open keeps those clicks passing through while the visible ring
@@ -72,7 +72,7 @@ export function SceneOriginMarker({
   // Unit-radius ring with alternating red/white stripes (the group scale sets
   // the world size that projects to PIXEL_RADIUS). LineSegmentsGeometry wants
   // an explicit start/end pair per segment, and `setColors` likewise wants a
-  // colour per endpoint, so the circle is emitted as discrete segments rather
+  // color per endpoint, so the circle is emitted as discrete segments rather
   // than a loop.
   const ringGeom = useMemo(() => {
     const stripes = 12;            // number of red/white alternations around the ring
@@ -223,7 +223,7 @@ export function SceneOriginMarker({
 
   const halo = selected || hovered;
 
-  // LineSegments2 isn't in r3f's catalogue, so each line is built imperatively
+  // LineSegments2 isn't in r3f's catalog, so each line is built imperatively
   // and mounted via <primitive>. `computeLineDistances` is only needed for
   // dashing, which we don't use.
   const ringLine = useMemo(() => new LineSegments2(ringGeom, ringMat), [ringGeom, ringMat]);

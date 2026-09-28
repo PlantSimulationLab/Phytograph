@@ -333,7 +333,7 @@ export function publishCropMaskStats(octree: any, cacheId?: string): void {
   // chrome untouched. A test screenshots with and without this and diffs the
   // two, which is the only reliable way to isolate the CLOUD's pixels — the
   // overlay tints the crop interior and the panels have blues of their own, so
-  // an absolute colour threshold on a single frame counts chrome as cloud.
+  // an absolute color threshold on a single frame counts chrome as cloud.
   // Re-applied every frame because potree resets node visibility as it streams.
   if ((globalThis as any).__hideCloudForPixelTest) {
     octree.traverse?.((o: any) => { if (o.isPoints) o.visible = false; });

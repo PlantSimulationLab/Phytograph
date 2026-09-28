@@ -11,7 +11,7 @@ import numpy as np
 async def _create_session_direct(request):
     """Run an import to completion in-process and return its result DICT.
 
-    `/api/cloud/session/create` is a streaming, cancellable endpoint: the route
+    `/api/cloud/session/create` is a streaming, cancelable endpoint: the route
     returns a StreamingResponse, not the payload. Tests that want the result
     directly (rather than over HTTP) call the worker underneath it instead.
 
@@ -55,7 +55,7 @@ def decode_bin_frame(content: bytes):
 def decode_streamed_json(content: bytes):
     """Decode a streaming endpoint whose payload is plain JSON (not a PHB1
     frame) preceded by PHP1 progress markers — e.g. /api/c2m/distance and the
-    icp-register endpoints, which stream a cancellable progress pill ahead of
+    icp-register endpoints, which stream a cancelable progress pill ahead of
     their JSON result. Plain `response.json()` chokes on the markers."""
     i = 0
     last_marker = None
@@ -81,8 +81,8 @@ def decode_streamed_json(content: bytes):
         if isinstance(last_marker, dict) and last_marker.get("error"):
             raise AssertionError(
                 f"streaming endpoint failed: {last_marker['error']}")
-        if isinstance(last_marker, dict) and last_marker.get("cancelled"):
-            raise AssertionError("streaming endpoint reported cancelled")
+        if isinstance(last_marker, dict) and last_marker.get("canceled"):
+            raise AssertionError("streaming endpoint reported canceled")
         raise AssertionError(
             f"streaming endpoint returned no JSON body (last marker: {last_marker!r})")
     return json.loads(tail.decode("utf-8"))

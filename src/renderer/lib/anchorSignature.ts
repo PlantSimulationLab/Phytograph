@@ -15,7 +15,7 @@
 //     anchor cannot be meaningfully carried anywhere. It is DROPPED.
 //
 // The original implementation hashed both into one signature and dropped
-// anchors on any change, so nudging a cloud one metre silently deleted every
+// anchors on any change, so nudging a cloud one meter silently deleted every
 // label the user had placed. Splitting the key in two is the whole fix; the
 // movement itself reuses `transformPoint`, which already exists and is already
 // tested against the real octree pose path.

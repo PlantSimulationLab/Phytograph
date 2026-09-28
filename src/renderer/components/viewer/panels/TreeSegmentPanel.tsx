@@ -142,7 +142,7 @@ export function TreeSegmentPanel({
           <InfoHint
             data-testid="tree-method-help"
             label="Method"
-            text="TreeIso (terrestrial) builds trees up from stems and branches — use it for ground-based scans where trunks are visible. Canopy height (airborne) finds each treetop in a canopy height model and gives every point the crown above it — use it for airborne or drone scans, and for dense canopies where TreeIso merges neighbouring trees."
+            text="TreeIso (terrestrial) builds trees up from stems and branches — use it for ground-based scans where trunks are visible. Canopy height (airborne) finds each treetop in a canopy height model and gives every point the crown above it — use it for airborne or drone scans, and for dense canopies where TreeIso merges neighboring trees."
           />
         </label>
         <select
@@ -172,7 +172,7 @@ export function TreeSegmentPanel({
               <InfoHint
                 data-testid="tree-chm-crown-scale-help"
                 label="Crown scale"
-                text="Roughly the width of the smaller crowns in the stand — not the distance between trunks. The default (2.5 m) suits most stands, planted or natural. Lower it if neighbouring trees come out as one; raise it if one crown is split into several trees. If unsure, err low: too small splits crowns (easy to spot), too large merges trees (easy to miss)."
+                text="Roughly the width of the smaller crowns in the stand — not the distance between trunks. The default (2.5 m) suits most stands, planted or natural. Lower it if neighboring trees come out as one; raise it if one crown is split into several trees. If unsure, err low: too small splits crowns (easy to spot), too large merges trees (easy to miss)."
               />
             </label>
             <DebouncedNumberInput
@@ -208,7 +208,7 @@ export function TreeSegmentPanel({
               <InfoHint
                 data-testid="tree-chm-cell-help"
                 label="CHM cell"
-                text="Grid size of the canopy height model. Leave empty to use one twelfth of the crown scale, which resolves the dip between neighbouring crowns at any point density. Raise it only to smooth out very bumpy crowns — a coarse grid merges neighbouring trees."
+                text="Grid size of the canopy height model. Leave empty to use one twelfth of the crown scale, which resolves the dip between neighboring crowns at any point density. Raise it only to smooth out very bumpy crowns — a coarse grid merges neighboring trees."
               />
             </label>
             <ChmCellInput value={chmCell} onCommit={onChmCellChange} disabled={inProgress} />
@@ -264,7 +264,7 @@ export function TreeSegmentPanel({
           <InfoHint
             data-testid="tree-max-gap-help"
             label="Max intra-tree gap"
-            text="The largest gap (in metres, usually from occlusion) still treated as belonging to a single tree. Lower it when trees stand close together so neighbours aren't merged into one; raise it if a single sparsely-scanned tree is broken apart."
+            text="The largest gap (in meters, usually from occlusion) still treated as belonging to a single tree. Lower it when trees stand close together so neighbors aren't merged into one; raise it if a single sparsely-scanned tree is broken apart."
           />
         </label>
         <DebouncedNumberInput
@@ -286,7 +286,7 @@ export function TreeSegmentPanel({
           <InfoHint
             data-testid="tree-max-outlier-gap-help"
             label="Separate trees beyond"
-            text="After trees are assembled, any part of one tree that sits further than this from the rest of it is treated as a different tree. Lower it if a neighbour's branches are absorbed into the tree you want; raise it if one tree is broken into pieces. Note this is the opposite of the gap above: that one joins an occluded limb back to its tree, this one separates bodies that are too far apart to belong together."
+            text="After trees are assembled, any part of one tree that sits further than this from the rest of it is treated as a different tree. Lower it if a neighbor's branches are absorbed into the tree you want; raise it if one tree is broken into pieces. Note this is the opposite of the gap above: that one joins an occluded limb back to its tree, this one separates bodies that are too far apart to belong together."
           />
         </label>
         <DebouncedNumberInput
@@ -326,7 +326,7 @@ export function TreeSegmentPanel({
             label="Seed trunks"
             text={method === 'chm'
               ? "Correct the result by marking trees yourself. Turn this on, then left-click a trunk or treetop in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and replaces any automatic treetop within half the crown scale of it; every other tree is still found automatically. Seed just the trees that came out wrong — two seeds split a merged pair, one seed joins a split crown."
-              : "Guide the result by marking trunks yourself. Turn this on, then left-click each trunk in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and ambiguous segments are assigned to their nearest seed — use it when neighbouring trees split automatically. Seeds can't separate trees TreeIso has already merged into one segment; for that, lower λ₂ or use Canopy height."}
+              : "Guide the result by marking trunks yourself. Turn this on, then left-click each trunk in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and ambiguous segments are assigned to their nearest seed — use it when neighboring trees split automatically. Seeds can't separate trees TreeIso has already merged into one segment; for that, lower λ₂ or use Canopy height."}
           />
         </label>
         {seedMode && (
@@ -371,7 +371,7 @@ export function TreeSegmentPanel({
           <span className="flex items-center gap-1">Tiling
             <InfoHint
               label="Tiling"
-              text="Large plots are segmented in square tiles, each with a buffer of its neighbours' points, and every tree is kept from the one tile its stem stands in. Auto tiles only when the plot is too big to segment at once."
+              text="Large plots are segmented in square tiles, each with a buffer of its neighbors' points, and every tree is kept from the one tile its stem stands in. Auto tiles only when the plot is too big to segment at once."
             />
           </span>
           <select
@@ -414,7 +414,7 @@ export function TreeSegmentPanel({
           data-testid="tree-split-clouds-help"
           label="Split into one cloud per tree"
           align="right"
-          text="Also add a separate cloud for each detected tree (… (tree N)) to the scan list, so you can hide, export, or process each individually. The original cloud is kept and recoloured by tree, but hidden so it doesn't draw on top of the per-tree clouds — show it again with its eye toggle in the scan list."
+          text="Also add a separate cloud for each detected tree (… (tree N)) to the scan list, so you can hide, export, or process each individually. The original cloud is kept and recolored by tree, but hidden so it doesn't draw on top of the per-tree clouds — show it again with its eye toggle in the scan list."
         />
       </label>
 

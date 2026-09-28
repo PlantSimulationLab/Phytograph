@@ -8,7 +8,7 @@
 //
 // Every modal draws the same backdrop element, so this pins the rule at the
 // source level: no `bg-black/NN backdrop-blur` overlay may carry a click
-// handler. Lightweight popovers (colour pickers, the command palette) use an
+// handler. Lightweight popovers (color pickers, the command palette) use an
 // invisible click-catcher instead and are deliberately out of scope.
 import { describe, expect, it } from 'vitest';
 import { readFile, readdir } from 'node:fs/promises';

@@ -16,16 +16,16 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 //     Fixed by registering derived ids in suppressFrameCloudIdsRef before the
 //     add (the same opt-out tree segmentation already used).
 //
-//  2. Derived clouds must take a NEW palette colour, like any other newly
+//  2. Derived clouds must take a NEW palette color, like any other newly
 //     created scan. They briefly inherited the source's swatch instead, which
 //     made a segment indistinguishable from the parent it was just separated
 //     from — the one thing a segment exists to show. Fixed by allocating from
 //     createScanColorAllocator at every derived-cloud site (an allocator, not a
-//     one-shot, so a multi-scan apply gives each child a distinct colour rather
+//     one-shot, so a multi-scan apply gives each child a distinct color rather
 //     than the same one).
 //
 // Per CLAUDE.md Testing rules: live backend, real UI, concrete assertions
-// (exact camera vector equality, exact hex colour) rather than "didn't throw".
+// (exact camera vector equality, exact hex color) rather than "didn't throw".
 
 let session: LaunchedApp;
 test.beforeAll(async () => {
@@ -106,7 +106,7 @@ test('applying a Segment crop leaves the camera exactly where it was', async () 
 
   const after = await readCamera(page);
   // The regression this guards is a crop RE-FRAMING the view — a visible jump
-  // of order the scene size. Compare to a sub-micrometre tolerance rather than
+  // of order the scene size. Compare to a sub-micrometer tolerance rather than
   // with toEqual: OrbitControls recomputes the camera from its spherical state
   // every frame, so the doubles come back differing in the last bit or two
   // (observed 1.7999999999999967 vs 1.7999999999999958, ~1e-15) without the
@@ -127,7 +127,7 @@ test('applying a Segment crop leaves the camera exactly where it was', async () 
   }
 });
 
-test('a Segment cloud takes a new palette colour, not its source scan colour', async () => {
+test('a Segment cloud takes a new palette color, not its source scan color', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-auto', TINY);
@@ -153,14 +153,14 @@ test('a Segment cloud takes a new palette colour, not its source scan colour', a
   // Blue is taken by the parent, so the allocator hands out the next free
   // palette entry (green). Asserting the exact hex — not merely "differs from
   // the parent" — is what pins it to the shared scan palette: a hardcoded
-  // one-off colour (the ORIGINAL bug here was a hardcoded amber) would satisfy
-  // an inequality check while still not being an allocated scan colour.
+  // one-off color (the ORIGINAL bug here was a hardcoded amber) would satisfy
+  // an inequality check while still not being an allocated scan color.
   await expect(segmentRow).toHaveAttribute('data-scan-color', '#22c55e', { timeout: 10_000 });
-  // The source keeps its own colour (the split doesn't recolour the parent).
+  // The source keeps its own color (the split doesn't recolor the parent).
   await expect(tinyRow).toHaveAttribute('data-scan-color', sourceColor!);
 });
 
-test('a retained crop takes a new palette colour, not its source scan colour', async () => {
+test('a retained crop takes a new palette color, not its source scan color', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-auto', TINY);

@@ -1,16 +1,16 @@
-// Class colours as a texture the point shader can sample WITHOUT blending.
+// Class colors as a texture the point shader can sample WITHOUT blending.
 //
 // potree-core turns a material's `gradient` stops into a 64-pixel canvas with
 // linear filtering, and the INTENSITY_GRADIENT shader samples it at
-// t = (v - lo) / span. That is fine for a colour ramp and wrong for classes:
+// t = (v - lo) / span. That is fine for a color ramp and wrong for classes:
 // once a column has more than ~64 classes in range, several classes share a
-// pixel and LinearFilter averages their colours, so neighbouring classes (tree
-// 41 and tree 42) draw as one blended colour. A large tree segmentation or an
+// pixel and LinearFilter averages their colors, so neighboring classes (tree
+// 41 and tree 42) draw as one blended color. A large tree segmentation or an
 // instance palette hits this immediately.
 //
-// So for class colouring we build the texture ourselves: wide enough that
+// So for class coloring we build the texture ourselves: wide enough that
 // every class's sample point lands in its own texel, NEAREST-filtered so no
-// texel is ever averaged with its neighbour, each texel taking the colour of
+// texel is ever averaged with its neighbor, each texel taking the color of
 // the class whose sample point is closest (the same midpoint cells
 // `buildCategoricalGradientStops` lays out).
 
@@ -30,7 +30,7 @@ export interface CategoricalTexels {
 }
 
 /**
- * Rasterise `scheme` over `range` into one row of texels.
+ * Rasterize `scheme` over `range` into one row of texels.
  *
  * The width is chosen so the closest pair of class sample points is at least
  * two texels apart (then `floor(t * width)` of each lands in its own cell),
@@ -68,7 +68,7 @@ export function categoricalTexels(
     return { width, data };
   }
   // Walk the texels left to right, advancing to the next class once the texel
-  // centre passes the midpoint between the two sample points.
+  // center passes the midpoint between the two sample points.
   let k = 0;
   for (let i = 0; i < width; i++) {
     const tc = (i + 0.5) / width;

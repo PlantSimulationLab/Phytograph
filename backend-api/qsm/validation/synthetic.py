@@ -233,7 +233,7 @@ def _wrap(a: np.ndarray) -> np.ndarray:
 
 
 def headed_tree(n_scaffolds: int = 3) -> QSM:
-    """A HEADED / open-centre tree: a short thick determinate trunk that ends in a
+    """A HEADED / open-center tree: a short thick determinate trunk that ends in a
     whorl of ``n_scaffolds`` co-dominant scaffolds (the almond shape).
 
     The trunk is rank 0 and STOPS at the head; every scaffold is rank 1. There is

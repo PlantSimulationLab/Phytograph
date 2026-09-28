@@ -1,9 +1,9 @@
 # Stand metrics
 
 A [tree inventory](tree-inventory.md) measures trees one at a time. Stand
-metrics summarise the whole plot: how many stems per hectare, how much
+metrics summarize the whole plot: how many stems per hectare, how much
 basal area, how tall the canopy is, how much ground the crowns cover, how
-crowded each tree is by its neighbours, and (optionally) how much biomass
+crowded each tree is by its neighbors, and (optionally) how much biomass
 the plot holds. This page is the method specification; every definition
 names its source. See [Run a tree inventory](../workflows/tree-inventory.md#stand-summary)
 for the steps.
@@ -91,9 +91,9 @@ CIᵢ = Σⱼ (Dⱼ / Dᵢ) / distᵢⱼ
 The sum runs over every other tree `j` with a DBH whose stem base lies
 within the **search radius** of tree `i`'s stem base. Competition and canopy
 cover need every tree, so a run restricted to some trees skips them. `D` is DBH, and
-`dist` is the horizontal distance between stem bases in metres (floored at
-0.1 m). Large, near neighbours raise the index; a tree that dominates its
-neighbours has a low one. The search radius is a setting (default 6 m; the
+`dist` is the horizontal distance between stem bases in meters (floored at
+0.1 m). Large, near neighbors raise the index; a tree that dominates its
+neighbors has a low one. The search radius is a setting (default 6 m; the
 default is ours). The index depends on it, so compare indices only at the
 same radius. `n_competitors` counts the trees inside the radius.
 
@@ -213,7 +213,7 @@ scene.
   National-scale biomass estimators for United States tree species.
   *Forest Science* 49(1):12–35.
 - Jennings, S.B., Brown, N.D. & Sheil, D. (1999). Assessing forest
-  canopies and understorey illumination: canopy closure, canopy cover and
+  canopies and understory illumination: canopy closure, canopy cover and
   other measures. *Forestry* 72(1):59–74.
 - Kershaw, J.A., Ducey, M.J., Beers, T.W. & Husch, B. (2016). *Forest
   Mensuration*, 5th ed. Wiley-Blackwell.

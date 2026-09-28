@@ -4,7 +4,7 @@ A PLY can mark misses two ways:
   - an explicit is_miss / miss / sky vertex property, or
   - non-finite (NaN/Inf) coordinates in an organized grid.
 
-_ply_to_las normalises both into the canonical `is_miss` extra dim. A generic
+_ply_to_las normalizes both into the canonical `is_miss` extra dim. A generic
 PLY has no scanner origin, so a NaN-coord miss has no recoverable direction and
 is dropped; an explicit flag on finite (e.g. Helios far-field) coords is kept.
 """

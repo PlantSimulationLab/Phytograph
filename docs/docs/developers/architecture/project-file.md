@@ -67,7 +67,7 @@ is rebuilt from it on first display.
 scans and their clouds, meshes, skeletons, QSMs, LAD results, the transform
 maps and the edit states. So is the viewer state a user expects back:
 
-- per-cloud colour modes and the colormap;
+- per-cloud color modes and the colormap;
 - point size, measurements and picked points;
 - the scene origin and the camera;
 - the tree inventory, with its species/status/label entries and stand
@@ -95,10 +95,10 @@ Any other value is written as itself.
 ## Save and open
 
 **Save** (`POST /api/project/save`, a plain `def`, admission-gated,
-streaming progress, cancellable). The renderer sends its scene document and
+streaming progress, cancelable). The renderer sends its scene document and
 buffers as one PHB1 frame, together with the target path and the ids of the
 sessions the scene uses. The backend writes to `<path>.partial` and renames
-it over the target only when the archive is complete. A failed or cancelled
+it over the target only when the archive is complete. A failed or canceled
 save never damages an existing project. Session arrays are streamed from
 their (possibly memory-mapped) columns in chunks, so saving a 100 M-point
 cloud holds no second copy in RAM.

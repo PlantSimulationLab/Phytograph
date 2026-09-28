@@ -62,7 +62,7 @@ test('File → New clears all data and frees backend sessions', async () => {
     const dialog = page.getByTestId('new-confirm-dialog');
     await expect(dialog).toBeVisible();
 
-    // Cancelling first must be a no-op: the cloud is still there.
+    // Canceling first must be a no-op: the cloud is still there.
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(dialog).not.toBeVisible();
     await expect(original).toHaveCount(1);

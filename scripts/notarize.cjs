@@ -41,7 +41,7 @@ const BACKOFF_MS = [60_000, 180_000];
  *     notarytool parsed fine but `status !== 'Accepted'`. That's a real verdict.
  *
  * So: retry when the message shows a transport symptom, and treat anything
- * carrying a parsed status (or anything we don't recognise) as final. Erring
+ * carrying a parsed status (or anything we don't recognize) as final. Erring
  * toward NOT retrying is the safe default — a spurious hard failure costs one
  * `gh run rerun --failed`, whereas silently retrying a genuine rejection hides
  * a real problem behind an hour of build time.
@@ -67,7 +67,7 @@ function isRetryableNotaryError(err) {
     /Failed to upload|Unable to (?:upload|submit)/i.test(message) ||
     // Stapling AFTER an accepted notarization, when Apple's ticket-delivery
     // service (api.apple-cloudkit.com) is down. The verdict is already in, so
-    // this is weather, not a judgement — but its message names neither
+    // this is weather, not a judgment — but its message names neither
     // "notary" nor "appstoreconnect", so the gateway rule above misses it. It
     // cost the v0.91.0 arm64 build: "Failed to staple … code: 68" with a 503 in
     // the stapler output. Only on a server/throttle status; a staple failure
@@ -141,7 +141,7 @@ exports.default = async function notarizing(context) {
         // file to interpret the log.
         console.error(
           `[notarize] attempt ${attempt}/${MAX_ATTEMPTS} failed and will not be retried ` +
-          `(${retryable ? 'no attempts left' : 'not a transport error — Apple returned a verdict, or an error we do not recognise'}).`,
+          `(${retryable ? 'no attempts left' : 'not a transport error — Apple returned a verdict, or an error we do not recognize'}).`,
         );
         throw err;
       }

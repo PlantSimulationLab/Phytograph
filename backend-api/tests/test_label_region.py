@@ -1,4 +1,4 @@
-"""Tests for manual point labelling (label_region / reset_label_edits /
+"""Tests for manual point labeling (label_region / reset_label_edits /
 commit_labels).
 
 A label edit repaints a per-point class column in place. Unlike a deletion it
@@ -11,7 +11,7 @@ Acceptance shape:
     touch the octree cache id.
   - a label survives delete → undo-delete (the `_session_add_extra_column`
     trap: that helper zero-fills deleted rows and would silently destroy it).
-  - sky/miss points are never labelled, even when a region covers them.
+  - sky/miss points are never labeled, even when a region covers them.
   - the From-class gate only repaints the classes it names.
   - strokes are order-dependent and undo is exact against a from-scratch replay.
   - bake compacts the column with the survivors and clears the undo history.
@@ -175,9 +175,9 @@ def test_labels_survive_a_delete_and_its_undo(client, cache_root, grid_xyz):
     assert np.all(_labels(sid)[painted] == 3)
 
 
-def test_misses_are_never_labelled(client, cache_root, tmp_path, monkeypatch):
+def test_misses_are_never_labeled(client, cache_root, tmp_path, monkeypatch):
     """A sky/miss point is a ray that hit nothing, projected ~1 km out. It can
-    fall inside a region by coordinate accident; labelling it would poison the
+    fall inside a region by coordinate accident; labeling it would poison the
     class counts and any split-by-class child cloud."""
     monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "cache"))
     # Grid of hits, plus miss points INSIDE the painted box's footprint.
@@ -200,7 +200,7 @@ def test_misses_are_never_labelled(client, cache_root, tmp_path, monkeypatch):
 
     labels = _labels(sid)
     assert np.all(labels[miss] == main.MANUAL_CLASS_UNLABELED), \
-        "misses inside the region must stay unlabelled"
+        "misses inside the region must stay unlabeled"
     assert np.all(labels[~miss] == 5)
     assert body["applied"][0]["changed_count"] == int((~miss).sum())
     # ...and they must not appear in the summary either, or the "how much have
@@ -209,7 +209,7 @@ def test_misses_are_never_labelled(client, cache_root, tmp_path, monkeypatch):
            body["class_counts"] == {5: int((~miss).sum())}
 
 
-def test_deleted_points_are_not_labelled(client, cache_root, grid_xyz):
+def test_deleted_points_are_not_labeled(client, cache_root, grid_xyz):
     """Deleted rows are excluded from selection, so a stroke over a deleted
     region is a no-op there rather than painting hidden points."""
     sid = _create(client, grid_xyz)
@@ -242,7 +242,7 @@ def test_from_class_gate_only_repaints_named_classes(client, cache_root, grid_xy
 
 
 def test_strokes_are_order_dependent(client, cache_root, grid_xyz):
-    """Labelling is not commutative — paint-all-A then subregion-B differs from
+    """Labeling is not commutative — paint-all-A then subregion-B differs from
     the reverse. This is why the stroke list is never sorted or deduped."""
     sid_a = _create(client, grid_xyz)
     _paint(client, sid_a, [_stroke(BOX_BIG, 1, "a1"), _stroke(BOX_SMALL, 2, "a2")])
@@ -301,7 +301,7 @@ def test_undo_is_exact_against_a_from_scratch_replay(client, cache_root, grid_xy
     assert np.array_equal(rolled_back, _labels(ref))
 
 
-def test_undo_to_zero_restores_an_unlabelled_column(client, cache_root, grid_xyz):
+def test_undo_to_zero_restores_an_unlabeled_column(client, cache_root, grid_xyz):
     sid = _create(client, grid_xyz)
     _paint(client, sid, [_stroke(BOX_BIG, 1, "s1"), _stroke(BOX_SMALL, 2, "s2")])
     res = client.post(f"/api/cloud/session/{sid}/reset_label_edits", json={})
@@ -354,7 +354,7 @@ def test_label_summary_excludes_deleted_and_miss_points(
 
     sid = _create(client, f, "x y z is_miss")
     body = client.get(f"/api/cloud/session/{sid}/label_summary").json()
-    # 20 hits, not 25 — the 5 misses are never labellable.
+    # 20 hits, not 25 — the 5 misses are never labelable.
     assert body["class_counts"] == {str(main.MANUAL_CLASS_UNLABELED): 20}
 
 
@@ -415,7 +415,7 @@ def test_commit_labels_rebuilds_and_exposes_the_column(client, cache_root, grid_
     assert res.status_code == 200, res.text
     body = decode_streamed_json(res.content)
     assert body["cache_id"] != before, "commit should rebuild the octree"
-    # The label column reaches the octree as a colourable attribute.
+    # The label column reaches the octree as a colorable attribute.
     assert any(a.get("name") == SLUG for a in body.get("attributes", []))
     # A commit is an undo boundary: the column's history is gone.
     assert sess.label_history.get(SLUG, []) == []
@@ -482,7 +482,7 @@ def test_export_writes_classes_into_the_las_classification_byte(
     assert painted > 0
     _paint(client, sid, [_stroke(BOX_BIG, 5, "s1")])
 
-    out = tmp_path / "labelled.laz"
+    out = tmp_path / "labeled.laz"
     res = client.post("/api/pointcloud/export", json={
         "source": {"kind": "session", "session_id": sid},
         "dest_path": str(out), "format": "laz",
@@ -532,7 +532,7 @@ def test_export_writes_user_classes_above_31(
     assert n64 > 0 and n255 > 0
 
     body = {"source": {"kind": "session", "session_id": sid}, "format": fmt}
-    out = tmp_path / f"labelled.{fmt}"
+    out = tmp_path / f"labeled.{fmt}"
     if to_file:
         body["dest_path"] = str(out)
     res = client.post("/api/pointcloud/export", json=body)
@@ -577,7 +577,7 @@ def test_reserved_las_slugs_are_rejected(client, cache_root, grid_xyz, slug):
 def test_reserved_slugs_are_rejected_case_insensitively(
     client, cache_root, grid_xyz, slug,
 ):
-    """laspy resolves standard dimension names case-blind, so a capitalised
+    """laspy resolves standard dimension names case-blind, so a capitalized
     variant is just as fatal. These are caught by the lower-case-only slug
     regex first — what matters is that they never reach the LAS writer."""
     sid = _create(client, grid_xyz)
@@ -692,12 +692,12 @@ def test_stroke_ids_take_precedence_over_edit_count(client, cache_root, grid_xyz
     assert res.json()["label_edit_count"] == 1
 
 
-# ── Labelling a column the file already carries ──────────────────────────────
+# ── Labeling a column the file already carries ──────────────────────────────
 #
-# The renderer feature these back: the labelling tool can now paint into ANY
+# The renderer feature these back: the labeling tool can now paint into ANY
 # classification column, not just the four its presets named. That rests
 # entirely on `_ensure_label_column_locked` REUSING a pre-existing column rather
-# than creating a parallel one — behaviour the backend already had and nothing
+# than creating a parallel one — behavior the backend already had and nothing
 # pinned. Without these, a refactor could break the whole feature with every
 # frontend test still green.
 
@@ -712,7 +712,7 @@ def tree_instance_xyz(tmp_path) -> Path:
     Shaped after a REAL failed tree segmentation
     (example-datasets/almond_treseg_failure.laz holds exactly {1, 2}):
 
-      * no 0 — so a synthesised "unassigned" class is the only way to
+      * no 0 — so a synthesized "unassigned" class is the only way to
         un-assign a mis-grabbed point, and
       * a GAP at 2 — so a class list built from the column's [min,max] is
         distinguishable from one built from its exact surviving values.
@@ -1002,13 +1002,13 @@ def test_class_range_is_per_column(client, cache_root, grid_xyz, slug, cls, ok):
         assert float(main._cloud_sessions[sid].extras[slug].max()) == cls
 
 
-def test_commit_labels_is_cancellable_and_leaves_the_octree_alone(
+def test_commit_labels_is_cancelable_and_leaves_the_octree_alone(
     client, cache_root, grid_xyz, monkeypatch,
 ):
     """The renderer runs a label commit in its background refresh queue, whose
     Cancel stopped the bake after it but not the commit's own converter run:
     the route minted no run_id and passed no cancel event down. Now the route
-    streams a run_id, the converter gets that run's live event, and a cancelled
+    streams a run_id, the converter gets that run's live event, and a canceled
     commit claims nothing: the session keeps the octree it had."""
     import json as _json
     import queue
@@ -1029,17 +1029,17 @@ def test_commit_labels_is_cancellable_and_leaves_the_octree_alone(
     current = sess.octree_cache_id
     seen = {}
 
-    def cancelled_converter(input_las, out_dir, cancel_event=None, poll=0.2):
+    def canceled_converter(input_las, out_dir, cancel_event=None, poll=0.2):
         seen["event"] = cancel_event
-        raise main.ScanCancelled()
+        raise main.ScanCanceled()
 
-    monkeypatch.setattr(main, "_run_potree_converter", cancelled_converter)
+    monkeypatch.setattr(main, "_run_potree_converter", canceled_converter)
     run_id, cancel_event = main._new_cancel_token()
     reporter = main._ProgressReporter(queue.Queue(), cancel_event)
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._do_commit_labels(sess, sid, SLUG, reporter)
     assert seen["event"] is cancel_event, "the converter got no live cancel event"
-    assert sess.octree_cache_id == current, "a cancelled commit claimed an octree"
+    assert sess.octree_cache_id == current, "a canceled commit claimed an octree"
     assert current != before
 
 
@@ -1108,9 +1108,9 @@ def test_excluded_classes_are_never_repainted(client, cache_root, grid_xyz):
     assert (_labels(sid)[small] == 64).all() and not (_labels(sid) == 65).any()
 
 
-def test_unlabelled_clusters_find_the_gaps_largest_first(client, cache_root, tmp_path):
-    """Two separate blobs of points, one of them labelled: the finder reports
-    only the unlabelled blob, and ranks separate blobs by size."""
+def test_unlabeled_clusters_find_the_gaps_largest_first(client, cache_root, tmp_path):
+    """Two separate blobs of points, one of them labeled: the finder reports
+    only the unlabeled blob, and ranks separate blobs by size."""
     rng = np.random.default_rng(1)
     a = rng.uniform(0, 0.2, size=(300, 3))                 # big blob near origin
     b = rng.uniform(0, 0.2, size=(100, 3)) + [3, 3, 3]     # small blob far away
@@ -1118,7 +1118,7 @@ def test_unlabelled_clusters_find_the_gaps_largest_first(client, cache_root, tmp
     f = tmp_path / "blobs.xyz"
     np.savetxt(f, np.vstack([a, b, c]), fmt="%.5f")
     sid = _create(client, f)
-    body = client.get(f"/api/cloud/session/{sid}/unlabelled_clusters").json()
+    body = client.get(f"/api/cloud/session/{sid}/unlabeled_clusters").json()
     assert body["total"] == 600
     assert [cl["count"] for cl in body["clusters"]] == [300, 200, 100]
     assert np.allclose(body["clusters"][2]["center"], b.mean(axis=0), atol=1e-3)
@@ -1126,14 +1126,14 @@ def test_unlabelled_clusters_find_the_gaps_largest_first(client, cache_root, tmp
     # Label the big blob: it drops out, the others remain in order.
     box = {"kind": "box", "min": [-1, -1, -1], "max": [0.5, 0.5, 0.5], "invert": False}
     _paint(client, sid, [_stroke(box, 64, "s1")])
-    body = client.get(f"/api/cloud/session/{sid}/unlabelled_clusters").json()
+    body = client.get(f"/api/cloud/session/{sid}/unlabeled_clusters").json()
     assert body["total"] == 300
     assert [cl["count"] for cl in body["clusters"]] == [200, 100]
 
 
-def test_unlabelled_clusters_do_not_splinter_a_sparse_blob():
+def test_unlabeled_clusters_do_not_splinter_a_sparse_blob():
     """Points further apart than a grid cell must still form one area: cells
     are never finer than twice the typical point spacing."""
     pts = np.loadtxt(Path(__file__).resolve().parents[2] / "tests/e2e/fixtures/two-blobs.xyz")
-    clusters = main._unlabelled_clusters(pts, np.ones(len(pts), dtype=bool))
+    clusters = main._unlabeled_clusters(pts, np.ones(len(pts), dtype=bool))
     assert [c["count"] for c in clusters] == [40, 20]

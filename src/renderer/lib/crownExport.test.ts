@@ -168,7 +168,7 @@ describe('crownMeshFileName', () => {
     expect(crownMeshFileName('oak', 'PLOT3', 1, 'obj', used)).toBe('oak_PLOT3_tree1_2.obj');
   });
 
-  it('sanitises a scan name with path-unsafe characters', () => {
+  it('sanitizes a scan name with path-unsafe characters', () => {
     const name = crownMeshFileName('oak', 'plot 3/north.laz', 1, 'obj', new Set());
     expect(name).toBe('oak_plot_3_north_tree1.obj');
     expect(name).not.toMatch(/[/\\ ]/);

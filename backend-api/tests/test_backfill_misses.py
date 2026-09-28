@@ -34,16 +34,16 @@ def _converter_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Fake PyHelios cloud modelling the gapfill contract
+# Fake PyHelios cloud modeling the gapfill contract
 # ---------------------------------------------------------------------------
 
 class _FakeCloud:
     """Models addScan/addHitPointsWithData + gapfillMisses + the bulk getters.
 
-    On ingest, every hit is recorded with code 0.0. gapfillMisses() synthesises
+    On ingest, every hit is recorded with code 0.0. gapfillMisses() synthesizes
     a fixed number of sky misses (far-field) tagged code 1.0, appended after the
-    hits — mirroring how Helios tags synthesised misses in-cloud. The number of
-    synthesised misses and the data keys seen are recorded for assertions.
+    hits — mirroring how Helios tags synthesized misses in-cloud. The number of
+    synthesized misses and the data keys seen are recorded for assertions.
     """
     instances = []
     SYNTH = 3  # synthetic misses produced per gapfill
@@ -55,7 +55,7 @@ class _FakeCloud:
     # them apart from the hit data alone.
     grid_path = False
 
-    # Whether gapfillMisses() stamps each synthesised miss with a reconstructed
+    # Whether gapfillMisses() stamps each synthesized miss with a reconstructed
     # pulse time, as the C++ timestamp path does (and the row/column path when the
     # scan carried times). Off models a timeless raster.
     stamp_timestamps = True
@@ -95,7 +95,7 @@ class _FakeCloud:
                 self._ts = np.asarray(vals, dtype=np.float64)[:, i]
 
     # The native bulk path the backend ingests through (helios-core v1.3.86);
-    # modelled by the same recording as addHitPointsWithData.
+    # modeled by the same recording as addHitPointsWithData.
     def addHitPointsBulk(self, scanID, xyz, dir_spherical=None, labels=None, values=None):
         self.addHitPointsWithData(scanID, xyz, dir_spherical, labels, values)
 
@@ -115,13 +115,13 @@ class _FakeCloud:
         if self._ts.shape[0] != n_hits:
             self._ts = np.full(n_hits, np.nan, np.float64)
         if _FakeCloud.stamp_timestamps:
-            # Each synthesised miss gets its own reconstructed pulse time.
+            # Each synthesized miss gets its own reconstructed pulse time.
             self._ts = np.concatenate(
                 [self._ts, 1000.0 + np.arange(self.SYNTH, dtype=np.float64)])
         else:
             self._ts = np.concatenate([self._ts, np.full(self.SYNTH, np.nan, np.float64)])
         if _FakeCloud.grid_path:
-            # Row/column path: each synthesised miss knows the empty cell it fills.
+            # Row/column path: each synthesized miss knows the empty cell it fills.
             self._row = np.concatenate(
                 [self._row, np.arange(self.SYNTH, dtype=np.float64)])
             self._col = np.concatenate(
@@ -269,7 +269,7 @@ def test_timestamp_session_backfills_and_populates_buffer(stub_pyhelios):
     assert sess.backfilled_misses["directions"].shape == (_FakeCloud.SYNTH, 3)
     np.testing.assert_array_equal(sess.positions, before_positions)
     assert "is_miss" not in sess.extras  # not interleaved into the column arrays
-    # Each synthesised miss carries its own reconstructed pulse time.
+    # Each synthesized miss carries its own reconstructed pulse time.
     ts = sess.backfilled_misses["timestamp"]
     assert ts.shape == (_FakeCloud.SYNTH,)
     assert len(np.unique(ts)) == _FakeCloud.SYNTH
@@ -303,7 +303,7 @@ def test_grid_only_session_relabels_row_column(stub_pyhelios):
 
     assert resp["backfilled"] == _FakeCloud.SYNTH
     # The C++ gapfill dispatcher probes the bare 'row'/'column' hit-data keys, so
-    # the slugs must be relabelled on the way into addHitPointsWithData.
+    # the slugs must be relabeled on the way into addHitPointsWithData.
     cloud = stub_pyhelios.instances[-1]
     assert "row" in cloud._labels_seen and "column" in cloud._labels_seen
     assert "row_index" not in cloud._labels_seen
@@ -384,7 +384,7 @@ def test_supplied_raster_drives_addscan_grid_and_sweep(stub_pyhelios):
 def test_omitted_raster_falls_back_to_estimate(stub_pyhelios):
     # Backward-compatible default: with no raster supplied, the backend estimates
     # the grid from point count and assumes a full 0–180°/0–360° sweep. (This is
-    # the legacy behaviour the frontend now overrides; kept as a regression guard
+    # the legacy behavior the frontend now overrides; kept as a regression guard
     # so the fallback isn't accidentally removed.)
     import math
     sess = _make_session(
@@ -535,7 +535,7 @@ def test_known_origin_at_world_zero_is_allowed(stub_pyhelios):
 
 
 def test_origin_known_defaults_true_for_existing_callers(stub_pyhelios):
-    """Omitting the flag keeps the old behaviour, so a caller that always sends a
+    """Omitting the flag keeps the old behavior, so a caller that always sends a
     real origin is unaffected by the new field."""
     sess = _make_session(
         _TS_POSITIONS,
@@ -649,7 +649,7 @@ def test_session_to_lad_arrays_appends_buffer_as_misses(stub_pyhelios):
 
 
 def test_dedupe_miss_timestamps_drops_hit_collisions_and_nudges_miss_duplicates():
-    # A synthesised miss on a real pulse's time IS that pulse (the gapfiller
+    # A synthesized miss on a real pulse's time IS that pulse (the gapfiller
     # reconstructs the pulse clock), so it is dropped: the hit already accounts
     # for the pulse, and Helios would otherwise refuse the merged beam. Misses
     # that merely duplicate each other are separated by one float step, so a
@@ -796,7 +796,7 @@ def test_moving_without_timestamp_returns_clean_error(stub_pyhelios):
 
 
 # ---------------------------------------------------------------------------
-# Raster address of the synthesised misses
+# Raster address of the synthesized misses
 #
 # The C++ row/column path iterates the grid to find empty cells, so it attaches
 # 'row'/'column' to every miss it emits (LiDAR.cpp). `_run_gapfill_extract` used
@@ -865,7 +865,7 @@ def test_partial_raster_address_is_refused_wholesale(stub_pyhelios):
 
     def holey(self):
         real_gapfill(self)
-        self._row[-1] = np.nan  # one synthesised miss with no cell
+        self._row[-1] = np.nan  # one synthesized miss with no cell
 
     _FakeCloud.gapfillMisses = holey
     try:
@@ -910,12 +910,12 @@ def test_recovered_cells_reach_the_lad_arrays(stub_pyhelios):
 # ---------------------------------------------------------------------------
 #
 # gapfillMisses() reconstructs the angular raster from the returns it is handed
-# and synthesises a miss into every cell that has none. So if a re-run were fed
+# and synthesizes a miss into every cell that has none. So if a re-run were fed
 # only the survivors of a crop, a pulse whose sole return was cropped away would
 # come back as a MISS — a fully transmitted beam. That is wrong twice over: the
 # beam was extinguished at its (deleted) hit, and if that hit was in FRONT of the
 # LAD voxel grid the pulse should not sample the grid at all, whereas a
-# synthesised miss is projected ~1 km out and rays straight through it. The
+# synthesized miss is projected ~1 km out and rays straight through it. The
 # endpoint therefore restores deleted hits before gap-filling.
 
 def test_backfill_rerun_feeds_deleted_hits_to_the_gapfill(stub_pyhelios):
@@ -951,7 +951,7 @@ def test_backfill_rerun_feeds_deleted_hits_to_the_gapfill(stub_pyhelios):
 
 class _RasterCloud(_FakeCloud):
     """Models the part of gapfillMisses() the fixed-count fake cannot: a miss is
-    synthesised for every raster cell that has NO return.
+    synthesized for every raster cell that has NO return.
 
     `_FakeCloud` emits a constant 3 misses whatever it is fed, so it cannot tell
     a re-run that resurrects a cropped pulse from one that reproduces the

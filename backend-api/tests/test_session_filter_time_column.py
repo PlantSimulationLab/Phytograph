@@ -1,7 +1,7 @@
 """The Filter tool must be able to filter on the TIME column.
 
 A per-point timestamp lives on the float64 `CloudSession.timestamps` field, not
-in the float32 `extras` (a float32 extra dim quantises GPS-magnitude times to
+in the float32 `extras` (a float32 extra dim quantizes GPS-magnitude times to
 32 s; see `_split_timestamp_extra_dim`). The renderer offers that column in the
 Filter picker under its octree BUFFER key, `gps-time` — PotreeConverter's name
 for the LAS gps_time dimension the import writes it to — but the filter worker

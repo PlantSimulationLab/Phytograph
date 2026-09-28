@@ -10,7 +10,7 @@ Auto-Register all pay it, serially, once per cloud. For a medium-to-large
 registration run, applying the alignment cost about as much as computing it.
 
 But a rigid transform does not invalidate an octree. Rotation and translation
-preserve every spatial relationship the hierarchy encodes: neighbourhood,
+preserve every spatial relationship the hierarchy encodes: neighborhood,
 subdivision, LOD selection, point ordering. The index is already correct — only
 the coordinate frame its numbers are expressed in has moved.
 
@@ -98,7 +98,7 @@ class OctreeTransformError(RuntimeError):
 def _scrub_json(text: str) -> str:
     """Make PotreeConverter's metadata.json parseable by the stdlib.
 
-    The converter emits bare `inf` / `-inf` / `nan` literals on uninitialised
+    The converter emits bare `inf` / `-inf` / `nan` literals on uninitialized
     min/max fields, which strict JSON rejects. Mirrors the same scrubbing
     `main._read_octree_metadata` does; kept here so this module has no import
     dependency on main.py (it must be unit-testable without a live server).
@@ -203,7 +203,7 @@ def _require_uncompressed(meta: dict) -> None:
 def _shift_xyz(value, delta: np.ndarray):
     """Add `delta` to a 3-element JSON list, preserving None entries.
 
-    Uninitialised min/max fields arrive as None (the scrubbed `inf`), and a
+    Uninitialized min/max fields arrive as None (the scrubbed `inf`), and a
     translated None is still None — shifting it would invent a bound the
     converter never computed.
     """
@@ -224,7 +224,7 @@ def _translate_metadata(meta: dict, delta: np.ndarray, new_offset: np.ndarray) -
 
     `offset` is set explicitly rather than shifted, because the rewrite re-bases
     the int32 coordinates against a freshly chosen origin (keeping them small and
-    centred, exactly as the converter does) — so the new offset is an input to
+    centered, exactly as the converter does) — so the new offset is an input to
     this function, not a derivation from the old one.
     """
     out = json.loads(json.dumps(meta))  # deep copy; meta is plain JSON data
@@ -237,7 +237,7 @@ def _translate_metadata(meta: dict, delta: np.ndarray, new_offset: np.ndarray) -
         bbox["max"] = _shift_xyz(bbox.get("max"), delta)
 
     # The position attribute's min/max are the TIGHT data bounds the renderer
-    # uses for camera framing and crop-box initialisation. They move with the
+    # uses for camera framing and crop-box initialization. They move with the
     # points; leaving them behind would frame the camera on empty space.
     for a in out.get("attributes", []):
         if a.get("name") == _POSITION_NAME:

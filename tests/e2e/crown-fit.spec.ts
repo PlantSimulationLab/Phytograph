@@ -8,7 +8,7 @@ import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 
-// Split a CSV line, honouring the RFC4180 quoting buildCrownCsv emits.
+// Split a CSV line, honoring the RFC4180 quoting buildCrownCsv emits.
 function splitCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '';
@@ -69,7 +69,7 @@ test('fits a crown to leaf points and reports metrics + CSV', async () => {
     await page.getByTestId('tool-wood-segment').click();
     await expect(page.getByTestId('wood-segment-panel')).toBeVisible();
     await page.getByTestId('wood-segment-run-button').click();
-    // Wait for the wood_class recolour (proof segmentation finished).
+    // Wait for the wood_class recolor (proof segmentation finished).
     const legend = page.getByTestId('class-legend');
     await expect(legend).toBeVisible({ timeout: 60_000 });
     await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
@@ -114,7 +114,7 @@ test('fits a crown to leaf points and reports metrics + CSV', async () => {
     // …and the pill clears once the fit is done.
     await expect(pill).toBeHidden({ timeout: 30_000 });
 
-    // With no tree segmentation, the crown gets an auto-assigned colour that is
+    // With no tree segmentation, the crown gets an auto-assigned color that is
     // distinct from its source scan (the scan is blue #3b82f6).
     const crownColor = await crownRow.getAttribute('data-mesh-color');
     expect(crownColor).toBeTruthy();
@@ -131,7 +131,7 @@ test('fits a crown to leaf points and reports metrics + CSV', async () => {
     await expect(crownRow.getByTestId('mesh-color-mode')).toHaveCount(0);
     await expect(crownRow.getByTestId('mesh-leaf-angles')).toHaveCount(0);
     // The metrics block reports a plausible tree height and crown volume. The
-    // leaf blobs span a few metres tall; assert a sane positive range rather than
+    // leaf blobs span a few meters tall; assert a sane positive range rather than
     // an exact value (the fit is fuzzy).
     const text = (await metrics.innerText()).replace(/\s+/g, ' ');
     const height = Number(text.match(/Tree height:\s*([\d.]+)\s*m/)?.[1] ?? '0');
@@ -202,7 +202,7 @@ test('fits a crown to leaf points and reports metrics + CSV', async () => {
     const [alphaCsvRow] = cellsByName(readFileSync(alphaCsvPath, 'utf8'));
     expect(alphaCsvRow.shape).toBe('alpha');
     // The alpha radius the fit actually used is reported (auto-grown here, since
-    // the radius field was left blank) — the one scalar that characterises a hull.
+    // the radius field was left blank) — the one scalar that characterizes a hull.
     expect(Number(alphaCsvRow.param_alpha_m)).toBeGreaterThan(0);
     expect(alphaCsvRow.param_alpha_auto).toBe('true');
     // …and the parametric columns stay blank, because a hull has none.

@@ -4,7 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
-import { fixturePoints, pointsDrawnGrey } from './helpers/pointColors';
+import { fixturePoints, pointsDrawnGray } from './helpers/pointColors';
 
 const DEPTH_LAYERS = join(repoRoot, 'tests', 'e2e', 'fixtures', 'depth-layers.xyz');
 
@@ -46,7 +46,7 @@ async function importDepthLayers() {
   await expect(row).toHaveAttribute('data-selected', 'true');
 
   // Look straight down, so the two planes are separated on screen and the
-  // centreline can be drawn across them.
+  // centerline can be drawn across them.
   await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
   await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 0, z: 1 }));
   return { page, row };
@@ -153,12 +153,12 @@ test('painting in a section is depth-bounded — it does not paint through', asy
   // EXACTLY the far plane. Not all 1706 — that would mean the lasso painted
   // through the section, which is the bug the whole feature prevents.
   await expect.poll(
-    async () => Number(await label.getAttribute('data-labelled-count')),
+    async () => Number(await label.getAttribute('data-labeled-count')),
     { timeout: 20_000 },
   ).toBe(FAR_PLANE);
 });
 
-test('the centreline is placed by two clicks in the view', async () => {
+test('the centerline is placed by two clicks in the view', async () => {
   // The gesture itself, distinct from the geometry assertions above.
   const { page } = await importDepthLayers();
   await page.getByTestId('tool-cross-section').click();
@@ -227,9 +227,9 @@ test('a slab CHANGED after the label tool is open still bounds the paint', async
 
   await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
 
-  // EXACTLY the near plane. With the stale closure this labelled all 1706.
+  // EXACTLY the near plane. With the stale closure this labeled all 1706.
   await expect.poll(
-    async () => Number(await label.getAttribute('data-labelled-count')),
+    async () => Number(await label.getAttribute('data-labeled-count')),
     { timeout: 20_000 },
   ).toBe(NEAR_PLANE);
 });
@@ -261,7 +261,7 @@ test('the close button closes the section panel', async () => {
   await expect(page.getByTestId('cross-section-panel')).toBeVisible();
 });
 
-test('the first centreline click shows a marker before the second is placed', async () => {
+test('the first centerline click shows a marker before the second is placed', async () => {
   // Report #1: clicking the first point gave NO feedback, so the user could not
   // tell the click had registered, where it landed, or which way the section
   // would run — they clicked twice into a void and the view jumped.
@@ -416,8 +416,8 @@ test('a viewport HUD offers the way out even with the panel closed', async () =>
   await expect(hud).toHaveCount(0);
 });
 
-test('redrawing shows the whole cloud while you aim the new centreline', async () => {
-  // Redraw left the OLD section clipping, so the user picked the new centreline
+test('redrawing shows the whole cloud while you aim the new centerline', async () => {
+  // Redraw left the OLD section clipping, so the user picked the new centerline
   // against a cloud that was still cut away — aiming at what you cannot see.
   const { page } = await importDepthLayers();
 
@@ -431,7 +431,7 @@ test('redrawing shows the whole cloud while you aim the new centreline', async (
   await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
     .toBe(TOTAL);
 
-  // Placing the new centreline re-applies clipping — the suspension lasts only
+  // Placing the new centerline re-applies clipping — the suspension lasts only
   // as long as the aiming does.
   //
   // Clear any toast first, then assert each point really lands on the canvas.
@@ -440,9 +440,9 @@ test('redrawing shows the whole cloud while you aim the new centreline', async (
   // right lane. Adding this guard immediately caught the latter — the old
   // 0.6/0.7-width points resolved to `section-suspend`, the panel's own Suspend
   // button, so the test was toggling the very state it then asserted on instead
-  // of aiming a centreline. It passed locally anyway and failed on CI, where
+  // of aiming a centerline. It passed locally anyway and failed on CI, where
   // the window has no title bar (innerHeight 800 vs 772) and the same fractions
-  // land on different pixels. A swallowed click leaves the centreline unplaced
+  // land on different pixels. A swallowed click leaves the centerline unplaced
   // and the test dies on the `data-suspended` wait, which reads as a
   // section-state bug rather than a missed click.
   await page.evaluate(() => {
@@ -473,7 +473,7 @@ test('redrawing shows the whole cloud while you aim the new centreline', async (
     .filter(Boolean), aimPoints);
   expect(
     blocked,
-    `centreline clicks must reach the canvas; canvas=${JSON.stringify(b)} ` +
+    `centerline clicks must reach the canvas; canvas=${JSON.stringify(b)} ` +
     `viewport=${JSON.stringify(await page.evaluate(() => ({ w: innerWidth, h: innerHeight })))}`,
   ).toEqual([]);
   await page.mouse.click(aimPoints[0].x, aimPoints[0].y);
@@ -590,10 +590,10 @@ test('the keyboard steps the section: , and ← back, . and → forward', async 
   await expect.poll(hudIndex).not.toBe(before);
 });
 
-test('"Show full cloud" greys the points outside the section instead of hiding it', async () => {
+test('"Show full cloud" grays the points outside the section instead of hiding it', async () => {
   // Suspending used to show the whole cloud with no trace of the section, so
   // the context view could not show where the slice was. Now the slab keeps its
-  // colours and everything outside it goes grey.
+  // colors and everything outside it goes gray.
   const { page } = await importDepthLayers();
   await page.getByTestId('tool-cross-section').click();
   const panel = page.getByTestId('cross-section-panel');
@@ -602,7 +602,7 @@ test('"Show full cloud" greys the points outside the section instead of hiding i
 
   await page.getByTestId('section-suspend').click();
   await expect(panel).toHaveAttribute('data-suspended', 'true');
-  // Every point draws again — grey is not hidden.
+  // Every point draws again — gray is not hidden.
   await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 }).toBe(TOTAL);
   // Out of the way: where the planes land on screen depends on the view the
   // previous test left, and the panel must not be what hides them. The section
@@ -616,17 +616,17 @@ test('"Show full cloud" greys the points outside the section instead of hiding i
   const far = pts.filter((p) => p[1] === 8);
   const skip = '[data-testid="section-inset"], [data-testid="section-hud"]';
   await expect.poll(async () => {
-    const f = await pointsDrawnGrey(page, far, 12, 60, skip);
+    const f = await pointsDrawnGray(page, far, 12, 60, skip);
     return f.sampled > 0 ? f.matched / f.sampled : -1;
   }, { timeout: 20_000 }).toBeGreaterThan(0.9);
-  const n = await pointsDrawnGrey(page, near, 12, 60, skip);
+  const n = await pointsDrawnGray(page, near, 12, 60, skip);
   expect(n.sampled).toBeGreaterThan(0);
   expect(n.matched / n.sampled).toBeLessThan(0.1);
 
-  // Clearing the section drops the ghost: nothing is grey any more.
+  // Clearing the section drops the ghost: nothing is gray any more.
   await page.getByTestId('section-hud-clear').click();
   await expect.poll(async () => {
-    const f = await pointsDrawnGrey(page, far, 12, 60, skip);
+    const f = await pointsDrawnGray(page, far, 12, 60, skip);
     return f.matched / Math.max(f.sampled, 1);
   }, { timeout: 20_000 }).toBeLessThan(0.1);
 });
@@ -689,29 +689,29 @@ test('the line tool paints above or below a line drawn across the section', asyn
     await page.keyboard.press('Enter');
   };
 
-  const labelled = async () => Number(await label.getAttribute('data-labelled-count'));
+  const labeled = async () => Number(await label.getAttribute('data-labeled-count'));
   const ROW = 41;
 
   // Above: rows z = 0.25 .. 1.0 — 16 rows. None of the near plane: the slab
   // bounds the stroke.
   await drawLine(0.225);
   await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(16 * ROW);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(16 * ROW);
 
   // Below: rows z = -1.0 .. 0.2 — 25 rows.
   await page.keyboard.press('ControlOrMeta+z');
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(0);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(0);
   await page.getByTestId('label-line-side-below').click();
   await drawLine(0.225);
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(25 * ROW);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(25 * ROW);
 
   // Below, within 0.1 of the line: rows z = 0.15 and 0.2 only.
   await page.keyboard.press('ControlOrMeta+z');
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(0);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(0);
   await page.getByTestId('label-line-band').fill('0.1');
   await page.getByTestId('label-line-band').press('Tab');
   await drawLine(0.225);
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(2 * ROW);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(2 * ROW);
 });
 
 async function lassoEverything(page: LaunchedApp['page']) {
@@ -744,14 +744,14 @@ test('Front depth paints only the surface you can see, not what is behind it', a
   await expect(page.getByTestId('label-depth')).toHaveAttribute('data-depth-mode', 'front');
   await lassoEverything(page);
   await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
-  await expect.poll(async () => Number(await label.getAttribute('data-labelled-count')),
+  await expect.poll(async () => Number(await label.getAttribute('data-labeled-count')),
     { timeout: 20_000 }).toBe(FAR_PLANE);
 
   // Through, from the same view, reaches the plane behind.
   await page.keyboard.press('ControlOrMeta+z');
   await page.getByTestId('label-depth-through').click();
   await lassoEverything(page);
-  await expect.poll(async () => Number(await label.getAttribute('data-labelled-count')),
+  await expect.poll(async () => Number(await label.getAttribute('data-labeled-count')),
     { timeout: 20_000 }).toBe(TOTAL);
 });
 
@@ -793,6 +793,6 @@ test('Box depth paints only inside the limiting box', async () => {
 
   await lassoEverything(page);
   await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
-  await expect.poll(async () => Number(await label.getAttribute('data-labelled-count')),
+  await expect.poll(async () => Number(await label.getAttribute('data-labeled-count')),
     { timeout: 20_000 }).toBe(17 * 41 + 5);
 });

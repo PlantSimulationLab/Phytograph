@@ -4,17 +4,17 @@
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes LAS 1.4 point format 7 (6 when colour is unchecked) with intensity, GPS time, every selected scalar as a float32 ExtraBytes dimension, and a class column in the classification byte (the one chosen in the export window; automatically the first of `manual_class`, `las_classification`, `ground_class`, `wood_class`), with the class names in a LAS 1.4 classification-lookup record and every labelled column's class set in a Phytograph record that a re-import restores, and the `flag_withheld` / `flag_synthetic` / `flag_key_point` label columns as the point flags, while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
+| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes LAS 1.4 point format 7 (6 when color is unchecked) with intensity, GPS time, every selected scalar as a float32 ExtraBytes dimension, and a class column in the classification byte (the one chosen in the export window; automatically the first of `manual_class`, `las_classification`, `ground_class`, `wood_class`), with the class names in a LAS 1.4 classification-lookup record and every labeled column's class set in a Phytograph record that a re-import restores, and the `flag_withheld` / `flag_synthetic` / `flag_key_point` label columns as the point flags, while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
-| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and colour. Export writes a **structured** file whenever the scan has a grid to write — either the instrument's own row/column indices or a declared Ntheta × Nphi sweep to bin against — and marks misses with the format's own `cartesianInvalidState` flag, so an exported scan re-imports as scan data rather than as a cloud of far-field points. Points are written in the scanner's local frame with its pose in the scan header, as scanners themselves do. |
+| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB color, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and color. Export writes a **structured** file whenever the scan has a grid to write — either the instrument's own row/column indices or a declared Ntheta × Nphi sweep to bin against — and marks misses with the format's own `cartesianInvalidState` flag, so an exported scan re-imports as scan data rather than as a cloud of far-field points. Points are written in the scanner's local frame with its pose in the scan header, as scanners themselves do. |
 | `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** offers a field picker, so any scalar column — including [normals](#normals) — can be written alongside x/y/z and RGB. Structured/organized PLYs recover sky/miss points (see below). |
 | `.ptx` | ✅ | ✅ | Leica Cyclone's structured-scan ASCII format (also written by RiSCAN and FARO). A **multi-block** `.ptx` imports as one scan per block, each with its own pose. Carries intensity and RGB, and recovers **sky/miss points** from the grid (see below), so **single-return** LAD works. **Not for multi-return data:** one line per grid cell means each pulse is collapsed to a single echo, and the fixed schema has no room for `timestamp` / `target_index` / `target_count`, so the scan re-imports as genuinely single-return with no warning — which biases LAD high ([see below](#multi-return-data-and-ptx)). Export is per-object via the batch export's **Data only** mode; PTX always writes the full grid with no-return cells left empty, so misses round-trip whether or not the *write misses* box is ticked. |
-| `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL), ASCII. Parsed via Open3D, which drops non-standard scalar fields — so **export carries position and colour only** and shows no field picker. Colour is packed into a single `rgb` field, as the format requires. Use `.ply` or `.las` to keep intensity and scalars. |
-| `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. Windows, Linux (x86_64) and macOS, and needs a user-supplied RiVLib (plus Docker on macOS only, where RiVLib has no native build): see **[Import a RIEGL project](../workflows/import-riegl-project.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**, though each position can be **levelled** using the instrument's own inclinometer (tilt only — not aligned to north or to each other); sky/miss points are recovered from the scanner's per-shot record, so LAD works (on Windows and Linux that recovery needs a C++ compiler; the scan imports without one, but with no sky shell). |
-| `.PROJ` | ✅ | — | RIEGL **on-instrument project** from a newer scanner (e.g. VZ-2000i) — also a *directory*. Same requirements and same columns as `.riproject`, but it also carries the instrument's **own registration**, so scans can land already aligned, level and north-oriented. Registration is often partial; each position reports whether it was registered or only placed from a metre-level prior. The `.rdbx` files beside each `.rxp` are not used. |
+| `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL), ASCII. Parsed via Open3D, which drops non-standard scalar fields — so **export carries position and color only** and shows no field picker. Color is packed into a single `rgb` field, as the format requires. Use `.ply` or `.las` to keep intensity and scalars. |
+| `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. Windows, Linux (x86_64) and macOS, and needs a user-supplied RiVLib (plus Docker on macOS only, where RiVLib has no native build): see **[Import a RIEGL project](../workflows/import-riegl-project.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**, though each position can be **leveled** using the instrument's own inclinometer (tilt only — not aligned to north or to each other); sky/miss points are recovered from the scanner's per-shot record, so LAD works (on Windows and Linux that recovery needs a C++ compiler; the scan imports without one, but with no sky shell). |
+| `.PROJ` | ✅ | — | RIEGL **on-instrument project** from a newer scanner (e.g. VZ-2000i) — also a *directory*. Same requirements and same columns as `.riproject`, but it also carries the instrument's **own registration**, so scans can land already aligned, level and north-oriented. Registration is often partial; each position reports whether it was registered or only placed from a meter-level prior. The `.rdbx` files beside each `.rxp` are not used. |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
-| `.pts` | ✅ | ✅ | Leica/Cyclone PTS. A leading line holding the **point count**, then `x y z intensity r g b` — intensity *before* colour. The order is **fixed** (a reader decodes these columns positionally), so PTS export shows no field picker; export to `.txt`/`.csv`/`.ply`/`.las` if you need to choose fields or carry other scalars. |
+| `.pts` | ✅ | ✅ | Leica/Cyclone PTS. A leading line holding the **point count**, then `x y z intensity r g b` — intensity *before* color. The order is **fixed** (a reader decodes these columns positionally), so PTS export shows no field picker; export to `.txt`/`.csv`/`.ply`/`.las` if you need to choose fields or carry other scalars. |
 | `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`. The delimiter is sniffed from the contents (RIEGL's ASCII export, for instance, is comma-separated with a header row), and a header line is read if present. Not to be confused with the DEM **ASC grid** raster export (see [DEM rasters](#dem-rasters)) — that `.asc` is an elevation *grid*, this one is a point list. |
 | `.ascii` | ✅ | — | RiSCAN PRO's ASCII scan export, treated like `.xyz`. The delimiter is sniffed from the contents and a header line is read if present, so the common headerless `x y z gps_time reflectance` layout auto-detects as *x, y, z, timestamp, intensity* — check the mapping in the import wizard and adjust it there if your export differs. **Import only**: export the cleaned cloud to `.xyz`/`.txt`/`.csv`/`.las` instead. |
 | `.obj` | — | — | **Not a point-cloud format in Phytograph** — it is a *mesh* format (see [Meshes](#meshes)). A vertex-only `.obj` cannot be imported as a cloud: `.obj` always loads as a mesh, so a cloud written to `.obj` would come back as a face-less mesh rather than a point cloud. Use `.ply` to carry points into Blender or MeshLab, or `.xyz` for a plain column file. |
@@ -48,9 +48,9 @@ to every supported point-cloud format: ASCII (`.xyz`/`.txt`/`.csv`/`.pts`/`.asc`
 via pandas, `.ply` (parsed directly, scalar fields preserved — see below),
 `.pcd` (streamed, every field preserved — see below), and `.las`/`.laz`
 (passed straight through). If the source XML provides an `<ASCII_format>` tag
-for an XYZ-family file, Phytograph forwards it to the parser; recognised
+for an XYZ-family file, Phytograph forwards it to the parser; recognized
 column tokens are `x`, `y`, `z`, `r`/`g`/`b` (0–1 range),
-`r255`/`g255`/`b255` (0–255 range, normalised to 0–1 on read),
+`r255`/`g255`/`b255` (0–255 range, normalized to 0–1 on read),
 `intensity`, `reflectance`, `timestamp`, `target_index`, `target_count`,
 `row`/`column` (structured-scan grid indices), `is_miss`/`miss`/`sky`
 (sky/miss flag), `deviation`. Token spellings are matched the same way header
@@ -64,13 +64,13 @@ untick in the import wizard is dropped instead, whatever its token.) Field names
 header, the `<ASCII_format>` token itself names the field — so a headerless
 `.xyz` referenced by an XML whose legend reads
 `row col x y z r255 g255 b255 reflectance` (as in
-`example-datasets/BPPtree_scaninds.xml`) imports with every column labelled,
+`example-datasets/BPPtree_scaninds.xml`) imports with every column labeled,
 not a positional `Column N` fallback. The hint is ignored for PLY/PCD because
 those formats encode their column layout in-file.
 
 `intensity` and `reflectance` are read at whatever scale the source uses —
 Helios reflectance in **dB** (negative), `[0, 1]` floats, `[0, 255]` bytes, or
-Helios's raw signed beam·normal dot product — and normalised to the viewer's
+Helios's raw signed beam·normal dot product — and normalized to the viewer's
 gradient by their observed range, so the **Intensity** color mode works for any
 of them. When a file carries **both** an `intensity` and a `reflectance`
 column, the first becomes the dedicated intensity channel and the second is
@@ -79,7 +79,7 @@ neither is dropped.
 
 When no `<ASCII_format>` hint is given, Phytograph auto-detects the
 layout: a header row's column names — whether plain or written as a
-leading `#` comment — are matched to roles where recognised (so
+leading `#` comment — are matched to roles where recognized (so
 `XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the rest become
 scalar fields), otherwise it falls back to a positional guess. The
 positional path first locates where the coordinates start: up to two leading
@@ -90,20 +90,20 @@ cloud, with no fractional column to anchor on, keeps xyz at column 0. After
 xyz, a 0–255 integer triple is taken as RGB and a lone trailing column as
 intensity. The RGB guess is range-checked: those three columns are only
 assigned to red/green/blue when their sampled values actually look like 8-bit
-colour (0–255 integers), so columns that hold timestamps, return counts, or a
+color (0–255 integers), so columns that hold timestamps, return counts, or a
 reflectance that ranges above 255 (e.g. Helios multi-return
 `x y z timestamp intensity return#`) are left as reassignable scalars rather
-than silently mislabelled as colour.
+than silently mislabeled as color.
 
 `.pts` files get two extra rules, because the canonical PTS layout breaks both
 of the general ones above:
 
-- A leading line holding just the **point count** is recognised as a header, not
+- A leading line holding just the **point count** is recognized as a header, not
   as data. It is all digits, so the usual "does this line contain a letter"
   header test doesn't catch it.
-- Columns are read as `x y z intensity r g b` — intensity **before** colour.
-  The general rule only recognises an RGB triple sitting directly after xyz, so
-  without this a 7-column PTS lost both its colour *and* its intensity.
+- Columns are read as `x y z intensity r g b` — intensity **before** color.
+  The general rule only recognizes an RGB triple sitting directly after xyz, so
+  without this a 7-column PTS lost both its color *and* its intensity.
 
 Both rules apply only to `.pts`, so no other ASCII layout changes meaning. A
 `.pts` written the other way round (`x y z r g b intensity`) still resolves
@@ -125,31 +125,31 @@ can be selected in the export field picker for `.ply` and the ASCII formats.
 
 `nx`/`ny`/`nz` are the standard PLY property names for normals, so a PLY
 exported from Phytograph carries its normals into CloudCompare, MeshLab and
-anything else that reads them. The same names are recognised on **import**, in
+anything else that reads them. The same names are recognized on **import**, in
 Phytograph's own spelling and in the `normal_x` / `scalar_nx` spellings
-CloudCompare writes, so a round trip keeps the normals recognisable as normals
+CloudCompare writes, so a round trip keeps the normals recognizable as normals
 instead of splitting them into three unrelated scalar columns.
 
 `.pcd` clouds (ASCII and binary) are streamed in blocks, never read whole,
 and keep **every single-valued field**. `x y z` become positions, a packed
-`rgb`/`rgba` becomes colour, `intensity`/`reflectance` becomes intensity, and
+`rgb`/`rgba` becomes color, `intensity`/`reflectance` becomes intensity, and
 normals come in as `nx`/`ny`/`nz`. Everything else (curvature, labels, …)
 becomes a scalar field under its own name. A field with `COUNT` above 1 (a
 feature histogram, say) is skipped. Points with non-finite coordinates (the
-empty pixels of an organised cloud) are dropped. A `binary_compressed` PCD
+empty pixels of an organized cloud) are dropped. A `binary_compressed` PCD
 cannot be streamed, so it is read through open3d and carries position and
-colour only. `.las`/`.laz` clouds retain their native extra dimensions.
+color only. `.las`/`.laz` clouds retain their native extra dimensions.
 
 Point positions keep the **source file's own precision** for every format.
 The intermediate LAS Phytograph builds for display is quantized to 1 mm, but
-the cloud itself never is, so sub-millimetre detail in a `.ply`, `.pcd`,
+the cloud itself never is, so sub-millimeter detail in a `.ply`, `.pcd`,
 `.xyz` or `.ptx` survives import. `.e57` is the exception for now: its
 positions are stored at 1 mm.
 
-`.e57` clouds carry **intensity** and **RGB colour** when the file records them
+`.e57` clouds carry **intensity** and **RGB color** when the file records them
 (both are surfaced in the import wizard and become color-mappable in the viewer);
-colour on the recovered sky/miss points is set to black. Other E57 per-point
-fields beyond position, intensity, and colour are not yet preserved — including
+color on the recovered sky/miss points is set to black. Other E57 per-point
+fields beyond position, intensity, and color are not yet preserved — including
 vendor extension fields such as RIEGL's `rlms:amplitude` / `rlms:reflectance`,
 which are skipped rather than treated as an error, so a stock RiSCAN PRO export
 imports normally.
@@ -157,7 +157,7 @@ imports normally.
 ### Large / projected coordinates
 
 Scans in a projected coordinate reference (UTM, state plane) have coordinates
-hundreds of thousands to millions of metres from the meridian/equator. Two
+hundreds of thousands to millions of meters from the meridian/equator. Two
 features keep these usable:
 
 - **Global shift** (at import, optional, persistent) — the import wizard can
@@ -174,29 +174,29 @@ features keep these usable:
 
 ### Measurement units
 
-Phytograph stores and reports everything in **metres**. Scans are converted at
+Phytograph stores and reports everything in **meters**. Scans are converted at
 import, so what a format can say about its own unit decides whether you are
 asked:
 
 | Format | Declares a unit? | What happens |
 |---|---|---|
 | **LAS / LAZ** | Yes, when it carries a CRS | Read from the coordinate reference system — a State Plane zone in US survey feet is detected as such |
-| **E57** | Fixed by the spec | Always metres; the format has no other option |
-| **RIEGL** `.rxp` / `.riproject` | Fixed by the format | Always metres (scanner-local) |
-| **PTX** | No | Defaults to metres; change it in the wizard |
-| **PLY / PCD** | No | Defaults to metres; change it in the wizard |
-| **ASCII** (`.xyz`, `.csv`, `.txt`, `.pts`, `.asc`, `.ascii`) | No | Defaults to metres; change it in the wizard |
+| **E57** | Fixed by the spec | Always meters; the format has no other option |
+| **RIEGL** `.rxp` / `.riproject` | Fixed by the format | Always meters (scanner-local) |
+| **PTX** | No | Defaults to meters; change it in the wizard |
+| **PLY / PCD** | No | Defaults to meters; change it in the wizard |
+| **ASCII** (`.xyz`, `.csv`, `.txt`, `.pts`, `.asc`, `.ascii`) | No | Defaults to meters; change it in the wizard |
 
 A LAS/LAZ **without** a CRS carries no unit either, and is treated like the
 formats that cannot declare one. Two further cases are also treated as
 undeclared, because a single scale factor cannot describe them honestly:
 
 - **A geographic (latitude/longitude) CRS.** Degrees are not a length, and
-  there is no constant that converts them — the metres-per-degree of longitude
+  there is no constant that converts them — the meters-per-degree of longitude
   depends on latitude. Such a file needs reprojection, which Phytograph does not
   do; its coordinates are left exactly as they are.
 - **A CRS whose axes disagree**, such as horizontal US survey feet with vertical
-  metres (a standard US survey configuration). Scaling all three axes by one
+  meters (a standard US survey configuration). Scaling all three axes by one
   factor would leave the horizontal correct and divide every elevation by 3.28.
 
 In both cases the wizard asks rather than guessing.
@@ -204,11 +204,11 @@ In both cases the wizard asks rather than guessing.
 The source unit is recorded with the scan. See
 [Source units](../workflows/import-export.md#source-units).
 
-!!! warning "Export is in metres, not the original unit"
+!!! warning "Export is in meters, not the original unit"
 
     A global **shift** is undone on export, restoring the original coordinate
     magnitudes — but the **unit conversion is not**. A survey imported in feet
-    exports as metres. The numbers will differ from the source file by the
+    exports as meters. The numbers will differ from the source file by the
     conversion factor.
 
 ### Sky/miss points
@@ -230,7 +230,7 @@ On **export**, the two structured formats keep misses in the form each one
 defines, so a round-trip through Phytograph doesn't lose them:
 
 - **PTX** always writes the full grid, with no-return cells left empty. The
-  *Include miss points* box makes no difference to the file, so it is greyed out
+  *Include miss points* box makes no difference to the file, so it is grayed out
   when PTX is selected.
 - **E57** writes misses as cells flagged `cartesianInvalidState`. Here the box
   **does** matter: unticking it leaves the misses out entirely (a smaller,
@@ -264,7 +264,7 @@ what PTX was designed around — none of this applies.
 Recovered misses are tagged with an `is_miss` flag (0 = hit, 1 = miss) and kept
 in the scan. Because their true coordinates are ~20 km away, they are **excluded
 from the viewer's octree** (so they don't wreck camera framing) and **hidden by
-default**. Toggle **Show misses** on a scan row to draw them in a distinct colour,
+default**. Toggle **Show misses** on a scan row to draw them in a distinct color,
 relocated onto the scan's bounding sphere so they sit at a sensible distance.
 
 If a scan has **no** miss points but **does** have a `timestamp` column, the LAD
@@ -329,7 +329,7 @@ elevation grid (from the **GIS raster** row in the mesh export panel):
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.asc` (ESRI ASCII grid) | ❌ | ✅ | Cell-centred elevation grid with an `ncols/nrows/xllcorner/yllcorner/cellsize/NODATA_value` header. **Distinct from the `.asc` *point-cloud* import format above** — here it's a raster. |
+| `.asc` (ESRI ASCII grid) | ❌ | ✅ | Cell-centered elevation grid with an `ncols/nrows/xllcorner/yllcorner/cellsize/NODATA_value` header. **Distinct from the `.asc` *point-cloud* import format above** — here it's a raster. |
 | `.tif` (GeoTIFF) | ❌ | ✅ | Georeferenced raster (pixel scale + tiepoint, and a CRS when known). Written without GDAL, readable in QGIS / ArcGIS. |
 
 The raster is written in the cloud's own coordinates; voids (cells with no
@@ -428,7 +428,7 @@ for a **folder** instead of a save location.
 ### Tree list CSV
 
 [Run a tree inventory](../workflows/tree-inventory.md) exports a tree list
-with **one row per measured tree**. Lengths are metres, areas m², volumes
+with **one row per measured tree**. Lengths are meters, areas m², volumes
 m³, and angles degrees (azimuths clockwise from +y). Coordinates are world
 coordinates. A value that could not be measured is left empty. How each
 value is measured, and the source it follows, is on
@@ -459,9 +459,9 @@ value is measured, and the source it follows, is on
 | `crown_offset_m`, `crown_offset_azimuth_deg` | Horizontal offset of the crown projection's centroid from the stem base, and its direction. |
 | `crown_volume_voxel_m3` | Occupied-voxel crown volume at the chosen voxel size. |
 | `basal_area_m2` | π/4 · DBH². |
-| `slenderness` | Height / DBH (both in metres). |
+| `slenderness` | Height / DBH (both in meters). |
 | `ground_source` | `height_above_ground`, `ground_class`, or `tree_min_z`. |
-| `n_points` | Points labelled with this tree id. |
+| `n_points` | Points labeled with this tree id. |
 | `flags` | Quality flags, `;`-separated: `few_points`, `partial_arc`, `high_residual`, `no_stem`, `ground_from_tree_min`. |
 | `hegyi_index`, `n_competitors` | Hegyi's competition index, and the trees inside its search radius. |
 | `crown_overlap_m2`, `crown_overlap_fraction` | Summed overlap of this crown's projection with the others', and the share of it covered by at least one. |
@@ -481,8 +481,8 @@ then by distance along the stem.
 |---|---|
 | `scan_name`, `tree_id` | As in the tree list. |
 | `axial_m` | Distance along the stem axis from the stem base (0.5 m steps). |
-| `height_m` | Height of the slice centre above the stem base's ground. |
-| `x`, `y`, `z` | Slice centre, world coordinates. |
+| `height_m` | Height of the slice center above the stem base's ground. |
+| `x`, `y`, `z` | Slice center, world coordinates. |
 | `diameter_m` | Fitted stem diameter. |
 | `rms_m`, `arc_coverage`, `n_points` | Fit quality, as for DBH. |
 | `ok` | `true` when the fit had neither `few_points` nor `high_residual` and continued the stem smoothly (0.5–1.5× the previous ok radius). A partial arc alone does not make a slice not-ok. |
@@ -562,24 +562,24 @@ MeshLab.
 
 ### QSM OBJ bundle
 
-Exporting a QSM to `.obj` writes the geometry *and* its colours, matching what
+Exporting a QSM to `.obj` writes the geometry *and* its colors, matching what
 the viewer is showing at the time of export:
 
 - `<name>.obj` — one continuous tube per shoot, each its own `o` group (so the
   tree arrives as separable objects), with vertex normals and a `usemtl` per
   group. **Leaves**, if the QSM has them, follow as a final `o leaves` group.
 - `<name>.mtl` — the material library the `.obj` references.
-- `<name>_bark.png` / `.jpg` — the bark image, in **Texture** colour mode only.
+- `<name>_bark.png` / `.jpg` — the bark image, in **Texture** color mode only.
 - `<name>_<material>.png` / `.jpg` — one image per textured leaf material, when
   the QSM has leaves.
 
-What lands in the `.mtl` depends on the QSM's colour mode in the viewer:
+What lands in the `.mtl` depends on the QSM's color mode in the viewer:
 
-| Colour mode | Materials written |
+| Color mode | Materials written |
 |---|---|
-| **Rank** (default) | One material per shoot rank (`rank_0`, `rank_1`, …), each carrying that rank's palette colour. |
+| **Rank** (default) | One material per shoot rank (`rank_0`, `rank_1`, …), each carrying that rank's palette color. |
 | **Shoot** | One material per shoot (`shoot_0`, `shoot_1`, …), each with that shoot's distinct hue. |
-| **Colour** | A single `qsm_color` material holding the colour you picked. |
+| **Color** | A single `qsm_color` material holding the color you picked. |
 | **Texture** | A single `bark` material with `map_Kd` pointing at the exported bark image; UV coordinates (`vt`) are written, and the tile size you set is baked into them. |
 
 Colors round-trip exactly: `Kd` is written as an sRGB display value, so
@@ -591,8 +591,8 @@ alpha **cutouts**, so their materials get `map_d` alongside `map_Kd` — that is
 what makes a leaf come back leaf-shaped instead of as an opaque rectangle.
 
 Keep the files together: an `.obj` moved away from its `.mtl` (and the images the
-`.mtl` names) loads as untextured grey geometry. `.ply` carries `branch_order` and `radius` per face
-instead of materials, so use it when you want to colour by branching order in a
+`.mtl` names) loads as untextured gray geometry. `.ply` carries `branch_order` and `radius` per face
+instead of materials, so use it when you want to color by branching order in a
 downstream tool.
 
 ### QSM cylinder CSV
@@ -666,7 +666,7 @@ referenced point data.
 A `<scannerModel>` tag (a Phytograph extension carrying an instrument id such as
 `riegl_vz400i`) restores the **scanner model** chosen in the Add/Edit Scan dialog.
 Scans exported from Phytograph write it so a non-default instrument round-trips;
-an absent or unrecognised value imports as the generic scanner. Helios ignores
+an absent or unrecognized value imports as the generic scanner. Helios ignores
 the tag, so the bundle stays Helios-loadable.
 
 A `<scan>` carrying `<scanPattern>spinning_multibeam</scanPattern>` imports as a
@@ -734,7 +734,7 @@ work:
 - [Leaf area density](../workflows/estimate-leaf-area-density.md) inverts
   transmission from a **single scanner origin**; the wrong one silently
   corrupts the result.
-- [Sky/miss points](#skymiss-points) are displayed on a shell centred on the
+- [Sky/miss points](#skymiss-points) are displayed on a shell centered on the
   scanner, which would sit around the wrong point.
 - The per-scan `row_index` / `column_index` rasters of two setups would
   collide.
@@ -798,7 +798,7 @@ file…** when editing the scan. Supported formats:
   present, contributes a position-RMS quality note. High-rate SBETs are decimated to a
   few thousand poses (the join interpolates between them; the last record is always
   kept so the time span is preserved).
-- **Pick `sbet_<mission>.out`, not its neighbours.** POSPac writes about fifteen
+- **Pick `sbet_<mission>.out`, not its neighbors.** POSPac writes about fifteen
   different internal formats under the same `.out` extension, so the extension alone
   says nothing about what is in the file. The one most easily picked by mistake is
   `smrmsg_<mission>.out` — the accuracy companion, named like the SBET apart from the
@@ -826,7 +826,7 @@ file…** when editing the scan. Supported formats:
 When a LAS/LAZ carries a per-point `gps_time` (point formats 1, 3, 4, 5, and 6+), it is
 read as the per-return timestamp and kept at full **double precision** (a 32-bit float
 would collapse adjacent returns at GPS-epoch magnitude). The LAS header's *GPS time
-type* (global encoding bit 0) is honoured:
+type* (global encoding bit 0) is honored:
 
 - **Adjusted Standard GPS time** — an absolute clock that can be joined to a survey
   trajectory directly.

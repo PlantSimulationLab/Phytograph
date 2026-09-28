@@ -1,20 +1,20 @@
 """Make exact synthetic labels look like hand labels.
 
 A Helios scene labels every scanned shoot as wood, down to a 3 mm current-year
-shoot glimpsed for a few points between two leaves. A person labelling a real
-dense crown cannot see those as wood, so they are labelled leaf, and only
+shoot glimpsed for a few points between two leaves. A person labeling a real
+dense crown cannot see those as wood, so they are labeled leaf, and only
 clearly visible, continuous wood is marked. The mismatch was measured: across
 8 library species and 20 synthetic scans, no leaf point was more than 30 cm
-from labelled wood, while a hand-labelled dense redbud had 78 % of its leaf
+from labeled wood, while a hand-labeled dense redbud had 78 % of its leaf
 that far from any. A model trained on the synthetic convention learns that
-every crown neighbourhood contains wood, and in a dense real crown it calls
+every crown neighborhood contains wood, and in a dense real crown it calls
 its most wood-like leaf clumps wood.
 
 :func:`human_visible_wood` keeps a wood point only when it belongs to a
 connected run of scanned wood whose extent is at least ``min_length``: the
-trunk and branches a labeller can follow. Shorter, disconnected fragments
+trunk and branches a labeler can follow. Shorter, disconnected fragments
 become leaf. Connectivity is on the scanned points, so what counts is what the
-scanner (and so the labeller) actually saw, not the plant's true topology.
+scanner (and so the labeler) actually saw, not the plant's true topology.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from ..grid import grid_sample
 
 def human_visible_wood(xyz: np.ndarray, sem: np.ndarray, wood_code: int, leaf_code: int,
                        min_length: float, link: float = 0.02, voxel: float = 0.01) -> np.ndarray:
-    """Return a copy of ``sem`` with wood outside long visible runs relabelled leaf.
+    """Return a copy of ``sem`` with wood outside long visible runs relabeled leaf.
 
     Wood points are grid-sampled at ``voxel`` (so dense near-range scanning does
     not bridge gaps a coarser far-range scan would leave), linked within

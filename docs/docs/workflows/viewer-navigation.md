@@ -40,7 +40,7 @@ direction starts a fresh gesture and picks a new target.
 
 How close and how far you can zoom is scaled to the size of your scene, so
 the same scroll gesture feels right on a single potted plant and on a
-400-metre plot. A few stray far-away points do not affect it.
+400-meter plot. A few stray far-away points do not affect it.
 
 **Panning is zoom-dependent.** The closer you are, the finer a drag moves the
 view — a drag always covers about the same fraction of the screen, so panning
@@ -220,7 +220,7 @@ While you are placing a measurement:
   press it again to disarm.
 
 Finished measurements stay on screen as you orbit, drawn as lines with a
-labelled readout. Copy one with its **copy** icon, or every measurement at
+labeled readout. Copy one with its **copy** icon, or every measurement at
 once with **Copy all (CSV)** — the CSV carries each measurement's value *and*
 its vertex coordinates, so the number can be re-derived from the file alone.
 Delete one with its **✕**, or clear them all from the panel.
@@ -231,7 +231,7 @@ move-with-the-cloud and drop-on-rebuild rules as inspect labels.
 
 !!! note "Units"
 
-    Measurements are reported in **metres**. Every scan is converted to metres
+    Measurements are reported in **meters**. Every scan is converted to meters
     at import — a file that declares another unit (a LAS in US survey feet, say)
     is scaled on the way in, and a format that cannot declare one is asked in
     the import wizard. See

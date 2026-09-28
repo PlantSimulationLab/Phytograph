@@ -2,7 +2,7 @@
 memory map at a time, without changing the file they produce.
 
 Pinned by invariance under the block size: the LAS written with a 7-row block
-is identical (coordinates, colours, intensity, every extra dim, header
+is identical (coordinates, colors, intensity, every extra dim, header
 offsets and bounds) to the one written with the default block, so a chunk
 boundary can never drop, duplicate or misalign a row.
 """

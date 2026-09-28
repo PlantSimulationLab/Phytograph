@@ -85,7 +85,7 @@ describe('is_miss scheme', () => {
     expect(categoricalSchemeFor('Is_Miss')).not.toBeNull();
   });
 
-  it('paints misses in the distinct miss colour, hits in a different colour', () => {
+  it('paints misses in the distinct miss color, hits in a different color', () => {
     const scheme = categoricalSchemeFor(MISS_ATTRIBUTE)!;
     expect(colorForClassValue(scheme, 1)).toEqual(MISS_COLOR);
     expect(colorForClassValue(scheme, 0)).not.toEqual(MISS_COLOR);
@@ -145,10 +145,10 @@ describe('rgbToHex', () => {
 });
 
 // The scan-list swatch for a child cloud split out by class must be the SAME
-// colour the viewer paints that class — these assertions derive the expected
+// color the viewer paints that class — these assertions derive the expected
 // hex from the scheme rather than hardcoding it, so the two can never drift.
 describe('classColorHex', () => {
-  it('returns the ground_class scheme colour for each class', () => {
+  it('returns the ground_class scheme color for each class', () => {
     const scheme = categoricalSchemeFor(GROUND_CLASS_ATTRIBUTE)!;
     expect(classColorHex(GROUND_CLASS_ATTRIBUTE, 1))
       .toBe(rgbToHex(colorForClassValue(scheme, 1)));
@@ -159,7 +159,7 @@ describe('classColorHex', () => {
       .not.toBe(classColorHex(GROUND_CLASS_ATTRIBUTE, 2));
   });
 
-  it('returns the wood_class scheme colour for each class', () => {
+  it('returns the wood_class scheme color for each class', () => {
     const scheme = categoricalSchemeFor(WOOD_CLASS_ATTRIBUTE)!;
     expect(classColorHex(WOOD_CLASS_ATTRIBUTE, 1))
       .toBe(rgbToHex(colorForClassValue(scheme, 1)));
@@ -223,13 +223,13 @@ describe('buildCategoricalGradientStops', () => {
   // widens the zero-width range [0,0] to [-1,1] so the shader's divisor isn't
   // zero — every point then samples the gradient at t = (0-(-1))/2 = 0.5. The
   // step gradient MUST be built against that SAME widened range, else t=0.5
-  // lands on the Hit/Miss seam and every (hit) point picks up the Miss colour.
+  // lands on the Hit/Miss seam and every (hit) point picks up the Miss color.
   // Built against [-1,1], the t=0.5 sample must fall inside the Hit band.
   it('samples a constant all-hits column as Hit when range is widened to [-1,1]', () => {
     const miss = categoricalSchemeFor(MISS_ATTRIBUTE)!;
     const stops = buildCategoricalGradientStops(miss, [-1, 1]);
-    // Find the colour the gradient yields at t = 0.5 (the value every point maps
-    // to). Walk the step stops: the colour is the last stop at or before 0.5.
+    // Find the color the gradient yields at t = 0.5 (the value every point maps
+    // to). Walk the step stops: the color is the last stop at or before 0.5.
     let sampled = stops[0][1];
     for (const [t, color] of stops) {
       if (t <= 0.5) sampled = color;
@@ -239,22 +239,22 @@ describe('buildCategoricalGradientStops', () => {
     expect(sampled).not.toEqual(MISS_COLOR);
   });
 
-  // Regression (ground renders as a tree colour): after ground+tree
+  // Regression (ground renders as a tree color): after ground+tree
   // segmentation, ground points carry tree_instance 0 and are meant to show as
-  // the grey "Unassigned" class. The octree bakes these stops into a 64-texel
+  // the gray "Unassigned" class. The octree bakes these stops into a 64-texel
   // LinearFilter texture and the shader samples value 0 at t=0 (the range is
   // [0, N]). Two ways this broke: (1) the original ±0.5 band gave class 0 only
   // a sub-texel sliver [0, 0.5/N] that averaged away; (2) a naive "widen every
   // band to ≥1 texel" fix made the bands OVERLAP for large N, so after sorting
-  // by t the neighbouring tree stops overwrote the grey. The real case that hit
+  // by t the neighboring tree stops overwrote the gray. The real case that hit
   // this was 87 tree classes over [0, 86]. The fix lays out non-overlapping
   // cells and guarantees the edge cell (id 0 at t=0) at least one texel.
-  it.each([20, 86])('samples tree_instance 0 as grey with %i tree classes (non-overlapping)', (N) => {
+  it.each([20, 86])('samples tree_instance 0 as gray with %i tree classes (non-overlapping)', (N) => {
     const scheme = categoricalSchemeForRange('tree_instance', [0, N])!;
     const stops = buildCategoricalGradientStops(scheme, [0, N]);
     const unassigned = colorForClassValue(scheme, 0);
     const tree1 = colorForClassValue(scheme, 1);
-    // The colour a texel at t samples ≈ the last stop at or before t. Ground
+    // The color a texel at t samples ≈ the last stop at or before t. Ground
     // points sample at t=0.
     const sampleAt = (t: number): typeof unassigned => {
       let c = stops[0][1];
@@ -263,19 +263,19 @@ describe('buildCategoricalGradientStops', () => {
       }
       return c;
     };
-    // Ground (t=0) reads grey, not Tree 1.
+    // Ground (t=0) reads gray, not Tree 1.
     expect(sampleAt(0)).toEqual(unassigned);
     expect(sampleAt(0)).not.toEqual(tree1);
     // Stops are monotonic in t (CanvasGradient.addColorStop requires it).
     for (let i = 1; i < stops.length; i++) {
       expect(stops[i][0]).toBeGreaterThanOrEqual(stops[i - 1][0]);
     }
-    // Class 0 owns a full texel before the first non-grey stop appears — i.e.
-    // its cell does not overlap Tree 1's (the bug that buried the grey).
-    const firstNonGrey = stops.find(([, color]) =>
+    // Class 0 owns a full texel before the first non-gray stop appears — i.e.
+    // its cell does not overlap Tree 1's (the bug that buried the gray).
+    const firstNonGray = stops.find(([, color]) =>
       JSON.stringify(color) !== JSON.stringify(unassigned),
     );
-    expect(firstNonGrey![0]).toBeGreaterThanOrEqual(1 / 64 - 1e-9);
+    expect(firstNonGray![0]).toBeGreaterThanOrEqual(1 / 64 - 1e-9);
   });
 });
 
@@ -331,7 +331,7 @@ describe('forced-continuous override (wizard "Scalar" over a registered scheme)'
     expect(hasRegisteredScheme('')).toBe(false);
   });
 
-  it('suppresses the registered Hit/Miss scheme so is_miss colours continuously', () => {
+  it('suppresses the registered Hit/Miss scheme so is_miss colors continuously', () => {
     // Sanity: by default is_miss is categorical with the Hit/Miss scheme.
     expect(categoricalSchemeFor(MISS_ATTRIBUTE)).not.toBeNull();
     registerContinuousSlug(MISS_ATTRIBUTE);
@@ -400,7 +400,7 @@ describe('las_classification (ASPRS standard classes)', () => {
     expect(ASPRS_CLASS_LIST.find((c) => c.value === 12)?.label).toBe('Reserved');
   });
 
-  it('still honours the wizard\'s "Scalar" override', () => {
+  it('still honors the wizard\'s "Scalar" override', () => {
     // Registering a by-name scheme must not take the choice away from a user who
     // explicitly asked to see the raw numbers as a gradient.
     registerContinuousSlug(LAS_CLASSIFICATION_ATTRIBUTE);
@@ -432,7 +432,7 @@ describe('plant organ scheme (ML organ tool)', () => {
     expect(categoricalSchemeFor('organ')?.classes.length).toBe(7);
   });
 
-  it('gives the three organs three distinct colours', () => {
+  it('gives the three organs three distinct colors', () => {
     const scheme = categoricalSchemeFor(PLANT_ORGAN_ATTRIBUTE)!;
     expect(new Set([1, 2, 3].map((v) => rgbToHex(colorForClassValue(scheme, v)))).size).toBe(3);
   });

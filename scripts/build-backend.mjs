@@ -209,7 +209,7 @@ const treeisoExtraArgs = [
 //
 // rxp_shim.cpp and rxpshim.def travel as DATA, not code: they are the source of
 // the miss-recovery DLL, which is compiled on the user's machine on first use
-// because RIEGL's licence forbids redistributing a prebuilt copy (on Windows it
+// because RIEGL's license forbids redistributing a prebuilt copy (on Windows it
 // statically links their scanlib). _shim_source_dir() finds them beside
 // rxp_reader.py, which inside the bundle means sys._MEIPASS.
 const rieglDir = join(root, 'docker', 'riegl');

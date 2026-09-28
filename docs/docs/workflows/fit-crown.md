@@ -49,7 +49,7 @@ tools write and adapts the fit to what's present:
 
 1. Select one or more scans, then open **Tools → Fit Crown & Metrics**
    (or press <kbd>Cmd/Ctrl</kbd>+<kbd>K</kbd> and search "crown").
-2. **Choose the scans** to fit. Ineligible scans are greyed out with a
+2. **Choose the scans** to fit. Ineligible scans are grayed out with a
    reason; scans missing labels show a warning banner but stay fittable.
 3. **Pick a crown shape:**
 

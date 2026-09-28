@@ -28,13 +28,13 @@ Analyses that need per-pulse direction (notably the
 [Helios triangulation](../workflows/triangulate.md#helios-method)
 mode) are disabled until parameters are added. Click the radio icon
 on the row to add them — the origin pre-fills to the scan's bounds
-centre as a starting point.
+center as a starting point.
 
 ## When a scan has only parameters
 
 You're planning a campaign, or you've imported a Helios scan XML whose
 referenced point data isn't on disk yet. The scanner marker still
-renders in the viewer at the configured origin so you can visualise
+renders in the viewer at the configured origin so you can visualize
 coverage. Click the paperclip icon on the row to attach a point cloud
 file later.
 
@@ -77,7 +77,7 @@ them silently.
 
 ## What's in the parameters
 
-- **Origin** — (x, y, z) position of the scanner head in metres
+- **Origin** — (x, y, z) position of the scanner head in meters
 - **Scan pattern** — one of:
     - **raster** — a uniform zenith × azimuth grid, the classic
       terrestrial-scanner dome sweep.
@@ -146,7 +146,7 @@ Attach one either by **importing a trajectory file** or by **building one by
 hand**. In the Add Scan popup, **Import trajectory file…** reads a
 CSV / whitespace-delimited table, one pose per row:
 
-- `t x y z qx qy qz qw` — time (seconds), position (metres), and a
+- `t x y z qx qy qz qw` — time (seconds), position (meters), and a
   Hamilton orientation quaternion, or
 - `t x y z roll pitch yaw` — orientation as Tait-Bryan angles (radians;
   the importer also accepts degrees) in intrinsic Z-Y-X order.
@@ -275,7 +275,7 @@ sphere missing its top and bottom caps). A **spinning multibeam** draws one
 ring per beam elevation, each with a few spokes back to the scanner to
 suggest the cone the channel sweeps; a 0° beam flattens to a horizontal
 disk. The shell rotates and leans with the scanner's heading and tilt, is
-coloured to match the scan, and its radius is five times the scanner's
+colored to match the scan, and its radius is five times the scanner's
 real-world height scaled by the **Scan marker size** setting — a halo
 around the instrument, not the full scan range. Toggle it back off from the
 same menu item.

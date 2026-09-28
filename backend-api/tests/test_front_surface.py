@@ -82,7 +82,7 @@ EVERYWHERE = {"kind": "polygon", "points": [[0, 0], [20, 0], [20, 20], [0, 20]],
 
 
 @pytest.mark.skipif(not _converter_available(), reason="PotreeConverter binary not found")
-def test_label_region_honours_depth_limit_and_limit_box(client, two_sheets):
+def test_label_region_honors_depth_limit_and_limit_box(client, two_sheets):
     res = client.post("/api/cloud/session/create",
                       json={"source_path": str(two_sheets), "ascii_format": "x y z"})
     assert res.status_code == 200, res.text

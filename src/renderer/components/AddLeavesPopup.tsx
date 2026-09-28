@@ -43,16 +43,16 @@ export function AddLeavesPopup({ isOpen, onClose, qsm, onAddLeaves }: AddLeavesP
   // the QSM's branching geometry, pre-filling the (editable) angle + leaves/node.
   useEffect(() => {
     if (!isOpen || !qsm) return;
-    let cancelled = false;
+    let canceled = false;
     setError(null);
     setDetectInfo(null);
     void getLeafTextures().then((list) => {
-      if (!cancelled && list.length) setTextures(list);
+      if (!canceled && list.length) setTextures(list);
     });
     setDetecting(true);
     void detectPhyllotaxis(qsm.cylinders, qsm.shoots)
       .then((res) => {
-        if (cancelled) return;
+        if (canceled) return;
         if (res.success) {
           setPhyllotaxisStr(String(res.angle_deg));
           setLeavesPerNodeStr(String(res.leaves_per_node));
@@ -60,8 +60,8 @@ export function AddLeavesPopup({ isOpen, onClose, qsm, onAddLeaves }: AddLeavesP
         }
       })
       .catch(() => { /* keep defaults if detection fails */ })
-      .finally(() => { if (!cancelled) setDetecting(false); });
-    return () => { cancelled = true; };
+      .finally(() => { if (!canceled) setDetecting(false); });
+    return () => { canceled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, qsm?.id]);
 

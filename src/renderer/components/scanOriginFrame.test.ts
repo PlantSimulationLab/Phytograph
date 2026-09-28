@@ -12,7 +12,7 @@
  * the mismatch was invisible in tests because the PTX fixtures put the scanner
  * at (0,0,0) -- where the stored origin and the world origin are the same three
  * zeros. On a georeferenced cloud it made PTX `local = xyz - origin` wrong by
- * the whole shift (local radii in thousands of km rather than metres) and
+ * the whole shift (local radii in thousands of km rather than meters) and
  * double-shifted the absolute header pose, because the writer re-adds
  * worldShift to an origin it assumes is stored-frame.
  *
@@ -21,7 +21,7 @@
  * into world to match, so a raw world-frame origin is correct there.
  *
  * Source-level because PointCloudViewer.tsx is E2E-covered rather than
- * unit-mounted; the numeric behaviour is asserted in
+ * unit-mounted; the numeric behavior is asserted in
  * backend-api/tests/test_ptx_export.py.
  */
 import { describe, it, expect } from 'vitest';

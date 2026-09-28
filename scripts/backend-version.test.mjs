@@ -183,7 +183,7 @@ describe('hashBackendSources — PyHelios inputs', () => {
     expect(hashLibhelios()).toBe(libBefore);
   });
 
-  it('reports a 40-hex commit for each initialised submodule', () => {
+  it('reports a 40-hex commit for each initialized submodule', () => {
     // `git rev-parse` rather than reading .git/HEAD, so a branch (symbolic
     // ref), a detached HEAD (raw SHA), and packed refs all resolve.
     const revs = pyheliosSubmoduleRevisions();
@@ -201,7 +201,7 @@ describe('hashBackendSources — PyHelios inputs', () => {
     // touching backend-api/ at all, which is precisely the shape that used to
     // slip through. Restored in `finally`, and the digest must come back.
     const sub = join(process.cwd(), 'pyhelios');
-    if (!existsSync(sub)) return; // submodule not initialised
+    if (!existsSync(sub)) return; // submodule not initialized
 
     const head = spawnSync('git', ['rev-parse', 'HEAD'], {
       cwd: sub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],

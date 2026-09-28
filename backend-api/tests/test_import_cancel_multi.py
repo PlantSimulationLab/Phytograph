@@ -1,4 +1,4 @@
-"""Cancelling an import on the endpoint the renderer ACTUALLY uses.
+"""Canceling an import on the endpoint the renderer ACTUALLY uses.
 
 `test_import_cancel.py` covers `/api/cloud/session/create` (singular). Every
 path-backed import in the app goes through `/api/cloud/session/create-multi`
@@ -20,7 +20,7 @@ no log, the work simply ran to completion after the user hit Cancel.
 The only thing that still stopped was `_run_potree_converter`, which polls the
 `cancel_event` object directly rather than going through the reporter. So a
 cancel took effect if and only if it happened to land while the converter was
-running. Land it a moment earlier — during the ASCII→LAS normalise or the point
+running. Land it a moment earlier — during the ASCII→LAS normalize or the point
 read, which is the common case for a large file — and the import completed and
 installed an octree into the cache long after the dialog was dismissed.
 
@@ -29,7 +29,7 @@ staging dir appearing 2.3 s LATER, and a fully installed cache entry 15 s after
 that.
 
 These tests pin the seam itself (a windowed reporter must forward the cancel
-protocol) and the behaviour through the real endpoint.
+protocol) and the behavior through the real endpoint.
 """
 
 import threading
@@ -76,14 +76,14 @@ def _install_fake_converter(monkeypatch, before_write=None):
 
 
 # --------------------------------------------------------------------------
-# The seam: a windowed reporter must stay cancellable.
+# The seam: a windowed reporter must stay cancelable.
 # --------------------------------------------------------------------------
 
 class _FakeReporter:
     """Stands in for _ProgressReporter: records calls, reports a cancel state."""
 
-    def __init__(self, cancelled: bool):
-        self._cancelled = cancelled
+    def __init__(self, canceled: bool):
+        self._canceled = canceled
         self.calls = []
         self.bound = None
 
@@ -91,7 +91,7 @@ class _FakeReporter:
         self.calls.append((fraction, message))
 
     def should_cancel(self) -> bool:
-        return self._cancelled
+        return self._canceled
 
     def bind_cancel_int(self, cancel_int):
         self.bound = cancel_int
@@ -100,31 +100,31 @@ class _FakeReporter:
 def test_windowed_progress_forwards_cancel_to_checkpoint():
     """The regression itself. `_cancel_checkpoint` must raise through the
     windowing wrapper — this is what a bare closure silently broke."""
-    outer = _FakeReporter(cancelled=True)
+    outer = _FakeReporter(canceled=True)
     windowed = main._WindowedProgress(outer, 0.0, 1.0, "[1/2] ")
 
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._cancel_checkpoint(windowed)
 
     assert windowed.should_cancel() is True
-    assert windowed.cancelled is True
-    with pytest.raises(main.ScanCancelled):
-        windowed.raise_if_cancelled()
+    assert windowed.canceled is True
+    with pytest.raises(main.ScanCanceled):
+        windowed.raise_if_canceled()
 
 
-def test_windowed_progress_does_not_raise_when_not_cancelled():
-    outer = _FakeReporter(cancelled=False)
+def test_windowed_progress_does_not_raise_when_not_canceled():
+    outer = _FakeReporter(canceled=False)
     windowed = main._WindowedProgress(outer, 0.25, 0.75, "")
     main._cancel_checkpoint(windowed)          # must not raise
-    windowed.raise_if_cancelled()              # must not raise
-    assert windowed.cancelled is False
+    windowed.raise_if_canceled()              # must not raise
+    assert windowed.canceled is False
 
 
 def test_windowed_progress_maps_fractions_into_its_slice():
-    """Behaviour parity with the closure it replaced: the sub-worker's own 0..1
+    """Behavior parity with the closure it replaced: the sub-worker's own 0..1
     is mapped into [lo, hi], the prefix is applied, and a None fraction (the
     indeterminate pulse) stays None."""
-    outer = _FakeReporter(cancelled=False)
+    outer = _FakeReporter(canceled=False)
     windowed = main._WindowedProgress(outer, 0.2, 0.6, "[1/2] ")
 
     windowed(0.0, "a")
@@ -141,7 +141,7 @@ def test_windowed_progress_maps_fractions_into_its_slice():
 
 
 def test_windowed_progress_clamps_out_of_range_fractions():
-    outer = _FakeReporter(cancelled=False)
+    outer = _FakeReporter(canceled=False)
     windowed = main._WindowedProgress(outer, 0.2, 0.6, "")
     windowed(-1.0, "lo")
     windowed(2.0, "hi")
@@ -158,7 +158,7 @@ def test_windowed_progress_tolerates_a_none_outer():
 
 
 def test_windowed_progress_delegates_bind_cancel_int():
-    outer = _FakeReporter(cancelled=False)
+    outer = _FakeReporter(canceled=False)
     windowed = main._WindowedProgress(outer, 0.0, 1.0, "")
     sentinel = object()
     windowed.bind_cancel_int(sentinel)
@@ -166,7 +166,7 @@ def test_windowed_progress_delegates_bind_cancel_int():
 
 
 # --------------------------------------------------------------------------
-# The behaviour, through the endpoint the renderer really calls.
+# The behavior, through the endpoint the renderer really calls.
 # --------------------------------------------------------------------------
 
 def test_create_multi_cancel_lands_at_the_next_checkpoint(
@@ -186,15 +186,15 @@ def test_create_multi_cancel_lands_at_the_next_checkpoint(
 
         broken: … Loading points into memory → Detecting sky/miss points →
                 Computing bounds → Writing octree source → Hashing point data
-        fixed:  … Loading points into memory → [cancelled]
+        fixed:  … Loading points into memory → [canceled]
 
-    Those four extra stages are the whole ASCII→LAS normalise, the miss scan, the
+    Those four extra stages are the whole ASCII→LAS normalize, the miss scan, the
     bounds pass, a full LAS write and a SHA-1 over every byte of the cloud. On the
     1M-point E2E fixture that is several seconds of work the user already asked
     to stop — and it is the window in which the observed leak happened, because
     once the converter does start, only its own poll loop can still stop it.
 
-    So: assert on the stage markers, which is what the user-visible behaviour
+    So: assert on the stage markers, which is what the user-visible behavior
     (and the wasted work) actually consists of.
     """
     converter_ran = threading.Event()
@@ -211,7 +211,7 @@ def test_create_multi_cancel_lands_at_the_next_checkpoint(
     real_source_to_las = main._source_to_las
     started = threading.Event()
 
-    def cancel_then_normalise(*args, **kwargs):
+    def cancel_then_normalize(*args, **kwargs):
         started.set()
         with main._CANCEL_REGISTRY_LOCK:
             ids = list(main._CANCEL_REGISTRY)
@@ -219,18 +219,18 @@ def test_create_multi_cancel_lands_at_the_next_checkpoint(
         main._cancel_run(ids[-1])
         return real_source_to_las(*args, **kwargs)
 
-    monkeypatch.setattr(main, "_source_to_las", cancel_then_normalise)
+    monkeypatch.setattr(main, "_source_to_las", cancel_then_normalize)
 
     sessions_before = set(main._cloud_sessions)
     res = client.post("/api/cloud/session/create-multi",
                       json={"source_path": str(grid_xyz),
                             "ascii_format": GRID_FORMAT})
     assert res.status_code == 200, res.text
-    assert started.is_set(), "the import never reached the normalise stage"
+    assert started.is_set(), "the import never reached the normalize stage"
 
     markers = decode_progress_markers(res.content)
-    assert any(m.get("cancelled") for m in markers), (
-        f"a cancelled create-multi must end with a terminal cancelled marker; "
+    assert any(m.get("canceled") for m in markers), (
+        f"a canceled create-multi must end with a terminal canceled marker; "
         f"got {markers}")
 
     stages = [m.get("message", "") for m in markers if m.get("message")]
@@ -252,13 +252,13 @@ def test_create_multi_cancel_lands_at_the_next_checkpoint(
     # The converter is covered by the direct-cancel_event backstop, so this is a
     # guard on that backstop rather than the checkpoint fix.
     assert not converter_ran.is_set(), (
-        "PotreeConverter ran after the user cancelled")
+        "PotreeConverter ran after the user canceled")
 
     # And nothing was published or installed.
     assert set(main._cloud_sessions) == sessions_before
     installed = ([p for p in cache_root.glob("*") if (p / "metadata.json").is_file()]
                  if cache_root.exists() else [])
-    assert not installed, f"a cancelled import installed an octree: {installed}"
+    assert not installed, f"a canceled import installed an octree: {installed}"
 
 
 def test_create_multi_cancel_installs_no_octree_when_it_lands_in_the_converter(
@@ -273,7 +273,7 @@ def test_create_multi_cancel_installs_no_octree_when_it_lands_in_the_converter(
         reached.set()
         release.wait(timeout=10)
         if cancel_event is not None and cancel_event.is_set():
-            raise main.ScanCancelled()
+            raise main.ScanCanceled()
 
     _install_fake_converter(monkeypatch, before_write=block)
 
@@ -304,13 +304,13 @@ def test_create_multi_cancel_installs_no_octree_when_it_lands_in_the_converter(
 
     res = result["res"]
     assert res.status_code == 200, res.text
-    assert any(m.get("cancelled") for m in decode_progress_markers(res.content))
+    assert any(m.get("canceled") for m in decode_progress_markers(res.content))
     installed = ([p for p in cache_root.glob("*") if (p / "metadata.json").is_file()]
                  if cache_root.exists() else [])
-    assert not installed, f"a cancelled import installed an octree: {installed}"
+    assert not installed, f"a canceled import installed an octree: {installed}"
 
 
-def test_create_multi_uncancelled_still_imports(
+def test_create_multi_uncanceled_still_imports(
         client, cache_root, grid_xyz, monkeypatch):
     """Guard the fix against over-reach: with no cancel, create-multi must still
     stream monotonic progress and return a real session."""
@@ -321,7 +321,7 @@ def test_create_multi_uncancelled_still_imports(
     assert res.status_code == 200, res.text
 
     markers = decode_progress_markers(res.content)
-    assert not any(m.get("cancelled") for m in markers)
+    assert not any(m.get("canceled") for m in markers)
     fractions = [m["progress"] for m in markers if m.get("progress") is not None]
     assert fractions == sorted(fractions), f"progress went backwards: {fractions}"
 

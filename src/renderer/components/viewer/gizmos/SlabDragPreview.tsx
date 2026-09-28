@@ -3,9 +3,9 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 import {
-  slabFromCentreline,
+  slabFromCenterline,
   slabToBox,
-  centrelineIsPreviewable,
+  centerlineIsPreviewable,
 } from '../../../lib/crossSection';
 
 // The slab you are ABOUT to create, drawn while you pick the second point.
@@ -73,14 +73,14 @@ export function SlabDragPreview({
     // Hide rather than render a degenerate box: at the instant of the first
     // click `a` and `b` coincide, the tangent is unstable, and a zero-width
     // flicker at the click point reads as a glitch.
-    if (!cursor || !centrelineIsPreviewable(first, cursor, bounds)) {
+    if (!cursor || !centerlineIsPreviewable(first, cursor, bounds)) {
       group.visible = false;
       (globalThis as any).__slabDragPreview = { visible: false };
       return;
     }
     group.visible = true;
 
-    const slab = slabFromCentreline(first, cursor, bounds, depth);
+    const slab = slabFromCenterline(first, cursor, bounds, depth);
     // E2E seam: the box is GPU-side geometry the DOM cannot show, so publish
     // the narrow facts a test needs — that it is drawn, and the dimensions it
     // is drawn at. Mirrors __labelOverlay / __slabDraw.

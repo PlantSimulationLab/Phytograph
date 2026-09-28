@@ -4,7 +4,7 @@ A colormap stretches its domain across the full ramp, so a domain taken from a
 column's absolute extrema is set by that column's single most extreme value. One
 saturated specular return in reflectance, one noise spike in deviation, and every
 real point crowds into a few percent of the ramp: the cloud renders as one flat
-colour and the structure the user is reading disappears, with nothing on screen
+color and the structure the user is reading disappears, with nothing on screen
 to explain why.
 
 These tests pin both halves — the tail is rejected, the real spread is not — plus

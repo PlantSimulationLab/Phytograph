@@ -24,13 +24,13 @@ test.beforeEach(async () => {
 // (1600 pts at z≈0) plus a raised plant blob (600 pts, z 0.12–0.8), shuffled.
 // CSF separates these cleanly. The 4th column is a ground-truth label but is
 // irrelevant to the workflow under test — segmentation computes its own
-// `ground_class` and that's what we colour by.
+// `ground_class` and that's what we color by.
 //
 // Drives the real DOM against the live backend: import (→ octree) → select →
-// open Ground Segmentation panel → run CSF → assert the cloud is re-coloured by
+// open Ground Segmentation panel → run CSF → assert the cloud is re-colored by
 // the discrete `ground_class` attribute (legend overlay appears, picker selects
 // it) and the optional split produces ground + plant child clouds.
-test('segments ground vs plant and colours by the ground_class attribute', async () => {
+test('segments ground vs plant and colors by the ground_class attribute', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
@@ -60,12 +60,12 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   await page.getByTestId('ground-segment-run-button').click();
 
   // The discrete class legend overlay appears once ground_class is the active
-  // scalar — proves the cloud is coloured categorically (ground vs plant),
-  // not by a continuous gradient or a solid colour.
+  // scalar — proves the cloud is colored categorically (ground vs plant),
+  // not by a continuous gradient or a solid color.
   const legend = page.getByTestId('class-legend');
   await expect(legend).toBeVisible({ timeout: 60_000 });
-  // The legend's attribute + class swatches prove the cloud is coloured by a
-  // discrete ground_class scalar (not a gradient or solid colour).
+  // The legend's attribute + class swatches prove the cloud is colored by a
+  // discrete ground_class scalar (not a gradient or solid color).
   await expect(legend).toHaveAttribute('data-legend-attribute', 'ground_class');
   await expect(legend.getByText('Ground', { exact: true })).toBeVisible();
   await expect(legend.getByText('Non-ground', { exact: true })).toBeVisible();
@@ -196,7 +196,7 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
 
   // While the backend rebuilds the octree the user MUST get a signal, or the
   // button reads as dead and they re-click — each click queueing another full
-  // filter. The pill is cancellable; here we just let it finish.
+  // filter. The pill is cancelable; here we just let it finish.
   // (Raced deliberately: on this small fixture the rebuild can beat the poll,
   // so a missing pill is only a failure if the work is still running.)
   const pill = page.getByTestId('filter-running');

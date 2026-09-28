@@ -25,7 +25,7 @@ ASCII_FORMAT = "x y z object_label"
 # Quantitative bars. The ground is the dominant lower surface in this scan, so
 # CSF should recover it almost perfectly; plant recall is lower because low
 # plant material within `class_threshold` of the soil reads as ground (a known,
-# acceptable CSF behaviour). Bars set below the observed numbers
+# acceptable CSF behavior). Bars set below the observed numbers
 # (acc≈0.98, ground_recall≈0.996, plant_recall≈0.95) with margin.
 MIN_ACCURACY = 0.90
 MIN_GROUND_RECALL = 0.90
@@ -292,7 +292,7 @@ def test_band_floor_needs_air_above_the_band():
     above 0.5 m, against a 47.2% base rate — i.e. that slice is almost purely
     pot, and the old cut swept all of it into the ground class.
 
-    The labelled tree_1 / tree_4 references behave the OPPOSITE way and must be
+    The labeled tree_1 / tree_4 references behave the OPPOSITE way and must be
     left alone: their density bottoms out at 0.00017-0.00019 of peak within
     ~7 cloth resolutions, a real empty gap, and the floor is what puts their
     thresholds at 0.184 / 0.145 (kappa 0.992 / 0.999 against ground truth).
@@ -343,7 +343,7 @@ def test_desnag_cloth_pulls_down_a_snagged_node():
 
     Models the `tree_1` reference, where 19 of 29,920 nodes (0.06%) rode up to
     1.19 m on a trunk while the rest sat at -0.08 m. Bilinear interpolation
-    spreads each bad node across its neighbourhood, so that handful of nodes
+    spreads each bad node across its neighborhood, so that handful of nodes
     put ~125k trunk points into the ground class."""
     ys, xs = np.mgrid[0:40, 0:40]
     flat = np.zeros((40, 40))

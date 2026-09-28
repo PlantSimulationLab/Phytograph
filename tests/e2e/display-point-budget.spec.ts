@@ -40,7 +40,7 @@ test('the display point budget setting drives the octree point budget on dialog 
       await expect(dialog).not.toBeVisible();
     };
 
-    // A fraction of a million is honoured (0.5 → 500 k), so the field is a
+    // A fraction of a million is honored (0.5 → 500 k), so the field is a
     // real number, not an integer that silently floors.
     await setBudget('0.5');
     await expect.poll(budget, { timeout: 10_000 }).toBe(500_000);

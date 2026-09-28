@@ -16,7 +16,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // handlers, and the backend that builds the meshes is live.
 //
 // Two properties this covers that a blob-capture test could not:
-//   1. The export writes only AFTER the user picks a destination — cancelling
+//   1. The export writes only AFTER the user picks a destination — canceling
 //      the dialog must leave nothing behind and report nothing.
 //   2. An OBJ export of a textured plant emits the whole bundle (.obj + .mtl +
 //      texture images) and re-imports with its materials intact.
@@ -131,11 +131,11 @@ test('exports a triangulated mesh to OBJ at the path the user chose', async () =
   expect(readdirSync(outDir).sort()).toEqual(['chosen_name.obj']);
 });
 
-test('writes nothing and reports nothing when the Save dialog is cancelled', async () => {
+test('writes nothing and reports nothing when the Save dialog is canceled', async () => {
   const { app, page } = session;
   await buildAndSelectMesh();
 
-  // A cancelled native Save dialog resolves to null.
+  // A canceled native Save dialog resolves to null.
   await app.evaluate(async ({ ipcMain }) => {
     const g = globalThis as unknown as { __saveDialogCalls?: unknown[] };
     g.__saveDialogCalls = [];
@@ -263,22 +263,22 @@ test('exports a textured plant as an OBJ + MTL + textures bundle that re-imports
 
   // Untextured organs (petioles, internodes, stems) are the majority of a bean's
   // triangles and carry NO texture — the backend leaves them out of the material
-  // groups because they render from vertex colours. They must still get a real
-  // `Kd`, or they come back flat grey: the reported round-trip bug.
+  // groups because they render from vertex colors. They must still get a real
+  // `Kd`, or they come back flat gray: the reported round-trip bug.
   const kds = mtl.split('\n')
     .filter(l => l.startsWith('Kd '))
     .map(l => l.slice(3).trim().split(/\s+/).map(Number));
   const untexturedKds = kds.filter(c => c.some(v => v !== 0.8));
   expect(untexturedKds.length).toBeGreaterThan(0);
-  // Plant organ colours are dark olive/green/brown — decisively not the 0.8 grey
+  // Plant organ colors are dark olive/green/brown — decisively not the 0.8 gray
   // fallback, and not white.
   for (const [r, g, b] of untexturedKds) {
     expect(Math.max(r, g, b)).toBeLessThan(0.95);
   }
-  // At least one organ colour is green-dominant (petioles/internodes/stems).
+  // At least one organ color is green-dominant (petioles/internodes/stems).
   expect(untexturedKds.some(([r, g, b]) => g > r && g > b)).toBe(true);
   // Every triangle is accounted for by a real material — nothing fell through to
-  // the grey default.
+  // the gray default.
   expect(obj).not.toContain('usemtl default');
 
   // A generated plant also writes its Helios structure XML beside the mesh.
@@ -301,20 +301,20 @@ test('exports a textured plant as an OBJ + MTL + textures bundle that re-imports
       { timeout: 30_000 })
     .toBeGreaterThan(0);
 
-  // The untextured organs came back with COLOUR, not grey. The importer rebuilds
-  // per-vertex colour from each triangle's material Kd, so this is the end of the
-  // chain the user actually sees: petioles and internodes the right colour.
+  // The untextured organs came back with COLOR, not gray. The importer rebuilds
+  // per-vertex color from each triangle's material Kd, so this is the end of the
+  // chain the user actually sees: petioles and internodes the right color.
   await expect(importedRow).toHaveAttribute('data-has-vertex-colors', 'true');
   const palette = await page.evaluate(() => {
     const mesh = (window as any).__meshVertexColorPalette?.();
     return mesh ?? null;
   });
   expect(palette, '__meshVertexColorPalette hook missing').not.toBeNull();
-  // Grey (0.8,0.8,0.8) was what every untextured organ collapsed to before the
-  // fix. A correct round-trip has none of it, and does have green organ colour.
-  const greyShare = palette.filter(
+  // Gray (0.8,0.8,0.8) was what every untextured organ collapsed to before the
+  // fix. A correct round-trip has none of it, and does have green organ color.
+  const grayShare = palette.filter(
     ([r, g, b]: number[]) => Math.abs(r - 0.8) < 0.02 && Math.abs(g - 0.8) < 0.02 && Math.abs(b - 0.8) < 0.02,
   ).length / palette.length;
-  expect(greyShare).toBeLessThan(0.05);
+  expect(grayShare).toBeLessThan(0.05);
   expect(palette.some(([r, g, b]: number[]) => g > r && g > b)).toBe(true);
 });

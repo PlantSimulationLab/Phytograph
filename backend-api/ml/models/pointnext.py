@@ -4,7 +4,7 @@ The architecture follows the paper: a stem MLP, four set-abstraction stages
 that each downsample and double the width, InvResMLP blocks inside each stage
 (a local max-pooled aggregation followed by an inverted-bottleneck MLP with a
 residual), and a feature-propagation decoder with skip connections. What
-differs is where the neighbourhoods come from (see ``ml/hierarchy.py``): they
+differs is where the neighborhoods come from (see ``ml/hierarchy.py``): they
 are precomputed indices, so every op here is a gather, a linear layer, a
 batch norm or a max. That runs on CUDA, MPS and CPU with no custom kernel.
 
@@ -14,7 +14,7 @@ The paper's variants, in (width, blocks per stage):
 - B = (32, (1, 2, 1, 1))
 - L = (32, (2, 4, 2, 2))
 
-Positions enter the network in metric units, relative to each group's centre
+Positions enter the network in metric units, relative to each group's center
 and divided by that level's radius. They are never rescaled per crop: a twig's
 diameter is itself the signal, so a 1 cm branch must look different from a
 10 cm one.
@@ -59,7 +59,7 @@ def _grouped(x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
 
 
 class GroupedPool(nn.Module):
-    """Pool a neighbourhood: MLP over [neighbour feature, relative position],
+    """Pool a neighborhood: MLP over [neighbor feature, relative position],
     then max over the group. Used both to downsample (set abstraction) and to
     aggregate within one level (the first half of InvResMLP)."""
 
@@ -113,7 +113,7 @@ class PointNeXtSeg(nn.Module):
         self.widths = widths
 
         # The input features always include the point's metric offset from the
-        # crop centre (3 channels) ahead of any extra channels.
+        # crop center (3 channels) ahead of any extra channels.
         self.stem = _mlp([in_channels, widths[0]])
         self.down = nn.ModuleList()
         self.stages = nn.ModuleList()
@@ -128,7 +128,7 @@ class PointNeXtSeg(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(widths[0], num_classes),
         )
-        # The offset head predicts in units of ``offset_scale`` metres, so its
+        # The offset head predicts in units of ``offset_scale`` meters, so its
         # outputs start near the size of an organ rather than 20x smaller.
         self.offset_scale = float(offset_scale)
         self.offset_head = nn.Sequential(_mlp([widths[0], widths[0]]), nn.Linear(widths[0], 4)) if offset else None
@@ -137,8 +137,8 @@ class PointNeXtSeg(nn.Module):
         """``batch`` is a collated hierarchy (see ``ml.hierarchy.collate``)
         whose arrays are torch tensors on the model's device, plus ``feat``:
         (n0, in_channels). Returns (n0, num_classes) logits, and with the
-        offset head also (n0, 3) offsets in metres and (n0,) log radii
-        (log metres)."""
+        offset head also (n0, 3) offsets in meters and (n0,) log radii
+        (log meters)."""
         pos, local, down = batch["pos"], batch["local"], batch["down"]
         x = self.stem(batch["feat"])
         skips = [x]

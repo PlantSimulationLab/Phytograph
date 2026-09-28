@@ -3,7 +3,7 @@
     PYTHONPATH=backend-api python -u backend-api/research/ml/organ_petiole_eval.py \\
         --cache .../cache_organ --out .../bench/beet_petioles.json --package NAME=path [--package ...]
 
-Sugar4D labels a whole beet leaf as one instance, petiole included, so no point is labelled petiole
+Sugar4D labels a whole beet leaf as one instance, petiole included, so no point is labeled petiole
 and the per-point benchmark cannot score the line PlantCloudFit needs. What the dataset does publish
 is a template-matched petiole length and total length for every leaf (``leaf_related.csv``). This
 script turns a model's per-point prediction into the same quantity:
@@ -46,7 +46,7 @@ def predicted_fraction(dist: np.ndarray, is_stem: np.ndarray, min_points: int = 
     stem points' distance from the base, over the leaf's extent. None when the model predicts no
     petiole on this leaf.
 
-    Not "the first run of mostly-stem distance bins": a neighbouring blade that overlaps a leaf's
+    Not "the first run of mostly-stem distance bins": a neighboring blade that overlaps a leaf's
     base puts blade points in its first bins, and that rule then scored a clearly found petiole as
     zero (seen in renders of 65_das_plant_002). And "no petiole" is scored separately rather than as
     zero, because Sugar4D is scanned from above and many petioles lie under blades, where no model

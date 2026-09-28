@@ -1,12 +1,12 @@
 """Frozen snapshot of `_format_points_as_text` as it was BEFORE the formatting
-optimisation (np.savetxt, row-by-row).
+optimization (np.savetxt, row-by-row).
 
 Used by test_text_formatting_matches_the_previous_implementation to prove the
 faster formatter is byte-identical. Kept as a snapshot rather than read from git
 at test time because a `git` subprocess segfaults once the native stack
 (open3d/pyhelios) is loaded in-process.
 
-Do NOT "fix" or optimise this file — its whole value is being the old behaviour.
+Do NOT "fix" or optimize this file — its whole value is being the old behavior.
 """
 from typing import Optional
 
@@ -24,7 +24,7 @@ def _format_points_as_text(
     text export exactly: 6-decimal positions, colors as 0-255 ints, intensity
     4-decimal.
 
-    Vectorised with `np.savetxt` rather than a per-point Python f-string loop —
+    Vectorized with `np.savetxt` rather than a per-point Python f-string loop —
     on a multi-million-point octree cloud the old loop dominated export time and
     held the whole formatted string list in RAM. Output is byte-identical to the
     previous loop (same precision, separators, headers, and no trailing newline).

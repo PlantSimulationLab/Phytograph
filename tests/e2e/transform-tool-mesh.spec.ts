@@ -4,7 +4,7 @@ import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
-// The Transform toolbar button was declared `requires: 'cloud'`, so it greyed
+// The Transform toolbar button was declared `requires: 'cloud'`, so it grayed
 // out whenever a MESH was selected — even though the mesh transform machinery
 // (position / rotation / scale, Move to Origin, Fit to Scans) was fully built
 // in its own floating TransformPanel. The only way in was the transform button
@@ -14,7 +14,7 @@ import { completeImportWizard } from './helpers/importWizard';
 // It's now `requires: 'cloud-or-mesh'` and routes on the selection: a mesh
 // opens the mesh TransformPanel, a cloud keeps the editMode draft panel it has
 // always had. QSMs are deliberately NOT covered — they have no transform state
-// at all, so the button correctly stays greyed for them.
+// at all, so the button correctly stays grayed for them.
 const CUBE_PLY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'cube-mesh.ply');
 const CLOUD_XYZ = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sparse.xyz');
 
@@ -27,7 +27,7 @@ test('the Transform toolbar button works for a mesh, not just a cloud', async ()
 
     const transformBtn = page.getByTestId('tool-cloud-translate');
 
-    // Nothing selected → the button is greyed out (unchanged behavior).
+    // Nothing selected → the button is grayed out (unchanged behavior).
     await expect(transformBtn).toBeDisabled();
 
     await importFiles(app, page, 'import-mesh', CUBE_PLY);

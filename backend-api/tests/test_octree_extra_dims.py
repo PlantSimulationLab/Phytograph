@@ -1,7 +1,7 @@
 """Tests for carrying arbitrary scalar columns into octree-backed clouds.
 
 Pure-helper unit tests (no PotreeConverter needed) for the column-plan /
-name-sanitisation logic.
+name-sanitization logic.
 
 The committed fixture `fixtures/scalars.xyz` is a comma-headered,
 space-delimited XYZ with two named scalar columns (Reflectance[dB],
@@ -74,7 +74,7 @@ def test_xyz_column_plan_promotes_unmapped_to_extras():
 
 def test_xyz_column_plan_dedupes_slug_collisions(tmp_path):
     f = tmp_path / "dup.xyz"
-    # Two headers that sanitise to the same slug.
+    # Two headers that sanitize to the same slug.
     f.write_text("A[],A[]\n0 0\n1 1\n")
     # Format marks both columns as unmapped via tokens not in known roles.
     names, extras = main._xyz_column_plan(f, "foo bar")
@@ -82,12 +82,12 @@ def test_xyz_column_plan_dedupes_slug_collisions(tmp_path):
     assert len(slugs) == len(set(slugs)), f"slugs not unique: {slugs}"
 
 
-# --- LAS intensity normalisation (round-trips via laspy, no PotreeConverter) -
+# --- LAS intensity normalization (round-trips via laspy, no PotreeConverter) -
 
 
-def test_intensity_to_las_uint16_normalises_db_scale():
+def test_intensity_to_las_uint16_normalizes_db_scale():
     """dB reflectance is all-negative; a fixed `* 256` + clip(0,…) would crush it
-    to a uniform 0. Normalising the range must spread it across the uint16 span."""
+    to a uniform 0. Normalizing the range must spread it across the uint16 span."""
     db = np.array([-14.8, -7.4, -0.001, -2.0], dtype=np.float64)
     out = main._intensity_to_las_uint16(db)
     assert out.dtype == np.uint16
@@ -170,14 +170,14 @@ def test_xyz_to_las_keeps_reflectance_when_intensity_present(tmp_path):
     las = laspy.read(str(out))
     assert "reflectance" in las.point_format.extra_dimension_names
     refl = np.asarray(las["reflectance"])
-    # Raw dB preserved (extra dims aren't normalised; the renderer scales by range).
+    # Raw dB preserved (extra dims aren't normalized; the renderer scales by range).
     assert refl.min() == pytest.approx(-14.8)
     assert refl.max() == pytest.approx(-0.001)
     assert any(e["slug"] == "reflectance" for e in eds)
 
 
 def test_xyz_to_las_db_intensity_consistent_across_chunks(tmp_path, monkeypatch):
-    """A multi-chunk file must normalise intensity against the GLOBAL range, so
+    """A multi-chunk file must normalize intensity against the GLOBAL range, so
     the gradient doesn't band at chunk seams. Force a tiny chunk size to split a
     small file across chunks and assert the global extremes still map to 0/65535."""
     src = tmp_path / "big.xyz"

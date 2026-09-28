@@ -106,12 +106,12 @@ describe('collectHitPoints', () => {
 
 describe('scatterToFullLength', () => {
   it('places hit-subset results back at their original cloud indices', () => {
-    // Backend labelled the 2 hits [7, 9]; cloud indices 1 and 3 were misses.
+    // Backend labeled the 2 hits [7, 9]; cloud indices 1 and 3 were misses.
     const out = scatterToFullLength([7, 9], [0, 2], 4);
     expect(Array.from(out)).toEqual([7, 0, 9, 0]);
   });
 
-  it('honours a custom fill for the non-hit slots', () => {
+  it('honors a custom fill for the non-hit slots', () => {
     const out = scatterToFullLength([5], [1], 3, -1);
     expect(Array.from(out)).toEqual([-1, 5, -1]);
   });

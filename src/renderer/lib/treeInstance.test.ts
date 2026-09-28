@@ -76,15 +76,15 @@ describe('tree instance scheme from observed values', () => {
     expect(scheme!.classes.map((c) => c.label)).toEqual(['Tree 3']);
   });
 
-  it('honours GAPS, which no min/max pair can express', () => {
+  it('honors GAPS, which no min/max pair can express', () => {
     // Keep Trees 1 and 3: the range is [1,3], so any range-derived list
     // resurrects Tree 2.
     const scheme = categoricalSchemeForRange('tree_instance', [1, 3], [1, 3]);
     expect(scheme!.classes.map((c) => c.value)).toEqual([1, 3]);
   });
 
-  it('keeps each class colour keyed to its id, not its position', () => {
-    // A surviving tree must not change colour because its siblings were
+  it('keeps each class color keyed to its id, not its position', () => {
+    // A surviving tree must not change color because its siblings were
     // filtered away.
     const before = categoricalSchemeForRange('tree_instance', [0, 3], [0, 1, 2, 3]);
     const after = categoricalSchemeForRange('tree_instance', [3, 3], [3]);

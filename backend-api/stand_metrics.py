@@ -162,7 +162,7 @@ def competition(trees: Sequence[dict], *, radius_m: float,
                           boundary, so competitors outside the plot are
                           missing and the index is an underestimate.
 
-    Neighbours come from a KD-tree over the stem bases, so the cost is
+    Neighbors come from a KD-tree over the stem bases, so the cost is
     O(N * k) in the trees near each one, not O(N^2). Two crowns can only
     overlap when their stem bases are within the sum of their reaches (the
     farthest hull vertex from each stem base). `check()`, when given, is
@@ -238,7 +238,7 @@ def crown_union_area(hulls: Sequence[Optional[np.ndarray]], *, cell_m: float = 0
     """(area covered by at least one crown projection in m², cell size used),
     measured on a raster; restricted to `within` (the convex plot polygon)
     when given. Each crown is first CLIPPED to the plot (both are convex, so
-    clip_convex is exact) and rasterised only over its own bounding box - no
+    clip_convex is exact) and rasterized only over its own bounding box - no
     full-extent coordinate grid is ever built. The cell grows past `cell_m`
     when the extent would exceed MAX_COVER_CELLS."""
     hs = []

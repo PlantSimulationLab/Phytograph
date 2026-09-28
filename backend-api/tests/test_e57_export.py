@@ -41,7 +41,7 @@ def _entry(points, *, n_theta=6, n_phi=8, origin=(0.0, 0.0, 0.0),
 
 def _grid_points(rows, cols, origin=(0.0, 0.0, 0.0), radius=5.0):
     """One point per cell of a rows x cols raster, on a sphere around `origin`,
-    placed at the CENTRE of each angular bin so binning is unambiguous."""
+    placed at the CENTER of each angular bin so binning is unambiguous."""
     th = (np.arange(rows) + 0.5) / rows * 180.0
     ph = (np.arange(cols) + 0.5) / cols * 360.0
     T, P = np.meshgrid(np.radians(th), np.radians(ph), indexing="ij")
@@ -123,7 +123,7 @@ class TestStructuredGrid:
         raw, _, stats = _read(res, tmp_path)
         assert stats["structured"] is True
         assert stats["source"] == "angles"
-        # Points were built at bin centres, so binning must recover their cells.
+        # Points were built at bin centers, so binning must recover their cells.
         assert np.array_equal(np.asarray(raw["rowIndex"]), rr.astype(np.uint16))
         assert np.array_equal(np.asarray(raw["columnIndex"]), cc.astype(np.uint16))
 

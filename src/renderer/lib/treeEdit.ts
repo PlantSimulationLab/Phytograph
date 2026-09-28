@@ -58,7 +58,7 @@ export function splitTreeByGaps(
   }
   if (idxs.length === 0) return compactLabels(labels);
 
-  // Map each point to a voxel key; union neighbouring occupied voxels (26-conn).
+  // Map each point to a voxel key; union neighboring occupied voxels (26-conn).
   const voxelOf = (i: number) => {
     const x = Math.floor(positions[i * 3] / res);
     const y = Math.floor(positions[i * 3 + 1] / res);

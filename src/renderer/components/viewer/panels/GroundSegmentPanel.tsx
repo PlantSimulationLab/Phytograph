@@ -82,7 +82,7 @@ export function GroundSegmentPanel({
           <InfoHint
             data-testid="ground-cloth-resolution-help"
             label="Cloth resolution"
-            text="Grid spacing of the simulated cloth, in metres. Smaller follows finer ground relief but runs slower; larger is coarser and faster. Seeded from the cloud's size — a few centimetres for close-range scans, larger for field-scale tiles."
+            text="Grid spacing of the simulated cloth, in meters. Smaller follows finer ground relief but runs slower; larger is coarser and faster. Seeded from the cloud's size — a few centimeters for close-range scans, larger for field-scale tiles."
           />
         </label>
         <DebouncedNumberInput
@@ -206,7 +206,7 @@ export function GroundSegmentPanel({
           data-testid="ground-split-clouds-help"
           label="Split into ground + plant clouds"
           align="right"
-          text="Also output two new clouds — ground and non-ground — alongside the classified original, so you can hide, export, or process them separately. The original is kept and recoloured by class, but hidden so it doesn't draw on top of the two halves — show it again with its eye toggle in the scan list."
+          text="Also output two new clouds — ground and non-ground — alongside the classified original, so you can hide, export, or process them separately. The original is kept and recolored by class, but hidden so it doesn't draw on top of the two halves — show it again with its eye toggle in the scan list."
         />
       </div>
 

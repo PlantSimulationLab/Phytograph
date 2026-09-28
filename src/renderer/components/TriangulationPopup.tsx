@@ -480,7 +480,7 @@ export function TriangulationPopup({
                 )}
                 {radiusAuto && (
                   <p className="text-[9px] text-neutral-500">
-                    Radius auto-computed from the median nearest-neighbour spacing.
+                    Radius auto-computed from the median nearest-neighbor spacing.
                   </p>
                 )}
 

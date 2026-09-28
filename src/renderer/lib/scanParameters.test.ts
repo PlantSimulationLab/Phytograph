@@ -326,7 +326,7 @@ describe('scannerModelIdFromFile', () => {
 
   it('does not hand a RIEGL body to another vendor', () => {
     // The fallback is anchored to the V-Line naming, not to "anything
-    // unrecognised" — a Velodyne or Livox identity must stay unset.
+    // unrecognized" — a Velodyne or Livox identity must stay unset.
     expect(scannerModelIdFromFile('VLP-16')).toBeUndefined();
     expect(scannerModelIdFromFile('Livox Mid-40')).toBeUndefined();
     expect(scannerModelIdFromFile('VUX-1UAV')).toBeUndefined();
@@ -349,7 +349,7 @@ describe('scannerModelIdFromFile', () => {
     expect(p.origin).toEqual({ x: 1, y: 2, z: 3 });
   });
 
-  it('falls back to the generic scanner for an unrecognised instrument', () => {
+  it('falls back to the generic scanner for an unrecognized instrument', () => {
     // Not "undefined": DEFAULT_SCAN_PARAMETERS already seeds 'generic', which
     // is exactly the right resting state — an unknown instrument draws a plain
     // marker and keeps the form's neutral defaults, rather than inheriting

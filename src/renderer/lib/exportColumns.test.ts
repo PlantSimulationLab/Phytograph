@@ -40,8 +40,8 @@ describe('supportsColumnSelection', () => {
     // PTS is positional (`x y z intensity r g b`) — a chosen subset would still
     // parse and be read WRONG, so the picker must not be offered.
     expect(supportsColumnSelection('pts')).toBe(false);
-    // PCD packs colour into one float-cast `rgb` field and its reader returns
-    // position + colour only.
+    // PCD packs color into one float-cast `rgb` field and its reader returns
+    // position + color only.
     expect(supportsColumnSelection('pcd')).toBe(false);
   });
 });
@@ -61,7 +61,7 @@ describe('usesFixedColumnOrder', () => {
 describe('lockFixedDimsForLas', () => {
   // LAS cannot omit x/y/z (they ARE the point record) or intensity (present in
   // the core record of every point format 0-3, so deselecting could only write
-  // zeros). Colour is deliberately NOT locked: dropping r/g/b selects point
+  // zeros). Color is deliberately NOT locked: dropping r/g/b selects point
   // format 1, which has no RGB dimension — a real omission.
   const sample = (): ExportColumn[] => [
     { slug: 'x', label: 'X', kind: 'geometry', selected: true },
@@ -82,7 +82,7 @@ describe('lockFixedDimsForLas', () => {
     }
   });
 
-  it('leaves colour selectable — dropping RGB is a real omission in LAS', () => {
+  it('leaves color selectable — dropping RGB is a real omission in LAS', () => {
     const by = Object.fromEntries(lockFixedDimsForLas(sample()).map(c => [c.slug, c]));
     expect(by['r'].selected).toBe(false);
     expect(by['r'].required).toBeUndefined();
@@ -118,7 +118,7 @@ describe('defaultExportColumns', () => {
     expect(cols.every(c => c.selected)).toBe(true);
   });
 
-  it('adds r/g/b after xyz when the cloud has colours', () => {
+  it('adds r/g/b after xyz when the cloud has colors', () => {
     const cols = defaultExportColumns({
       colors: new Float32Array([0, 0, 0]), scalarFields: {},
     } as never);
@@ -146,7 +146,7 @@ describe('defaultExportColumns', () => {
   // The regression these guard: an octree/session-backed cloud (i.e. EVERY
   // normal import — xyz/txt/csv/ply/pcd/las/laz/e57) keeps no flat arrays at all,
   // and `asciiFormat` is set only by the Helios-XML importer. So the picker saw
-  // no colours, no intensity and no scalarFields, and degenerated to bare x/y/z.
+  // no colors, no intensity and no scalarFields, and degenerated to bare x/y/z.
   // `attributeRanges` keys are the authoritative field list for those clouds.
   describe('octree attributes (the normal import path)', () => {
     it('surfaces scalars from octree attributes with no asciiFormat and no flat arrays', () => {
@@ -156,7 +156,7 @@ describe('defaultExportColumns', () => {
       );
       const slugs = cols.map(c => c.slug);
       expect(slugs.slice(0, 3)).toEqual(['x', 'y', 'z']);
-      // rgb maps to the three colour slugs...
+      // rgb maps to the three color slugs...
       expect(slugs).toContain('r');
       expect(slugs).toContain('g');
       expect(slugs).toContain('b');
@@ -185,7 +185,7 @@ describe('defaultExportColumns', () => {
           ],
         },
       );
-      // Only geometry, colour, and the one real scalar survive.
+      // Only geometry, color, and the one real scalar survive.
       expect(cols.map(c => c.slug)).toEqual(['x', 'y', 'z', 'r', 'g', 'b', 'reflectance']);
     });
 
@@ -262,7 +262,7 @@ describe('defaultExportColumns', () => {
       expect(slugs).not.toContain('intensity');
       expect(slugs).not.toContain('classification');
       expect(slugs).toContain('reflectance');
-      // Colour survives: its range is real.
+      // Color survives: its range is real.
       expect(slugs).toContain('r');
     });
 
@@ -280,7 +280,7 @@ describe('defaultExportColumns', () => {
       expect(cols.map(c => c.slug)).toContain('classification');
     });
 
-    it('drops a degenerate rgb so no phantom colour columns appear', () => {
+    it('drops a degenerate rgb so no phantom color columns appear', () => {
       const cols = defaultExportColumns(
         { scalarFields: {} } as never,
         {
@@ -307,7 +307,7 @@ describe('defaultExportColumns', () => {
       expect(cols.map(c => c.slug)).toContain('reflectance');
     });
 
-    it('adds no colour columns when the octree has no rgb attribute', () => {
+    it('adds no color columns when the octree has no rgb attribute', () => {
       const cols = defaultExportColumns(
         { scalarFields: {} } as never,
         { octreeAttributes: ['position', 'reflectance'] },
@@ -318,7 +318,7 @@ describe('defaultExportColumns', () => {
 
   it('recovers columns from an ASCII_format hint for octree clouds (no in-RAM fields)', () => {
     // An octree cloud has no in-RAM colors/scalarFields; columns come from the
-    // Helios ASCII_format. 'row'/'column' become scalars; r/g/b become colour.
+    // Helios ASCII_format. 'row'/'column' become scalars; r/g/b become color.
     const cols = defaultExportColumns(
       { scalarFields: {} } as never,
       { asciiFormat: 'row column x y z r g b reflectance' },
@@ -363,7 +363,7 @@ describe('cellValue', () => {
     intensities: new Float32Array([0.25]),
     scalarFields: { is_miss: field([1]) },
   };
-  it('formats geometry to 6 dp and colour to 0-255 ints', () => {
+  it('formats geometry to 6 dp and color to 0-255 ints', () => {
     expect(cellValue(data as never, 'x', 0)).toBe('1.500000');
     expect(cellValue(data as never, 'r', 0)).toBe('255');
     expect(cellValue(data as never, 'g', 0)).toBe('128');
@@ -425,7 +425,7 @@ describe('buildBareAsciiExport', () => {
 });
 
 describe('ptsColumnSlugs', () => {
-  it('puts intensity BEFORE colour', () => {
+  it('puts intensity BEFORE color', () => {
     // Canonical PTS is `x y z intensity r g b`. Any other order still parses and
     // is read wrong — a reader takes column 3 as red if intensity is absent.
     expect(ptsColumnSlugs({
@@ -492,7 +492,7 @@ describe('buildPcdExport', () => {
     expect(decode(body[0])).toEqual([255, 0, 0]);
     expect(decode(body[1])).toEqual([0, 255, 0]);
   });
-  it('omits the rgb field for a cloud with no colour', () => {
+  it('omits the rgb field for a cloud with no color', () => {
     const text = buildPcdExport({
       pointCount: 1, positions: new Float32Array([0, 0, 0]),
     } as never);

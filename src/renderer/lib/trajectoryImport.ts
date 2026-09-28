@@ -24,7 +24,7 @@ export const TRAJECTORY_EXTENSIONS: readonly string[] = [
 
 // The dialog filter list. Deliberately a SINGLE combined entry rather than one
 // per format: on macOS `showOpenDialog` applies only the FIRST filter's
-// allowedFileTypes, so splitting text and binary across two entries greys out
+// allowedFileTypes, so splitting text and binary across two entries grays out
 // every .out/.sbet file — the user cannot select the SBET they came to import,
 // and the second filter is reachable only through a format popup that is easy to
 // miss. That is exactly how this shipped, and why an Applanix .out looked
@@ -55,7 +55,7 @@ export async function parseTrajectoryFromPath(path: string): Promise<PoseStream>
 }
 
 // Open the native file picker for a trajectory file and parse the user's choice.
-// Returns the parsed PoseStream, or null if the user cancelled the dialog. Throws
+// Returns the parsed PoseStream, or null if the user canceled the dialog. Throws
 // PoseStreamParseError / Error on a malformed file (callers surface the message).
 export async function pickAndParseTrajectory(): Promise<PoseStream | null> {
   const picked = await window.electronAPI.dialog.open({

@@ -10,7 +10,7 @@ It is not a surface point. The hits-only octree already excludes `is_miss != 0`
 (see `_session_to_las(exclude_misses=True)`), but `_read_points_from_source` —
 the single chokepoint every compute op reads through — only applied the
 `deleted` mask, so triangulate/skeleton/LAD/export still saw the misses. Ball
-pivoting then tried to span a dense mm-scale cube AND a phantom shell a kilometre
+pivoting then tried to span a dense mm-scale cube AND a phantom shell a kilometer
 away; the auto-radius (mean NN distance, ~1.2 m, dragged up by the far points)
 made BPA explode combinatorially.
 

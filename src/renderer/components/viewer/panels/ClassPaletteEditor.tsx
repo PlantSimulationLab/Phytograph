@@ -43,11 +43,11 @@ export interface ClassPaletteEditorProps {
   /**
    * Points currently carrying each class value, keyed by value.
    *
-   * Drives the value-lock below: renaming and recolouring a class are always
+   * Drives the value-lock below: renaming and recoloring a class are always
    * safe, but CHANGING ITS VALUE is not, because the backend column stores real
    * class values. Repointing a class that already has points would leave those
    * points holding a number the palette no longer describes — they would read
-   * as unlabelled with no warning and no undo. So a class with points keeps its
+   * as unlabeled with no warning and no undo. So a class with points keeps its
    * value; an empty one is free to move.
    */
   classCounts?: Record<number, number>;
@@ -118,7 +118,7 @@ export function ClassPaletteEditor({
       ...d,
       // Editing any class makes this the user's own palette, not the preset it
       // started from — `preset` is provenance, and keeping it would relabel a
-      // customised palette as stock.
+      // customized palette as stock.
       preset: undefined,
       classes: d.classes.map((c, i) => (i === index ? { ...c, ...patch } : c)),
     }));
@@ -157,10 +157,10 @@ export function ClassPaletteEditor({
         classes: [...d.classes, {
           value,
           label: derivedNumbering && sharedStem ? `${sharedStem}${value}` : 'New class',
-          // Match the colour the viewer already draws for this id, so a class
+          // Match the color the viewer already draws for this id, so a class
           // added here and a class the segmentation wrote look alike. A class
-          // of the user's own gets a colour distinct from its siblings, never
-          // Unclassified's grey.
+          // of the user's own gets a color distinct from its siblings, never
+          // Unclassified's gray.
           color: derivedNumbering
             ? treeInstanceColor(value)
             : distinctClassColor(d.classes.map((c) => c.color)),
@@ -252,7 +252,7 @@ export function ClassPaletteEditor({
           const isUnclassified = c.value === UNCLASSIFIED_VALUE;
           // Class 0 is required in every palette (merge zero-fills a missing
           // column, so 0 must mean "unclassified" everywhere) — it can be
-          // recoloured but never removed or repointed.
+          // recolored but never removed or repointed.
           const valueLocked = isUnclassified || painted > 0;
           return (
             <div
@@ -267,7 +267,7 @@ export function ClassPaletteEditor({
                 type="color"
                 value={rgbToHex(c.color)}
                 onChange={(e) => patchClass(i, { color: hexToRgb(e.target.value) })}
-                title="Class colour"
+                title="Class color"
                 className="w-6 h-6 shrink-0 bg-transparent border border-neutral-700 rounded cursor-pointer"
               />
               <DebouncedNumberInput
@@ -314,7 +314,7 @@ export function ClassPaletteEditor({
                 title={isUnclassified
                   ? 'Unclassified cannot be removed'
                   : painted > 0
-                    ? `Remove — ${painted.toLocaleString()} points carry this class and will read as unlabelled`
+                    ? `Remove — ${painted.toLocaleString()} points carry this class and will read as unlabeled`
                     : 'Remove class'}
                 className="p-1 shrink-0 rounded text-neutral-500 hover:text-red-300 hover:bg-red-900/40 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-neutral-500"
               >

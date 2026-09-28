@@ -10,7 +10,7 @@
 //      class palettes, rivlib path, synthetic-scan defaults). Any spec or dev
 //      session that changes a setting through the UI overwrote them for good.
 //   2. Chromium's profile, including `<userData>/Cache` — which Chromium EMPTIES
-//      when it initialises its disk cache. Every dev/E2E launch therefore wiped
+//      when it initializes its disk cache. Every dev/E2E launch therefore wiped
 //      whatever the running desktop app had in there. That is how a live desktop
 //      session lost the octrees for a cloud it had edited: the octree cache used
 //      to live at <userData>/cache/octrees, the same directory on a
@@ -84,7 +84,7 @@ describe('docs/scripts/capture-screenshots.mjs', () => {
 // One definition, shared by dev.mjs and the capture script. A per-OS path
 // computed twice and validated on only the OS where the two happen to agree is
 // exactly what shipped the octree-cache divergence (see CLAUDE.md), so the
-// resolver is asserted on its BEHAVIOUR here rather than by grepping each
+// resolver is asserted on its BEHAVIOR here rather than by grepping each
 // caller for platform strings.
 describe('scripts/dev-state-root.mjs', () => {
   it('is the single definition — callers import it rather than re-deriving', () => {

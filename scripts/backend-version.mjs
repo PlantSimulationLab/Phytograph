@@ -143,7 +143,7 @@ export function readExpectedBackendVersion() {
  *
  * Uses `git rev-parse HEAD` rather than reading .git/HEAD directly: a submodule
  * may be on a branch (a symbolic ref), detached (a raw SHA), or have its refs
- * packed, and git resolves all three. A submodule that isn't initialised, or a
+ * packed, and git resolves all three. A submodule that isn't initialized, or a
  * tree with no git at all (an unpacked source tarball), yields 'absent' — a
  * stable value, so the digest stays deterministic instead of throwing.
  */
@@ -208,7 +208,7 @@ export function hashBackendSources() {
     if (!existsSync(full) || !statSync(full).isFile()) continue;
     files.push([rel, full]);
   }
-  // Normalise separators so a Windows build and a macOS build of identical
+  // Normalize separators so a Windows build and a macOS build of identical
   // sources produce identical digests.
   files.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const h = createHash('sha256');

@@ -1,8 +1,8 @@
 # Ship candidate (2026-09-26): the hl_ft recipe (hand-label-like synthetic wood mixed into the real
-# fine-tune, leaf-off almonds, clear-of-wood seeding) plus both hand-labelled redbuds. One of three
+# fine-tune, leaf-off almonds, clear-of-wood seeding) plus both hand-labeled redbuds. One of three
 # seeds; the shipped one is chosen by validation mIoU.
 name: final2_s2
-description: "Leaf/wood PointNeXt-S: hand-label-like synthetic wood, real trees, both labelled redbuds and leaf-off almonds (seed 2)."
+description: "Leaf/wood PointNeXt-S: hand-label-like synthetic wood, real trees, both labeled redbuds and leaf-off almonds (seed 2)."
 task: wood_leaf
 cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
 out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs

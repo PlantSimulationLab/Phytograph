@@ -4,7 +4,7 @@ Reading RIEGL raw scanner data needs RIEGL's closed-source RiVLib, which has no
 macOS build, so Phytograph runs it inside a linux/amd64 container. The feature
 is therefore available only when three things hold at once: Docker is reachable,
 the user has supplied their own RiVLib copy, and the image has been built from
-it. RiVLib's licence forbids redistribution, so it can never be bundled — hence
+it. RiVLib's license forbids redistribution, so it can never be bundled — hence
 a runtime probe rather than a build flag.
 
 Every probe here is monkeypatched. These tests must not depend on whether the
@@ -443,7 +443,7 @@ def test_inspect_503s_when_capability_unavailable(client, monkeypatch, tmp_path)
 
 
 def _plenty_of_disk(monkeypatch):
-    """Neutralise the pre-flight free-space check.
+    """Neutralize the pre-flight free-space check.
 
     These tests are about mounts and session building, not capacity — without
     this they fail with 507 on any machine whose disk happens to be full, which
@@ -634,7 +634,7 @@ def test_streamed_arrays_map_onto_session_inputs(monkeypatch):
         "is_miss", "reflectance", "amplitude", "deviation",
         "target_index", "target_count",
     }
-    # `is_miss` is carried through from the reader, not synthesised here — this
+    # `is_miss` is carried through from the reader, not synthesized here — this
     # fixture happens to supply all-hits.
     assert float(res.extras["is_miss"].sum()) == 0.0
     # Multi-return columns survive verbatim — LAD reads these.
@@ -727,7 +727,7 @@ def test_misses_survive_the_origin_translation():
     )
 
 
-def test_miss_flag_is_carried_not_synthesised():
+def test_miss_flag_is_carried_not_synthesized():
     """`is_miss` must come from the reader, not be zeroed here.
 
     It used to be hardcoded to all-zeros because .rxp appeared to have no
@@ -1074,7 +1074,7 @@ def test_a_sop_rotates_as_well_as_translates():
 def test_the_sop_supersedes_the_gnss_prior():
     """Passing both would place the cloud twice.
 
-    `origin` is the metres-level GNSS seed and the SOP is the surveyed pose;
+    `origin` is the meters-level GNSS seed and the SOP is the surveyed pose;
     applying them together would offset every registered cloud by the prior on
     top of its real position.
     """
@@ -1140,10 +1140,10 @@ def test_frame_validation_rejects_an_unknown_frame():
     assert exc.value.status_code == 400
 
 
-def test_a_levelling_matrix_takes_the_same_path_as_a_sop():
+def test_a_leveling_matrix_takes_the_same_path_as_a_sop():
     """The sensor frame reuses the SOP transform wholesale.
 
-    A levelling matrix is an ordinary 4x4, so hits and miss directions must
+    A leveling matrix is an ordinary 4x4, so hits and miss directions must
     turn together exactly as they do under a registration SOP — the frame only
     changes where the matrix came from, never how it is applied.
     """

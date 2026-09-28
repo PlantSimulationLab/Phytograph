@@ -200,7 +200,7 @@ def test_skeleton_on_tricky_fork():
 # nothing in the build passes -O, so it ships. The original walked every node to
 # the root with a Python set per node -- O(K x depth), and a QSM skeleton is
 # chain-like by construction, so depth scales with K (measured 56.8s on a real
-# 57,863-node skeleton). It is now vectorised pointer doubling. These pin the
+# 57,863-node skeleton). It is now vectorized pointer doubling. These pin the
 # REJECTIONS, which the happy-path tests above cannot: a guard that returns True
 # for everything would pass all of them.
 

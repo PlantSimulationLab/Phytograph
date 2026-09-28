@@ -13,7 +13,7 @@ import { resetToFreshScene } from './helpers/resetApp';
 //    process, no renderer gesture needed). importFiles() now drives that real
 //    dialog → readBinary → import pipeline, so these tests exercise the fix.
 //
-// 2. Dropping a mesh .ply after a cancelled skeleton import raised
+// 2. Dropping a mesh .ply after a canceled skeleton import raised
 //    "Unsupported skeleton format: .ply" — a stale pendingImportTypeRef from
 //    the menu leaked into the next drop. The fix removes the menu's dependency
 //    on that ref entirely and makes drops auto-detect explicitly.
@@ -63,7 +63,7 @@ test('File → Import → Skeleton imports a skeleton through the native dialog'
   await expect(page.getByTestId('scan-row')).toHaveCount(0);
 });
 
-test('a dropped mesh .ply still auto-detects after a cancelled skeleton import', async () => {
+test('a dropped mesh .ply still auto-detects after a canceled skeleton import', async () => {
   const { app, page } = session;
   await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 

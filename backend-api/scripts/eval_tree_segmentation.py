@@ -212,7 +212,7 @@ def evaluate_file(path: Path, args) -> dict:
     from treeiso.treeiso_core import segment_trees, TreeIsoParams
 
     xyz, gt = load(path)
-    # Drop ground / unlabelled points so TreeIso (above-ground) is judged fairly.
+    # Drop ground / unlabeled points so TreeIso (above-ground) is judged fairly.
     ground_ids = set(int(x) for x in args.ground_ids.split(",")) if args.ground_ids else set()
     keep = ~np.isin(gt, list(ground_ids)) if ground_ids else np.ones(len(gt), bool)
     xyz, gt = xyz[keep], gt[keep]

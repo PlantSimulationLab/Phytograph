@@ -13,6 +13,7 @@ import {
   blockedReason,
   effectiveCheckedIds,
   exportBaseName,
+  type BaseNamePosition,
   mergeCheckedIntent,
   objectDetailLine,
   plannedFileNames,
@@ -45,7 +46,7 @@ export interface ExportModalProps {
   // cloud. Only affects the INITIAL check state (see seedCheckedIds): the object
   // list itself always shows every cloud in the scene.
   sceneSelectionHasNonCloud: boolean;
-  // Available export columns for a given cloud id (geometry + colour + scalars/
+  // Available export columns for a given cloud id (geometry + color + scalars/
   // labels), in default order. `null` asks for the representative set used by the
   // multi-object column picker. Called per render for the checked object, so the
   // parent should keep it stable (useCallback).
@@ -88,6 +89,7 @@ export interface ExportModalProps {
   onExportScanXml: (
     scanIds: string[], includeMisses: boolean, writeXml: boolean,
     columns: string[], dataFormat: string, gridIds: string[], baseName: string,
+    basePosition: BaseNamePosition,
   ) => void;
   onExportMesh: (format: 'obj' | 'ply' | 'stl') => void;
   // DEM raster export (mesh.method === 'dem' only): ESRI ASCII grid or GeoTIFF.
@@ -111,7 +113,7 @@ export type ScanDataFormat = typeof SCAN_DATA_FORMATS[number];
 //     cloud as OBJ and re-importing yields a FACE-LESS MESH, not the cloud. It
 //     was the only cloud format Phytograph could not round-trip.
 //   * It is lossy in a way no sibling is. A `v` line takes exactly x/y/z, so
-//     colour, intensity and every scalar are dropped — which is why it was the
+//     color, intensity and every scalar are dropped — which is why it was the
 //     one format excluded from the column picker.
 //   * XYZ dominates it: the same information, smaller, and re-importable. For
 //     getting points into Blender/MeshLab, PLY is offered and is the better fit.
@@ -124,7 +126,7 @@ const CLOUD_FORMATS: { id: 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'asc'
   { id: 'txt', label: 'TXT', title: 'Space-delimited with header and scalar fields' },
   { id: 'asc', label: 'ASC', title: 'Bare whitespace-separated ASCII, no header line' },
   { id: 'pts', label: 'PTS', title: 'Leica PTS: point-count line, then x y z intensity r g b (fixed order)' },
-  { id: 'pcd', label: 'PCD', title: 'PCL Point Cloud Data (ASCII) — position and colour only' },
+  { id: 'pcd', label: 'PCD', title: 'PCL Point Cloud Data (ASCII) — position and color only' },
 ];
 
 export function ExportModal({
@@ -161,6 +163,9 @@ export function ExportModal({
   // alone once the user types: the seed follows the selection, their text does
   // not get overwritten by it.
   const [baseNameDraft, setBaseNameDraft] = useState<string | null>(null);
+  // Multi-object names: base before the object name (<base>_<name>) or after it
+  // (<name>_<base>). An empty base drops it entirely, so this is moot then.
+  const [basePosition, setBasePosition] = useState<BaseNamePosition>('prefix');
   // Grid export (XML mode only): off by default; when on, reveals a checklist of
   // the scene's voxel-box grids. An empty selection writes no <grid> blocks.
   const [exportGrid, setExportGrid] = useState(false);
@@ -224,9 +229,10 @@ export function ExportModal({
   const baseName = baseNameDraft ?? seededBaseName;
   const scanExt = xmlMode ? 'xyz' : scanDataFormat;
   const plannedNames = useMemo(
-    () => plannedFileNames(checkedScans.map(o => o.name), baseName, scanExt, xmlMode),
+    () => plannedFileNames(checkedScans.map(o => o.name), baseName, scanExt, xmlMode, basePosition),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [checkedScans.map(o => o.name).join('\u0000'), baseName, scanExt, xmlMode]);
+    [checkedScans.map(o => o.name).join('\u0000'), baseName, scanExt, xmlMode, basePosition]);
+  const baseIsEmpty = exportBaseName(baseName) === '';
 
   const pickerItems = useMemo(
     () => exportObjects.map(o => ({
@@ -266,7 +272,7 @@ export function ExportModal({
   const [classByte, setClassByte] = useState('');
 
   // Columns for a LAS/LAZ export: the standard dimensions it cannot omit
-  // (x/y/z, intensity) are forced on and locked; colour and scalars stay
+  // (x/y/z, intensity) are forced on and locked; color and scalars stay
   // selectable. Mirrors `scanColumns` below.
   const lasColumns = useMemo(() => lockFixedDimsForLas(columns), [columns]);
   // The list the cloud picker actually renders/submits for the chosen format.
@@ -474,7 +480,7 @@ export function ExportModal({
                    the branch a fixed-schema format would land in if one is added
                    back; `cloudFormatTakesColumns` still gates the picker. */
                 <div className="text-[10px] text-neutral-500" data-testid="export-fixed-schema-note">
-                  This format writes a fixed set of fields — colour and scalars
+                  This format writes a fixed set of fields — color and scalars
                   cannot be chosen. Use PLY, LAS or CSV to keep them.
                 </div>
               )}
@@ -652,14 +658,45 @@ export function ExportModal({
                   so misrepresented every multi-object export: the file it
                   offered to save was never the file that got written. The name
                   is typed here, the preview says what will land on disk, and the
-                  button asks only for a folder. */}
-              <div className="text-[10px] text-neutral-400 mb-1">Base name</div>
+                  button asks only for a folder. An empty name is allowed: each
+                  file is then named after its object alone. */}
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-neutral-400">Base name</span>
+                {/* Compact Before/After switch on the label row: where the base
+                    goes relative to each object's name. Several objects only —
+                    a lone object is written under the base name alone. */}
+                {checkedScans.length > 1 && (
+                  <div
+                    className="inline-flex rounded border border-neutral-700 overflow-hidden"
+                    data-testid="export-base-position"
+                  >
+                    {(['prefix', 'suffix'] as const).map(p => (
+                      <button
+                        key={p}
+                        data-testid={`export-base-position-${p}`}
+                        data-active={basePosition === p ? 'true' : 'false'}
+                        onClick={() => setBasePosition(p)}
+                        disabled={baseIsEmpty}
+                        title={baseIsEmpty
+                          ? 'No base name — each file is named after its object alone.'
+                          : p === 'prefix' ? 'Before the object name: <base>_<object>' : 'After the object name: <object>_<base>'}
+                        className={`px-1.5 py-0.5 text-[10px] leading-none ${
+                          baseIsEmpty
+                            ? 'text-neutral-600 cursor-not-allowed'
+                            : basePosition === p
+                              ? 'bg-green-600 text-white'
+                              : 'text-neutral-300 hover:bg-neutral-700'}`}
+                      >{p === 'prefix' ? 'Prepend' : 'Append'}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <input
                 type="text"
                 data-testid="export-base-name"
                 value={baseName}
                 onChange={e => setBaseNameDraft(e.target.value)}
-                placeholder={seededBaseName}
+                placeholder={checkedScans.length > 1 ? 'Empty: use object names' : 'Empty: use the object name'}
                 spellCheck={false}
                 className="w-full px-2 py-1.5 mb-2 rounded text-[11px] bg-neutral-900 border border-neutral-700 text-neutral-100 focus:outline-none focus:border-green-600"
               />
@@ -687,6 +724,7 @@ export function ExportModal({
                   xmlMode ? 'xyz' : scanDataFormat,
                   exportGrid && xmlMode ? [...checkedGridIds] : [],
                   baseName,
+                  basePosition,
                 )}
                 disabled={checkedScans.length === 0}
                 className={`w-full px-2 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${

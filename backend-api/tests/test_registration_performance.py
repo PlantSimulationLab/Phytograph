@@ -2,7 +2,7 @@
 
 Every number here was a real regression found on real data (a 4-scan RIEGL
 almond survey). They are asserted loosely — the point is to catch a return to
-the pathological behaviour, not to police normal variation on a busy machine.
+the pathological behavior, not to police normal variation on a busy machine.
 """
 
 import time

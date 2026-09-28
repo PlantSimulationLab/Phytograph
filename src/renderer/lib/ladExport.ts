@@ -42,7 +42,7 @@ export function ladExportVariables(hasWood: boolean): { key: string; label: stri
 }
 
 // 'txt' is the plain-text grid summary — the one place LAI is reported, since no
-// other format carries it. (A VoxLAD-flavoured '.asc' was offered briefly and
+// other format carries it. (A VoxLAD-flavored '.asc' was offered briefly and
 // removed: one tool's undocumented output, with a leaf-angle class we could only
 // approximate. GeoTIFF is the interoperable option, .vox the community one.)
 export type LadExportFormat = 'tif' | 'csv' | 'vox' | 'txt';
@@ -118,7 +118,7 @@ export function ladWorldOrigin(result: LADResultEntry): [number, number, number]
  *
  * Every coordinate is shifted stored→world here, once, so no downstream caller
  * has to remember to. `solved` defaults to true for a legacy voxel with no flag:
- * that preserves the old behaviour rather than silently voiding a whole grid.
+ * that preserves the old behavior rather than silently voiding a whole grid.
  */
 export function buildLadExportRequest(
   result: LADResultEntry,

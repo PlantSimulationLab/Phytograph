@@ -13,7 +13,7 @@ You need:
   points/dm³ on branches.
 
 Skeleton extraction runs on point clouds only — a mesh is not a valid input,
-and the tool stays greyed out unless a single cloud is selected.
+and the tool stays grayed out unless a single cloud is selected.
 
 Leaves can be present but degrade results — if you have a way to
 filter the cloud to woody points only (intensity threshold,

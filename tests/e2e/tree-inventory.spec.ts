@@ -149,7 +149,7 @@ test('ground -> DEM -> trees -> inventory -> stand -> QSMs on known stems', asyn
       .toBeGreaterThan(34.5);
 
     // Clicking a row selects it and frames that tree: two trees 7 m apart
-    // give camera targets several metres apart.
+    // give camera targets several meters apart.
     const target = async () => (await page.evaluate(() => (window as any).__getCameraState().target)) as number[];
     const rowOf = (id: number) => page.locator(`[data-testid="tree-row"][data-tree-id="${id}"]`);
     await rowOf(matched[0].id).click();

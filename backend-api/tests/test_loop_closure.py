@@ -87,14 +87,14 @@ def test_a_bad_pair_is_named_when_other_loops_vouch_for_the_rest():
 
     report = check_loops(pairs, 4)
     assert not report["consistent"]
-    assert report["localised"]
+    assert report["localized"]
     assert report["suspect_pairs"] == [(1, 3)], report["suspect_pairs"]
 
 
 def test_a_single_triangle_admits_it_cannot_attribute_blame():
     """Three scans detect the problem but cannot say which pair caused it.
 
-    Reporting all three as suspect while claiming to have localised would invite
+    Reporting all three as suspect while claiming to have localized would invite
     a caller to "repair" a pair that was correct.
     """
     pairs = _exact_pairs(_poses())
@@ -104,7 +104,7 @@ def test_a_single_triangle_admits_it_cannot_attribute_blame():
 
     report = check_loops(pairs, 3)
     assert not report["consistent"]
-    assert not report["localised"]
+    assert not report["localized"]
     assert len(report["suspect_pairs"]) == 3
 
 
@@ -192,7 +192,7 @@ def test_variant_selection_prefers_the_self_consistent_graph():
     scores best on any single pair.
 
     Reproduces the vineyard situation: one variant is right for every pair and
-    the others are wrong by metres. Pairwise scores cannot choose between them
+    the others are wrong by meters. Pairwise scores cannot choose between them
     (measured on real data, ICP fitness picked a 27.6 m answer and inlier RMSE a
     102 m one), but loop closure can, because it asks about the whole set.
     """
@@ -247,7 +247,7 @@ def test_loop_closure_names_the_bad_pairs_on_a_real_orchard():
     """Five real scans, ten triangles, two genuinely wrong pairs.
 
     Measured: loops whose pairs are all correct close to 0.045-0.106 m, loops
-    containing a wrong pair to 4.17-5.36 m. Suspect localisation names exactly
+    containing a wrong pair to 4.17-5.36 m. Suspect localization names exactly
     the pairs whose pose is wrong against RiSCAN's answer -- (1,4) and (2,3) --
     with no false accusations among the other eight.
     """
@@ -285,27 +285,27 @@ def test_loop_closure_names_the_bad_pairs_on_a_real_orchard():
     # wrong here, this stops testing detection and should be re-pointed.
     assert truly_bad, "fixture no longer contains a wrong pair"
     assert not report["consistent"]
-    assert report["localised"]
+    assert report["localized"]
     # Assert that suspicion is SOUND, not that it is an exact match. Which
     # pairs come out wrong shifts with coarse-stage tuning -- lowering the
     # shortlist from 32 to 8 and coarsening the ranking voxel changed the set
     # from 2 wrong pairs to 5 while leaving the registration itself at 4 of 4 --
     # so pinning the exact list makes this a change-detector for tuning rather
-    # than a test of localisation. What must hold is that every pair it accuses
+    # than a test of localization. What must hold is that every pair it accuses
     # really is wrong: a false accusation withholds a scan that registered fine.
     # Detection must hold: an inconsistent graph has to be reported as such.
     assert report["suspect_pairs"], "a broken graph named no suspect at all"
 
-    # Localisation is NOT asserted here, deliberately. With 5 of 10 pairs wrong
+    # Localization is NOT asserted here, deliberately. With 5 of 10 pairs wrong
     # this fixture is past the regime where set arithmetic over loops works:
     # two bad edges in one cycle cancel, the loop closes, and that closure
     # vouches for both. Verified in
-    # `test_localisation_inverts_when_most_pairs_are_wrong` on a controlled
-    # graph. Asserting an exact suspect list here would pin behaviour that is
+    # `test_localization_inverts_when_most_pairs_are_wrong` on a controlled
+    # graph. Asserting an exact suspect list here would pin behavior that is
     # known to be unsound rather than testing anything.
 
 
-def test_localisation_inverts_when_most_pairs_are_wrong():
+def test_localization_inverts_when_most_pairs_are_wrong():
     """Blame-by-elimination fails once wrong edges are the majority.
 
     `suspect = in_failing - in_passing` assumes a closing loop implies good
@@ -315,7 +315,7 @@ def test_localisation_inverts_when_most_pairs_are_wrong():
     never vouched for.
 
     Pinned so the limitation is visible rather than rediscovered. If a future
-    change makes localisation sound in this regime, this test will fail and
+    change makes localization sound in this regime, this test will fail and
     should be replaced by an assertion of the stronger property.
     """
     truly_bad = {(0, 4), (1, 3), (1, 4), (2, 3), (2, 4)}
@@ -334,5 +334,5 @@ def test_localisation_inverts_when_most_pairs_are_wrong():
     assert accused, "no suspect named at all"
     # The documented failure: it clears the guilty and blames the innocent.
     assert not (accused & truly_bad), (
-        "localisation has become sound in this regime -- update this test to "
+        "localization has become sound in this regime -- update this test to "
         "assert the stronger property instead of the known limitation")

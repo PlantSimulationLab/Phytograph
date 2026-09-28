@@ -187,7 +187,7 @@ test.describe('QSM CSV import', () => {
 
     // The re-imported QSM must render ON the cloud. Without its own worldShift it
     // renders at the raw UTM coordinate (~545000, ~4183000) while the cloud sits
-    // near the origin — so compare the framed centre against the cloud's, not
+    // near the origin — so compare the framed center against the cloud's, not
     // against the box size (the box tracks the QSM alone and stays small either
     // way, which is exactly how a size-based assertion passes while displaced).
     const qsmCenter = await readCenter();
@@ -241,15 +241,15 @@ test.describe('QSM CSV import', () => {
     await expect(page.getByTestId('qsm-row')).toHaveCount(0);
   });
 
-  test('a QSM CSV -> OBJ -> mesh round trip keeps the colours it was exported with', async () => {
+  test('a QSM CSV -> OBJ -> mesh round trip keeps the colors it was exported with', async () => {
     // The reported bug: import a QSM, export it to OBJ, re-import, and the tree
-    // came back lighter and desaturated. An MTL's `Kd` is an sRGB display colour,
+    // came back lighter and desaturated. An MTL's `Kd` is an sRGB display color,
     // but three.js treats a `color` BufferAttribute as LINEAR and encodes it to
     // sRGB at output — so an unconverted Kd was encoded a second time, and the
     // error compounded on every trip.
     //
     // This drives the whole chain through the real UI: import the CSV, export
-    // OBJ, re-import the exported file as a mesh, then compare the colours that
+    // OBJ, re-import the exported file as a mesh, then compare the colors that
     // actually reach the renderer against the ones the MTL declares.
     await importFiles(app, page, 'import-qsm', [QSM_CSV]);
     await expect(page.getByTestId('qsm-row')).toHaveCount(1, { timeout: 60_000 });
@@ -265,7 +265,7 @@ test.describe('QSM CSV import', () => {
       await page.getByTestId('qsm-export-confirm').click();
       await expect(page.getByTestId('qsm-export-panel')).toHaveCount(0, { timeout: 30_000 });
 
-      // What the exporter declared for the trunk. Default colour mode is rank, so
+      // What the exporter declared for the trunk. Default color mode is rank, so
       // rank_0 is the palette's wood tan — an sRGB value near 0.69/0.55/0.34.
       const mtl = readFileSync(join(outDir, 'roundtrip.mtl'), 'utf-8');
       const trunkBlock = mtl.slice(mtl.indexOf('newmtl rank_0'));
@@ -284,7 +284,7 @@ test.describe('QSM CSV import', () => {
       expect(palette, '__meshVertexColorPalette hook missing').not.toBeNull();
       expect(palette.length).toBeGreaterThan(0);
 
-      // The renderer holds vertex colours LINEAR, so the trunk's stored colour is
+      // The renderer holds vertex colors LINEAR, so the trunk's stored color is
       // the linear form of the Kd we exported. If the importer skipped the
       // conversion it would still be 0.690 here, and three.js would then encode
       // it a second time on the way to the screen — the washed-out tree.
@@ -299,7 +299,7 @@ test.describe('QSM CSV import', () => {
       );
       expect(
         match,
-        `no re-imported colour matched the exported trunk Kd. expected linear ` +
+        `no re-imported color matched the exported trunk Kd. expected linear ` +
           `[${expected.map(v => v.toFixed(3))}], got ${JSON.stringify(palette.slice(0, 8))}`,
       ).toBeDefined();
 
@@ -314,7 +314,7 @@ test.describe('QSM CSV import', () => {
       );
       expect(
         unconverted,
-        'a vertex colour still holds the raw sRGB Kd — it will be encoded twice and render washed out',
+        'a vertex color still holds the raw sRGB Kd — it will be encoded twice and render washed out',
       ).toBeUndefined();
     } finally {
       rmSync(outDir, { recursive: true, force: true });

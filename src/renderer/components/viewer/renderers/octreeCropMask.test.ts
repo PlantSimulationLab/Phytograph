@@ -12,7 +12,7 @@ import {
 
 // The masking functions take a STACK of clauses (an applied crop keeps hiding
 // its points while the next one is drawn). These single-clause wrappers keep the
-// original cases reading as they did; the stack behaviour has its own block at
+// original cases reading as they did; the stack behavior has its own block at
 // the bottom.
 function applyCropMaskToGeometry(
   geom: any,
@@ -388,7 +388,7 @@ describe('filter clauses', () => {
     expect(drawn(geom)).toEqual([1, 2]);
   });
 
-  it('honours selectedClasses, rounding float32 class ids', () => {
+  it('honors selectedClasses, rounding float32 class ids', () => {
     // The categorical case that used to preview as a no-op and then delete
     // points on commit — now routed through the shared filterValueKeeps.
     const geom = makeGeometryWithAttrs(
@@ -446,9 +446,9 @@ describe('filter clauses', () => {
   });
 
   it('prefers the stashed original intensity over the aliased live slot', () => {
-    // In scalar colour mode `intensity` points at ANOTHER field's buffer. A
+    // In scalar color mode `intensity` points at ANOTHER field's buffer. A
     // filter that read the live slot would filter by whatever is being
-    // coloured by — here that would keep point 0 instead of point 1.
+    // colored by — here that would keep point 0 instead of point 1.
     const geom = makeGeometryWithAttrs([[0, 0, 0], [1, 0, 0]], {
       intensity: [0.9, 0.1],          // aliased to some scalar
       __intensity_orig: [0.1, 0.9],   // the real intensity

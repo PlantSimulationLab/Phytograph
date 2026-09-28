@@ -9,7 +9,7 @@ import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 import type { LabelableColumn } from '../../../lib/classPalettes';
 
-// Presentational manual-labelling panel. All painting, stroke bookkeeping and
+// Presentational manual-labeling panel. All painting, stroke bookkeeping and
 // backend calls live in PointCloudViewer; this renders the class list, the
 // active-class selection, the From-class gate and the commit/undo actions from
 // derived props — the same split ErasePanel uses.
@@ -26,7 +26,7 @@ import type { LabelableColumn } from '../../../lib/classPalettes';
 const NEW_COLUMN_SENTINEL = '__new__';
 
 const COLUMN_GROUP_LABEL: Record<LabelableColumn['kind'], string> = {
-  manual: 'Labelling',
+  manual: 'Labeling',
   categorical: 'Classifications',
   scalar: 'Other columns',
 };
@@ -40,7 +40,7 @@ export interface LabelPanelProps {
    *  place a 300-class tree palette would say so. */
   paletteWarning?: string | null;
   activeClass: number;
-  /** value -> count of currently-labelled points, from the backend. */
+  /** value -> count of currently-labeled points, from the backend. */
   classCounts: Record<number, number>;
   /** Classes currently drawn; hidden ones are also excluded from the From gate. */
   visibleClasses: Set<number>;
@@ -89,10 +89,10 @@ export interface LabelPanelProps {
   /** Classes no stroke may change (the padlocks). */
   lockedClasses: Set<number>;
   onToggleLocked: (value: number) => void;
-  /** Lock every labelled class (all but Unclassified), or unlock everything. */
+  /** Lock every labeled class (all but Unclassified), or unlock everything. */
   onToggleProtect: () => void;
-  /** Where the camera is in the unlabelled-point finder (null until used):
-   *  place `index` of `places`, `here` points there, `total` unlabelled. */
+  /** Where the camera is in the unlabeled-point finder (null until used):
+   *  place `index` of `places`, `here` points there, `total` unlabeled. */
   finder?: { index: number; places: number; here: number; total: number; estimated?: boolean } | null;
   /** Step the finder (N / Shift+N); the first step starts it. */
   onFinderStep: (dir: 1 | -1) => void;
@@ -124,7 +124,7 @@ export interface LabelPanelProps {
   } | null;
   /** Pre-label (F8): other columns of this cloud whose classes can seed this one. */
   prelabelSources?: Array<{ slug: string; label: string; classes: ClassDef[] }>;
-  onPrelabel?: (source: string, map: Record<string, number> | null, onlyUnlabelled: boolean) => void;
+  onPrelabel?: (source: string, map: Record<string, number> | null, onlyUnlabeled: boolean) => void;
   /** Save the column's strokes to a file, or replay a saved file (F10). */
   onSaveStrokes?: () => void;
   onLoadStrokes?: () => void;
@@ -150,7 +150,7 @@ export interface LabelPanelProps {
   /** Brush radius in screen pixels, shown so the wheel/bracket keys are discoverable. */
   brushPx: number;
   /**
-   * The columns of this cloud that can be labelled, in display order.
+   * The columns of this cloud that can be labeled, in display order.
    *
    * The tool used to reach only the four columns its presets named, so a cloud
    * carrying its own classification — a `tree_instance` from a tree
@@ -170,7 +170,7 @@ export interface LabelPanelProps {
   presetCount: number;
   /** Cycle to the next built-in preset vocabulary for this column. */
   onCyclePreset: () => void;
-  /** Open the editor to add/rename/recolour classes. */
+  /** Open the editor to add/rename/recolor classes. */
   onEditPalette: () => void;
   onClose: () => void;
 }
@@ -240,14 +240,14 @@ export function LabelPanel({
   onEditPalette,
   onClose,
 }: LabelPanelProps) {
-  const labelled = Object.entries(classCounts)
+  const labeled = Object.entries(classCounts)
     .filter(([v]) => Number(v) !== 0)
     .reduce((n, [, c]) => n + c, 0);
 
   const nameOf = (v: number) => classes.find((c) => c.value === v)?.label ?? `Class ${v}`;
-  // Protect is on when every labelled class (all but Unclassified) is locked.
-  const labelledValues = classes.map((c) => c.value).filter((v) => v !== 0);
-  const protectOn = labelledValues.length > 0 && labelledValues.every((v) => lockedClasses.has(v));
+  // Protect is on when every labeled class (all but Unclassified) is locked.
+  const labeledValues = classes.map((c) => c.value).filter((v) => v !== 0);
+  const protectOn = labeledValues.length > 0 && labeledValues.every((v) => lockedClasses.has(v));
   const activeName = nameOf(activeClass);
   const fromNames = fromClasses
     ? [...fromClasses].map(nameOf).join(', ')
@@ -258,7 +258,7 @@ export function LabelPanel({
   const limitBoxZ = limitBox ? { min: limitBox.min.z, max: limitBox.max.z } : null;
   // Pre-label draft: the chosen source column and its class map.
   const [prelabel, setPrelabel] = useState<{
-    slug: string; map: Record<string, number> | null; onlyUnlabelled: boolean;
+    slug: string; map: Record<string, number> | null; onlyUnlabeled: boolean;
   } | null>(null);
   const prelabelSource = prelabel ? prelabelSources.find((s) => s.slug === prelabel.slug) : undefined;
 
@@ -273,18 +273,18 @@ export function LabelPanel({
       data-label-baking={baking ? 'true' : 'false'}
       data-label-drawing={drawing ? 'true' : 'false'}
       data-section-active={sectionActive ? 'true' : 'false'}
-      data-labelled-count={labelled}
+      data-labeled-count={labeled}
       // The column being painted. The DOM cannot show which backend column a
       // stroke lands in, so the panel states it.
       data-label-slug={activeSlug}
-      // Serialised counts, so a spec can assert on per-class totals without
+      // Serialized counts, so a spec can assert on per-class totals without
       // reaching into the scene graph.
       data-label-counts={JSON.stringify(classCounts)}
       // z-20 keeps the panel above the polygon lasso overlay (z-10), which fills
       // the whole viewport while drawing. WITHOUT IT the overlay renders on top
       // and swallows every click here — the panel becomes unusable and even its
       // close button just drops another lasso vertex. Same reason CropPanel
-      // carries z-20; the labelling tool borrows that same overlay.
+      // carries z-20; the labeling tool borrows that same overlay.
       className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20"
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
@@ -383,7 +383,7 @@ export function LabelPanel({
           <button
             data-testid="label-tool-pick"
             onClick={() => onToolChange('pick')}
-            title="Click a piece of the cloud to label all of it; Shift+click also takes its neighbours facing the same way (K)"
+            title="Click a piece of the cloud to label all of it; Shift+click also takes its neighbors facing the same way (K)"
             className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
               tool === 'pick'
                 ? 'bg-blue-600 text-white'
@@ -432,7 +432,7 @@ export function LabelPanel({
               <span className="text-neutral-500">{pickSize > 0 ? '' : '(auto)'}</span>
             </label>
             <p className="text-[9px] text-neutral-500 mt-1 leading-tight">
-              {pickBusy ? 'Finding the piece…' : 'Click a piece. Shift+click adds its neighbours facing the same way.'}
+              {pickBusy ? 'Finding the piece…' : 'Click a piece. Shift+click adds its neighbors facing the same way.'}
             </p>
           </div>
         )}
@@ -657,7 +657,7 @@ export function LabelPanel({
           <button
             data-testid="label-edit-palette"
             onClick={onEditPalette}
-            title="Add, rename or recolour classes — build your own set"
+            title="Add, rename or recolor classes — build your own set"
             className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
           >
             <Palette className="w-3 h-3" />
@@ -787,13 +787,13 @@ export function LabelPanel({
           data-testid="label-protect"
           data-active={protectOn ? 'true' : 'false'}
           onClick={onToggleProtect}
-          title="Lock every labelled class, so strokes only label points that are still Unclassified"
+          title="Lock every labeled class, so strokes only label points that are still Unclassified"
           className={`mt-1 w-full px-2 py-1 rounded text-left flex items-center gap-1 ${
             protectOn ? 'bg-amber-600/30 text-amber-200' : 'bg-neutral-900 text-neutral-400 hover:bg-neutral-700'
           }`}
         >
           <ShieldCheck className="w-3 h-3" />
-          {protectOn ? 'Protecting labelled points' : 'Protect labelled points'}
+          {protectOn ? 'Protecting labeled points' : 'Protect labeled points'}
         </button>
         {isNoOp && (
           <div data-testid="label-noop-warning" className="mt-1.5 text-amber-400">
@@ -878,12 +878,12 @@ export function LabelPanel({
 
       <div className="mt-2 flex items-center gap-1 text-[10px]">
         <button
-          data-testid="label-find-unlabelled"
+          data-testid="label-find-unlabeled"
           onClick={() => onFinderStep(1)}
-          title="Show only unlabelled points and go to where most of them are (N; Shift+N goes back)"
+          title="Show only unlabeled points and go to where most of them are (N; Shift+N goes back)"
           className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200 text-left"
         >
-          {finder ? 'Next unlabelled area (N)' : 'Find unlabelled points (N)'}
+          {finder ? 'Next unlabeled area (N)' : 'Find unlabeled points (N)'}
         </button>
         {finder && finder.places > 0 && (
           <button
@@ -905,9 +905,9 @@ export function LabelPanel({
           className="mt-1 text-[10px] text-neutral-400"
         >
           {finder.places === 0
-            ? 'No unlabelled points left.'
+            ? 'No unlabeled points left.'
             : `Area ${finder.index + 1} of ${finder.places}: ${finder.estimated ? 'about ' : ''}`
-              + `${finder.here.toLocaleString()} of ${finder.total.toLocaleString()} unlabelled points.`}
+              + `${finder.here.toLocaleString()} of ${finder.total.toLocaleString()} unlabeled points.`}
         </div>
       )}
 
@@ -928,7 +928,7 @@ export function LabelPanel({
               setPrelabel(src ? {
                 slug: src.slug,
                 map: defaultPrelabelMap(src.slug, src.classes, activeSlug, classes),
-                onlyUnlabelled: true,
+                onlyUnlabeled: true,
               } : null);
             }}
             title="Seed this column from a result another tool wrote (ground, wood/leaf, trees…)"
@@ -965,9 +965,9 @@ export function LabelPanel({
               <label className="flex items-center gap-1 mt-1 text-neutral-400">
                 <input
                   type="checkbox"
-                  data-testid="label-prelabel-only-unlabelled"
-                  checked={prelabel.onlyUnlabelled}
-                  onChange={(e) => setPrelabel({ ...prelabel, onlyUnlabelled: e.target.checked })}
+                  data-testid="label-prelabel-only-unlabeled"
+                  checked={prelabel.onlyUnlabeled}
+                  onChange={(e) => setPrelabel({ ...prelabel, onlyUnlabeled: e.target.checked })}
                 />
                 Only points still Unclassified
               </label>
@@ -975,7 +975,7 @@ export function LabelPanel({
                 <button
                   data-testid="label-prelabel-apply"
                   disabled={busy || (prelabel.map !== null && Object.keys(prelabel.map).length === 0)}
-                  onClick={() => { onPrelabel(prelabel.slug, prelabel.map, prelabel.onlyUnlabelled); setPrelabel(null); }}
+                  onClick={() => { onPrelabel(prelabel.slug, prelabel.map, prelabel.onlyUnlabeled); setPrelabel(null); }}
                   className="flex-1 px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
                 >
                   Pre-label
@@ -1013,7 +1013,7 @@ export function LabelPanel({
           <dt><kbd>X</kbd></dt><dd>Swap the paint class with the one it paints over</dd>
           <dt><kbd>L</kbd></dt><dd>Stop drawing to look around, and back</dd>
           <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Brush size</dd>
-          <dt><kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd></dt><dd>Next / previous unlabelled area</dd>
+          <dt><kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd></dt><dd>Next / previous unlabeled area</dd>
           <dt>Alt+click</dt><dd>Show only that class</dd>
           <dt><kbd>⌘Z</kbd> / <kbd>⇧⌘Z</kbd></dt><dd>Undo / redo a stroke</dd>
         </dl>

@@ -165,7 +165,7 @@ describe('screen-space regions refresh the octree first', () => {
     // leaves the HITS cacheId untouched — and the stored pose is gated on that
     // hits id. Without this guard the shell keeps being posed on top of geometry
     // that already carries the transform, drawing it at DOUBLE the rotation
-    // (hundreds of metres off, on a scan whose misses sit ~1 km out).
+    // (hundreds of meters off, on a scan whose misses sit ~1 km out).
     const at = src.indexOf('await backfillMisses(');
     expect(at).toBeGreaterThan(-1);
     const before = src.slice(Math.max(0, at - 1500), at);

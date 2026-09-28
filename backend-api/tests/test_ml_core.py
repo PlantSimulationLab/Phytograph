@@ -19,7 +19,7 @@ from ml.data import readers  # noqa: E402
 from ml.data.cache import CachedItem, write_item  # noqa: E402
 from ml.data.crops import CropSampler, Source  # noqa: E402
 from ml.grid import grid_sample  # noqa: E402
-from ml.infer import Cancelled, predict  # noqa: E402
+from ml.infer import Canceled, predict  # noqa: E402
 from ml.models import build_model  # noqa: E402
 from ml.package import PackageError, ModelPackage, load_meta, load_model, save, validate  # noqa: E402
 from ml.tasks import TASKS, task_map  # noqa: E402
@@ -135,10 +135,10 @@ def test_predict_covers_every_point_deterministically():
     np.testing.assert_allclose(p1.sum(axis=1), 1.0, rtol=1e-4)
 
 
-def test_predict_honours_cancel():
+def test_predict_honors_cancel():
     pkg = _package(max_points=500)
     model = build_model(pkg.arch, **pkg.hparams).eval()
-    with pytest.raises(Cancelled):
+    with pytest.raises(Canceled):
         predict(model, pkg, _cloud(6000)[0], cancel=lambda: True)
 
 
@@ -157,9 +157,9 @@ def test_fixture_reader_and_cache_round_trip(tmp_path):
     c = meta["counts"]
     assert c["wood"] + c["leaf"] == len(it)
     # ball() returns exactly the rows a brute-force radius search would.
-    centre = np.asarray(it.xyz[len(it) // 2])
-    got = np.sort(it.ball(centre, 0.8))
-    d = np.linalg.norm(np.asarray(it.xyz) - centre, axis=1)
+    center = np.asarray(it.xyz[len(it) // 2])
+    got = np.sort(it.ball(center, 0.8))
+    d = np.linalg.norm(np.asarray(it.xyz) - center, axis=1)
     np.testing.assert_array_equal(got, np.flatnonzero(d <= 0.8))
 
 
@@ -213,7 +213,7 @@ def test_crop_sampler_produces_a_trainable_batch(tmp_path):
 # ---- plant organs: partial labels, instance offsets, clustering -------------
 
 def _organ_cloud(seed=0):
-    """Two flat 'leaflets' on either side of a vertical 'stem', over a soil disc,
+    """Two flat 'leaflets' on either side of a vertical 'stem', over a soil disk,
     in the herbaceous codes: soil / stem / two blade instances, plus one
     undivided Sugar4D-style leaf that is only 'not soil'."""
     rng = np.random.default_rng(seed)
@@ -282,9 +282,9 @@ def test_organ_crops_carry_rotated_centroid_offsets(tmp_path):
         # Every instance point's vote lands on one of the three centroids,
         # whatever rotation and scale the crop drew.
         votes = pos[has] + x["offset"][has]
-        centres = np.unique(np.round(votes, 4), axis=0)
-        assert 1 <= len(centres) <= 6   # 3 centroids, each possibly split by rounding
-        assert np.abs(votes[:, None, :] - centres[None]).max(axis=2).min(axis=1).max() < 1e-4
+        centers = np.unique(np.round(votes, 4), axis=0)
+        assert 1 <= len(centers) <= 6   # 3 centroids, each possibly split by rounding
+        assert np.abs(votes[:, None, :] - centers[None]).max(axis=2).min(axis=1).max() < 1e-4
         # Radii are the instances' (scaled) RMS radii: ~1.1-1.4 cm here.
         r = np.exp(x["log_radius"][has])
         assert (r > 0.008).all() and (r < 0.02).all()

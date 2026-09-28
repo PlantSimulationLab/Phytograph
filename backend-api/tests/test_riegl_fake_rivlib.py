@@ -15,7 +15,7 @@ RIVLIB_SO and PHYTOGRAPH_RXP_SHIM at those runs the whole pipeline with no
 licensed bytes anywhere — which also means it runs on fork PRs, where a job
 using the real library never could.
 
-WHAT IT DOES NOT PROVE: nothing about RIEGL's actual behaviour. If they reorder
+WHAT IT DOES NOT PROVE: nothing about RIEGL's actual behavior. If they reorder
 a struct, the stub and the reader stay wrong together. That is the credentialed
 job's problem; this one catches our own regressions, which are almost all of
 them.
@@ -65,7 +65,7 @@ def fake_rivlib():
 def project(tmp_path):
     """A minimal .riproject: one ScanPos with an .rxp and a .pat.
 
-    The .rxp's CONTENT is irrelevant — the fake scanifc synthesises points and
+    The .rxp's CONTENT is irrelevant — the fake scanifc synthesizes points and
     only checks the file opens — but it has to exist, because discovery globs
     for it and the reader reports its size.
     """
@@ -95,7 +95,7 @@ def _reader_env(fake, **extra):
 # instead of fork()+exec() (see subprocess.Popen._execute_child's conditions).
 # That matters here for the same reason main.py's _SegProc exists: once
 # anything in the same pytest process has built a cloud session, libhelios' GLFW
-# and open3d's own copy are both loaded and initialised, and forking that image
+# and open3d's own copy are both loaded and initialized, and forking that image
 # kills the child in the post-fork/pre-exec window with SIGSEGV — the reader
 # then "fails" with exit -11 having never run. It is order-dependent, so these
 # helpers passed alone and died as soon as a session-building test ran first.
@@ -145,7 +145,7 @@ def test_the_stub_rejects_the_uri_form_real_rivlib_rejects(fake_rivlib, project)
 
     Measured against real RiVLib: `file:C:\\...` and `file:C:/...` open, while
     `file:///C:/...` does not. The stub enforces the same rule so a "helpful"
-    normalisation to the file:// form fails here instead of in the field.
+    normalization to the file:// form fails here instead of in the field.
     """
     reader = _load_reader()
     rxp = str(next(project.rglob("*.rxp")))

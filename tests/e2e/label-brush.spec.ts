@@ -144,8 +144,8 @@ async function counts(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
   return JSON.parse(await panel.getAttribute('data-label-counts') ?? '{}') as Record<string, number>;
 }
 
-async function labelled(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
-  return Number(await panel.getAttribute('data-labelled-count') ?? '0');
+async function labeled(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
+  return Number(await panel.getAttribute('data-labeled-count') ?? '0');
 }
 
 /** Drag across the middle of the canvas — one brush stroke. */
@@ -181,11 +181,11 @@ test('the cursor follows the pointer, and the wheel resizes it in place', async 
   // FOLLOWING: `rayForNdc` returned the camera's forward axis as the direction
   // under perspective as well as ortho, so every pick ray was the same ray —
   // the one through the middle of the screen. The anchor was therefore whatever
-  // sat at the view centre, identical to 1e-7 across the whole canvas, and the
+  // sat at the view center, identical to 1e-7 across the whole canvas, and the
   // sphere hung motionless in the scene while the pointer moved around it.
   // Nothing already here could see it: every other assertion in this file is
-  // satisfied by a stroke that paints SOMETHING, and a centre-anchored stroke
-  // on a centred fixture does.
+  // satisfied by a stroke that paints SOMETHING, and a center-anchored stroke
+  // on a centered fixture does.
   //
   // RESIZING: the world radius was only ever recomputed inside the mousemove
   // handler, so a wheel notch moved the number in the panel and left the sphere
@@ -230,10 +230,10 @@ test('a drag paints, and does not sweep the whole cloud', async () => {
   const { page, panel } = await openBrush();
   await dragAcross(page);
 
-  await expect.poll(async () => await labelled(panel), { timeout: 30_000 })
+  await expect.poll(async () => await labeled(panel), { timeout: 30_000 })
     .toBeGreaterThan(0);
   // A world-space sphere cannot take everything, unlike a full-viewport lasso.
-  expect(await labelled(panel)).toBeLessThan(1706);
+  expect(await labeled(panel)).toBeLessThan(1706);
 });
 
 test('the wheel resizes the brush, and a bigger brush paints more', async () => {
@@ -255,9 +255,9 @@ test('the wheel resizes the brush, and a bigger brush paints more', async () => 
   const smallPx = Number(await size.getAttribute('data-brush-px'));
 
   await dragAcross(page, 12);
-  await expect.poll(async () => await labelled(panel), { timeout: 30_000 })
+  await expect.poll(async () => await labeled(panel), { timeout: 30_000 })
     .toBeGreaterThan(0);
-  const smallCount = await labelled(panel);
+  const smallCount = await labeled(panel);
 
   // Now the WHEEL, which is the binding this test is really about — brackets
   // are the wheel-free alternative and were exercised above.
@@ -269,7 +269,7 @@ test('the wheel resizes the brush, and a bigger brush paints more', async () => 
   // The readout moving is not enough — the radius has to reach the geometry.
   // Painting the same path with a bigger brush must label strictly more.
   await dragAcross(page, 12);
-  await expect.poll(async () => await labelled(panel), { timeout: 30_000 })
+  await expect.poll(async () => await labeled(panel), { timeout: 30_000 })
     .toBeGreaterThan(smallCount);
 });
 
@@ -279,12 +279,12 @@ test('brush strokes undo like lasso strokes', async () => {
   const { page, panel } = await openBrush();
   await dragAcross(page);
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 30_000 });
-  await expect.poll(async () => await labelled(panel), { timeout: 30_000 })
+  await expect.poll(async () => await labeled(panel), { timeout: 30_000 })
     .toBeGreaterThan(0);
 
   await page.getByTestId('label-undo').click();
   await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 30_000 });
-  await expect.poll(async () => await labelled(panel), { timeout: 30_000 }).toBe(0);
+  await expect.poll(async () => await labeled(panel), { timeout: 30_000 }).toBe(0);
 });
 
 test('switching to the brush stops the lasso claiming clicks', async () => {

@@ -9,9 +9,9 @@ import {
 } from './meshExport';
 import type { MeshData, PlantMaterialDef } from './pointCloudTypes';
 
-// `Kd` in an MTL is an sRGB display colour, while MeshData.vertexColors and
+// `Kd` in an MTL is an sRGB display color, while MeshData.vertexColors and
 // PlantMaterialDef.color are held in three.js's LINEAR working space. So the
-// writer encodes on the way out, and these tests state the LINEAR colour they
+// writer encodes on the way out, and these tests state the LINEAR color they
 // set and let the helper compute the sRGB text to look for — asserting the
 // conversion happens, rather than hardcoding numbers that would still pass if
 // the encode were silently dropped.
@@ -19,7 +19,7 @@ const linearToSrgb = (c: number): number =>
   c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
 const kdLine = (...linear: number[]): string =>
   `Kd ${linear.map(c => linearToSrgb(c).toFixed(6)).join(' ')}`;
-// Same, but for a colour the writer read back out of a Float32Array (a mesh's
+// Same, but for a color the writer read back out of a Float32Array (a mesh's
 // vertexColors). The f32 round-trip shifts the value by an ulp, which is enough
 // to move the 6th decimal place — so match what the code actually computes.
 const kdLineF32 = (...linear: number[]): string =>
@@ -38,10 +38,10 @@ function quad(withUVs = false, withNormals = false): MeshData {
   };
 }
 
-// The same quad, but flat-shaded per triangle in two distinct colours — the
+// The same quad, but flat-shaded per triangle in two distinct colors — the
 // shape a generated plant's untextured organs take (petioles, internodes).
 // Triangle 0 (verts 0,1,2) is olive; triangle 1 (verts 0,2,3) shares verts 0
-// and 2, so we give each triangle its own vertices to keep the colours flat.
+// and 2, so we give each triangle its own vertices to keep the colors flat.
 function coloredStrip(colors: [number, number, number][]): MeshData {
   const tris = colors.length;
   const vertices = new Float32Array(tris * 9);
@@ -269,8 +269,8 @@ describe('serializeMeshObj — material bundle', () => {
     for (const name of used) expect(declared).toContain(name);
   });
 
-  it('falls back to a declared default material when there are no vertex colours', () => {
-    // Materials cover only triangle 0, and this quad has no vertex colours to
+  it('falls back to a declared default material when there are no vertex colors', () => {
+    // Materials cover only triangle 0, and this quad has no vertex colors to
     // derive one from — so triangle 1 lands in `default`. It must still be
     // exported either way.
     const files = serializeMeshObj(quad(true), {
@@ -302,14 +302,14 @@ describe('serializeMeshObj — material bundle', () => {
     expect(linesStartingWith(files[0].text!, 'f ')).toHaveLength(2);
   });
 
-  it('keeps a flat-colour material but omits map_Kd when its texture is unusable', () => {
+  it('keeps a flat-color material but omits map_Kd when its texture is unusable', () => {
     const files = serializeMeshObj(quad(true), {
       baseName: 'bean',
       materials: [
         { name: 'stem', color: [0.3, 0.5, 0.1], textureData: toBase64(new Uint8Array([1, 2, 3, 4])), hasAlpha: false, triangleIndices: [0, 1] },
       ],
     });
-    // obj + mtl only — no image file for an unrecognised format.
+    // obj + mtl only — no image file for an unrecognized format.
     expect(files.map(f => f.name)).toEqual(['bean.obj', 'bean.mtl']);
     expect(files[1].text!).toContain(kdLine(0.3, 0.5, 0.1));
     expect(files[1].text!).not.toContain('map_Kd');
@@ -349,54 +349,54 @@ describe('serializeMeshObj — material bundle', () => {
   });
 });
 
-// The reported bug: a round-tripped bean had correct leaves but wrong-coloured
+// The reported bug: a round-tripped bean had correct leaves but wrong-colored
 // petioles and internodes. Those organs carry no texture, so the backend leaves
-// them out of `material_groups` entirely and they render from vertex colours —
-// ~72% of a bean's triangles. OBJ has no portable per-vertex colour and our
-// importer rebuilds colour from each triangle's material `Kd`, so the only way
+// them out of `material_groups` entirely and they render from vertex colors —
+// ~72% of a bean's triangles. OBJ has no portable per-vertex color and our
+// importer rebuilds color from each triangle's material `Kd`, so the only way
 // they survive is as generated `Kd` materials.
-describe('serializeMeshObj — untextured organs keep their colour', () => {
+describe('serializeMeshObj — untextured organs keep their color', () => {
   const OLIVE: [number, number, number] = [0.21, 0.25, 0.05];
   const STEM: [number, number, number] = [0.28, 0.35, 0.07];
 
-  it('writes a Kd material per distinct vertex colour, not one flat grey', () => {
+  it('writes a Kd material per distinct vertex color, not one flat gray', () => {
     const files = serializeMeshObj(coloredStrip([OLIVE, STEM]), { baseName: 'bean' });
     const mtl = files[1].text!;
     expect(mtl).toContain(kdLine(0.21, 0.25, 0.05));
     expect(mtl).toContain(kdLine(0.28, 0.35, 0.07));
-    // The old behaviour — everything flattened to the default grey — is exactly
+    // The old behavior — everything flattened to the default gray — is exactly
     // what made the petioles come back wrong.
     expect(mtl).not.toContain('Kd 0.800000 0.800000 0.800000');
     expect(files[0].text!).not.toContain('usemtl default');
   });
 
-  it('emits an .obj + .mtl bundle for a mesh with only vertex colours', () => {
+  it('emits an .obj + .mtl bundle for a mesh with only vertex colors', () => {
     // No textures at all, so no image files — but still a material library.
     const files = serializeMeshObj(coloredStrip([OLIVE, STEM]), { baseName: 'bean' });
     expect(files.map(f => f.name)).toEqual(['bean.obj', 'bean.mtl']);
     expect(files[0].text!).toContain('mtllib bean.mtl');
   });
 
-  it('groups triangles sharing a colour under one material', () => {
+  it('groups triangles sharing a color under one material', () => {
     const files = serializeMeshObj(coloredStrip([OLIVE, STEM, OLIVE, OLIVE]), { baseName: 'bean' });
     const declared = linesStartingWith(files[1].text!, 'newmtl ');
-    expect(declared).toHaveLength(2); // 4 triangles, 2 colours
+    expect(declared).toHaveLength(2); // 4 triangles, 2 colors
     const used = linesStartingWith(files[0].text!, 'usemtl ');
     expect(used).toHaveLength(2);
     // All four faces still present, exactly once each.
     expect(linesStartingWith(files[0].text!, 'f ')).toHaveLength(4);
   });
 
-  it('collapses float noise so one organ colour does not split into many materials', () => {
-    // Colours arrive as float32; bit-level wobble must not fragment a material.
+  it('collapses float noise so one organ color does not split into many materials', () => {
+    // Colors arrive as float32; bit-level wobble must not fragment a material.
     const nudged: [number, number, number] = [0.21 + 1e-7, 0.25 - 1e-7, 0.05];
     const files = serializeMeshObj(coloredStrip([OLIVE, nudged]), { baseName: 'bean' });
     expect(linesStartingWith(files[1].text!, 'newmtl ')).toHaveLength(1);
   });
 
-  it('colours the untextured remainder of a textured plant', () => {
+  it('colors the untextured remainder of a textured plant', () => {
     // The real bean shape: a textured leaf material claiming some triangles,
-    // with the flat-coloured organs left over.
+    // with the flat-colored organs left over.
     const data = coloredStrip([OLIVE, STEM, OLIVE]);
     data.uvCoordinates = new Float32Array(data.vertexCount * 2);
     const files = serializeMeshObj(data, {
@@ -409,17 +409,17 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     // The leaf keeps its texture…
     expect(mtl).toContain('newmtl bean_leaf');
     expect(mtl).toContain('map_Kd bean_bean_leaf.png');
-    // …and the two leftover organs keep their own colours.
+    // …and the two leftover organs keep their own colors.
     expect(mtl).toContain(kdLine(0.28, 0.35, 0.07));
     expect(mtl).toContain(kdLine(0.21, 0.25, 0.05));
     expect(files[0].text!).not.toContain('usemtl default');
     expect(linesStartingWith(files[0].text!, 'f ')).toHaveLength(3);
   });
 
-  it('derives Kd from geometry for a textured material that declares no colour', () => {
+  it('derives Kd from geometry for a textured material that declares no color', () => {
     // Generated plants set `color` only on UNtextured materials — a textured
-    // leaf arrives with color undefined. Writing the grey 0.8 fallback there
-    // meant the leaves re-imported grey too (masked by the texture, but wrong,
+    // leaf arrives with color undefined. Writing the gray 0.8 fallback there
+    // meant the leaves re-imported gray too (masked by the texture, but wrong,
     // and visible wherever the texture can't be applied).
     const LEAF: [number, number, number] = [0.3, 0.55, 0.2];
     const data = coloredStrip([LEAF, LEAF, OLIVE]);
@@ -433,7 +433,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     });
     const mtl = files[1].text!;
     expect(mtl).toContain('newmtl bean_leaf');
-    // The leaf's own vertex colour, not grey.
+    // The leaf's own vertex color, not gray.
     expect(mtl).toContain(kdLineF32(0.3, 0.55, 0.2));
     expect(mtl).not.toContain('Kd 0.800000 0.800000 0.800000');
   });
@@ -441,7 +441,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
   it('does not write the conventional white Kd under a texture', () => {
     // `Kd 1 1 1` is the usual idiom for "the texture is authoritative" (renderers
     // multiply Kd by map_Kd). It is WRONG for our round-trip: the importer copies
-    // Kd into per-vertex colours regardless of texturing, and those are the
+    // Kd into per-vertex colors regardless of texturing, and those are the
     // viewer's fallback when a texture isn't applied — so white Kd would bring
     // every leaf back white. Guard against a well-meaning "fix" to the convention.
     const LEAF: [number, number, number] = [0.3, 0.55, 0.2];
@@ -458,7 +458,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     expect(files[1].text!).toContain(kdLineF32(0.3, 0.55, 0.2));
   });
 
-  it('keeps an explicitly declared material colour over the geometry mean', () => {
+  it('keeps an explicitly declared material color over the geometry mean', () => {
     const data = coloredStrip([OLIVE, OLIVE]);
     const files = serializeMeshObj(data, {
       baseName: 'bean',
@@ -467,7 +467,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     expect(files[1].text!).toContain(kdLine(0.9, 0.1, 0.1));
   });
 
-  it('gives colour materials names that do not collide with supplied ones', () => {
+  it('gives color materials names that do not collide with supplied ones', () => {
     const data = coloredStrip([OLIVE, STEM]);
     const files = serializeMeshObj(data, {
       baseName: 'bean',
@@ -480,7 +480,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     for (const n of used) expect(declared).toContain(n);
   });
 
-  it('ignores vertex colours that do not match the vertex count', () => {
+  it('ignores vertex colors that do not match the vertex count', () => {
     const data = coloredStrip([OLIVE, STEM]);
     data.vertexColors = new Float32Array([0.1, 0.2, 0.3]); // wrong length
     const files = serializeMeshObj(data, { baseName: 'bean' });

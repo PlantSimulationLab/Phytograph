@@ -102,8 +102,8 @@ export function effectiveCheckedIds(
  *
  * The picker only ever reports the state of the rows it currently shows as
  * enabled, so a naive `setChecked(next)` would silently forget every row the
- * mode had greyed out: check 3 scans + 2 plain clouds, switch to XML (clouds go
- * grey), switch back — and the clouds would be gone. Re-adding the previously
+ * mode had grayed out: check 3 scans + 2 plain clouds, switch to XML (clouds go
+ * gray), switch back — and the clouds would be gone. Re-adding the previously
  * checked ids that aren't currently selectable keeps the toggle non-destructive.
  */
 export function mergeCheckedIntent(
@@ -148,30 +148,38 @@ export function objectFileSlug(label: string, index: number): string {
 
 /**
  * The typed base name as the backend will read it: `os.path.basename` minus one
- * extension, falling back to "scans". Users paste paths and type "myscan.laz"
- * into the field, and neither should leak into the written names.
+ * extension. Users paste paths and type "myscan.laz" into the field, and neither
+ * should leak into the written names. Empty is allowed — it means "name every
+ * file after its object".
  */
 export function exportBaseName(raw: string): string {
   const tail = raw.trim().split(/[\\/]/).pop() ?? '';
-  return tail.replace(LABEL_EXTENSION, '').trim() || 'scans';
+  return tail.replace(LABEL_EXTENSION, '').trim();
 }
+
+/** Where the base name sits in a multi-object file name. */
+export type BaseNamePosition = 'prefix' | 'suffix';
 
 /**
  * Every file the current settings will write, in write order.
  *
  * One object takes the base name alone — the export writes exactly what was
- * typed. Several get `<base>_<object name>`, deduped case-insensitively because
- * macOS and Windows would otherwise let two objects overwrite one file. An XML
- * bundle additionally writes `<base>.xml` (listed first, as the backend does).
+ * typed. Several get `<base>_<object name>` (or `<object name>_<base>` when
+ * `position` is 'suffix'), deduped case-insensitively because macOS and Windows
+ * would otherwise let two objects overwrite one file. An empty base names each
+ * file by its object alone. An XML bundle additionally writes `<base>.xml`
+ * (`scans.xml` for an empty base; listed first, as the backend does).
  */
 export function plannedFileNames(
   objectNames: string[], rawBase: string, ext: string, writeXml = false,
+  position: BaseNamePosition = 'prefix',
 ): string[] {
   const base = exportBaseName(rawBase);
-  const stems = objectNames.length === 1
+  const stems = objectNames.length === 1 && base
     ? [base]
     : objectNames.reduce<string[]>((acc, name, i) => {
-      const stem = `${base}_${objectFileSlug(name, i)}`;
+      const slug = objectFileSlug(name, i);
+      const stem = !base ? slug : position === 'suffix' ? `${slug}_${base}` : `${base}_${slug}`;
       let candidate = stem;
       for (let n = 2; acc.some(s => s.toLowerCase() === candidate.toLowerCase()); n++) {
         candidate = `${stem}_${n}`;
@@ -180,5 +188,5 @@ export function plannedFileNames(
       return acc;
     }, []);
   const dataFiles = stems.map(s => `${s}.${ext}`);
-  return writeXml ? [`${base}.xml`, ...dataFiles] : dataFiles;
+  return writeXml ? [`${base || 'scans'}.xml`, ...dataFiles] : dataFiles;
 }

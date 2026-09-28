@@ -5,10 +5,10 @@ import type { SlabStepMode } from '../../../lib/crossSection';
 // Presentational cross-section panel. All slab geometry and camera work lives
 // in PointCloudViewer / lib/crossSection.ts; this renders the controls.
 //
-// Separate from the labelling panel because a section is a VIEW STATE, not a
+// Separate from the labeling panel because a section is a VIEW STATE, not a
 // mode. It coexists with whatever tool is active — inspect a canopy with no tool
 // open, bound an erase stroke, check a QSM against its points, or (the main
-// case) bound a labelling stroke. Modes are mutually exclusive; view states are
+// case) bound a labeling stroke. Modes are mutually exclusive; view states are
 // not, which is why this panel does not participate in closeAllToolPanels and
 // stacks below the active tool's panel instead.
 
@@ -26,7 +26,7 @@ export interface CrossSectionPanelProps {
    * so the two are visible at once and must not overlap.
    */
   stacked?: boolean;
-  /** True once a centreline exists; false while the user is still drawing one. */
+  /** True once a centerline exists; false while the user is still drawing one. */
   hasSlab: boolean;
   drawing: boolean;
   thickness: number;

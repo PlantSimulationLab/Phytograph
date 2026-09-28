@@ -8,9 +8,9 @@ is the only source of column meaning, so it must:
 
   - resolve each token through the same alias set a real header column would
     (`row`->row_index, `col`->column_index, `red`->r255, `reflectivity`->
-    reflectance, ...) rather than dropping unrecognised spellings to 'skip';
-  - carry an unrecognised legend word (a custom scalar like 'deviation') as a
-    labelled extra dimension named from the word, not a positional 'Column N';
+    reflectance, ...) rather than dropping unrecognized spellings to 'skip';
+  - carry an unrecognized legend word (a custom scalar like 'deviation') as a
+    labeled extra dimension named from the word, not a positional 'Column N';
   - surface those same labels in the wizard preview so the suggestion matches
     what import produces.
 
@@ -43,7 +43,7 @@ def _write_headerless(path: Path, rows) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tokeniser: legend words resolve through the header-alias set
+# Tokenizer: legend words resolve through the header-alias set
 # --------------------------------------------------------------------------- #
 
 def test_tokenize_resolves_row_col_aliases():
@@ -71,8 +71,8 @@ def test_tokenize_uses_header_alias_set(token, expected):
 
 
 def test_tokenize_passes_unknown_word_through_not_skip():
-    """An unrecognised legend word is carried verbatim (lower-cased), so the
-    column can be labelled from it — not dropped to 'skip'."""
+    """An unrecognized legend word is carried verbatim (lower-cased), so the
+    column can be labeled from it — not dropped to 'skip'."""
     assert main._tokenize_ascii_format("x y z Deviation") == [
         "x", "y", "z", "deviation",
     ]
@@ -83,8 +83,8 @@ def test_tokenize_passes_unknown_word_through_not_skip():
 # --------------------------------------------------------------------------- #
 
 def test_plan_labels_extras_from_legend_without_header():
-    """With no file header, an unrecognised legend word becomes an extra dim
-    labelled/slugged from the word (not a positional 'Column N')."""
+    """With no file header, an unrecognized legend word becomes an extra dim
+    labeled/slugged from the word (not a positional 'Column N')."""
     roles = main._tokenize_ascii_format("x y z deviation amplitude")
     names, extras = main._plan_columns(roles, None)
     assert names[:3] == ["x", "y", "z"]
@@ -93,8 +93,8 @@ def test_plan_labels_extras_from_legend_without_header():
     assert by_slug["amplitude"]["label"] == "amplitude"
 
 
-def test_bpp_format_plan_carries_grid_and_colour(tmp_path):
-    """The full BPP legend over a headerless file maps colour/reflectance to
+def test_bpp_format_plan_carries_grid_and_color(tmp_path):
+    """The full BPP legend over a headerless file maps color/reflectance to
     reserved roles and carries row/col as the canonical grid-index extras."""
     f = tmp_path / "headerless.xyz"
     _write_headerless(f, _BPP_ROWS)
@@ -111,7 +111,7 @@ def test_bpp_format_plan_carries_grid_and_colour(tmp_path):
 
 def test_preview_uses_legend_for_headerless_file(client, tmp_path):
     """The preview endpoint, given the ASCII_format hint for a headerless file,
-    pre-selects grid roles for row/col and labels colour/reflectance — matching
+    pre-selects grid roles for row/col and labels color/reflectance — matching
     what a no-edit import produces."""
     f = tmp_path / "headerless.xyz"
     _write_headerless(f, _BPP_ROWS)
@@ -137,7 +137,7 @@ def test_preview_uses_legend_for_headerless_file(client, tmp_path):
 
 
 def test_preview_labels_unknown_legend_word(client, tmp_path):
-    """An unrecognised legend word over a headerless file is shown as a labelled
+    """An unrecognized legend word over a headerless file is shown as a labeled
     'extra' column named from the word, not 'Column N'."""
     f = tmp_path / "dev.xyz"
     _write_headerless(f, [(0.1, 0.2, 1.0, 5.0), (0.3, 0.4, 1.5, 6.0)])
@@ -172,7 +172,7 @@ def test_bpp_legend_round_trips_grid_extras(tmp_path):
     assert len(positions) == len(_BPP_ROWS)
     for slug in main._GRID_INDEX_SLUGS:
         assert slug in extras, f"missing extra {slug}"
-    # Colours came through the colour channel, not as extras.
+    # Colors came through the color channel, not as extras.
     assert colors is not None
     np.testing.assert_allclose(
         sorted(extras["row_index"].tolist()), [1.0, 2.0, 3.0])

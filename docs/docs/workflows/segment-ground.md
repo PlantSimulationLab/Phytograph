@@ -14,9 +14,9 @@ labels the points the cloth settles onto as ground.
    tool column), or open the command palette and choose **Segment Ground**.
 3. Adjust the parameters if needed (hover the **?** beside any parameter for
    a quick explanation). The parameters are seeded automatically from the
-   cloud's size **and shape** each time you open the panel — a few centimetres
+   cloud's size **and shape** each time you open the panel — a few centimeters
    of cloth resolution for a pot/plot-scale scan, scaling up to tens of
-   centimetres for a field- or orchard-scale scan. The seed also reads the
+   centimeters for a field- or orchard-scale scan. The seed also reads the
    cloud's **vertical relief**: a large *flat* field gets a coarse, stiff
    cloth, but a large *sloped* tile (e.g. an aerial scan of a hillside forest)
    gets a **finer cloth, low rigidness, and slope smoothing on** so the cloth
@@ -26,11 +26,11 @@ labels the points the cloth settles onto as ground.
    rather than terrain, and keeps the flat-ground recipe: a conforming cloth
    would climb the trunk.
    **Airborne (ALS) scans get a different recipe entirely.** Phytograph
-   recognises them by their point spacing — metres apart, against millimetres
+   recognizes them by their point spacing — meters apart, against millimeters
    for a tripod scan — and switches to a fixed 0.75 m cloth with slope
    smoothing on, rather than scaling the cloth from the tile's width. Scaling
    it up is actively wrong on airborne data: on a 400 m tile the size-based
-   rule asks for a cloth several metres across, which is *coarser than the
+   rule asks for a cloth several meters across, which is *coarser than the
    terrain* yet, once clamped, still finer than the points can support, so it
    settles onto sampling noise. Measured on the standard ISPRS ground-filtering
    benchmark, the fixed airborne recipe raises mean accuracy from 0.76 to 0.86.
@@ -40,13 +40,13 @@ labels the points the cloth settles onto as ground.
    (CSF's parameters are absolute distances, so a fixed default that suits a
    1 m plant scan would label nearly everything as non-ground on a 50 m
    field — and a coarse, stiff cloth tuned for a flat field bridges over a
-   steep tile, labelling the whole uphill slope non-ground. The seeded values
+   steep tile, labeling the whole uphill slope non-ground. The seeded values
    are a starting point — override them freely.)
     - **Cloth resolution (m)** — the cloth grid cell size. Smaller follows
       finer ground relief but is slower; for pot/plot-scale scans a few
-      centimetres works well.
+      centimeters works well.
     - **Ground tolerance (m)** — how far a point can sit *above* the draped
-      cloth and still count as ground. The box is greyed out while **Measure
+      cloth and still count as ground. The box is grayed out while **Measure
       from the scan** (below) is ticked, which it is by default; untick that to
       set the tolerance by hand. Raise it to pull low plant material —
       weeds, ground cover, inter-row vegetation — into the ground class;
@@ -79,13 +79,13 @@ labels the points the cloth settles onto as ground.
    **Cancel** button appears beside it — click Cancel to stop a long or stuck run
    immediately (the computation is killed and the cloud is left unchanged).
 
-When it finishes, the cloud is recoloured by a new **Ground Class**
-attribute, with a legend in the corner showing which colour is which. The
+When it finishes, the cloud is recolored by a new **Ground Class**
+attribute, with a legend in the corner showing which color is which. The
 original points are never deleted.
 
 !!! note "Ground vs *non-ground*, not ground vs plant"
     CSF only separates the ground from everything above it. The above-ground
-    class is labelled **Non-ground** because the filter can't tell a plant
+    class is labeled **Non-ground** because the filter can't tell a plant
     from any other object sitting on the ground — a person, a building, a
     tripod. In a clean plant scan the non-ground class *is* the plant, but if
     the scene contains other above-ground objects they'll land in the same
@@ -118,7 +118,7 @@ setting shows what it detected, so you can see the figure being used).
 
 The classification is stored as a scalar attribute named **Ground Class**.
 You can switch back to it any time from the **Color by** picker in the
-Display panel — it shows discrete colours (brown for ground, green for
+Display panel — it shows discrete colors (brown for ground, green for
 non-ground), not a continuous gradient.
 
 If you ticked **Split**, two extra clouds appear in the scan list —
@@ -137,13 +137,13 @@ cloud alone.
 
 ## Why ground points come out as non-ground
 
-The most common surprise is patches of obviously-flat ground labelled
+The most common surprise is patches of obviously-flat ground labeled
 non-ground, sitting right next to ground points at what looks like the same
 height. Raising the **Ground tolerance** fixes it, which feels wrong when the
 terrain is visibly flat.
 
 It isn't the terrain. Ground returns don't form a thin sheet — they form a
-*band* several tens of centimetres thick, because of the scanner's range noise
+*band* several tens of centimeters thick, because of the scanner's range noise
 plus soil roughness. The cloth settles onto the **bottom** of that band, and the
 tolerance is measured upward from the cloth, so it has to clear the band's full
 thickness. On a real aerial orchard scan that band measured ~0.5 m thick even
@@ -163,8 +163,8 @@ is already accounted for — it works the same on a hillside as on flat ground.
 It also handles the opposite extreme. On a clean scan of a single tree over
 flat ground the ground returns form a very thin band with empty air above it,
 and the nearest thing that looks like the "top" of the band is the canopy
-metres overhead — which would place the cut far too high and swallow the
-bottom of the trunk into the ground class. The measurement recognises that
+meters overhead — which would place the cut far too high and swallow the
+bottom of the trunk into the ground class. The measurement recognizes that
 shape and keeps the cut on the ground band where it belongs.
 
 If you'd rather set it by hand, look at the point where the ground stops and

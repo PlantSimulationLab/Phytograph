@@ -53,7 +53,7 @@ test('per-tree split loads each octree exactly once (no remount flicker)', async
   await page.getByTestId('tree-split-clouds').check();
   await page.getByTestId('tree-segment-run-button').click();
 
-  // Parent recoloured, then one child cloud per tree.
+  // Parent recolored, then one child cloud per tree.
   await expect(page.getByTestId('scalar-overlay'))
     .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 120_000 });
 

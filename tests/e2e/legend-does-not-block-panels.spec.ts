@@ -20,7 +20,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars.xyz');
 // generate-dem-cancel timed out clicking Run with "scalar-overlay subtree
 // intercepts pointer events", while passing locally where the legend happened
 // to be narrow enough that only the button's right edge was covered and the
-// centre click landed clear. The fix puts the legend at z-[15], below the
+// center click landed clear. The fix puts the legend at z-[15], below the
 // panels; this spec pins that ordering.
 test('a legend card cannot swallow a tool panel button', async () => {
   const { app, page, close } = await launchApp();
@@ -30,7 +30,7 @@ test('a legend card cannot swallow a tool panel button', async () => {
     await completeImportWizard(page);
     await expect(page.locator('[data-testid="scan-row"]').first()).toBeVisible({ timeout: 20_000 });
 
-    // Colour by a scalar so the continuous colorbar actually renders.
+    // Color by a scalar so the continuous colorbar actually renders.
     await page.getByRole('button', { name: 'Display' }).click();
     // `gps-time` is the octree buffer key of the Timestamp column (it rides the
     // LAS standard gps_time field); the option value is that key.
@@ -47,7 +47,7 @@ test('a legend card cannot swallow a tool panel button', async () => {
     await page.getByTestId('tool-dem').click();
     await expect(page.getByTestId('dem-panel')).toBeVisible();
 
-    // Park the real legend card squarely over the Run button's centre. On CI a
+    // Park the real legend card squarely over the Run button's center. On CI a
     // taller legend does this on its own; forcing it makes the ordering
     // assertion deterministic on every machine instead of depending on how many
     // entries the scene happens to produce.
@@ -78,7 +78,7 @@ test('a legend card cannot swallow a tool panel button', async () => {
       const el = document.elementFromPoint(cx, cy) as HTMLElement | null;
       return [overlaps, el?.dataset.testid ?? el?.tagName ?? 'null'] as const;
     });
-    expect(covered, 'the legend card should be sitting over the button centre').toBe(true);
+    expect(covered, 'the legend card should be sitting over the button center').toBe(true);
     expect(topmost, 'the panel button must win the hit test, not the legend').toBe('dem-run-button');
 
     // And the click must actually reach it: with the legend at the panels' own

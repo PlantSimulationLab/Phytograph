@@ -13,7 +13,7 @@ line of the reader.
 reader spawns were written with `Popen` and were the last fork()ing children in
 the backend.
 
-WHY IT HID: the crash needs the GLFW runtime to be INITIALISED, not merely
+WHY IT HID: the crash needs the GLFW runtime to be INITIALIZED, not merely
 imported, so a reader spawn only dies once something has already built a cloud
 session in the same process. In the test suite that is exactly the ordering
 `extract` (builds a session) then `inspect` (spawns the reader again) --
@@ -29,7 +29,7 @@ import main
 def test_native_reader_spawn_does_not_fork(monkeypatch, tmp_path):
     """Spawn the reader through the REAL code path and prove it never forks.
 
-    Behavioural, not a source grep: an earlier version of this test asserted
+    Behavioral, not a source grep: an earlier version of this test asserted
     that `_SegProc` appeared in the function source, and it passed happily when
     the branch selecting it was disabled. What has to hold is that the child is
     actually created without forking, so this records how it was created.

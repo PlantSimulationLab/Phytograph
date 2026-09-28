@@ -147,7 +147,7 @@ test.describe('viewport picking', () => {
     await expect(rows).toHaveCount(scanCount, { timeout: 20_000 });
 
     // Deliberately do NOT call __resetPointCloudCamera here: reset frames the
-    // full scene bounds (including the scan markers metres away), which pulls
+    // full scene bounds (including the scan markers meters away), which pulls
     // the camera far enough back that the grid box is small on screen. The bug
     // under test appears at the app's OWN post-import framing, which fits the
     // point data — a ~0.5 m scene viewed from ~1 m, where the grid box covers
@@ -248,9 +248,9 @@ test.describe('viewport picking', () => {
     // unpickable entirely. Target the box out toward a side corner, clear of the
     // sphere: the box is 0.5^3 at (0,0,0.5) rotated 45 deg, so its vertical
     // edges run through (0, +-0.354) and (+-0.354, 0), and the sphere only
-    // reaches z ~ 0.70 near the centre.
+    // reaches z ~ 0.70 near the center.
     //
-    // The box is symmetric about its centre, so every corner is an equally valid
+    // The box is symmetric about its center, so every corner is an equally valid
     // target — take whichever currently projects onto bare canvas. Hardcoding
     // one made this depend on where the framing happens to put it: on the CI
     // runner (0, +0.30) landed on the right-hand scene panel, so the click never

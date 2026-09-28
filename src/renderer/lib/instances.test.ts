@@ -24,7 +24,7 @@ describe('instancePrefix', () => {
 });
 
 describe('withNewInstance', () => {
-  it('takes the id after the highest in use, named and coloured like its siblings', () => {
+  it('takes the id after the highest in use, named and colored like its siblings', () => {
     const { palette, value } = withNewInstance(trees);
     expect(value).toBe(18);
     const added = palette.classes.find((c) => c.value === 18)!;

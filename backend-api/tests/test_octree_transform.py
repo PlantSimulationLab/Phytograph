@@ -167,9 +167,9 @@ def test_bad_matrix_size_raises():
 def test_translation_matches_independent_reconvert(tmp_path):
     """THE core property: rewriting in place == converting the moved cloud.
 
-    Compared by nearest-neighbour distance rather than index-wise, because the
+    Compared by nearest-neighbor distance rather than index-wise, because the
     converter is free to order points differently; what must match is the point
-    SET, to within the format's 1 mm quantisation.
+    SET, to within the format's 1 mm quantization.
     """
     from scipy.spatial import cKDTree
 
@@ -189,14 +189,14 @@ def test_translation_matches_independent_reconvert(tmp_path):
 
     dist, _ = cKDTree(ref).query(fast)
     quantum = float(read_metadata(src)["scale"][0])
-    # One quantisation step in each axis is the worst honest rounding error.
+    # One quantization step in each axis is the worst honest rounding error.
     assert dist.max() <= quantum * np.sqrt(3) * 1.001
 
 
 @needs_converter
 def test_translation_is_exact_against_analytic_transform(tmp_path):
     """Independent of the converter: every point must land within half a
-    quantisation step of source + delta."""
+    quantization step of source + delta."""
     pts = _cloud()
     delta = np.array([-12.5, 3.25, 900.0])
     _write_las(tmp_path / "a.las", pts)
@@ -320,7 +320,7 @@ def test_repeated_translations_do_not_accumulate_error(tmp_path):
 
 @needs_converter
 def test_zero_translation_is_a_faithful_copy(tmp_path):
-    """Identity must be a no-op, not a slow re-quantisation drift."""
+    """Identity must be a no-op, not a slow re-quantization drift."""
     pts = _cloud(n=10_000)
     _write_las(tmp_path / "a.las", pts)
     src = _convert(tmp_path / "a.las", tmp_path / "oct_a")
@@ -400,7 +400,7 @@ def test_truncated_octree_bin_is_refused(tmp_path):
 
 
 def test_inf_and_nan_literals_in_metadata_parse(tmp_path):
-    """PotreeConverter emits bare inf/nan on uninitialised min/max; strict JSON
+    """PotreeConverter emits bare inf/nan on uninitialized min/max; strict JSON
     rejects them, so the reader must scrub before parsing (mirrors
     main._read_octree_metadata)."""
     d = tmp_path / "oct"

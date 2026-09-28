@@ -62,7 +62,7 @@ interface FilterPanelProps {
   // `hasAnyFilter` so "Remove this filter" is offered per field rather than
   // whenever any other field happens to be filtered.
   selectedFieldNarrows: boolean;
-  // Resolves a field value to its committed filter (used to summarise it).
+  // Resolves a field value to its committed filter (used to summarize it).
   getFieldFilter: (fieldValue: string) => FilterRange | undefined;
   // True when this field's committed filter actually removes points. The
   // dropdown's "(active)" marker reads from THIS, not from `enabled` — an
@@ -84,7 +84,7 @@ interface FilterPanelProps {
   onSegmentFilter: () => void;
   // True while the permanent filter's backend round-trip (octree reconversion)
   // is in flight. Disables the commit button so an impatient re-click can't
-  // queue a second full filter; the cancellable StatusPill carries the progress.
+  // queue a second full filter; the cancelable StatusPill carries the progress.
   isApplying?: boolean;
 
   // ---- Noise section --------------------------------------------------
@@ -251,7 +251,7 @@ export function FilterPanel({
               Auto parameters
             </label>
 
-            {/* Auto FILLS and greys these rather than hiding them: the user has
+            {/* Auto FILLS and grays these rather than hiding them: the user has
                 to be able to see what the auto rule picked to judge whether it
                 is sane for their scan. */}
             {NOISE_PARAM_FIELDS[noiseMethod].map(field => (
@@ -485,7 +485,7 @@ export function FilterPanel({
             })}
           </div>
           {/* Live preview summary. A PERCENTAGE, not a count — see
-              `previewShownFraction`. Labelled "preview" and paired with the
+              `previewShownFraction`. Labeled "preview" and paired with the
               caveat below so it is never read as the number Filter will
               actually remove. */}
           {previewShownFraction != null && (

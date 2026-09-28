@@ -14,7 +14,7 @@ const FIX = join(repoRoot, 'tests', 'e2e', 'fixtures', 'georef-moving');
 // `-displayOffset - worldShift`, LAD calls `shiftPoseStream(traj, ws)`. The
 // single-file import path ALSO pre-shifted the poses, so both conversions fired on
 // already-shifted data. On this fixture (UTM zone 10N, ellipsoidal height) the
-// trajectory was drawn at (-605445, -4266619, 0) — 4.3 million metres from the
+// trajectory was drawn at (-605445, -4266619, 0) — 4.3 million meters from the
 // cloud, i.e. invisible — and LAD received doubly-shifted per-beam origins. The
 // bulk-import path never pre-shifted, which is why every existing trajectory spec
 // passed: they all run with worldShift = 0.
@@ -48,8 +48,8 @@ test('a georeferenced moving-platform scan draws its trajectory in the viewport'
     // bug, so assert it rather than assume it. Bounds are in the stored frame, so
     // a UTM easting of 605k must not appear here.
     const viewer = page.locator('[data-scene-bounds-size]');
-    const centre = (await viewer.getAttribute('data-scene-center'))!;
-    const [cx, cy] = centre.split(',').map(Number);
+    const center = (await viewer.getAttribute('data-scene-center'))!;
+    const [cx, cy] = center.split(',').map(Number);
     expect(Math.abs(cx)).toBeLessThan(1000);
     expect(Math.abs(cy)).toBeLessThan(1000);
 
@@ -71,11 +71,11 @@ test('a georeferenced moving-platform scan draws its trajectory in the viewport'
     // The union midpoint (with the trajectory) is ~78.7 — assert we are not that.
     expect(Math.abs(originY - 78.7)).toBeGreaterThan(5);
     // ...while the camera's framing bounds DO still include the flight path.
-    const sceneCentreY = Number(
+    const sceneCenterY = Number(
       (await page.locator('[data-scene-bounds-size]').getAttribute('data-scene-center'))!
         .split(',')[1],
     );
-    expect(sceneCentreY).toBeGreaterThan(67);
+    expect(sceneCenterY).toBeGreaterThan(67);
     await page.getByTestId('scene-origin-close').click();
 
     // Hide the point cloud so the markers are the only thing that can change.

@@ -105,7 +105,7 @@ def test_column_type_hint_deviation_name_forms():
 
 def test_preview_commented_header_recovers_labels_and_roles(client, tmp_path: Path):
     # A '#'-commented column legend (some exporters write the header as a comment
-    # so loaders that honour comment='#' skip it as data). Preview must recover
+    # so loaders that honor comment='#' skip it as data). Preview must recover
     # the labels, map each to a role, and NOT consume the first data row.
     f = tmp_path / "commented.xyz"
     f.write_text(
@@ -121,7 +121,7 @@ def test_preview_commented_header_recovers_labels_and_roles(client, tmp_path: Pa
     assert [c["header_name"] for c in cols] == [
         "x", "y", "z", "r255", "g255", "b255", "row", "column", "is_miss"]
     roles = [c["detected_role"] for c in cols]
-    # x/y/z + RGB (r255 spelling recognised) + grid indices; is_miss reports the
+    # x/y/z + RGB (r255 spelling recognized) + grid indices; is_miss reports the
     # dedicated 'is_miss' role token (pre-selects the wizard's 'Miss Flag' option)
     # pinned to the canonical is_miss slug.
     assert roles[:6] == ["x", "y", "z", "r255", "g255", "b255"]
@@ -177,12 +177,12 @@ def test_commented_header_import_carries_canonical_slugs(client, tmp_path: Path)
     assert hdr["has_colors"] is True
 
 
-def test_miss_alias_spellings_normalise_to_is_miss(tmp_path: Path):
-    # 'sky' / 'miss' header spellings (and a column_plan slug) all canonicalise
+def test_miss_alias_spellings_normalize_to_is_miss(tmp_path: Path):
+    # 'sky' / 'miss' header spellings (and a column_plan slug) all canonicalize
     # to the is_miss slug so the LAD path finds the flag regardless of source.
     assert main._role_from_header_name("sky") == "is_miss"
     assert main._role_from_header_name("Miss") == "is_miss"
-    assert main._normalise_miss_alias("Sky") == "is_miss"
+    assert main._normalize_miss_alias("Sky") == "is_miss"
     cp = _plan([
         {"index": 0, "role": "x"}, {"index": 1, "role": "y"}, {"index": 2, "role": "z"},
         {"index": 3, "role": "extra", "slug": "sky", "label": "Sky"},
@@ -224,7 +224,7 @@ def test_preview_headerless_xyz_positional(client, tmp_path: Path):
 
 
 def test_preview_headerless_six_col_rgb_detected(client, tmp_path: Path):
-    # No header; 6 columns whose 4th-6th look like 8-bit colour (0-255 ints) →
+    # No header; 6 columns whose 4th-6th look like 8-bit color (0-255 ints) →
     # the positional fallback assigns r255/g255/b255.
     f = tmp_path / "rgb.xyz"
     f.write_text(
@@ -254,7 +254,7 @@ def test_preview_headerless_multireturn_not_mistaken_for_rgb(client, tmp_path: P
     cols = res.json()["columns"]
     roles = [c["detected_role"] for c in cols]
     assert roles[:3] == ["x", "y", "z"]
-    # No RGB mislabel — cols 4-6 are reassignable scalars, not colour.
+    # No RGB mislabel — cols 4-6 are reassignable scalars, not color.
     assert "r255" not in roles and "g255" not in roles and "b255" not in roles
     for i in (3, 4, 5):
         assert cols[i]["detected_role"] == "skip"
@@ -269,7 +269,7 @@ def test_columns_look_like_rgb255_unit():
     # A timestamp column (>255) disqualifies it.
     assert not main._columns_look_like_rgb255(
         [[0.0, 0.0, 0.0, 297972.0, 99, 1]], (3, 4, 5))
-    # Non-integer (0-1 float colour) is not 8-bit RGB either.
+    # Non-integer (0-1 float color) is not 8-bit RGB either.
     assert not main._columns_look_like_rgb255(
         [[0.0, 0.0, 0.0, 0.5, 0.2, 0.1]], (3, 4, 5))
     # Negative disqualifies.
@@ -284,8 +284,8 @@ def test_leading_integer_index_columns_shift_xyz(tmp_path: Path):
     # header. The first two columns are entirely integers (scan-pattern row /
     # column index), the coordinates start at column 2 with fractional
     # precision, columns 5-7 are 0-255 RGB, and the trailing reflectance ranges
-    # above 255 (so it must NOT be mistaken for colour). Auto-detect should
-    # recognise the index pair, anchor xyz at column 2, tag the RGB triple, and
+    # above 255 (so it must NOT be mistaken for color). Auto-detect should
+    # recognize the index pair, anchor xyz at column 2, tag the RGB triple, and
     # carry the reflectance as intensity.
     f = tmp_path / "scanner.xyz"
     f.write_text(
@@ -382,14 +382,14 @@ def test_preview_ascii_ply_fields(client, tmp_path: Path):
     assert all(not c["remappable"] for c in body["columns"])
     roles = [c["detected_role"] for c in body["columns"]]
     assert roles[:3] == ["x", "y", "z"]
-    # reflectance maps to the intensity role; deviation is an unrecognised
+    # reflectance maps to the intensity role; deviation is an unrecognized
     # property carried as a scalar field.
     assert "intensity" in roles
     assert "extra" in roles
 
 
 # --------------------------------------------------------------------------- #
-# column_plan: import honours rename + categorical + RGB scale
+# column_plan: import honors rename + categorical + RGB scale
 # --------------------------------------------------------------------------- #
 
 def _plan(columns, rgb_is_255=True):
@@ -397,7 +397,7 @@ def _plan(columns, rgb_is_255=True):
 
 
 def test_extra_dim_slug_colliding_with_reserved_las_name_is_renamed():
-    # A scalar field whose name sanitises onto a built-in LAS dimension
+    # A scalar field whose name sanitizes onto a built-in LAS dimension
     # ('intensity', 'classification', 'x', …) must be renamed, or laspy's
     # header build crashes with "field '<name>' occurs more than once".
     for raw in ('intensity', 'Intensity', 'classification', 'X', 'red'):
@@ -479,7 +479,7 @@ def test_column_plan_multiple_skips_get_unique_names():
 
 def test_skipped_ascii_column_is_absent_from_the_written_las(tmp_path: Path):
     # End-to-end on the real converter: the skipped column must not survive as an
-    # extra dim, while its neighbours still do. A names-only assertion could pass
+    # extra dim, while its neighbors still do. A names-only assertion could pass
     # while the writer still emitted the field.
     f = tmp_path / "scan.xyz"
     f.write_text("0 0 0 11 21\n1 1 1 12 22\n2 2 2 13 23\n")
@@ -500,7 +500,7 @@ def test_skipped_ascii_column_is_absent_from_the_written_las(tmp_path: Path):
 # drop_slugs: the IN-FILE (LAS/PLY/E57/PTX) equivalent of role='skip'
 # --------------------------------------------------------------------------- #
 
-def test_canonical_drop_slugs_normalises_case_order_and_duplicates():
+def test_canonical_drop_slugs_normalizes_case_order_and_duplicates():
     # The filter and any cache identity must agree on what "the same drop list"
     # means, so ordering/case/duplicates have to collapse to one canonical form.
     assert main._canonical_drop_slugs(["B", "a", "b ", "A"]) == ("a", "b")
@@ -533,7 +533,7 @@ def test_apply_drop_slugs_removes_only_the_named_fields():
 
 def test_apply_drop_slugs_can_drop_a_load_bearing_field():
     # The wizard warns about dropping is_miss but does not forbid it (an all-zero
-    # is_miss on a hits-only export is dead weight). The backend must honour it
+    # is_miss on a hits-only export is dead weight). The backend must honor it
     # rather than silently keeping the field.
     extras = {"is_miss": np.array([0.0], dtype=np.float32)}
     meta = [{"slug": "is_miss", "label": "Miss"}]
@@ -543,7 +543,7 @@ def test_apply_drop_slugs_can_drop_a_load_bearing_field():
 
 
 def test_drops_channel_covers_intensity_and_whole_rgb_triple():
-    # Intensity and colour are first-class session fields, NOT entries in
+    # Intensity and color are first-class session fields, NOT entries in
     # `extras`, so the slug filter alone can't remove them — E57's intensity is
     # exactly this case. They need their own check.
     assert main._drops_channel(["intensity"], "intensity") is True
@@ -551,8 +551,8 @@ def test_drops_channel_covers_intensity_and_whole_rgb_triple():
     assert main._drops_channel(["deviation"], "intensity") is False
     assert main._drops_channel(None, "intensity") is False
 
-    # Colour goes only when the WHOLE triple is unticked — a cloud with two of
-    # three channels has no colour the renderer could show.
+    # Color goes only when the WHOLE triple is unticked — a cloud with two of
+    # three channels has no color the renderer could show.
     assert main._drops_channel(["r", "g", "b"], "colors") is True
     assert main._drops_channel(["red", "green", "blue"], "colors") is True
     assert main._drops_channel(["r", "g"], "colors") is False
@@ -644,12 +644,12 @@ def test_exported_class_column_previews_as_a_label(client, tmp_path: Path, make_
     It has to come back as a LABEL. The wizard's role is not cosmetic — 'Scalar'
     calls `registerContinuousSlug` in the renderer, which suppresses the slug's
     categorical scheme PROCESS-WIDE (every cloud in the session, until restart),
-    so a file Phytograph itself wrote used to re-import as a grey gradient and
-    take Wood/Leaf colouring down with it.
+    so a file Phytograph itself wrote used to re-import as a gray gradient and
+    take Wood/Leaf coloring down with it.
 
     Written by `_export_session_to_las` rather than by hand, because the thing
     under test is that the name the EXPORTER chooses is the name the PREVIEW
-    recognises; two hand-written spellings would agree with each other and with
+    recognizes; two hand-written spellings would agree with each other and with
     nothing else.
     """
     src = tmp_path / "cloud.xyz"
@@ -718,7 +718,7 @@ def test_class_field_name_matching_is_tolerant_of_spelling():
                  "scalar_wood_class", "ground_class", "noise_class",
                  "manual_class", "las_classification",
                  # The organ tool's columns, so an exported result re-imports
-                 # as Label and keeps its Soil/Stem/Leaf colouring.
+                 # as Label and keeps its Soil/Stem/Leaf coloring.
                  "plant_organ", "Plant Organ", "leaflet_id", "scalar_leaflet_id"):
         assert main._is_class_field_name(name), name
     for name in ("height_above_ground", "reflectance", "curvature",

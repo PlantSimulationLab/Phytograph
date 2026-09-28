@@ -73,11 +73,11 @@ time for a trustworthy result.
    without one — see the note below).
 4. Click **Backfill Misses**. A progress bar shows the per-scan stages
    (reading the scan, building the cloud, reconstructing misses, storing);
-   it can be cancelled. A summary toast reports how many points were
+   it can be canceled. A summary toast reports how many points were
    recovered.
 5. When **Show misses** was on, the **"Show misses"** toggle on each
    backfilled scan row turns on automatically and the recovered sky points
-   are drawn (in a distinct colour, projected onto the scan's bounding
+   are drawn (in a distinct color, projected onto the scan's bounding
    sphere and streamed as a level-of-detail octree, so a dense sky shell
    stays smooth). Toggle it off once you've confirmed them.
 
@@ -104,13 +104,13 @@ one-click **Backfill Misses** button. See
   only removes hits.)
 - **Re-running Backfill after a crop does not "recompute against the
   survivors" — and must not.** The reconstruction is a property of the
-  *instrument*: it rebuilds the scan's angular raster and synthesises a miss
+  *instrument*: it rebuilds the scan's angular raster and synthesizes a miss
   into every cell that has no return. Fed only the survivors of a crop, a
   pulse whose single return you cropped away would come back as a **miss** —
   a fully transmitted beam — when the beam was really extinguished at that
   deleted hit. If that hit sat in *front* of the voxel grid, the pulse should
-  not sample the grid at all, whereas a synthesised miss is projected about a
-  kilometre out and rays straight through it. Phytograph therefore restores
+  not sample the grid at all, whereas a synthesized miss is projected about a
+  kilometer out and rays straight through it. Phytograph therefore restores
   deleted hits before gap-filling, so a re-run reproduces the scan as
   measured rather than inventing beams.
 
@@ -121,7 +121,7 @@ one-click **Backfill Misses** button. See
     one case where re-running Backfill after a crop is the right move, and LAD
     says so in its warning.
 - **No editing tool ever discards sky/miss points.** Crop, erase, filter,
-  segment and split all act on hits alone: a miss sits about a kilometre out
+  segment and split all act on hits alone: a miss sits about a kilometer out
   along its beam, so it falls outside any region you draw around the canopy,
   and deleting it on that basis would quietly destroy the transmission
   denominator LAD depends on. Splitting a cloud keeps the misses with the

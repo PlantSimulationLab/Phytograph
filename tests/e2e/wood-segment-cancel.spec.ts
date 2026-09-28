@@ -59,7 +59,7 @@ test('wood/leaf segmentation shows a Cancel button and recovers after cancel', a
     await expect(panel.locator('.bg-red-900\\/30')).toHaveCount(0);
 
     // Prove a new op can start and complete after the cancel: run again and let
-    // it finish, asserting the cloud is coloured by the discrete wood_class
+    // it finish, asserting the cloud is colored by the discrete wood_class
     // attribute (concrete correct output, per the E2E rules).
     await expect(runButton).toBeEnabled();
     await runButton.click();

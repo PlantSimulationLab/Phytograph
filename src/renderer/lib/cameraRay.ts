@@ -73,13 +73,13 @@ const _eye = new THREE.Vector3();
  * the reasoning that the offset near-plane origin was "good enough for picking"
  * under perspective. It is not, and the error is not subtle: the near plane sits
  * ~0.001-0.1 world units from the eye, so the whole screen maps to origins
- * within a fraction of a millimetre of each other, all travelling dead ahead.
- * Every pick therefore reported the surface at the CENTRE of the viewport no
+ * within a fraction of a millimeter of each other, all traveling dead ahead.
+ * Every pick therefore reported the surface at the CENTER of the viewport no
  * matter where the pointer was — measured on a 14.8 M-point cloud as the exact
  * same anchor, to 1e-7, across five widely separated cursor positions. The label
  * brush's sphere sat frozen mid-scene while the mouse moved around it, and
  * potree's own picker (which derives its pick pixel from `camera.position +
- * ray.direction`) was handed the view centre every time.
+ * ray.direction`) was handed the view center every time.
  *
  * NOTE `projectionMatrixInverse` must be current. `OrthoProjectionOverride`
  * updates it alongside `projectionMatrix` for exactly this reason; a new
@@ -113,7 +113,7 @@ export function rayForNdc(
  * alone. That is right for a perspective ray and wrong for a parallel one: under
  * an orthographic projection every ray shares the camera's forward direction, so
  * the derived point is always view-space (0, 0, -1) and the pick window always
- * lands on the CENTRE of the viewport, whatever the cursor is doing. The
+ * lands on the CENTER of the viewport, whatever the cursor is doing. The
  * cross-section's ortho override puts the label brush in exactly that case, and
  * the erase brush lives there permanently.
  *

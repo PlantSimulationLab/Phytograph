@@ -65,7 +65,7 @@ European forest near Bretten, Germany), used to exercise the three ways origin
 information can enter Phytograph on **genuine drone/aircraft data** (not toy fixtures).
 
 Source: PANGAEA [doi:10.1594/PANGAEA.942856](https://doi.pangaea.de/10.1594/PANGAEA.942856),
-plot **BR04** (`BR04.zip`, 5.58 GB), licence **CC-BY-SA-4.0**. Frame: ETRS89 / UTM
+plot **BR04** (`BR04.zip`, 5.58 GB), license **CC-BY-SA-4.0**. Frame: ETRS89 / UTM
 zone 32N (EPSG:25832). The full zip is not kept here (gitignored anyway); re-download
 and extract the ALS cloud + trajectory with:
 

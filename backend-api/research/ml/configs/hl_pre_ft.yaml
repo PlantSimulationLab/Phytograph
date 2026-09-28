@@ -1,5 +1,5 @@
 # Hand-label-like synthetic wood: fine-tune of hl_pre on real trees + leaf-off almonds, with a
-# 20 % relabelled-synthetic replay. Neither labelled redbud is trained on.
+# 20 % relabeled-synthetic replay. Neither labeled redbud is trained on.
 name: hl_pre_ft
 description: "Leaf/wood PointNeXt-S: hand-label-like synthetic pre-training, then real fine-tuning (redbuds held out)."
 task: wood_leaf

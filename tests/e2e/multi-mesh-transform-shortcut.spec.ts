@@ -179,12 +179,12 @@ test('a click-committed transform keeps the selection for the next gesture', asy
   const canvas = page.locator('canvas').first();
   const box = await canvas.boundingBox();
   if (!box) throw new Error('no canvas');
-  // Park the cursor on empty canvas, well away from the meshes at the centre:
+  // Park the cursor on empty canvas, well away from the meshes at the center:
   // the placing click must MISS everything, which is exactly the case that
   // triggers onPointerMissed. A click that landed on a mesh would take the
   // selection path instead and prove nothing.
   //
-  // Left-of-centre on purpose. The viewport's RIGHT side is overlaid by the
+  // Left-of-center on purpose. The viewport's RIGHT side is overlaid by the
   // object panel and its buttons, and an import toast covers the bottom-right
   // for the first few seconds — a click there never reaches the canvas at all,
   // so the test would pass or fail for reasons having nothing to do with

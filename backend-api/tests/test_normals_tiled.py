@@ -1,6 +1,6 @@
 """The tiled normal estimate must equal the untiled one.
 
-This is THE test for the tool's scalability story. Normals are a neighbourhood
+This is THE test for the tool's scalability story. Normals are a neighborhood
 statistic, so a tile that cannot see past its own edge computes a different
 answer there than the whole-cloud run would -- and the failure is a cosmetic-
 looking seam that silently corrupts anything downstream (Poisson stitches across
@@ -81,7 +81,7 @@ def test_tiled_matches_untiled(monkeypatch, fixture, origin):
     ang, dot = _angles(ref, got)
     assert (dot < 0).sum() == 0, "origin orientation must not flip across tiles"
     assert ang.max() < 0.1, f"seam error {ang.max():.4f} deg"
-    # The derived scalars are functions of the same neighbourhood, so they must
+    # The derived scalars are functions of the same neighborhood, so they must
     # agree too -- a collar that is right for the normal is right for these.
     assert np.abs(ref[:, 3] - got[:, 3]).max() < 1e-6
     assert np.abs(ref[:, 4] - got[:, 4]).max() < 0.1
@@ -128,7 +128,7 @@ def test_per_point_origins_survive_tiling(monkeypatch):
 
 def test_tiling_covers_every_point(monkeypatch):
     """A point missed by every tile keeps the `fill=0.0`, so |n| = 0 marks the
-    gap. This checks tile COVERAGE only — a genuinely degenerate neighbourhood
+    gap. This checks tile COVERAGE only — a genuinely degenerate neighborhood
     also yields |n| = 0 by design (see `_eigen_normals`'s degeneracy guard and
     its tests in test_normals.py), so the two are deliberately indistinguishable
     here. The fixture is a dense surface with no degenerate points, which is
@@ -197,9 +197,9 @@ def test_small_cloud_skips_tiling(monkeypatch):
     assert meta["workers"] == 1
 
 
-def test_collar_is_measured_from_the_kth_neighbour_not_the_first(monkeypatch):
-    """The collar must grow with k -- it has to contain the whole neighbourhood
-    the estimator looks at, which the FIRST neighbour distance does not bound."""
+def test_collar_is_measured_from_the_kth_neighbor_not_the_first(monkeypatch):
+    """The collar must grow with k -- it has to contain the whole neighborhood
+    the estimator looks at, which the FIRST neighbor distance does not bound."""
     pts = _tls_density()
     small, large = {}, {}
     _tiled(monkeypatch, pts, k=10, meta=small, orientation="none")

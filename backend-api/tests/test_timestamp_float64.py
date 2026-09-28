@@ -60,7 +60,7 @@ def test_gps_time_survives_as_float64_through_read(tmp_path):
     assert len(np.unique(timestamps)) == _N
     np.testing.assert_allclose(timestamps, _GPS_TIMES, rtol=0, atol=0)
 
-    # CONTROL: a float32 cast (the OLD behaviour) collapses the 1 ms spacing at
+    # CONTROL: a float32 cast (the OLD behavior) collapses the 1 ms spacing at
     # this epoch. If this assertion ever fails, the float32 path has returned and
     # the precision fix is broken — that is exactly what this gate guards.
     assert len(np.unique(timestamps.astype(np.float32))) < _N
@@ -174,7 +174,7 @@ def test_encoding_adjusted_standard(tmp_path):
 
 def test_encoding_gps_week(tmp_path):
     """global_encoding bit clear + week-range values → GPS Week Time; raw values
-    preserved (NOT silently normalised to adjusted-standard)."""
+    preserved (NOT silently normalized to adjusted-standard)."""
     las_path = tmp_path / "week.las"
     vals = np.array([100.0, 200.0, 300000.0, 400000.0, 604000.0])  # seconds-into-week
     _write_las_with_encoding(las_path, 0, vals)  # 0 = WEEK_TIME

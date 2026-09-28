@@ -1,10 +1,10 @@
 """Scalar fields must survive a point-cloud export, in every format.
 
-The bug these guard: an export wrote geometry and (sometimes) colour, and
+The bug these guard: an export wrote geometry and (sometimes) color, and
 silently dropped every other field the user imported.
 
 * `_read_points_from_source` returned a 3-tuple by signature — positions,
-  colours, intensity — so no caller could reach the session's `extras` at all.
+  colors, intensity — so no caller could reach the session's `extras` at all.
 * The text writers hardcoded X/Y/Z + optional R/G/B + optional Intensity, and
   ignored the ordered column list the export modal's picker had collected.
 * The LAS writer chose point format `2 if has_colors else 0`. Neither format has
@@ -160,7 +160,7 @@ def test_deselected_scalar_is_omitted(client, scalar_session, tmp_path):
 
     lines = dest.read_text().splitlines()
     # Scalars keep their SLUG verbatim as the header (only the fixed geometry /
-    # colour / intensity slugs get a pretty name), so a re-import matches columns
+    # color / intensity slugs get a pretty name), so a re-import matches columns
     # by the same token the picker showed.
     assert lines[0] == "X Y Z reflectance"
     assert "ground_class" not in dest.read_text()
@@ -256,7 +256,7 @@ def test_las_writes_scalars_as_extra_dimensions(client, scalar_session, tmp_path
 
 
 def test_las_point_format_matches_the_importer(client, scalar_session, tmp_path):
-    """Export writes the LAS 1.4 records: 7 with colour, 6 without.
+    """Export writes the LAS 1.4 records: 7 with color, 6 without.
 
     Both carry GPS time (a scan's per-point timestamp needs it) and a full
     classification byte; the legacy 1/3 held only 5 bits of class, so a user
@@ -268,7 +268,7 @@ def test_las_point_format_matches_the_importer(client, scalar_session, tmp_path)
     dest = tmp_path / "fmt.las"
     _export(client, scalar_session, "las", dest)
     las = laspy.read(str(dest))
-    # No colour in this fixture -> format 6.
+    # No color in this fixture -> format 6.
     assert las.point_format.id == 6, f"expected format 6, got {las.point_format.id}"
     assert "gps_time" in set(las.point_format.dimension_names)
 
@@ -333,7 +333,7 @@ def test_las_deselecting_every_scalar_writes_none(client, scalar_session, tmp_pa
     np.testing.assert_allclose(las.x[0], 0.0, atol=1e-3)
 
 
-def test_las_omitting_rgb_drops_the_colour_dimensions(client, make_file_session, tmp_path):
+def test_las_omitting_rgb_drops_the_color_dimensions(client, make_file_session, tmp_path):
     """Deselecting r/g/b picks point format 6, which has no RGB dimension.
 
     This is the one standard dimension that IS omittable — but only as a bundle:
@@ -357,11 +357,11 @@ def test_las_omitting_rgb_drops_the_colour_dimensions(client, make_file_session,
     las2 = laspy.read(str(without))
     assert "red" not in set(las2.point_format.dimension_names)
     assert las2.point_format.id == 6
-    # Geometry unaffected by dropping colour.
+    # Geometry unaffected by dropping color.
     np.testing.assert_allclose(las2.x, [0, 1, 2], atol=1e-3)
 
 
-def test_las_response_reports_the_colour_actually_written(client, make_file_session, tmp_path):
+def test_las_response_reports_the_color_actually_written(client, make_file_session, tmp_path):
     """has_colors must describe the FILE, not the cloud — the renderer's toast
     and any caller branching on it would otherwise be wrong."""
     src = tmp_path / "rgb2.txt"

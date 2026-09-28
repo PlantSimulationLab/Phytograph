@@ -68,7 +68,7 @@ async function closeWindow(app: import('@playwright/test').ElectronApplication) 
   });
 }
 
-test('a close is CANCELLED when the user declines, and the session survives intact', async () => {
+test('a close is CANCELED when the user declines, and the session survives intact', async () => {
   const app = await launchApp({ PHYTOGRAPH_E2E_QUIT_CONFIRM: 'cancel' });
 
   // Import a real cloud so the scene is dirty through the genuine renderer
@@ -85,7 +85,7 @@ test('a close is CANCELLED when the user declines, and the session survives inta
   expect(result.prompts).toBe(1);
   expect(result.windows).toBe(1);
 
-  // The point of cancelling: the work is still there and still usable. A
+  // The point of canceling: the work is still there and still usable. A
   // confirmation that saved the window but lost the scene would be useless.
   await expect(rows).toHaveCount(1);
 

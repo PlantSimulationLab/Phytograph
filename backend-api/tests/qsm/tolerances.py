@@ -64,7 +64,7 @@ L2_LENGTH_RECOVERED_MIN = 0.90         # arc-length fraction recovered (worst 0.
 # so it was briefly raised to 0.45 for the distance-taper + pipe-model model. The
 # TRUE NEAREST-CYLINDER point assignment (Phase D, 2026-06-08) then improved radius
 # accuracy across the board -- each cylinder fits its OWN bark instead of sharing a
-# radial band with the trunk/neighbours -- bringing total-volume error back to
+# radial band with the trunk/neighbors -- bringing total-volume error back to
 # <=0.15 on every fixture. Re-TIGHTENED accordingly (worst measured 0.147), so the
 # bar is once again a real guard, met by an honest model rather than by thinning.
 L2_VOLUME_RELERR_MAX = 0.22

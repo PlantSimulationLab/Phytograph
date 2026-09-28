@@ -97,7 +97,7 @@ const api = {
   notifyRendererReady: (): void => ipcRenderer.send(IPC.RendererReady),
   // Push which scene-dependent menu items should be clickable. The native menu
   // lives in main and cannot read renderer state, so this is the only way an
-  // item like "Reset Registration" can grey out when there is nothing to reset.
+  // item like "Reset Registration" can gray out when there is nothing to reset.
   setMenuState: (payload: MenuStatePayload): void => ipcRenderer.send(IPC.MenuState, payload),
   // Push whether closing now would lose work. Main owns the window 'close' and
   // 'before-quit' events and cannot read renderer state, so the confirmation

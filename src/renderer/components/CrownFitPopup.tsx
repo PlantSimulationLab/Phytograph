@@ -74,13 +74,13 @@ export function CrownFitPopup({
   // selection (only the eligible ones) each time the modal opens.
   useEffect(() => {
     if (!isOpen) return;
-    let cancelled = false;
+    let canceled = false;
     (async () => {
       try {
         const stored = await window.electronAPI?.store?.get?.(CROWN_FIT_OPTIONS_STORE_KEY);
-        if (!cancelled) setOpts(coerceCrownFitOptions(stored));
+        if (!canceled) setOpts(coerceCrownFitOptions(stored));
       } catch {
-        if (!cancelled) setOpts(DEFAULT_CROWN_FIT_OPTIONS);
+        if (!canceled) setOpts(DEFAULT_CROWN_FIT_OPTIONS);
       }
     })();
     const seed = new Set<string>();
@@ -90,7 +90,7 @@ export function CrownFitPopup({
     }
     setSelectedScanIds(seed);
     return () => {
-      cancelled = true;
+      canceled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
@@ -177,7 +177,7 @@ export function CrownFitPopup({
 
         <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
           {/* Scan selection. Each scan must be a segmented individual tree with
-              the ground handled; ineligible scans are greyed with a reason. */}
+              the ground handled; ineligible scans are grayed with a reason. */}
           <ObjectPicker
             data-testid="crown-scan-picker"
             label="Scans to fit"

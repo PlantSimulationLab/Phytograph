@@ -320,7 +320,7 @@ def test_a_spilled_session_still_pins_its_octrees(spill_root, monkeypatch):
 
 def test_the_spill_directory_is_held_under_its_cap(spill_root, monkeypatch):
     """Over the cap the oldest spill is dropped — reverting THAT cloud to the
-    old 404 behaviour, which is why it is the last resort and is logged."""
+    old 404 behavior, which is why it is the last resort and is logged."""
     monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 1)
     monkeypatch.setenv("PHYTOGRAPH_SESSION_SPILL_MAX_BYTES", "1")
     _admit(_session("first"), 100)

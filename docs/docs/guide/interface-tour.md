@@ -66,7 +66,7 @@ Hover any button to see its name. Buttons no longer appear and disappear
 with your selection — they're always shown so you can see what's available.
 
 - **Single-input tools** (Filter, Segment Ground, Triangulate, …) act on the
-  selected cloud. They're greyed out until you select one; the tooltip tells
+  selected cloud. They're grayed out until you select one; the tooltip tells
   you what to pick.
 - **Multi-input tools** (Align, Stitch, Leaf Area Density) stay enabled and
   open a dialog where you pick their inputs explicitly — for example, Leaf
@@ -145,7 +145,7 @@ Expanding a scan shows whatever that scan actually carries:
   sweep, tilt, and heading, plus the return type detected from its data.
 - **Cloud details**, when it has point data — the point count (flagged
   when there are unapplied edits, and noting whether the scan carries
-  sky/miss returns), the extent in metres, the global shift applied at
+  sky/miss returns), the extent in meters, the global shift applied at
   import if any, the source file it was read from, and — for a registered
   scan — which scan it was registered onto and how far it moved (or, for a
   reference scan, which scans were registered onto it).

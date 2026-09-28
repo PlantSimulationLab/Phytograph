@@ -32,7 +32,7 @@ export function CameraController({
   bounds: PointCloudData['bounds'] & {
     groundZ?: number;
     robustExtent?: [number, number, number];
-    // WORLD-space centre of the actual content (outlier-resistant). Defaults to
+    // WORLD-space center of the actual content (outlier-resistant). Defaults to
     // `center` when the scene carries no percentile box.
     contentCenter?: [number, number, number];
   };
@@ -119,12 +119,12 @@ export function CameraController({
   const limitsRef = useRef(limits);
   limitsRef.current = limits;
 
-  // WORLD-space content centre, for the zoom fallback anchor (see the wheel
-  // handler). Falls back to the raw bounds centre on a scene with no percentile
+  // WORLD-space content center, for the zoom fallback anchor (see the wheel
+  // handler). Falls back to the raw bounds center on a scene with no percentile
   // box; that is the pre-existing behavior and is correct when there are no
   // outliers to reject.
-  const contentCentreRef = useRef<[number, number, number]>([0, 0, 0]);
-  contentCentreRef.current = bounds.contentCenter
+  const contentCenterRef = useRef<[number, number, number]>([0, 0, 0]);
+  contentCenterRef.current = bounds.contentCenter
     ?? [bounds.center.x, bounds.center.y, bounds.center.z];
 
   // What "fit everything" should actually fit: the CONTENT, not the raw bounding
@@ -134,7 +134,7 @@ export function CameraController({
   // that — a dolly moves along the view ray and never corrects a lateral offset
   // — so the fix has to be here, at the framing step.
   //
-  // Built from the robust centre + extent when the scene has them, else the raw
+  // Built from the robust center + extent when the scene has them, else the raw
   // bounds unchanged (the pre-existing behavior, correct with no outliers).
   const framingBounds = useMemo(() => {
     const e = bounds.robustExtent;
@@ -202,7 +202,7 @@ export function CameraController({
     // Aim at exactly what was framed. The scene origin deliberately does NOT
     // override the look-at height any more: zoom no longer converges on the
     // target alone (zoom-to-cursor walks toward whatever is under the pointer),
-    // so bending framing toward the origin would only mis-centre the view
+    // so bending framing toward the origin would only mis-center the view
     // without buying the reachability it used to be there for.
     camera.position.copy(newPos);
     controlsRef.current.target.copy(center);
@@ -287,7 +287,7 @@ export function CameraController({
   }, [camera, displayCenter]);
 
   // Frame the scene origin explicitly: keep the current viewing angle, but
-  // re-centre on the origin at a comfortable distance. This is the deliberate
+  // re-center on the origin at a comfortable distance. This is the deliberate
   // "take me to the pivot" command (Blender's numpad-`.`), and it replaces the
   // implicit origin-anchoring that framing used to do — the reachability is now
   // a command the user invokes, not a rule that silently bends every reframe.
@@ -311,8 +311,8 @@ export function CameraController({
   // target — and no gesture moves the target toward what you are looking at:
   // pan slides the view sideways (screen-space, perpendicular to the view
   // direction) and never shortens camera→target. On a big scene with far
-  // outliers the target sits at the inflated bounds centre, possibly hundreds of
-  // metres from the content, and the region you want is simply unreachable.
+  // outliers the target sits at the inflated bounds center, possibly hundreds of
+  // meters from the content, and the region you want is simply unreachable.
   //
   // Here the wheel instead moves BOTH camera and target toward the point under
   // the pointer, the way CloudCompare, Potree, MeshLab and Blender all do it.
@@ -323,7 +323,7 @@ export function CameraController({
   //
   // On a miss (pointing at empty sky) we fall back to a plain dolly along the
   // view direction, keeping the target ahead of the camera. That still gets you
-  // somewhere sane, unlike the stock behaviour, because the target follows.
+  // somewhere sane, unlike the stock behavior, because the target follows.
   useEffect(() => {
     const el = gl.domElement;
 
@@ -364,14 +364,14 @@ export function CameraController({
     // only that a deliberate pause under ~0.4 s keeps flying at the old anchor.
     const GESTURE_IDLE_MS = 400;
     const GESTURE_MOVE_PX = 40;      // beyond this the cursor is on a new subject
-    // Closest the camera may get to the content centre, as a fraction of the
+    // Closest the camera may get to the content center, as a fraction of the
     // scene scale. Keeps a deep zoom inspecting the subject rather than passing
     // through the middle of it — see the clamp in the wheel handler.
     const CONTENT_APPROACH_FLOOR = 0.02;
     // Largest single-notch step, as a fraction of the scene scale. Bounds the
     // zoom-out feedback loop (speed ∝ distance, and zooming out grows distance).
     const PACE_CEILING = 2;
-    // Farthest the camera may get from the content centre, as a fraction of the
+    // Farthest the camera may get from the content center, as a fraction of the
     // scene scale. The auto-frame sits at ~2x the scene size, so this leaves
     // ample room to pull back and see everything while keeping the scene from
     // receding to a dot that no further notch can recover from.
@@ -410,7 +410,7 @@ export function CameraController({
       // ── Notches: never DISCARD scroll input ─────────────────────────────────
       //
       // Fraction of the remaining gap to close, compounding at 0.82 per notch.
-      // deltaY is normalised per notch (~100px on most mice; a trackpad sends
+      // deltaY is normalized per notch (~100px on most mice; a trackpad sends
       // many small deltas, which compose to the same rate).
       //
       // The clamp used to be ±4, which silently turned the frame rate into a
@@ -419,7 +419,7 @@ export function CameraController({
       // second, and when the scene is heavy the main thread stalls so the OS
       // COALESCES wheel events: ten physical notches arrive as a couple of
       // events carrying a large deltaY. Clamping at 4 threw the surplus away, so
-      // a flick over the full cloud travelled less than it was asked to. Zoomed
+      // a flick over the full cloud traveled less than it was asked to. Zoomed
       // in the scene is cheap, nothing coalesces, every notch arrives as its own
       // event and all of it counts — the identical flick then delivers its full
       // travel and overshoots.
@@ -453,10 +453,10 @@ export function CameraController({
       // doing exactly that — steps fell from 17.3 to 0.026 across one burst,
       // which is the "it gets laggy then momentarily freezes" report.
       //
-      // Distance to the content centre is the one quantity here that does NOT
+      // Distance to the content center is the one quantity here that does NOT
       // collapse as the camera closes on a surface: fly onto a leaf and you are
       // still a real distance from the middle of the tree. Floored near the
-      // scene scale so sitting at the centre (or a degenerate scene) still gives
+      // scene scale so sitting at the center (or a degenerate scene) still gives
       // a usable step. Scale-free, continuous across a re-probe, never decays.
       // The anchor steers; this sets the pace.
       //
@@ -472,7 +472,7 @@ export function CameraController({
       // outer clamp below is written against the ANCHOR distance, not against
       // how far the camera is from the scene.
       const oPace = offsetRef.current;
-      const ccPace = contentCentreRef.current;
+      const ccPace = contentCenterRef.current;
       const contentDist = camPos.distanceTo(new THREE.Vector3(
         ccPace[0] - (oPace?.x ?? 0),
         ccPace[1] - (oPace?.y ?? 0),
@@ -534,18 +534,18 @@ export function CameraController({
           // degraded every one of those notches to an on-axis dolly.
           //
           // The old form also decelerated to a standstill: it projected the
-          // content centre onto the view ray, and that projection shrinks as the
-          // camera approaches the centre plane, so `step` (a fraction of the
+          // content center onto the view ray, and that projection shrinks as the
+          // camera approaches the center plane, so `step` (a fraction of the
           // remaining gap) shrank toward zero while the user kept scrolling.
           //
-          // Distance along the cursor ray comes from the content centre's depth
+          // Distance along the cursor ray comes from the content center's depth
           // measured along the VIEW direction — "how far away is the subject" —
-          // which stays finite and stable as the camera closes in. The centre
+          // which stays finite and stable as the camera closes in. The center
           // must be the CONTENT's, not the raw bounding box's: with far outliers
-          // the box centre sits in empty space among the strays.
+          // the box center sits in empty space among the strays.
           const o = offsetRef.current;
-          const cc = contentCentreRef.current;
-          const sceneCentre = new THREE.Vector3(
+          const cc = contentCenterRef.current;
+          const sceneCenter = new THREE.Vector3(
             cc[0] - (o?.x ?? 0),
             cc[1] - (o?.y ?? 0),
             cc[2] - (o?.z ?? 0),
@@ -557,7 +557,7 @@ export function CameraController({
           // Depth of the subject ahead of the camera. Behind us (already flown
           // past the scene) or degenerate: fall back to the current look-at
           // distance so a zoom still does something sane instead of reversing.
-          let depth = sceneCentre.clone().sub(camPos).dot(viewDir);
+          let depth = sceneCenter.clone().sub(camPos).dot(viewDir);
           if (!(depth > 1e-6)) depth = camPos.distanceTo(target);
           if (!(depth > 1e-6)) return;
 
@@ -576,7 +576,7 @@ export function CameraController({
           // Place the anchor at the subject's depth along the cursor ray. Divide
           // by cos(angle to the view axis) so the anchor sits on the same depth
           // PLANE as the subject rather than on a sphere around the camera —
-          // otherwise an off-centre cursor would anchor short of the content.
+          // otherwise an off-center cursor would anchor short of the content.
           const cosA = cursorDir.dot(viewDir);
           const alongCursor = cosA > 1e-3 ? depth / cosA : depth;
           anchor = camPos.clone().addScaledVector(cursorDir, alongCursor);
@@ -590,7 +590,7 @@ export function CameraController({
         // view recedes on a zoom-in. Keeping the old anchor makes the motion
         // simply stop at the surface, which is the honest outcome: there is
         // nothing closer under the cursor to fly to.
-        // Only ever a defence against a real PICK receding. Applying it to the
+        // Only ever a defense against a real PICK receding. Applying it to the
         // fallback deadlocks: pointing at empty sky near the edge of a small scene
         // misses every time, the fallback legitimately sits at content depth
         // (farther than a surface the camera reached earlier in the gesture),
@@ -619,7 +619,7 @@ export function CameraController({
       //
       // The anchor's job is to set the DIRECTION (that is what makes the point
       // under the cursor stay put). Deriving the step size from it as well is
-      // what produced every remaining artefact, because the anchor gap is not a
+      // what produced every remaining artifact, because the anchor gap is not a
       // stable quantity:
       //
       //   • Latched, it shrinks geometrically. A 25-notch burst decayed from 9.9
@@ -640,7 +640,7 @@ export function CameraController({
       // `clampDollyToSurface` below stops the camera short of the surface it is
       // flying at, which is the right guard in open space but provides no
       // protection once the camera is inside the cloud: from in there the
-      // nearest surface is millimetres away in every direction, the probe keeps
+      // nearest surface is millimeters away in every direction, the probe keeps
       // returning it (measured: an anchor 0.004 out, notch after notch), and
       // "stop 2% short of 4 mm" still lets the camera sit buried in the canopy
       // with nothing on screen. That is the "over-zooms until no points are in
@@ -745,7 +745,7 @@ export function CameraController({
       // spherical radius |camera − target| after clamping it into
       // [minDistance, maxDistance] (three-stdlib OrbitControls, `update()`).
       // Re-seating the target closer than minDistance therefore had the update
-      // immediately shove the camera back out along the target ray, cancelling
+      // immediately shove the camera back out along the target ray, canceling
       // the dolly — zoom died permanently, and only an orbit (which rebuilds the
       // offset) revived it. Keeping the re-seat inside the range means the
       // clamp is a no-op and the dolly always survives the update.
@@ -757,7 +757,7 @@ export function CameraController({
         // Preserve the VIEW DIRECTION — re-seating must not rotate the camera.
         // Move the target along the existing camera→target ray, NOT onto the
         // anchor point itself (which is off-axis whenever the cursor isn't
-        // dead-centre; putting the target there would swing the view and turn
+        // dead-center; putting the target there would swing the view and turn
         // every zoom into an orbit).
         const dir = new THREE.Vector3().subVectors(target, camPos);
         if (dir.lengthSq() > 1e-18) {
@@ -803,7 +803,7 @@ export function CameraController({
   // comes from the same response and is threaded through `combinedBounds`, so on
   // the empty→loaded transition this effect can fire once with only the raw box
   // available. Framing the raw box on an outlier-heavy scene parks the camera
-  // hundreds of metres out, aimed at empty space between the strays — and the
+  // hundreds of meters out, aimed at empty space between the strays — and the
   // plain latch would then never correct it. So we re-frame exactly once more,
   // when the robust box first becomes available.
   const framedRobustRef = useRef(false);
@@ -887,8 +887,8 @@ export function CameraController({
   // - NEAR = clamp(dist/1000, 1e-6, minDistance): pushed as far out as it can go
   //   without clipping (never beyond the scene-scaled minDistance, so the orbit
   //   target is never clipped), pulled in as you dolly toward a surface. A near
-  //   pinned at 0.01 is 100x closer than needed when orbiting a metre-scale scene
-  //   metres out, and that tiny near is what crushes precision near z=0. The
+  //   pinned at 0.01 is 100x closer than needed when orbiting a meter-scale scene
+  //   meters out, and that tiny near is what crushes precision near z=0. The
   //   ceiling tracks minDistance rather than a hardcoded 0.1 because zoom limits
   //   are now scene-scaled — on a small scene a 0.1 near would clip the content
   //   the user zoomed in to inspect.
@@ -1110,9 +1110,9 @@ export function CameraController({
         : null,
       framedContent: hasFramedContentRef.current,
       lastUserMoveAt: lastUserMoveAtRef.current,
-      // WORLD-space centre of the content (outlier-resistant); the zoom fallback
+      // WORLD-space center of the content (outlier-resistant); the zoom fallback
       // anchor converges here when the pointer misses geometry.
-      contentCenter: [...contentCentreRef.current],
+      contentCenter: [...contentCenterRef.current],
       // WORLD-space scene origin — the point left-drag orbits about, and what
       // the 3D-cursor marker shows. Exposed because a pivot that drifts off the
       // content is invisible until the first orbit throws the cloud out of the

@@ -8,18 +8,18 @@ import type { PointCloudData } from './pointCloudTypes';
  *
  * Why the percentile is the right default. A colormap maps its domain onto the
  * full ramp, so the domain's endpoints are set by the single most extreme value
- * in the column. One multipath return a kilometre above the canopy, one
+ * in the column. One multipath return a kilometer above the canopy, one
  * saturated specular spike in reflectance, one mis-registered scan — and every
  * real point is squeezed into a few percent of the ramp. The scene reads as one
- * flat colour and the variation the user is actually looking for is gone, with
+ * flat color and the variation the user is actually looking for is gone, with
  * nothing on screen to say why. Trimming a 1% tail from each end costs the
- * outliers their exact position (they clamp to the end colours, which is what a
+ * outliers their exact position (they clamp to the end colors, which is what a
  * user wants for noise) and buys back the whole ramp for the data.
  *
  * WHY THE CATEGORICAL GATE IS HERE AND NOT IN THE BACKEND. Trimming a class-ID
  * column is destructive in a way trimming a measurement is not: the rarest class
  * is, by definition, in the tail, so a 1% trim silently deletes it from the
- * palette and every point owning it is repainted as its neighbour. The backend
+ * palette and every point owning it is repainted as its neighbor. The backend
  * cannot avoid this on its own — whether a numeric column is a measurement or a
  * label is the user's import-wizard choice, it lives in this process's
  * module-level registries (`classification.ts`), and the user can flip it after
@@ -52,9 +52,9 @@ export function robustScalarRange(
   // touch it.
   //
   // Resolved through `categoricalSchemeForCloud` so a slug carrying a USER
-  // PALETTE is recognised as a label here even if it never reached
-  // DYNAMIC_CATEGORICAL — otherwise a hand-labelled column would be percentile-
-  // trimmed like a measurement, dropping its rarest class off the colour ramp.
+  // PALETTE is recognized as a label here even if it never reached
+  // DYNAMIC_CATEGORICAL — otherwise a hand-labeled column would be percentile-
+  // trimmed like a measurement, dropping its rarest class off the color ramp.
   // The palette path only ADDS resolutions; the nullness this gate reads is
   // otherwise identical, so this cannot disagree with the renderers.
   const observed = data.octree?.observedClasses?.[field];
@@ -65,7 +65,7 @@ export function robustScalarRange(
 
   // Never widen. The percentile range is a subset of the extrema whenever both
   // were measured over the same points, so a robust end outside the raw one
-  // means they were not. That is defence in depth rather than a live bug: both
+  // means they were not. That is defense in depth rather than a live bug: both
   // numbers now travel together on every response that carries either (import
   // and `_session_rebuild` alike), so a mismatched pairing should not arise.
   // It is cheap, and the failure it prevents is a domain containing no points.

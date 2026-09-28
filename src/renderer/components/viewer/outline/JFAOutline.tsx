@@ -63,7 +63,7 @@ const SEED_INIT_FRAG = /* glsl */ `
   }
 `;
 
-// JFA step: among the 3x3 neighbours at the current step distance, keep the
+// JFA step: among the 3x3 neighbors at the current step distance, keep the
 // stored seed UV nearest to this pixel. Nearest filtering is mandatory (we store
 // positions, which must not be interpolated).
 const JFA_STEP_FRAG = /* glsl */ `

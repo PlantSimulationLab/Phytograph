@@ -6,7 +6,7 @@ import {
   slabViewPose, slabOrthoFrustum,
   slabStepDistance, stepSlab, slabCoverage,
   defaultSlabForBounds, slabToPayload,
-  slabFromCentreline, drawnSlabDepth, centrelineIsPreviewable,
+  slabFromCenterline, drawnSlabDepth, centerlineIsPreviewable,
   type SlabRegion,
 } from './crossSection';
 
@@ -22,13 +22,13 @@ const SLAB: SlabRegion = {
 };
 
 describe('slab axes', () => {
-  it('tangent runs along the centreline, normal is perpendicular', () => {
+  it('tangent runs along the centerline, normal is perpendicular', () => {
     expect(slabTangent(SLAB)).toEqual({ x: 1, y: 0 });
     expect(slabNormal(SLAB)).toEqual({ x: -0, y: 1 });
     expect(slabLength(SLAB)).toBe(10);
   });
 
-  it('handles a diagonal centreline', () => {
+  it('handles a diagonal centerline', () => {
     const s: SlabRegion = { ...SLAB, a: { x: 0, y: 0 }, b: { x: 3, y: 4 } };
     const t = slabTangent(s);
     expect(t.x).toBeCloseTo(0.6, 10);
@@ -40,14 +40,14 @@ describe('slab axes', () => {
     expect(slabLength(s)).toBeCloseTo(5, 10);
   });
 
-  it('degenerates safely when the centreline has no length', () => {
+  it('degenerates safely when the centerline has no length', () => {
     const s: SlabRegion = { ...SLAB, b: { x: 0, y: 0 } };
     expect(() => slabPredicate(s)(0, 0, 5)).not.toThrow();
     expect(slabLength(s)).toBe(0);
     expect(slabTangent(s)).toEqual({ x: 1, y: 0 });
   });
 
-  it('centre follows the step offset along the normal', () => {
+  it('center follows the step offset along the normal', () => {
     expect(slabCenter(SLAB).toArray()).toEqual([5, 0, 5]);
     expect(slabCenter({ ...SLAB, offset: 3 }).toArray()).toEqual([5, 3, 5]);
   });
@@ -56,7 +56,7 @@ describe('slab axes', () => {
 describe('slabPredicate', () => {
   const inside = slabPredicate(SLAB);
 
-  it('accepts a point on the centreline', () => {
+  it('accepts a point on the centerline', () => {
     expect(inside(5, 0, 5)).toBe(true);
   });
 
@@ -67,7 +67,7 @@ describe('slabPredicate', () => {
     expect(inside(5, -1.01, 5)).toBe(false);
   });
 
-  it('bounds along the centreline, not infinitely', () => {
+  it('bounds along the centerline, not infinitely', () => {
     expect(inside(-0.01, 0, 5)).toBe(false);
     expect(inside(10.01, 0, 5)).toBe(false);
     expect(inside(0, 0, 5)).toBe(true);
@@ -189,12 +189,12 @@ describe('stepping', () => {
     }
   });
 
-  it('fixed mode honours the value, falling back to half', () => {
+  it('fixed mode honors the value, falling back to half', () => {
     expect(slabStepDistance(SLAB, 'fixed', 0.25)).toBe(0.25);
     expect(slabStepDistance(SLAB, 'fixed', 0)).toBe(1);
   });
 
-  it('steps move OFFSET only, so the centreline is untouched', () => {
+  it('steps move OFFSET only, so the centerline is untouched', () => {
     const next = stepSlab(SLAB, 1, 'half');
     expect(next.a).toEqual(SLAB.a);
     expect(next.b).toEqual(SLAB.b);
@@ -243,11 +243,11 @@ describe('defaultSlabForBounds', () => {
     max: new THREE.Vector3(10, 20, 5),
   };
 
-  it('centres a readable slab across the cloud', () => {
+  it('centers a readable slab across the cloud', () => {
     const s = defaultSlabForBounds(bounds);
     expect(s.depth).toBeGreaterThan(0);
     expect(s.depth).toBeLessThan(20);        // thin relative to the cloud
-    // Spans the full X extent and sits at the Y centre.
+    // Spans the full X extent and sits at the Y center.
     expect(s.a.x).toBeCloseTo(0, 6);
     expect(s.b.x).toBeCloseTo(10, 6);
     expect(s.a.y).toBeCloseTo(10, 6);
@@ -286,14 +286,14 @@ describe('slabToPayload', () => {
   });
 });
 
-describe('slabFromCentreline', () => {
+describe('slabFromCenterline', () => {
   const bounds = {
     min: new THREE.Vector3(-10, -10, 0),
     max: new THREE.Vector3(10, 10, 5),
   };
 
-  it('puts the centreline exactly where it was drawn', () => {
-    const s = slabFromCentreline({ x: -3, y: 2 }, { x: 4, y: 2 }, bounds);
+  it('puts the centerline exactly where it was drawn', () => {
+    const s = slabFromCenterline({ x: -3, y: 2 }, { x: 4, y: 2 }, bounds);
     expect(s.a).toEqual({ x: -3, y: 2 });
     expect(s.b).toEqual({ x: 4, y: 2 });
     expect(s.offset).toBe(0);
@@ -302,22 +302,22 @@ describe('slabFromCentreline', () => {
   it('spans the cloud vertically regardless of where the clicks landed', () => {
     // Both clicks sit at one height; the section must still slice the whole
     // tree rather than being clipped to the pick plane.
-    const s = slabFromCentreline({ x: 0, y: 0 }, { x: 6, y: 0 }, bounds);
+    const s = slabFromCenterline({ x: 0, y: 0 }, { x: 6, y: 0 }, bounds);
     expect(s.zMin).toBeLessThanOrEqual(bounds.min.z);
     expect(s.zMax).toBeGreaterThanOrEqual(bounds.max.z);
   });
 
   it('derives thickness from the drawn length when none is given', () => {
-    const s = slabFromCentreline({ x: 0, y: 0 }, { x: 20, y: 0 }, bounds);
+    const s = slabFromCenterline({ x: 0, y: 0 }, { x: 20, y: 0 }, bounds);
     expect(s.depth).toBeCloseTo(1, 9);   // 20 / 20
   });
 
-  it('honours an explicit depth — the preview holds it FIXED while dragging', () => {
+  it('honors an explicit depth — the preview holds it FIXED while dragging', () => {
     // The whole point of the fixed-thickness preview: length grows with the
     // drag, width does not. A depth that tracked the drag would splay the
     // walls outward while the user is trying to aim.
-    const short = slabFromCentreline({ x: 0, y: 0 }, { x: 2, y: 0 }, bounds, 0.4);
-    const long = slabFromCentreline({ x: 0, y: 0 }, { x: 18, y: 0 }, bounds, 0.4);
+    const short = slabFromCenterline({ x: 0, y: 0 }, { x: 2, y: 0 }, bounds, 0.4);
+    const long = slabFromCenterline({ x: 0, y: 0 }, { x: 18, y: 0 }, bounds, 0.4);
     expect(short.depth).toBeCloseTo(0.4, 9);
     expect(long.depth).toBeCloseTo(0.4, 9);
   });
@@ -326,13 +326,13 @@ describe('slabFromCentreline', () => {
     // Preview and commit share this function; a preview that disagreed with
     // the second click's result would be worse than no preview.
     const a = { x: -2, y: 1 }, b = { x: 5, y: 4 };
-    expect(slabFromCentreline(a, b, bounds)).toEqual(slabFromCentreline(a, b, bounds));
+    expect(slabFromCenterline(a, b, bounds)).toEqual(slabFromCenterline(a, b, bounds));
   });
 
   it('never produces a non-positive thickness (the backend rejects it)', () => {
-    expect(slabFromCentreline({ x: 0, y: 0 }, { x: 0, y: 0 }, bounds).depth)
+    expect(slabFromCenterline({ x: 0, y: 0 }, { x: 0, y: 0 }, bounds).depth)
       .toBeGreaterThan(0);
-    expect(slabFromCentreline({ x: 0, y: 0 }, { x: 5, y: 0 }, bounds, 0).depth)
+    expect(slabFromCenterline({ x: 0, y: 0 }, { x: 5, y: 0 }, bounds, 0).depth)
       .toBeGreaterThan(0);
   });
 });
@@ -351,7 +351,7 @@ describe('drawnSlabDepth', () => {
   });
 });
 
-describe('centrelineIsPreviewable', () => {
+describe('centerlineIsPreviewable', () => {
   const bounds = {
     min: new THREE.Vector3(0, 0, 0),
     max: new THREE.Vector3(100, 100, 10),
@@ -360,11 +360,11 @@ describe('centrelineIsPreviewable', () => {
   it('is false at the instant of the first click, before any movement', () => {
     // Guards the degenerate box: a and b coincide, the tangent is unstable,
     // and a zero-width flicker at the click point reads as a glitch.
-    expect(centrelineIsPreviewable({ x: 5, y: 5 }, { x: 5, y: 5 }, bounds)).toBe(false);
+    expect(centerlineIsPreviewable({ x: 5, y: 5 }, { x: 5, y: 5 }, bounds)).toBe(false);
   });
 
   it('is true once the drag is a visible fraction of the cloud', () => {
-    expect(centrelineIsPreviewable({ x: 5, y: 5 }, { x: 45, y: 5 }, bounds)).toBe(true);
+    expect(centerlineIsPreviewable({ x: 5, y: 5 }, { x: 45, y: 5 }, bounds)).toBe(true);
   });
 
   it('scales with the cloud, not an absolute distance', () => {
@@ -372,7 +372,7 @@ describe('centrelineIsPreviewable', () => {
     const drag = [{ x: 0, y: 0 }, { x: 2, y: 0 }] as const;
     const small = { min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(10, 10, 1) };
     const huge = { min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(1000, 1000, 1) };
-    expect(centrelineIsPreviewable(drag[0], drag[1], small)).toBe(true);
-    expect(centrelineIsPreviewable(drag[0], drag[1], huge)).toBe(false);
+    expect(centerlineIsPreviewable(drag[0], drag[1], small)).toBe(true);
+    expect(centerlineIsPreviewable(drag[0], drag[1], huge)).toBe(false);
   });
 });

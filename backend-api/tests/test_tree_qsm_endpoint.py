@@ -1,7 +1,7 @@
 """POST /api/cloud/session/{id}/tree_qsm: one QSM per tree_instance.
 
 Two copies of the QSM package's known synthetic tree stand in one session,
-wrapped in leaf points labelled leaf. The batch must build each tree from its
+wrapped in leaf points labeled leaf. The batch must build each tree from its
 own points only (wood points when asked), give the same model a single-tree
 build gives for those points, report a too-small tree as a per-tree failure
 rather than failing the batch, and exclude sky/miss points.
@@ -36,7 +36,7 @@ def _session(wood_pts, sid="tqsm", with_wood=True):
         tid += [np.full(len(w), t_id), np.full(len(leaves), t_id)]
         wc += [np.full(len(w), main.WOOD_CLASS_WOOD), np.full(len(leaves), main.WOOD_CLASS_LEAF)]
         miss += [np.zeros(len(w)), np.zeros(len(leaves))]
-    # A tiny "tree" of 20 wood points, and a sky point labelled tree 4.
+    # A tiny "tree" of 20 wood points, and a sky point labeled tree 4.
     parts += [rng.normal([20, 20, 1], 0.05, size=(20, 3)), np.array([[400.0, 900.0, 800.0]])]
     tid += [np.full(20, 13), np.array([4])]
     wc += [np.full(20, main.WOOD_CLASS_WOOD), np.array([main.WOOD_CLASS_WOOD])]

@@ -110,7 +110,7 @@ describe('isElf', () => {
       '_stub.cpython-312-x86_64-linux-gnu.so',
     );
     const machO = join(__dirname, '..', 'pyhelios', 'pyhelios', '_stub.cpython-312-darwin.so');
-    // Guard: these fixtures live in a submodule that may not be initialised.
+    // Guard: these fixtures live in a submodule that may not be initialized.
     try {
       readFileSync(linuxSo);
       readFileSync(machO);

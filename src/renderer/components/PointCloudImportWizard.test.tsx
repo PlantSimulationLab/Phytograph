@@ -105,7 +105,7 @@ describe('PointCloudImportWizard — per-column Import checkbox', () => {
     expect(includeBox(4)).not.toBeNull();
   });
 
-  it('every column starts ticked, so a no-edit import keeps auto-detect behaviour', async () => {
+  it('every column starts ticked, so a no-edit import keeps auto-detect behavior', async () => {
     await open(ASCII_COLUMNS);
     expect(includeBox(3)!.checked).toBe(true);
     expect(includeBox(4)!.checked).toBe(true);
@@ -248,7 +248,7 @@ describe('PointCloudImportWizard — per-column Import checkbox', () => {
 
   it('excludes an unticked Label column from categoricalSlugs', async () => {
     // A dropped column never reaches the cloud, so registering a categorical
-    // colour scheme for its slug would be dead state.
+    // color scheme for its slug would be dead state.
     const onComplete = await open([
       col({ index: 0, header_name: 'x', detected_role: 'x' }),
       col({ index: 1, header_name: 'y', detected_role: 'y' }),
@@ -389,7 +389,7 @@ describe('PointCloudImportWizard — role assignment on fixed-layout formats', (
 
   it('does not send extra/label as an override', async () => {
     // They are not canonical roles — they only pick gradient vs discrete
-    // colouring, which the rename box already expresses.
+    // coloring, which the rename box already expresses.
     const onComplete = await open(ASSIGNABLE_COLUMNS, 'las');
     fireEvent.change(roleSelect(4)!, { target: { value: 'label' } });
     submit();
@@ -409,7 +409,7 @@ describe('PointCloudImportWizard — role assignment on fixed-layout formats', (
   });
 
   it('still restricts a NON-assignable in-file scalar to Scalar/Label', async () => {
-    // The pre-existing behaviour for formats we have not opened up (PLY/PCD).
+    // The pre-existing behavior for formats we have not opened up (PLY/PCD).
     await open(LAS_COLUMNS, 'las');
     const values = [...roleSelect(3)!.options].map((o) => o.value);
     expect(values.sort()).toEqual(['extra', 'label']);

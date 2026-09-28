@@ -140,7 +140,7 @@ The app stores its preferences and recent files list in:
 - **Linux**: `~/.config/phytograph/`
 
 (Lowercase — this directory is named after the app's internal name. macOS and
-Windows are case-insensitive so the capitalisation there makes no difference,
+Windows are case-insensitive so the capitalization there makes no difference,
 but on Linux it does.)
 
 Imported point clouds are also cached on disk in a streaming format, so

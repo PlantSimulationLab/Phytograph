@@ -58,7 +58,7 @@ describe('robustScalarRange', () => {
 
   // The destructive case the gate exists for. A class-ID column's rarest class
   // sits in the tail by definition, so trimming 1% deletes it from the palette
-  // and repaints its points as a neighbouring class.
+  // and repaints its points as a neighboring class.
   it('does NOT trim a statically registered categorical field', () => {
     const d = cloud({ robust: { [GROUND_CLASS_ATTRIBUTE]: [0, 1] } });
     expect(robustScalarRange(d, GROUND_CLASS_ATTRIBUTE, [0, 2])).toEqual([0, 2]);
@@ -87,7 +87,7 @@ describe('robustScalarRange', () => {
     expect(robustScalarRange(d, GROUND_CLASS_ATTRIBUTE, [0, 2])).toEqual([0, 1]);
   });
 
-  it('honours observedClasses when resolving the scheme', () => {
+  it('honors observedClasses when resolving the scheme', () => {
     // A dynamic scheme built from exact surviving values still counts as
     // categorical; the gate must see it.
     registerCategoricalSlug('my_label');

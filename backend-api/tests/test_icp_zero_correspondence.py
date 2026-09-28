@@ -24,7 +24,7 @@ def _blob(n=400, scale=0.02, seed=0):
 
 
 def _row(n_plants=3, spacing=4.0, seed=1):
-    """A few separated clumps spanning several metres."""
+    """A few separated clumps spanning several meters."""
     rng = np.random.default_rng(seed)
     out = []
     for i in range(n_plants):
@@ -66,7 +66,7 @@ def _ring(n_per=200, n_clumps=8, radius=5.0, seed=1):
 
 
 def _correspondence_gap(target, source):
-    """(nearest-neighbour distance after centroid pre-alignment, ICP's window).
+    """(nearest-neighbor distance after centroid pre-alignment, ICP's window).
 
     Derived from the PRODUCTION helpers rather than hardcoded, so a change to
     the correspondence rule surfaces here as a failed precondition carrying real

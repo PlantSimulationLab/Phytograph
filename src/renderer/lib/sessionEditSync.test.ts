@@ -66,7 +66,7 @@ describe('labelStrokeRequest', () => {
 });
 
 describe('labelStrokeRequest exclusions', () => {
-  it('sends the hidden/locked classes a replay must honour', () => {
+  it('sends the hidden/locked classes a replay must honor', () => {
     expect(labelStrokeRequest(stroke('s', { excludeClasses: [64, 2] })))
       .toMatchObject({ exclude_classes: [64, 2] });
     expect(labelStrokeRequest(stroke('s'))).not.toHaveProperty('exclude_classes');

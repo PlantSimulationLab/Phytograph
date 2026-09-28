@@ -176,7 +176,7 @@ describe('saveTextFileQuiet / saveBinaryFileQuiet', () => {
     expect(window.electronAPI.fs.writeText).toHaveBeenCalledWith('/chosen/out.xyz', 'x y z');
   });
 
-  it('returns null and writes nothing when the save dialog is cancelled', async () => {
+  it('returns null and writes nothing when the save dialog is canceled', async () => {
     window.electronAPI.dialog.save = vi.fn(async () => null);
     window.electronAPI.fs.writeText = vi.fn(async () => undefined);
     window.electronAPI.fs.writeBinary = vi.fn(async () => undefined);

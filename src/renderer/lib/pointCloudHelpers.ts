@@ -671,7 +671,7 @@ export function computeMeshTriangleScalars(
   let min = Infinity;
   let max = -Infinity;
 
-  // Layer: colour each triangle by the centroid of its 3 vertices' stored layer
+  // Layer: color each triangle by the centroid of its 3 vertices' stored layer
   // values (a DTM's elevation / density / intensity / hillshade / slope / aspect
   // band). `layerValues` is one value per mesh vertex, aligned to `vertices`.
   if (mode === 'layer') {
@@ -883,7 +883,7 @@ export function fuzzyMatch(query: string, text: string): number {
   return qi === q.length ? 1 : 0;
 }
 
-// Octree attribute names that have a dedicated render path (geometry / colour /
+// Octree attribute names that have a dedicated render path (geometry / color /
 // intensity), so they must never appear in the *scalar* picker. Everything else
 // in the octree metadata IS a user-selectable scalar — including the standard
 // LAS dimensions the backend now carries explicitly (classification, scan_angle,
@@ -891,14 +891,14 @@ export function fuzzyMatch(query: string, text: string): number {
 // filtered out here, but the backend rebuilds the octree from session arrays and
 // only surfaces a dim when it holds non-constant data, so carrying them through
 // to the picker is the whole point of the fix. Compared case-insensitively.
-// PotreeConverter 2.x can emit position/colour with spaces ('rgb', 'position');
+// PotreeConverter 2.x can emit position/color with spaces ('rgb', 'position');
 // the potree-core decoder uses the squashed forms — list both spellings.
 //
 // PotreeConverter also writes LAS standard point dimensions (return number,
 // scan angle rank, gps-time, …) even when the source is a plain XYZ with no such
 // data — they come through degenerate (all-zero). These are sensor/schema
 // plumbing, not user-meaningful scalars, so they must NOT appear in the
-// colour-by picker. Names are PotreeConverter's exact spellings (spaces and the
+// color-by picker. Names are PotreeConverter's exact spellings (spaces and the
 // hyphen in 'gps-time'); the filter lowercases before comparing.
 //
 // NOTE: 'classification' is intentionally NOT filtered — it's a real LAS dim a
@@ -911,11 +911,11 @@ export function fuzzyMatch(query: string, text: string): number {
 // The two names live at DIFFERENT layers and must not be conflated:
 //
 //   `gps-time`  is the octree BUFFER KEY. `swapScalarIntoIntensity` does a bare
-//               `geometry.attributes[field]` lookup, so colour-by only works if
+//               `geometry.attributes[field]` lookup, so color-by only works if
 //               the name matches what PotreeConverter actually wrote. Renaming
 //               it in the octree view made that lookup miss and no-op, leaving
 //               the shader on the previous buffer: the legend showed the
-//               timestamp range while the points stayed coloured by intensity.
+//               timestamp range while the points stayed colored by intensity.
 //
 //   `timestamp` is the EXPORT/COMPUTE slug. The backend allowlist and the
 //               multi-return join key both use it.
@@ -939,7 +939,7 @@ export function octreeAttributeSlug(name: string): string {
  * export list ended up showing a bare lowercase `timestamp` while the Scans
  * panel and the Color-by picker both said "Timestamp".
  *
- * Falls back to the slug itself, so an unlabelled column still reads sensibly.
+ * Falls back to the slug itself, so an unlabeled column still reads sensibly.
  */
 export function displayLabelFor(
   slug: string,
@@ -972,11 +972,11 @@ export const OCTREE_BUILTIN_ATTRIBUTES = new Set([
   'position', 'rgb', 'rgba', 'color', 'intensity',
   'normal', 'indices', 'spacing',
   // LAS sensor/schema dimensions PotreeConverter always emits (degenerate for
-  // non-LAS sources); never user-meaningful as a colour-by field.
+  // non-LAS sources); never user-meaningful as a color-by field.
   'return number', 'number of returns',
   'scan angle rank', 'user data', 'point source id',
   // NOT 'gps-time': on a LAS/LAZ or .riproject import it IS the real time
-  // column — colourable, exportable, and the key LAD joins a trajectory on. A
+  // column — colorable, exportable, and the key LAD joins a trajectory on. A
   // cloud that never had one reports an all-zero range, which the
   // degenerate-range filter below suppresses.
 ]);
@@ -1171,7 +1171,7 @@ export function ladRange(
 //      session nor a source file (e.g. a synthetic scan).
 // The `positions.length > 0` guard on (3) is load-bearing: an octree cloud has
 // EMPTY positions but a full pointCount, so an unguarded points loop would
-// serialise millions of `[undefined, undefined, undefined]` (including any
+// serialize millions of `[undefined, undefined, undefined]` (including any
 // backfilled misses) into a multi-hundred-MB JSON body that OOM'd the backend's
 // pydantic parse. Returns true if a source was found, false if the scan has none.
 export function resolveHeliosScanSource(scan: Scan, entry: HeliosScanEntry): boolean {
@@ -1809,7 +1809,7 @@ export function partitionImportedColumns(scan: {
 // expanded scan row.
 //
 // This is deliberately BROADER than `octreeScalarFieldOptions`, which answers a
-// different question ("what can I colour by?") and therefore hides `intensity`,
+// different question ("what can I color by?") and therefore hides `intensity`,
 // the LAS schema builtins, and anything constant. Those omissions made the
 // Color-by dropdown a misleading way to check what an import produced: a column
 // that was silently dropped looked exactly like one that was kept but happened
@@ -1830,8 +1830,8 @@ function importedColumnNames(scan: {
   const names = new Set<string>();
   for (const k of Object.keys(scan.data?.octree?.attributeRanges ?? {})) names.add(k);
   for (const k of Object.keys(scan.data?.scalarFields ?? {})) names.add(k);
-  // `position` is the geometry, not a scalar field; `rgb`/`rgba` are colour and
-  // are already visible as a colour mode.
+  // `position` is the geometry, not a scalar field; `rgb`/`rgba` are color and
+  // are already visible as a color mode.
   for (const geom of ['position', 'rgb', 'rgba', 'color', 'normal', 'indices', 'spacing']) {
     names.delete(geom);
   }
@@ -1863,6 +1863,6 @@ export function importedColumnsFor(scan: {
   // identically, so keying the set on the raw name listed "Timestamp, Timestamp"
   // and read as two separate fields.
   const labels = scan.data?.octree?.attributeLabels ?? {};
-  const labelled = new Set([...names].map((n) => labels[n] ?? n));
-  return [...labelled].sort((a, b) => a.localeCompare(b));
+  const labeled = new Set([...names].map((n) => labels[n] ?? n));
+  return [...labeled].sort((a, b) => a.localeCompare(b));
 }

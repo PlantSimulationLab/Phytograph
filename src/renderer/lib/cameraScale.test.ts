@@ -158,7 +158,7 @@ describe('clampDollyToSurface', () => {
     expect(clampDollyToSurface(1, 10)).toBe(1);
   });
 
-  it('stops short of the surface instead of tunnelling through it', () => {
+  it('stops short of the surface instead of tunneling through it', () => {
     // Asking to move 10 m toward a surface 4 m away must not put the camera 6 m
     // behind it — the whole "I zoomed and the cloud vanished" failure.
     const step = clampDollyToSurface(10, 4);

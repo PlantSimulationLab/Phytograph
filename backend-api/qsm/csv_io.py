@@ -27,7 +27,7 @@ The CSV has no shoot table, but a shoot is recoverable in full:
   the only encoding of base->tip ordering in the file, so rows are never sorted.
 - ``parent_cyl_id`` -- the ``parentID`` of the shoot's first cylinder. A shoot's
   first cylinder attaches at the fork, so that column *is* the fork cylinder; no
-  nearest-neighbour heuristic is needed (unlike ``validation.gt_io``, which exists
+  nearest-neighbor heuristic is needed (unlike ``validation.gt_io``, which exists
   for JSON ground truth that omits ``parent_id`` entirely).
 - ``parent_shoot_id`` -- from ``parentSegmentID`` when present, else the shoot of
   that parent cylinder.

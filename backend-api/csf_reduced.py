@@ -13,13 +13,13 @@ cloth depends on the input points through exactly two things:
     smoothing (`movableFilter`) reads those same per-particle heights, and the
     per-particle point lists it fills are never read.
 
-Every other point matters only to the final labelling (`c2cdist`), which
+Every other point matters only to the final labeling (`c2cdist`), which
 interpolates the settled cloth bilinearly at each point. So the cloth that
 all N points produce is the cloth that at most one point per particle (plus
 the six bounding-box extremes) produces. At a 0.5 m cloth a 45.7 M-point
 terrestrial scan has ~10^5 particles, so CSF runs on ~10^5 points instead of
 all of them, and its working set (~60 B per point, twice over) stops scaling
-with the scan. The labelling is then done here, in chunks, with `c2cdist`'s
+with the scan. The labeling is then done here, in chunks, with `c2cdist`'s
 own arithmetic against the full-precision cloth (`do_cloth_export`).
 
 Exactness. Which point a particle keeps is decided with CSF's arithmetic
@@ -27,7 +27,7 @@ Exactness. Which point a particle keeps is decided with CSF's arithmetic
 library may fuse a multiply-add and differ in the last bit, so every point
 within a relative 1e-9 of its particle's minimum distance is kept, not just
 the minimum; they keep their input order, so CSF's own first-wins tie-break
-picks among them exactly as it would have among all N. The labelling
+picks among them exactly as it would have among all N. The labeling
 reproduces `c2cdist` operation for operation; a point can only disagree if
 its height above the cloth is within rounding (~1e-15 m) of the threshold.
 `tests/test_csf_reduced.py` checks label equality against plain CSF.

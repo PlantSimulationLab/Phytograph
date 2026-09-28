@@ -149,7 +149,7 @@ def test_beam_zenith_from_spherical_matches_cartesian_truth():
     array (main._directions_from_origin / Helios cart2sphere), not Cartesian
     vectors. Drive the REAL production helper rather than hand-authored input:
     passing its output to the Cartesian `beam_zenith_samples` computes
-    |azimuth| / ||[r, elev, az]|| — an angle over a range in metres — which
+    |azimuth| / ||[r, elev, az]|| — an angle over a range in meters — which
     collapses every beam toward 90 deg and skewed G by ~-29% on a planophile
     canopy.
 

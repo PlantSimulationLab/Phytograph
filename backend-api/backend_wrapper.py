@@ -19,7 +19,7 @@ from logging.handlers import RotatingFileHandler
 # pays only for what it needs.
 # Spawn-pool re-entry comes FIRST. The tiled tools (tiled.run_tiled_parallel)
 # run their tiles in a `multiprocessing` spawn pool whose children are this
-# same binary; freeze_support() recognises a pool child from its argv (via
+# same binary; freeze_support() recognizes a pool child from its argv (via
 # PyInstaller's multiprocessing runtime hook, on every platform), runs the
 # child's task loop and exits here - it must never fall through into the
 # seg-worker dispatch below or the server start, or every pool child would

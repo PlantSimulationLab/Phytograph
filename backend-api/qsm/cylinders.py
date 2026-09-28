@@ -47,7 +47,7 @@ class CylinderFitOptions:
     assign_sample_spacing: float = 0.03  # meters between axis samples
     # A point whose nearest axis sample is farther than this is dropped (other
     # trees, ground, gross outliers). Generous enough to reach a thick trunk's bark
-    # (real trunks here ~0.2 m radius) but not so large it absorbs a neighbouring
+    # (real trunks here ~0.2 m radius) but not so large it absorbs a neighboring
     # tree. Points genuinely on the tree sit within this of SOME cylinder axis.
     max_assign_dist: float = 0.5  # meters
     # Legacy radial-band knobs, kept for the re-fit helper / tests that call
@@ -308,7 +308,7 @@ def fit_cylinder(
     # DIVERGENCE GUARD. Gauss-Newton can converge to a wild axis OFFSET (x0,y0 blow
     # up) on a pathological point set -- e.g. points from a crossing branch that the
     # nearest-cylinder assignment handed this cylinder -- which projects the
-    # endpoints metres away from the (trustworthy) skeleton position. The result is
+    # endpoints meters away from the (trustworthy) skeleton position. The result is
     # a giant cylinder shooting off into space. The skeleton axis is reliable, so a
     # fit that RELOCATES an endpoint farther than max_axis_shift_scale*seg_len +
     # max_axis_shift_abs from its seed is a divergence: flag it unreliable so the
@@ -568,10 +568,10 @@ def _assign_nearest_cylinder(
 
     Implementation: sample every cylinder's axis at ~``assign_sample_spacing`` and
     build ONE KD-tree over those samples (each remembers its cyl_id). A single
-    batched nearest-neighbour query maps every cloud point to its nearest axis
+    batched nearest-neighbor query maps every cloud point to its nearest axis
     sample -> nearest cylinder. Points whose nearest axis sample is farther than
     ``max_assign_dist`` (other trees, ground, gross outliers) are dropped. This is
-    a per-point hard assignment, so neighbouring cylinders in a dense crown no
+    a per-point hard assignment, so neighboring cylinders in a dense crown no
     longer share each other's bark. O(N log M); one tree build + one query."""
     samples: list[np.ndarray] = []
     sample_cyl: list[np.ndarray] = []

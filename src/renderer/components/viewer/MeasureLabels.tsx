@@ -120,7 +120,7 @@ export function MeasureProjector({
       });
     }
 
-    // Pass 2 — de-overlap. Two measurements a few centimetres apart project to
+    // Pass 2 — de-overlap. Two measurements a few centimeters apart project to
     // bubbles that cover each other, and the top one swallows the buttons of
     // everything beneath it. Try a small ring of slots and take the first free
     // one; when all are blocked take the least-covered rather than oscillating.

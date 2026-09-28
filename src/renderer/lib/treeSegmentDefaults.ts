@@ -39,9 +39,9 @@ export interface TreeSegmentDefaults {
   maxOutlierGap: number;
 }
 
-// Seeding bounds (metres). DEC1_MIN is the upstream paper default, so any scan
+// Seeding bounds (meters). DEC1_MIN is the upstream paper default, so any scan
 // small enough to need finer decimation than the paper assumes stays exactly at
-// the paper value — small TLS behaviour is unchanged.
+// the paper value — small TLS behavior is unchanged.
 const DEC1_MIN = 0.05;
 const DEC1_MAX = 1.0;
 // 186 / 372 = 0.5 → BR04 lands at decimate_res1 0.5 m, decimate_res2 1.0 m.
@@ -63,17 +63,17 @@ const MAX_GAP_MAX = 6.0;
 // declared a DIFFERENT tree, so it wants to be tight. Seeding it at 1.5x maxGap
 // (the previous rule, a 3 m floor) made it unreachable in practice: measured on
 // the Nickels tree_8 almond scan, segments genuinely belonging to one tree touch
-// at 0.49-0.52 m while a neighbouring tree's branches were merged in across
+// at 0.49-0.52 m while a neighboring tree's branches were merged in across
 // 0.92 m and 1.72 m, so nothing at or above 2 m ever splits anything and the
 // knob was inert.
 //
 // The value is calibrated on TWO independent datasets rather than one, because a
-// threshold tuned on a single scan generalises badly. Sweeping both:
+// threshold tuned on a single scan generalizes badly. Sweeping both:
 //
 //   Nickels almond tree_8 (8.85 m extent, the reported failure)
-//     0.40  over-splits (12 trees) AND reabsorbs the neighbour
-//     0.50-0.75  correct: focal tree ends at x=6.63, neighbour separated
-//     1.00  neighbour reabsorbed into the focal tree again
+//     0.40  over-splits (12 trees) AND reabsorbs the neighbor
+//     0.50-0.75  correct: focal tree ends at x=6.63, neighbor separated
+//     1.00  neighbor reabsorbed into the focal tree again
 //   TreeIso's own demo cloud (17.1 m extent, 9 GROUND-TRUTH trees)
 //     0.40  badly over-segments: 22 trees, recall 0.968
 //     0.50  one spurious split (10 trees)

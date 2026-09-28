@@ -44,7 +44,7 @@ test('builds a trajectory manually and runs a moving-platform scan', async () =>
     // Save is enabled straight away (two strictly-increasing poses).
     await expect(page.getByTestId('trajectory-save')).toBeEnabled();
 
-    // Edit pose 1's X so the platform actually moves a few metres (commit on Enter).
+    // Edit pose 1's X so the platform actually moves a few meters (commit on Enter).
     const p1x = page.getByTestId('trajectory-1-x');
     await p1x.fill('8');
     await p1x.press('Enter');

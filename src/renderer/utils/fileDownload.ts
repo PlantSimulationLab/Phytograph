@@ -34,7 +34,7 @@ function browserDownload(content: string | Uint8Array, suggestedFilename: string
 /**
  * Save bytes to a user-chosen path, WITHOUT showing any toast.
  *
- * Returns the written path, or null if the user cancelled the save dialog.
+ * Returns the written path, or null if the user canceled the save dialog.
  * Throws if the write itself fails.
  *
  * This is the primitive the export flows use: they own a single "Export

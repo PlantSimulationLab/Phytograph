@@ -20,7 +20,7 @@ Two data quirks this handles:
     registered export. Without removing it the time windows do not overlap and
     the matcher silently returns zero pairs.
 
-Recovered quality: 0.52-0.64 mm median nearest-neighbour over the full 13-14 M
+Recovered quality: 0.52-0.64 mm median nearest-neighbor over the full 13-14 M
 point clouds, with rotation matrices orthonormal to ~1e-16.
 
 Usage:  python tools/recover_riscan_truth.py <unregistered_dir> <registered_dir> <out_dir>
@@ -36,7 +36,7 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 # Matching tolerances. Point spacing is ~3.5e-6 s, so a 5e-6 s window admits a
-# near neighbour; the gap test then rejects any match whose runner-up is close
+# near neighbor; the gap test then rejects any match whose runner-up is close
 # enough to be confusable.
 _MAX_DT = 5e-6
 _MIN_GAP = 2e-5
@@ -67,7 +67,7 @@ def _drop_misses(points, times):
     A scanner emits a return for every pulse, including those that hit nothing;
     those land at the instrument's maximum range. In the GrapeX exports that is
     61% of all points sitting at ~20 km, which drags the cloud median to
-    z=2586 m and makes any median-centred crop select empty space. Peach and
+    z=2586 m and makes any median-centered crop select empty space. Peach and
     olive had no misses, so this only surfaced on the third dataset.
 
     Uses the same filter the registration path uses, so the recovery tool and
@@ -82,9 +82,9 @@ def _drop_misses(points, times):
     kept = _load_drop_far_outliers()(points.copy())
     if len(kept) < 100 or len(kept) == len(points):
         return points, times
-    centre = np.median(kept, axis=0)
-    limit = float(np.max(np.linalg.norm(kept - centre, axis=1)))
-    mask = np.linalg.norm(points - centre, axis=1) <= limit
+    center = np.median(kept, axis=0)
+    limit = float(np.max(np.linalg.norm(kept - center, axis=1)))
+    mask = np.linalg.norm(points - center, axis=1) <= limit
     return points[mask], times[mask]
 
 
@@ -138,7 +138,7 @@ def recover(unreg_path, reg_path):
         return M
 
     def _score(M):
-        """Median nearest-neighbour of the whole cloud under M."""
+        """Median nearest-neighbor of the whole cloud under M."""
         if M is None:
             return float("inf")
         k = np.linspace(0, len(XU) - 1, 60_000).astype(int)

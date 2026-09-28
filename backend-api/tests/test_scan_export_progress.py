@@ -1,6 +1,6 @@
 """Progress + cancellation for the batch export (POST /api/scan/export-xml).
 
-The export used to be one buffered, non-cancellable POST covering every checked
+The export used to be one buffered, non-cancelable POST covering every checked
 object, so the UI could only show an indeterminate "Exporting…" pill for what is
 routinely tens of seconds of formatting. It now rides the same PHP1-marker
 stream as /api/pointcloud/export. What has to hold:
@@ -10,7 +10,7 @@ stream as /api/pointcloud/export. What has to hold:
   * a run_id is emitted so /api/cancel/{run_id} has something to cancel,
   * an object with NO scanner parameters exports fine as data (the Export
     window now lists every cloud, not just scans),
-  * a cancel raises ScanCancelled and takes the already-written files with it —
+  * a cancel raises ScanCanceled and takes the already-written files with it —
     a half-written batch that looks complete is worse than no batch at all.
 """
 
@@ -114,7 +114,7 @@ class TestExportProgressStream:
         messages = [m.get("message", "") for m in markers]
         joined = " | ".join(messages)
         # The per-scan LOAD head is what makes a multi-scan bundle advance at
-        # all; the single opaque exportScans() call gets its own labelled stage.
+        # all; the single opaque exportScans() call gets its own labeled stage.
         assert "Loading north (1/2)" in joined
         assert "Loading south (2/2)" in joined
         assert any("Writing Helios scan bundle" in m for m in messages)
@@ -166,16 +166,16 @@ class TestParamlessObjects:
 
 class TestExportCancel:
     def test_cancel_unwinds_and_removes_partial_files(self, tmp_path):
-        # An already-cancelled run: the export must raise rather than return a
+        # An already-canceled run: the export must raise rather than return a
         # {"success": False} the endpoint would stream as a normal result.
         evt = threading.Event()
         evt.set()
         progress = main._ProgressReporter(queue.Queue(), evt)
-        with pytest.raises(main.ScanCancelled):
+        with pytest.raises(main.ScanCanceled):
             main._do_scan_export(
                 main.ScanExportRequest(
                     scans=[_scan_entry("a"), _scan_entry("b")],
-                    base_name="cancelled", write_xml=False, data_format="xyz",
+                    base_name="canceled", write_xml=False, data_format="xyz",
                     dest_dir=str(tmp_path)),
                 progress=progress, cancel_event=evt)
         # Nothing left behind — a partial batch that looks complete is the
@@ -194,7 +194,7 @@ class TestExportCancel:
                 super().__call__(fraction, message)
 
         progress = _CancelAfterFirst(queue.Queue(), evt)
-        with pytest.raises(main.ScanCancelled):
+        with pytest.raises(main.ScanCanceled):
             main._do_scan_export(
                 main.ScanExportRequest(
                     scans=[_scan_entry("a"), _scan_entry("b"), _scan_entry("c")],

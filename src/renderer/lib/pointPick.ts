@@ -1,13 +1,13 @@
 // Point picker — pure logic behind the CloudCompare-style "click a point, get a
-// labelled bubble" tool.
+// labeled bubble" tool.
 //
 // The viewer's gizmo (components/viewer/gizmos/PointPicker.tsx) does the actual
 // raycast/GPU pick and hands back a raw hit; everything that turns that hit into
 // something a human can read lives here so it stays unit-testable:
 //
 //   * frame conversion (display → local → world),
-//   * turning a bag of raw attribute values into labelled, formatted rows, and
-//   * CSV/TSV serialisation for the copy buttons.
+//   * turning a bag of raw attribute values into labeled, formatted rows, and
+//   * CSV/TSV serialization for the copy buttons.
 //
 // Pure + stateless — no three.js, no React, no DOM.
 import {
@@ -21,7 +21,7 @@ import { OCTREE_BUILTIN_ATTRIBUTES, octreeAttributeSlug } from './pointCloudHelp
 export type Vec3 = [number, number, number];
 
 // Where OctreePointCloud re-registers a tile's REAL intensity buffer before the
-// scalar-colour path aliases the selected scalar into the `intensity` slot.
+// scalar-color path aliases the selected scalar into the `intensity` slot.
 // potree's picker reports a value for every named attribute on the geometry, so
 // without this backup the picker would read the aliased scalar and label it
 // "intensity". Lives here (rather than in either component) because the
@@ -95,8 +95,8 @@ export function worldPerPixel(
 // `params.Points.threshold` as a world-space radius around the ray and applies
 // it unscaled at every depth under a perspective camera, so whichever distance
 // feeds the pixels→world conversion decides which slice of the cloud is
-// comfortably clickable. Sizing from the sphere's CENTRE (the previous
-// behaviour) under-serves the near half of any cloud that is deep along the
+// comfortably clickable. Sizing from the sphere's CENTER (the previous
+// behavior) under-serves the near half of any cloud that is deep along the
 // view axis — a 100 m scan viewed end-on got a midpoint-sized tolerance, so
 // near points were too tight to hit.
 //
@@ -115,7 +115,7 @@ export function nearSurfaceDistance(
 // potree's GPU pick resolves occlusion correctly WITHIN a pixel (the pick pass
 // runs with depth test + write against a cleared depth buffer), but its
 // `findHit` chooses between DIFFERENT pixels of the readback window purely by
-// 2D distance to the centre:
+// 2D distance to the center:
 //
 //   l = (x - c)² + (y - c)²;  if (written && l < best) take it
 //
@@ -130,11 +130,11 @@ export function nearSurfaceDistance(
 // — and then rank the results by true distance along the view ray rather than
 // by screen distance.
 
-// Offsets, in CSS pixels, at which to re-probe around the cursor. The centre
+// Offsets, in CSS pixels, at which to re-probe around the cursor. The center
 // comes first so an exact hit is found immediately and the ring is only paid
 // for when it can change the answer.
 //
-// A ring rather than a filled disc: probes are GPU round-trips
+// A ring rather than a filled disk: probes are GPU round-trips
 // (render + readPixels), so this is the expensive axis of the picker. Eight
 // compass points at one radius catch the silhouette case — where the competing
 // surfaces sit on opposite sides of the cursor — without a quadratic blow-up.
@@ -239,7 +239,7 @@ export function hasNonZeroShift(worldShift?: Vec3 | number[] | null): boolean {
 
 // ── Formatting ─────────────────────────────────────────────────────────────
 
-// Coordinates print at millimetre resolution. Huge (UTM-scale) values keep the
+// Coordinates print at millimeter resolution. Huge (UTM-scale) values keep the
 // same 3 decimals — they're what the user needs to compare against the source
 // file — but anything non-finite degrades to a dash rather than "NaN".
 export function formatCoord(v: number): string {
@@ -290,10 +290,10 @@ const NON_ATTRIBUTE_KEYS = new Set([
   'spacing',
 ]);
 
-// Attributes the picker shows even though the colour-by dropdown filters them
-// out of OCTREE_BUILTIN_ATTRIBUTES. Those are excluded from *colouring* because
-// they have a dedicated colour mode — but a picker that hid a point's intensity
-// or colour would be missing the point.
+// Attributes the picker shows even though the color-by dropdown filters them
+// out of OCTREE_BUILTIN_ATTRIBUTES. Those are excluded from *coloring* because
+// they have a dedicated color mode — but a picker that hid a point's intensity
+// or color would be missing the point.
 const PICKER_KEEPS = new Set(['intensity', 'rgb', 'rgba', 'color', 'classification']);
 
 // Everything else in the builtin set is dropped. PotreeConverter always writes
@@ -310,7 +310,7 @@ function isPickerAttribute(key: string): boolean {
   return !OCTREE_BUILTIN_ATTRIBUTES.has(k);
 }
 
-// Potree stores colour as a 4-component rgba attribute; it's shown as its own
+// Potree stores color as a 4-component rgba attribute; it's shown as its own
 // row rather than three anonymous numbers.
 const RGBA_KEYS = new Set(['rgba', 'rgb', 'color']);
 
@@ -323,7 +323,7 @@ export interface AttributeContext {
   // slug → the cloud's own user-defined palette, from OctreeRef.classPalettes.
   // Threaded so a picked point reads back the class name the USER gave it —
   // the by-name schemes are process-wide and cannot know that this cloud's
-  // "Tree 1" was renamed "North row" in the labelling tool.
+  // "Tree 1" was renamed "North row" in the labeling tool.
   palettes?: Record<string, { slug: string; classes: ClassDef[] }>;
   // slug → this cloud's exact surviving class values, from
   // OctreeRef.observedClasses. Preferred over `ranges` for a dynamic scheme,
@@ -372,7 +372,7 @@ export function buildAttributeRows(
       rows.push({
         slug,
         label,
-        // Colour has no single numeric value; carry the red channel so the CSV
+        // Color has no single numeric value; carry the red channel so the CSV
         // column is at least well-typed, and let `display` hold the triplet.
         value: comps[0],
         display: comps.map((c) => Math.round(c)).join(', '),
@@ -424,7 +424,7 @@ export function flatCloudRanges(
   return out;
 }
 
-// ── Clipboard serialisation ────────────────────────────────────────────────
+// ── Clipboard serialization ────────────────────────────────────────────────
 
 const CSV_FIXED_COLUMNS = [
   'scan',
@@ -433,7 +433,7 @@ const CSV_FIXED_COLUMNS = [
   'index',
 ];
 
-// Exported so lib/measure.ts serialises with the same quoting rules rather than
+// Exported so lib/measure.ts serializes with the same quoting rules rather than
 // growing a second, subtly different one.
 export function csvCell(v: string | number | undefined): string {
   if (v === undefined) return '';

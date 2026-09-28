@@ -8,7 +8,7 @@
 //
 // We deliberately forward only error+warn (not log/info/debug) to keep the file
 // signal-dense — those are the lines that matter for a bug report. The original
-// console behaviour is preserved so DevTools still shows everything in dev.
+// console behavior is preserved so DevTools still shows everything in dev.
 
 import type { LogLevel } from '../../shared/ipc';
 

@@ -160,8 +160,8 @@ export interface TranslationGizmoProps {
   /**
    * When set, the arrows are rescaled every frame to span this many screen
    * pixels instead of `size` world units — so the gizmo stays grabbable whether
-   * you're zoomed into a corner of a kilometre-wide survey cloud or looking at a
-   * centimetre-scale mesh. Every gizmo in the app sets it; `size` then only fixes
+   * you're zoomed into a corner of a kilometer-wide survey cloud or looking at a
+   * centimeter-scale mesh. Every gizmo in the app sets it; `size` then only fixes
    * the glyph's internal proportions. Omit for raw world-unit sizing.
    */
   constantScreenSize?: number;
@@ -183,7 +183,7 @@ export function TranslationGizmo({ center, size, onTranslate, onDragStart, onDra
 
   return (
     // UI overlay, not content — see lib/sceneOverlay.ts. On the root group so
-    // every arrow, drag handler and the centre marker inherit it.
+    // every arrow, drag handler and the center marker inherit it.
     <group {...SCENE_OVERLAY}>
       {/* Everything visual hangs off one group positioned at the center, so the
           constant-size scaler can scale the whole glyph about that point. */}

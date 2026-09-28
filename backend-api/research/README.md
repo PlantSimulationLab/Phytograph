@@ -1,6 +1,6 @@
 # Research harnesses
 
-Exploratory studies that validate backend behaviour. **Not shipped** — nothing here is
+Exploratory studies that validate backend behavior. **Not shipped** — nothing here is
 bundled by PyInstaller; these are run by hand from a dev machine. Generated artifacts go
 to `out/` (gitignored).
 
@@ -41,10 +41,10 @@ builds (the generation is otherwise stochastic).
    (`triangulate_candidates`). Vertices map back to organs by nearest hit.
 4. Label triangles valid/erroneous; record each one's longest edge.
 5. Ground truth: AUC of "longest edge predicts inter-organ" and the label-optimal `Lmax*`.
-6. Label-free statistics on the pooled (unlabelled) longest edges:
+6. Label-free statistics on the pooled (unlabeled) longest edges:
    - **Otsu** on log-edges → suggested `Lmax`; confidence = separability η.
    - **Two-Gaussian mixture** (1-D EM) → crossover `Lmax`; confidence = 1 − Bhattacharyya overlap.
-   - **NN-spacing** baseline → `Lmax = k · median nearest-neighbour spacing`.
+   - **NN-spacing** baseline → `Lmax = k · median nearest-neighbor spacing`.
 
 ### Run
 

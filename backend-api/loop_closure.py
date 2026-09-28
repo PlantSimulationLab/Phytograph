@@ -46,8 +46,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# A loop closes to a few centimetres when every pose in it is right, and to
-# metres when one is wrong (measured 0.013-0.106 m against 5.3-6.3 m). 0.5 m
+# A loop closes to a few centimeters when every pose in it is right, and to
+# meters when one is wrong (measured 0.013-0.106 m against 5.3-6.3 m). 0.5 m
 # sits in that gap with an order of magnitude of headroom either side, and is
 # well above the ~0.15 m accuracy the pairwise stage itself achieves.
 _LOOP_TRANSLATION_TOL_M = 0.5
@@ -88,7 +88,7 @@ def triangles(n: int, available: Iterable[Tuple[int, int]]) -> List[Tuple[int, i
 def check_loops(pairs: Dict[Tuple[int, int], np.ndarray], n_scans: int,
                 translation_tol: float = _LOOP_TRANSLATION_TOL_M,
                 rotation_tol: float = _LOOP_ROTATION_TOL_DEG) -> dict:
-    """Score every triangle in the scan graph and localise the bad edges.
+    """Score every triangle in the scan graph and localize the bad edges.
 
     `pairs` maps (a, b) -> 4x4 transform taking scan b into scan a's frame. Only
     one direction per pair is needed; the inverse is used where required.
@@ -96,7 +96,7 @@ def check_loops(pairs: Dict[Tuple[int, int], np.ndarray], n_scans: int,
     Returns {'loops': [...], 'suspect_pairs': [...], 'consistent': bool}.
 
     A pair is suspect when it appears in a FAILING loop and in no passing one.
-    That distinction is what makes this localise rather than merely detect: with
+    That distinction is what makes this localize rather than merely detect: with
     three scans a single bad pose breaks the only triangle, but with four or more
     the good pairs still close their own loops and the culprit stands out.
     """
@@ -132,19 +132,19 @@ def check_loops(pairs: Dict[Tuple[int, int], np.ndarray], n_scans: int,
     # edges: this named only (0,3), which was GOOD, and cleared every genuinely
     # bad edge.
     #
-    # It localises correctly while wrong edges are a minority, which is the
+    # It localizes correctly while wrong edges are a minority, which is the
     # regime it was measured in. Beyond that a caller gets a false accusation --
-    # withholding a scan that registered fine -- so `localised` should be read
+    # withholding a scan that registered fine -- so `localized` should be read
     # as "this is a hypothesis", not a verdict. A proper fix needs per-edge
     # residuals from a joint adjustment rather than set arithmetic over loops.
     suspect = sorted(in_failing - in_passing)
 
-    # A single triangle cannot localise: one bad pose breaks the only loop, so
+    # A single triangle cannot localize: one bad pose breaks the only loop, so
     # all three edges look equally guilty. Rank them by how much each one's
     # REMOVAL would be needed -- i.e. report them, but say the loop could not
     # attribute blame, so a caller does not "repair" a pair that was fine.
-    localised = bool(in_passing) or len(suspect) <= 1
-    return dict(loops=loops, suspect_pairs=suspect, localised=localised,
+    localized = bool(in_passing) or len(suspect) <= 1
+    return dict(loops=loops, suspect_pairs=suspect, localized=localized,
                 consistent=bool(loops and not any(not lp["closed"] for lp in loops)),
                 checked=bool(loops))
 
@@ -300,7 +300,7 @@ def select_per_pair_by_loops(n_scans: int,
     occupancy left (0,2) 4.33 m out.
 
     The objective is HOW MANY LOOPS CLOSE, not the worst loop error. That
-    distinction is load-bearing. Minimising the worst loop fails whenever one
+    distinction is load-bearing. Minimizing the worst loop fails whenever one
     pair is unregisterable by any variant: that pair appears in several loops,
     dominates the maximum, and the search trades away pairs that were fine
     chasing it. Measured, that made a good pair go 0.031 m -> 5.632 m while never
@@ -327,7 +327,7 @@ def select_per_pair_by_loops(n_scans: int,
         return score, report, pairs
 
     # Seed from the best UNIFORM assignment, so per-pair search only has to
-    # improve on the previous behaviour rather than rediscover it.
+    # improve on the previous behavior rather than rediscover it.
     best = None
     for v in range(n_variants):
         assign = {k: v for k in keys}

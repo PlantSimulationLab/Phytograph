@@ -70,7 +70,7 @@ apply to them.)
 | <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> | Select the first ten classes as the paint class |
 | <kbd>G</kbd> / <kbd>R</kbd> / <kbd>B</kbd> | Lasso / rectangle / brush |
 | <kbd>P</kbd> | Line: paint above / below a line (in a cross-section) |
-| <kbd>K</kbd> | Pick: click to label a whole piece (<kbd>Shift</kbd>+click also takes its neighbours) |
+| <kbd>K</kbd> | Pick: click to label a whole piece (<kbd>Shift</kbd>+click also takes its neighbors) |
 | <kbd>X</kbd> | Swap the paint class with the class it paints over |
 | Left-click | Place a lasso corner |
 | <kbd>Enter</kbd> or double-click | Close the lasso and paint the enclosed points |
@@ -78,7 +78,7 @@ apply to them.)
 | <kbd>Esc</kbd> | Cancel the lasso in progress |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo the last stroke |
 | <kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>Z</kbd> | Redo the stroke you just undid |
-| <kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd> | Go to the next / previous area of unlabelled points |
+| <kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd> | Go to the next / previous area of unlabeled points |
 | <kbd>Alt</kbd>+click a class | Show only that class (again: show every class) |
 
 ## Cross-section

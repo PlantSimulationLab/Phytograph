@@ -19,12 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 
 def _cloud_with_flyers(n=120_000, extent=30.0, seed=5):
-    from make_big_cloud import _tree_centres, generate_chunk
+    from make_big_cloud import _tree_centers, generate_chunk
 
     rng = np.random.default_rng(seed)
-    centres = _tree_centres(rng, extent, 9)
+    centers = _tree_centers(rng, extent, 9)
     scanner = np.array([extent / 2, extent / 2, 1.6])
-    xyz = generate_chunk(rng, n, extent, centres, 0.5, 0.0, scanner)["xyz"]
+    xyz = generate_chunk(rng, n, extent, centers, 0.5, 0.0, scanner)["xyz"]
     n_fly = n // 200
     flyers = np.column_stack([rng.uniform(0, extent, n_fly), rng.uniform(0, extent, n_fly),
                               rng.uniform(6, 12, n_fly)])

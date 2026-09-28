@@ -1,10 +1,10 @@
 name: organ_S_ft_v3_s2
-description: "Plant organ PointNeXt-S: v3 synthetic (small-triangle fix, soil mounds, young-leaf partial labels) pre-training (organ_S_synth_v3), then fine-tuned on the hand-labelled dicots. (seed 2)"
+description: "Plant organ PointNeXt-S: v3 synthetic (small-triangle fix, soil mounds, young-leaf partial labels) pre-training (organ_S_synth_v3), then fine-tuned on the hand-labeled dicots. (seed 2)"
 task: plant_organ
 cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache_organ
 out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs
 model: {variant: S}
-# Herbaceous organs are millimetre-scale (a tomato petiolule is ~1 mm across),
+# Herbaceous organs are millimeter-scale (a tomato petiolule is ~1 mm across),
 # so the base voxel is 2 mm where trees use 1 cm. Level radii run 7 mm - 11 cm.
 hierarchy: {voxel: 0.002, levels: 5, k: 16}
 channels: [dxyz]

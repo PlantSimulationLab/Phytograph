@@ -50,12 +50,12 @@ def test_headed_tree_trunk_ends_at_the_head(n_scaffolds):
     Built as GT with the correct ranks, then RE-TAGGED from scratch -- so this
     asserts the rule reproduces the truth, not that it preserved it. To make that
     meaningful the input is first collapsed to the WRONG (never-terminating)
-    labelling that Stage C would produce.
+    labeling that Stage C would produce.
     """
     gt = headed_tree(n_scaffolds=n_scaffolds)
     head_z = _rank0_top(gt)
     wrong = _collapse_like_stage_c(gt)
-    # Precondition: the un-terminated labelling really is wrong (trunk runs on).
+    # Precondition: the un-terminated labeling really is wrong (trunk runs on).
     assert _rank0_top(wrong) > head_z + 0.5
 
     out = retag_ranks(wrong, ContinuationOptions())

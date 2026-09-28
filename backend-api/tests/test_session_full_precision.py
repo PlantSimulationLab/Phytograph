@@ -6,9 +6,9 @@ shattered) on an imported tree scan.
 
 Root cause: the import path converts an ASCII source to a LAS for PotreeConverter
 (`_xyz_to_las`) at the LAS 1 mm scale, then read THAT LAS back into the session's
-in-RAM positions array. For a tree scanned from tens of metres away the true
-inter-point spacing is sub-millimetre, so the 1 mm quantization collapsed/jittered
-neighbouring points; Helios projects each hit to (zenith, azimuth) from the scan
+in-RAM positions array. For a tree scanned from tens of meters away the true
+inter-point spacing is sub-millimeter, so the 1 mm quantization collapsed/jittered
+neighboring points; Helios projects each hit to (zenith, azimuth) from the scan
 origin and runs a Delaunay over those angles, so the quantization blew up local
 edge lengths and most candidate triangles then exceeded Lmax.
 
@@ -34,7 +34,7 @@ import main
 
 @pytest.fixture
 def fine_scan(tmp_path):
-    """A small ASCII scan whose coordinates carry sub-millimetre detail near
+    """A small ASCII scan whose coordinates carry sub-millimeter detail near
     z~100 m — exactly where the 1 mm LAS scale does damage. Returns (path, fmt,
     expected (N,3) array)."""
     rng = np.random.default_rng(0)

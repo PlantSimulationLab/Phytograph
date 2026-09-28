@@ -59,7 +59,7 @@ Three entry points. All accept the same set of formats — see
     - **Windows** — right-click → **Open with → Phytograph** (or
       double-click once Phytograph is the default for the extension).
     - **Linux** — right-click → **Open With** → Phytograph in file managers
-      that honour the desktop entry.
+      that honor the desktop entry.
 
     The file is **auto-detected** by extension (the same as drag-and-drop), so
     point clouds open the [import wizard](#the-import-wizard) and meshes,
@@ -95,7 +95,7 @@ dropdowns in; you correct anything that's wrong before importing:
     For formats that carry named scalar fields (`.las`, `.laz`, RIEGL projects)
     the **geometry** columns are fixed by the file, but the scalar fields can be
     reassigned. This matters because a scalar's name is whatever the exporting
-    software chose: Phytograph recognises the common spellings — `gps_time`,
+    software chose: Phytograph recognizes the common spellings — `gps_time`,
     `GpsTime`, `time` and `Timestamp[s]` all resolve to **Timestamp** — but it
     cannot know that a column called `shot_time` is the same thing. Set its
     dropdown to **Timestamp** and the tools that need one (Backfill Misses,
@@ -105,7 +105,7 @@ dropdowns in; you correct anything that's wrong before importing:
     source file is never modified.
 - **Import (skip a column)** — every column except X / Y / Z carries an
   **Import** checkbox above its role dropdown. Untick it to leave that field
-  out: its preview values grey out, and the column is never read. A skipped
+  out: its preview values gray out, and the column is never read. A skipped
   field is not stored in the cloud, doesn't appear in the Display panel's
   *Color by* list, and can't be exported — so unticking the columns you don't
   need keeps a cloud smaller and its field list shorter. X, Y, and Z have no
@@ -197,7 +197,7 @@ dropdowns in; you correct anything that's wrong before importing:
   layout (`.las`, `.laz`, `.ply`, `.pcd`, `.e57`, `.ptx`) the rename changes
   only the displayed name. The field keeps the file's own name underneath.
 - **Global shift** — scans in a projected coordinate system (UTM, state plane)
-  carry very large coordinates — hundreds of thousands to millions of metres
+  carry very large coordinates — hundreds of thousands to millions of meters
   from the meridian/equator. The wizard offers a **Global shift**: a checkbox
   plus X / Y / Z fields, pre-filled with a suggested offset when the data's
   coordinates are large. Leaving it **on** subtracts the offset at import so the
@@ -210,9 +210,9 @@ dropdowns in; you correct anything that's wrong before importing:
   common case where only the horizontal coordinates are large.
 
     The suggestion is measured over **returns only**. Sky/miss points are rays
-    that hit nothing, drawn about a kilometre out along the beam, so a scan's
-    recorded extent can span tens of kilometres while the actual returns sit
-    within a few hundred metres of the origin. Measuring those would suggest a
+    that hit nothing, drawn about a kilometer out along the beam, so a scan's
+    recorded extent can span tens of kilometers while the actual returns sit
+    within a few hundred meters of the origin. Measuring those would suggest a
     shift that pushes the cloud *away* from the origin rather than onto it, so
     they are excluded — a scan that is already near the origin is correctly
     offered no shift at all, however far its misses reach.
@@ -248,7 +248,7 @@ inside the file, so X/Y/Z and color roles can't be reassigned — but you can st
 preview the fields, rename scalars, and switch any scalar between **Scalar**
 and **Label**. For `.las`, `.laz` and RIEGL projects you can additionally assign a
 scalar its true role (see *Column roles* above), which is how you tell Phytograph
-that a field named something it doesn't recognise is really the timestamp,
+that a field named something it doesn't recognize is really the timestamp,
 reflectance, or a multi-return column. `.e57` is the one format with no sample rows: reading values out
 of it means decoding its binary point data, so the wizard shows the structure
 only.
@@ -263,42 +263,42 @@ with auto-detection.
 
 ### Source units
 
-Phytograph works in **metres** throughout — leaf area density is reported in
-m²/m³, QSM radii and tree heights in metres, registration residuals in
-millimetres. So every scan is converted to metres **at import**, and the
+Phytograph works in **meters** throughout — leaf area density is reported in
+m²/m³, QSM radii and tree heights in meters, registration residuals in
+millimeters. So every scan is converted to meters **at import**, and the
 wizard's **Source units** control is where that conversion is decided.
 
 What you see depends on what the file can tell us:
 
 - **The file declares its unit.** A LAS/LAZ carrying a coordinate reference
-  system knows whether it is in metres, US survey feet, or something else, and
+  system knows whether it is in meters, US survey feet, or something else, and
   the control shows *detected from file*. An `.e57` or a RIEGL project is
-  metres by specification — those formats have no other option.
+  meters by specification — those formats have no other option.
 - **The file cannot say.** An ASCII `.xyz`/`.csv`, a `.ply`, a `.pcd` and a
   `.ptx` carry no unit information at all — they are just numbers. The control
-  defaults to **metres**, which is what Phytograph has always assumed, and you
+  defaults to **meters**, which is what Phytograph has always assumed, and you
   can change it if your data is in something else.
 
-When the chosen unit is not metres, the wizard says it *will convert*, and the
-coordinates you see after import are metres rather than the raw numbers in the
+When the chosen unit is not meters, the wizard says it *will convert*, and the
+coordinates you see after import are meters rather than the raw numbers in the
 file. That is deliberate: it is what makes every measurement, density and radius
 in the app mean what it says.
 
 !!! tip "If your measurements come out wrong by a constant factor"
 
-    Check the unit. A cloud recorded in millimetres but imported as metres will
-    measure 1000× too large, and one in feet imported as metres about 3.28×.
+    Check the unit. A cloud recorded in millimeters but imported as meters will
+    measure 1000× too large, and one in feet imported as meters about 3.28×.
     Re-import with the right unit selected.
 
 Two cases are deliberately **not** auto-detected even from a CRS, because no
 single factor describes them: a **geographic (lat/long)** file, whose degrees
 are not a length at all, and a CRS whose **axes disagree** (horizontal feet with
-vertical metres). Both fall back to asking.
+vertical meters). Both fall back to asking.
 
 Units are chosen **per file**, not shared across a batch — a set of scans can
-legitimately mix a metre LAS with a feet one. **Apply these settings to all**
+legitimately mix a meter LAS with a feet one. **Apply these settings to all**
 carries your unit choice only to scans that could not detect their own, so a
-file that declared its unit is never overwritten by a neighbour's.
+file that declared its unit is never overwritten by a neighbor's.
 
 ### Importing several files at once
 
@@ -335,7 +335,7 @@ than you're willing to wait.
 
 When you cancel part-way through a **multi-file** import, the scans that
 already finished are kept (they're complete and correct); a notice tells you
-how many of the selected files made it. Cancelling a Helios scan **XML**
+how many of the selected files made it. Canceling a Helios scan **XML**
 import is all-or-nothing, matching how that pathway already treats a failed
 scan — nothing from the bundle is added.
 
@@ -443,7 +443,7 @@ bundle**, which carries the scanner `<origin>` and an `is_miss` column — bring
 [leaf-area-density inversion](../concepts/leaf-area-density.md) relies on.
 Phytograph recovers and tags them on import. They're hidden by default (their
 true positions are ~20 km away); toggle the **Show misses** button on a scan row
-to draw them in a distinct colour, relocated onto the scan's bounding sphere, so
+to draw them in a distinct color, relocated onto the scan's bounding sphere, so
 you can confirm a scan actually carries miss information. The relocation needs a
 scanner origin — supplied by the E57/PTX/PLY pose or the XML bundle's
 `<origin>`; a bare ASCII cloud with no scanner geometry shows its misses at their
@@ -486,7 +486,7 @@ which writes one file per object.
 ### Point cloud formats
 
 Pick a **Format** in the Export window, then click **Export**. Most formats show
-a **field picker**: check which fields to write (x, y, z, colour,
+a **field picker**: check which fields to write (x, y, z, color,
 intensity, scalars, labels). Everything is checked by default, so a plain export
 stays lossless and you prune from there. The picker lists **every field the cloud
 actually holds** — including scalars that came from a LAS extra dimension or an
@@ -501,7 +501,7 @@ drag handle is omitted.
 position, so writing a chosen subset would produce a file that still parses and
 is read *wrong* rather than one that's merely smaller. PTS is always
 `x y z intensity r g b` (after its point-count line); PCD always carries
-position plus, if present, colour. Use `.ply`, `.las`, `.csv` or `.txt` when you
+position plus, if present, color. Use `.ply`, `.las`, `.csv` or `.txt` when you
 need to pick fields or keep other scalars.
 
 !!! note "What LAS/LAZ cannot leave out"
@@ -513,7 +513,7 @@ need to pick fields or keep other scalars.
     - **Intensity** is present in every LAS point format, so it cannot be
       removed — unchecking it could only write zeros. Both are shown locked.
 
-    Unchecking **colour** is a real omission: it selects LAS point format 6
+    Unchecking **color** is a real omission: it selects LAS point format 6
     instead of 7, which has no RGB dimension. Both carry GPS time and a full
     classification byte (classes 0–255).
 
@@ -522,19 +522,19 @@ need to pick fields or keep other scalars.
     ground and wood/leaf results; *None* leaves it at 0; or pick any class
     column. A column with values above 255 (a plot of more trees than that)
     cannot go in the byte, and the export says so; it is still written as its
-    own dimension. The file also records the class names and colours, and the
+    own dimension. The file also records the class names and colors, and the
     [LAS flags](label-points.md#las-flags) you painted.
 
 | Format | Carries |
 |---|---|
-| `.las` / `.laz` | x, y, z, intensity, colour, plus the scalars you select as **named LAS extra dimensions** |
+| `.las` / `.laz` | x, y, z, intensity, color, plus the scalars you select as **named LAS extra dimensions** |
 | `.ply` | The columns you select, each declared as a named `property` |
 | `.xyz` | The columns you select, whitespace-separated, with no header line |
 | `.txt` | The columns you select, whitespace-separated, with a `#`-prefixed column header |
 | `.csv` | Same columns as `.txt` but comma-separated with a plain header row |
 | `.asc` | The columns you select, whitespace-separated, no header line (same bytes as `.xyz`) |
 | `.pts` | Point-count line, then `x y z intensity r g b` — **fixed order**, no picker |
-| `.pcd` | Position + colour only (PCL ASCII, colour packed into one `rgb` field) — no picker |
+| `.pcd` | Position + color only (PCL ASCII, color packed into one `rgb` field) — no picker |
 
 The `.txt` export writes a leading `#`-prefixed column header (the CloudCompare
 convention, e.g. `# X Y Z is_miss`). Phytograph's own importer reads that header
@@ -549,8 +549,8 @@ same named fields (and is far smaller and faster than text for a large cloud).
 
 !!! note "Scalar fields are no longer dropped"
 
-    Before v0.65.0 the text exports wrote only x/y/z (plus colour and intensity
-    for `.txt`/`.csv`) and LAS/LAZ wrote only x/y/z and colour — every other
+    Before v0.65.0 the text exports wrote only x/y/z (plus color and intensity
+    for `.txt`/`.csv`) and LAS/LAZ wrote only x/y/z and color — every other
     field was silently lost, and the column picker offered only x/y/z for a
     normally-imported cloud. If you have exports from an earlier version that
     are missing their scalars, re-export them.
@@ -561,12 +561,12 @@ at the top of the viewer, showing a live percentage as the cloud is written (a
 25-million-point text export takes roughly half a minute). The pill has a
 **cancel** button — stopping an export leaves no partial file behind. When the
 write finishes the pill clears and a toast reports the file name and point
-count, so there's no need to click Export twice. Cancelling the save dialog
+count, so there's no need to click Export twice. Canceling the save dialog
 writes nothing and reports nothing.
 
 The pill names the stage it is on. For the text formats that is mostly
 *Formatting*, which is where nearly all their time goes; `.las`/`.laz` step
-through *Computing bounds*, *Packing coordinates*, *Packing colours*, *Packing
+through *Computing bounds*, *Packing coordinates*, *Packing colors*, *Packing
 intensity*, *Packing scalar fields* and *Writing file* instead (the packing
 stages appear only for the fields the cloud actually has). Binary formats are
 several times faster than text for the same cloud, so their pill moves through
@@ -601,13 +601,19 @@ is the exception — it is written under the base name alone, with nothing
 appended. An **XML + data** bundle also writes `<base>.xml` next to its per-scan
 data files.
 
+With several objects checked, the small **Prepend / Append** switch beside the
+Base name label picks whether the base name leads (`myscan_ScanPos002.laz`, the
+default) or trails (`ScanPos002_myscan.laz`) each object's name. Clear the base name entirely to
+name every file after its object alone (`ScanPos002.laz`); an XML bundle then
+calls its own file `scans.xml`.
+
 The list holds every cloud in the scene, scans and plain imports alike, with a
 **Select all** checkbox above it and a count of how many of them are checked.
 Plain clouds (a `.xyz` / `.las` / `.ply` import with no scanner metadata) can be
 written to any of the data formats, so exporting a whole folder's worth of
 clouds in one pass is a single check-all and click.
 
-Two outputs *do* need scan geometry, and the rows they can't write grey out with
+Two outputs *do* need scan geometry, and the rows they can't write gray out with
 the reason on hover rather than vanishing:
 
 - the **XML + data** bundle needs a scanner origin and angular sweep, so it is
@@ -616,7 +622,7 @@ the reason on hover rather than vanishing:
   patterns (a Livox rosette has no `Ntheta × Nphi` grid).
 
 **Select all** only ever checks the rows the current output can actually write,
-and switching between outputs is non-destructive — a cloud greyed out by XML
+and switching between outputs is non-destructive — a cloud grayed out by XML
 mode is still checked when you switch back to **Data only**.
 
 **Output mode** — the two toggles at the top:
@@ -675,7 +681,7 @@ column picker — without that flag the far-field miss points would re-import as
 real returns, breaking the round-trip. (E57 uses the format's own
 `cartesianInvalidState` flag for this instead of a column; PTX needs no flag,
 since an empty cell already says it.) Turn it off for a returns-only export.
-Available only when at least one checked scan carries misses — and greyed out
+Available only when at least one checked scan carries misses — and grayed out
 for PTX, where it makes no difference to the file.
 
 **Export grid** — shown only in **XML + data** mode when the scene holds one or
@@ -720,7 +726,7 @@ exports to `.obj` as a **bundle**: the `.obj`, a `.mtl` material library, and on
 image per textured material, all written together in the folder you chose. That
 is what lets the model round-trip: re-importing the `.obj` picks the `.mtl` and
 its images back up and the plant comes back textured. Move the three together;
-an `.obj` on its own re-imports as plain grey geometry.
+an `.obj` on its own re-imports as plain gray geometry.
 
 Organs with no texture (petioles, internodes, stems) keep their color too — they
 are grouped by color into materials in the same `.mtl`, since OBJ has no portable
@@ -752,7 +758,7 @@ and opens it again exactly as you left it. It contains:
 - every point cloud with all its points and scalar fields, including edits
   you have not baked. Undo still works on those edits after reopening;
 - every mesh, skeleton, QSM and LAD result, with their positions;
-- colour modes, point size, measurements and picked points, the scene
+- color modes, point size, measurements and picked points, the scene
   origin and the camera;
 - the tree inventory, with your species, status and label entries.
 
@@ -767,7 +773,7 @@ It is as large as the clouds in it.
 | **File → Open Project…** | <kbd>Cmd/Ctrl</kbd>+<kbd>O</kbd> | Open a project. It **replaces** the current scene, so you are asked first when the scene is not empty. |
 
 A save runs in the background with a progress bar you can cancel. A
-cancelled or failed save leaves any existing project file untouched.
+canceled or failed save leaves any existing project file untouched.
 
 !!! note "What a project does not keep"
     Undo history from before the save, app-wide settings (theme, the class

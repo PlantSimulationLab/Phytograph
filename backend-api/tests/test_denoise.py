@@ -76,7 +76,7 @@ def test_the_multi_scan_companion_fixture_flags_only_its_own_flyers():
 
 def test_sor_also_catches_the_self_supporting_clump(tree):
     """SOR's one genuine advantage: the 8-point clump is dense enough to satisfy
-    a radius rule but its k-th neighbour is still metres away."""
+    a radius rule but its k-th neighbor is still meters away."""
     points, groups = tree
     keep, stats = denoise_mask(points, "sor")
     assert stats["flagged"] == 33
@@ -161,7 +161,7 @@ def test_sor_warns_when_re_run_on_an_already_denoised_cloud(tree):
 
 def test_chunked_query_matches_one_shot(tree):
     """Pins the chunking added so these survive a real scan: chunking is a memory
-    optimisation and must not change a single bit of the answer."""
+    optimization and must not change a single bit of the answer."""
     points, _ = tree
     for chunked, whole in (
         (statistical_outlier_mask(points, 20, 2.0, chunk=7),
@@ -174,8 +174,8 @@ def test_chunked_query_matches_one_shot(tree):
 
 def test_the_query_chunk_shrinks_as_k_grows(tree):
     """`chunk` bounds `tree.query`'s allocation only for a FIXED k, and k comes
-    straight from a user parameter with no upper bound ("min neighbours" /
-    "neighbours"). Unbounded, the two multiply: a 1 M-row chunk at nb_points=1000
+    straight from a user parameter with no upper bound ("min neighbors" /
+    "neighbors"). Unbounded, the two multiply: a 1 M-row chunk at nb_points=1000
     asks for (rows, k) distances AND indices, i.e. ~16 GB, in a worker subprocess
     whose peak the parent pays for. `_chunk_rows` spends the same budget on fewer
     rows instead.
@@ -198,7 +198,7 @@ def test_the_query_chunk_shrinks_as_k_grows(tree):
 
 
 def test_ror_matches_query_ball_point_except_on_exact_ties():
-    """ROR is asked as a BOUNDED k-NN query rather than a neighbour count, for
+    """ROR is asked as a BOUNDED k-NN query rather than a neighbor count, for
     speed (measured 32x on a real TLS scan; see `radius_outlier_mask`). This
     pins it against the count formulation it replaced, and pins the ONE place
     the two can legitimately differ.
@@ -206,7 +206,7 @@ def test_ror_matches_query_ball_point_except_on_exact_ties():
     The boundary is the whole point. scipy's `distance_upper_bound` is strict
     (`<`) whereas `query_ball_point(r)` is inclusive (`<=`), so a naive swap
     flips every pair sitting at exactly the radius — routine on lattice and
-    voxel-quantised data, and in the dangerous direction (real structure
+    voxel-quantized data, and in the dangerous direction (real structure
     reported as noise: on the lattice below at the pitch radius it drops the
     kept count from 184 to 56). Hence the one-ulp bound nudge plus an explicit
     `<= radius`.
@@ -215,7 +215,7 @@ def test_ror_matches_query_ball_point_except_on_exact_ties():
     compute the same pair distance differently — `query_ball_point` against a
     squared radius, `query` returning a correctly-rounded sqrt. Measured over
     40 seeds x 3 cloud shapes x 5 radii x 7 nb values, EVERY disagreement is a
-    point whose k-th neighbour is exactly `radius` away (0 ulps) and is one this
+    point whose k-th neighbor is exactly `radius` away (0 ulps) and is one this
     form KEEPS and the count form drops — never the reverse. So the two
     assertions here are: agreement is exact away from ties, and where a tie
     does split the two, the error is in the direction that preserves a point.
@@ -232,7 +232,7 @@ def test_ror_matches_query_ball_point_except_on_exact_ties():
     # about appeared on an Apple Silicon dev machine and never on the Linux CI
     # runner (`fixtures no longer exercise the exact-tie boundary`). With
     # integer coordinates every squared distance is an exact small integer, so
-    # a neighbour at `radius` is a tie on every IEEE-754 machine by
+    # a neighbor at `radius` is a tie on every IEEE-754 machine by
     # construction: sqrt(1), sqrt(4), sqrt(9) are exact, and sqrt(3)**2 rounds
     # to 2.9999999999999996 (< 3) everywhere, which is precisely the case where
     # the squared-radius and correctly-rounded-sqrt paths disagree. The
@@ -242,7 +242,7 @@ def test_ror_matches_query_ball_point_except_on_exact_ties():
     clouds = {
         "lattice": np.array(np.meshgrid(g, g, g)).reshape(3, -1).T.astype(np.float64),
         "random": rng.random((4000, 3)) * 10.0,
-        "quantised": np.round(rng.random((4000, 3)) * 20.0),
+        "quantized": np.round(rng.random((4000, 3)) * 20.0),
     }
     radii = (0.5, 1.0, np.sqrt(2), np.sqrt(3), 2.0, 3.0, 5.0)
     seen_a_tie = False
@@ -316,7 +316,7 @@ def test_voxel_count_needs_no_kdtree_when_its_size_is_pinned(tree):
 
 def test_voxel_count_mask_matches_the_legacy_registration_filter():
     """`main._reject_sparse_voxels` now delegates here. Pins the swap from
-    `np.unique(axis=0)` to a packed int64 key against the original behaviour."""
+    `np.unique(axis=0)` to a packed int64 key against the original behavior."""
     import main
 
     # A deterministic lattice plus sparse scatter — over the 1000-point floor and

@@ -117,7 +117,7 @@ describe('duplicateScanName', () => {
   });
 });
 
-// derivedScanName generalises the "(copy)" enumeration to any suffix, so a
+// derivedScanName generalizes the "(copy)" enumeration to any suffix, so a
 // retained crop can produce "… (cropped)". duplicateScanName is now a thin
 // wrapper over it — the suite above doubles as the regression guard.
 describe('derivedScanName', () => {
@@ -339,7 +339,7 @@ describe('meanScanOrigin', () => {
   });
 });
 
-describe('the time column is recognised under either octree spelling', () => {
+describe('the time column is recognized under either octree spelling', () => {
   // A cloud whose timestamps round-tripped through the LAS `gps_time` field
   // carries the octree attribute under PotreeConverter's own name, `gps-time`.
   // The buffer key must stay that way (it indexes the GPU buffer), so the
@@ -347,7 +347,7 @@ describe('the time column is recognised under either octree spelling', () => {
   //
   // THE REPORTED BUG: Backfill Misses refused such a scan with "no column
   // 'timestamp'" while the Color-by picker listed `gps-time` — the same column,
-  // two names, one of which no predicate recognised.
+  // two names, one of which no predicate recognized.
   const gpsTimeScan = {
     data: {
       octree: {
@@ -490,7 +490,7 @@ describe('the time column is recognised under either octree spelling', () => {
 
   it('keeps a column whose range is unknown', () => {
     // Absence of a range is absence of evidence, not proof of emptiness — a
-    // label-only octree must keep its pre-existing "trust the key" behaviour.
+    // label-only octree must keep its pre-existing "trust the key" behavior.
     const s = {
       data: {
         octree: { cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
@@ -733,7 +733,7 @@ describe('allocateScanColor / createScanColorAllocator', () => {
   const RED = '#ef4444';
   const PALETTE_SIZE = 8;
 
-  it('picks the first palette colour not already on the scene', () => {
+  it('picks the first palette color not already on the scene', () => {
     expect(allocateScanColor(new Set())).toBe(BLUE);
     expect(allocateScanColor(new Set([BLUE]))).toBe(GREEN);
     expect(allocateScanColor(new Set([BLUE, GREEN]))).toBe(AMBER);
@@ -741,34 +741,34 @@ describe('allocateScanColor / createScanColorAllocator', () => {
 
   // The reported bug: importing ONE file holding several scanner setups (a
   // multi-block PTX, a multi-scan E57) gave every resulting scan the same
-  // swatch, because the colour picker read the committed scan list — which does
+  // swatch, because the color picker read the committed scan list — which does
   // not change until the whole import commits. A generator has to remember what
   // it just handed out.
-  it('hands out a DIFFERENT colour on each successive call', () => {
+  it('hands out a DIFFERENT color on each successive call', () => {
     const next = createScanColorAllocator([]);
     const three = [next(), next(), next()];
     expect(three).toEqual([BLUE, GREEN, AMBER]);
     expect(new Set(three).size).toBe(3);
   });
 
-  it('skips colours already used by existing scans', () => {
+  it('skips colors already used by existing scans', () => {
     const next = createScanColorAllocator([BLUE, AMBER]);
     expect([next(), next()]).toEqual([GREEN, RED]);
   });
 
   // Guards the trap that makes the obvious implementation wrong. Accumulating
-  // into a `used` set and re-asking for "the first free colour" falls back to
+  // into a `used` set and re-asking for "the first free color" falls back to
   // `used.size % 8` once every entry is taken — and the set cannot grow past 8,
-  // so every allocation from the 9th on returns the SAME colour, reproducing the
+  // so every allocation from the 9th on returns the SAME color, reproducing the
   // original bug for any source with more than 8 positions.
-  it('keeps cycling past palette exhaustion instead of repeating one colour', () => {
+  it('keeps cycling past palette exhaustion instead of repeating one color', () => {
     const next = createScanColorAllocator([]);
     const twelve = Array.from({ length: 12 }, next);
 
     // First pass: all 8 distinct entries.
     expect(new Set(twelve.slice(0, PALETTE_SIZE)).size).toBe(PALETTE_SIZE);
 
-    // Past exhaustion the colours must still VARY call to call.
+    // Past exhaustion the colors must still VARY call to call.
     expect(twelve[8]).not.toBe(twelve[9]);
     expect(twelve[9]).not.toBe(twelve[10]);
     expect(twelve[10]).not.toBe(twelve[11]);
@@ -838,7 +838,7 @@ describe('missingMultiReturnColumns', () => {
     )).toEqual([]);
   });
 
-  it('normalises gps-time so it is not reported missing', () => {
+  it('normalizes gps-time so it is not reported missing', () => {
     expect(missingMultiReturnColumns(
       makeScanWithColumns(['gps-time', 'target_index', 'target_count']),
     )).toEqual([]);

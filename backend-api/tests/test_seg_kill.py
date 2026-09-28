@@ -106,7 +106,7 @@ def test_skeleton_worker_returns_result_dict():
 # ---- A client disconnect SIGKILLs the worker (the true-kill guarantee) ------
 
 def test_disconnect_kills_worker_promptly():
-    """A heavy CSF run on a large cloud is cancelled the instant the client
+    """A heavy CSF run on a large cloud is canceled the instant the client
     disconnects: ClientDisconnected is raised quickly and NO worker survives in
     the registry — proving the worker process was actually killed, not abandoned."""
     pts = np.vstack([_ground_cloud()] * 60).astype(np.float64)

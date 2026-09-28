@@ -220,7 +220,7 @@ let childProcessHandlerInstalled = false;
  * behave identically to the renderer-crash path.
  *
  * `cause` is a diagnosed, user-readable reason from classifyBackendFailure()
- * when the supervisor recognised one. It changes the dialog in two ways, both
+ * when the supervisor recognized one. It changes the dialog in two ways, both
  * deliberate: the reason is shown instead of the generic "try reloading" copy,
  * and **no Reload button is offered**. These causes (an OS too old for the
  * build, a missing system library) cannot be fixed by retrying, and a button

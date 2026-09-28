@@ -235,7 +235,7 @@ def _alpha_concave_hull(points: np.ndarray, alpha: "float | None"):
     Returns `(mesh, alpha_used)` — an open3d TriangleMesh with vertex normals,
     and the alpha radius (m) that actually produced it, so the caller can report
     the fit parameter (for an auto-grown alpha the user never chose it, and it's
-    the ONLY scalar that characterises the hull). Raises ValueError if no
+    the ONLY scalar that characterizes the hull). Raises ValueError if no
     triangles could be built at all.
     """
     import open3d as o3d
@@ -417,7 +417,7 @@ def fit_crown(
         tris = np.asarray(mesh.triangles, dtype=np.int32)
         normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
         # A concave hull has no analytic parameters — the MESH is the model. The
-        # alpha radius is the one scalar that characterises it, so report it (plus
+        # alpha radius is the one scalar that characterizes it, so report it (plus
         # whether it was auto-grown); the geometry itself has to travel as a mesh.
         try:
             watertight = bool(mesh.is_watertight())

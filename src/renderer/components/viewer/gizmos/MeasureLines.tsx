@@ -6,7 +6,7 @@ import type { Measurement, MeasureVertex } from '../../../lib/measure';
 // The in-scene half of the measurement tool: vertex markers and the lines
 // between them.
 //
-// Modelled on SlabCentrelinePreview, which is the same "markers plus a
+// Modeled on SlabCenterlinePreview, which is the same "markers plus a
 // connecting line" shape, and it carries four conventions that are each load-
 // bearing:
 //
@@ -28,7 +28,7 @@ import type { Measurement, MeasureVertex } from '../../../lib/measure';
 // need to grab while a measurement is on screen.
 const RENDER_ORDER = 9997;
 
-// Committed measurements; the one being placed is drawn in the accent colour so
+// Committed measurements; the one being placed is drawn in the accent color so
 // it reads as "in progress".
 const COMMITTED_COLOR = '#a3e635';   // lime, matching the picker's leader lines
 const PENDING_COLOR = '#fbbf24';     // amber, matching the panel's armed state
@@ -138,7 +138,7 @@ export function MeasureLines({
   pending,
   displayOffset,
 }: {
-  /** Committed measurements, drawn in the settled colour. */
+  /** Committed measurements, drawn in the settled color. */
   measurements: Measurement[];
   /** Vertices of the measurement currently being placed, if any. */
   pending: MeasureVertex[];

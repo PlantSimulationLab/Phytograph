@@ -6,12 +6,12 @@
 // pickers that appeared per-mesh and per-LAD-result were all wired to that same
 // setter, so "per-instance" colormaps were an illusion — changing one changed
 // them all. Separately, each pseudocolored object type rendered its own legend
-// overlay, so a scene could stack four unlabelled colorbars along the bottom
+// overlay, so a scene could stack four unlabeled colorbars along the bottom
 // edge with no indication of which belonged to what.
 //
 // A ColorChannel fixes both by moving the mapping onto the object that is being
 // colored. Legends are then DERIVED from the set of active channels rather than
-// hand-rolled per object type, which is what lets them be labelled, deduped and
+// hand-rolled per object type, which is what lets them be labeled, deduped and
 // collapsed uniformly.
 //
 // Pure + stateless — no React, no three.js. Safe to unit-test directly.
@@ -55,7 +55,7 @@ export interface ColorChannel {
 // 'none' exists for tree_instance: ids are arbitrary nominal labels, and a
 // scene routinely holds 100+ trees, so neither a gradient (meaningless — tree 7
 // is not "between" 6 and 8) nor a class list (fills the viewport) is useful.
-// The points stay colored; only the legend is suppressed. Modelling this as an
+// The points stay colored; only the legend is suppressed. Modeling this as an
 // explicit kind keeps the decision here in the pure layer, rather than as a
 // special case wired into the overlay JSX.
 export type LegendKind = 'continuous' | 'categorical' | 'none';
@@ -183,7 +183,7 @@ function schemeAndKind(
   }
   // Tree and leaflet instances are arbitrary nominal ids, often 100+ of them: a gradient is
   // meaningless and the class list would fill the viewport, so the legend is
-  // dropped while the points stay coloured.
+  // dropped while the points stay colored.
   //
   // A CALLER-SUPPLIED scheme overrides this (see `buildLegendEntries`), which
   // is how a cloud whose tree instances the user has NAMED still gets a legend:
@@ -292,7 +292,7 @@ export function buildLegendEntries(descriptors: ChannelDescriptor[]): LegendEntr
     const derivedResult = schemeAndKind(d.channel, d.dataRange);
     // A caller-supplied scheme is AUTHORITATIVE — and it also settles the kind.
     // Some palettes aren't registered in classification.ts at all (a mesh's
-    // source-scan colouring uses the scans' own identifier swatches), so the
+    // source-scan coloring uses the scans' own identifier swatches), so the
     // derivation would call them continuous and quietly drop the class list.
     // When the descriptor hands us classes, this is categorical by definition.
     const scheme = d.scheme ?? derivedResult.scheme ?? undefined;
@@ -342,10 +342,10 @@ export function buildLegendEntries(descriptors: ChannelDescriptor[]): LegendEntr
   return entries.sort((a, b) => Number(b.selected) - Number(a.selected));
 }
 
-// Parse a CSS colour string into the 0–1 RGB triplet the legend schemes use.
+// Parse a CSS color string into the 0–1 RGB triplet the legend schemes use.
 // Handles the two forms the app actually stores: `#rgb` / `#rrggbb` swatch
-// hexes (scan + mesh identifier colours) and `rgb(r, g, b)`. Anything else
-// falls back to mid-grey rather than throwing — a legend swatch is not worth
+// hexes (scan + mesh identifier colors) and `rgb(r, g, b)`. Anything else
+// falls back to mid-gray rather than throwing — a legend swatch is not worth
 // crashing a render over.
 export function cssColorToRgb(css: string): RGB {
   const s = css.trim();
@@ -403,7 +403,7 @@ export function layoutLegend(
   const rest = entries.filter(e => e.key !== promotedKey);
   const slots = Math.max(0, limit - promoted.length);
   // Anything beyond the limit collapses; selection has already been sorted to
-  // the front, so a plain prefix take honours it.
+  // the front, so a plain prefix take honors it.
   const expanded = [...promoted, ...rest.slice(0, slots)];
   const expandedKeys = new Set(expanded.map(e => e.key));
   return {

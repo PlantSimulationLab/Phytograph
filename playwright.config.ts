@@ -58,7 +58,7 @@ export default defineConfig({
   //
   // The problem: a handful of specs build million-point fixtures and assert on
   // absolute memory (crop-octree-100m holds a 500 MB usedJSHeapSize ceiling
-  // through its apply window). With `workers: 2` a neighbour is driving its own
+  // through its apply window). With `workers: 2` a neighbor is driving its own
   // Electron + PyInstaller backend (~1-1.5 GB RSS) at the same time, so those
   // specs are measuring a machine they do not control. On 2026-08-21 that took
   // out crop-multi-scan, whose app was killed mid `File → New` — "Target page,
@@ -69,7 +69,7 @@ export default defineConfig({
   // `heavy` runs alone (workers: 1) so its specs never share the runner with a
   // second app instance — not with each other, and not with a `main` spec.
   //
-  // Deliberately NOT wired with `dependencies: ['heavy']`. That does serialise
+  // Deliberately NOT wired with `dependencies: ['heavy']`. That does serialize
   // the projects, but it also drags the whole heavy project into every targeted
   // run: `npx playwright test tests/e2e/some-other.spec.ts` would first run (and
   // could fail on) three unrelated million-point specs, and a failure there
@@ -88,10 +88,10 @@ export default defineConfig({
   // dedicated `e2e-heavy` job. So the heavy specs run on their own runner,
   // concurrently with the main shards rather than serially after them.
   //
-  // That dedicated job is also the only placement that actually honours the
+  // That dedicated job is also the only placement that actually honors the
   // memory ceilings above. `workers: 1` keeps these specs off EACH OTHER but
   // cannot keep a `main` spec off the same machine — and sharding would have
-  // scattered them among the main shards, putting exactly that neighbour back.
+  // scattered them among the main shards, putting exactly that neighbor back.
   // If you ever fold them into the sharded matrix, the ceilings become
   // measurements of a machine the spec does not control again.
   projects: platformOnly ? [
@@ -110,7 +110,7 @@ export default defineConfig({
       testMatch: [
         // Generates a 1M-point fixture and asserts a hard heap ceiling.
         '**/crop-octree-100m.spec.ts',
-        // Writes a 1M-point file to exercise cancelling a big import.
+        // Writes a 1M-point file to exercise canceling a big import.
         '**/import-cancel.spec.ts',
         // 13M-point cloud when example-datasets/ is present (skips otherwise).
         '**/zoom-large-cloud.spec.ts',

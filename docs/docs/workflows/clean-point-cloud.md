@@ -20,7 +20,7 @@ the same size to grab whether you are looking at a whole survey or zoomed
 into one branch. Set the change any of these ways — all update the viewport
 **live** so you can see the result before committing:
 
-- Type exact **X / Y / Z** values (metres for position, degrees for
+- Type exact **X / Y / Z** values (meters for position, degrees for
   rotation) in the panel.
 - Drag the gizmo's **arrows** to translate along an axis, or its colored
   **rings** to rotate about an axis.
@@ -106,10 +106,10 @@ halfway up — which is usually the point you want to circle.
 Both of those are measured **robustly**, ignoring the outermost few percent of
 points, so far strays cannot drag the pivot off the data. This matters most on
 a terrestrial scan, which typically carries a thin halo of very distant returns
-(a treeline hundreds of metres off, atmospheric hits, the odd artefact) spread
+(a treeline hundreds of meters off, atmospheric hits, the odd artifact) spread
 unevenly to one side. Those points define the raw bounding box while
 contributing nothing you want to look at, and a pivot at its center can end up
-a kilometre from the cloud — at which range even a small orbit drag sweeps the
+a kilometer from the cloud — at which range even a small orbit drag sweeps the
 whole scene out of view.
 
 **Scan projects start at the scanner instead.** If the first thing you load
@@ -124,7 +124,7 @@ scene center** drops it. Scans imported *later*, into a scene that already has
 content, never move the origin — only the first load seeds it.
 
 That ground level is measured robustly, so a handful of erroneous returns
-below the terrain (multipath, birds, scanner artefacts) will not drag it
+below the terrain (multipath, birds, scanner artifacts) will not drag it
 down: it ignores the lowest 0.5% of points rather than taking the single
 lowest one. The ground grid uses the same estimate.
 
@@ -339,9 +339,9 @@ new **"… (segment)"** cloud is added to the scene holding the cropped-out
 points. No points are lost. It works with all three shapes — **Box**,
 **Rect**, and **Polygon**.
 
-The new cloud is given its own colour from the scan palette, the same as any
+The new cloud is given its own color from the scan palette, the same as any
 newly created scan, so the two halves are immediately distinguishable in the
-viewport — the **"… (segment)"** name tells you where it came from. Recolour or
+viewport — the **"… (segment)"** name tells you where it came from. Recolor or
 rename it from the scan list like any other scan. It's handy
 for separating a plant from its ground, or splitting one scan into named
 regions without re-importing.
@@ -363,7 +363,7 @@ will **not** bring them back.
 Tick **Keep original cloud** to crop non-destructively. The source scan stays
 in the scene untouched (just hidden, so the viewport looks the same as a
 normal crop) and the kept points are added as a new **"… (cropped)"** cloud,
-which takes its own colour from the scan palette. Click the eye icon next to
+which takes its own color from the scan palette. Click the eye icon next to
 the original to show it again.
 
 Because nothing is destroyed, a retained crop **is** undoable — one
@@ -441,7 +441,7 @@ octree), they're cheap and reversible:
 - **Permanently apply deletions** bakes the survivors into a fresh octree —
   the one slower step, and the point at which the deletions become permanent
   (no longer undoable). While it runs the button reads *Applying deletions…*
-  and a progress pill appears at the top of the viewer; cancelling it leaves
+  and a progress pill appears at the top of the viewer; canceling it leaves
   your pending deletions exactly as they were. You only need this to free the
   deleted points' memory; until then the masked result is already what every
   other operation (triangulate, skeleton, segment, export) sees. Skip it on a
@@ -507,7 +507,7 @@ Then choose how to commit (there is no separate Apply step):
   might want the excluded points later.
 - **Segment (split into two clouds)** — keeps the in-range points on the
   original cloud and adds the out-of-range points as a **second cloud**
-  (`<name> (filtered out)`), given its own colour from the scan palette so
+  (`<name> (filtered out)`), given its own color from the scan palette so
   the two halves are distinguishable in the viewport. Nothing is discarded;
   the two clouds together equal the original. Handy for separating, say, a
   canopy from the rest by height without losing the rest.
@@ -562,7 +562,7 @@ The **Noise** section at the top of the Filter panel finds them.
 It works in two steps, and the first one deletes nothing:
 
 1. Click **Detect noise**. The cloud is classified into `noise_class`
-   (Clean / Noise), recoloured so the flagged points stand out in **red**,
+   (Clean / Noise), recolored so the flagged points stand out in **red**,
    and the panel reports how many were flagged and what share of the cloud
    that is.
 2. Look at the red points. If they're where you expect stray points to be,
@@ -579,7 +579,7 @@ overwrites the previous result — there's nothing to undo.
     In **Auto** mode the parameters are derived from each scan's own point
     spacing, so scans of differing density are each judged on their own terms.
     The scans are done one after another, with the current one named beneath
-    the **Cancel** button; cancelling stops the whole run and keeps the results
+    the **Cancel** button; canceling stops the whole run and keeps the results
     of the scans already finished. The result box reports the **first** selected
     scan's numbers (it is the scan whose criteria the panel edits) while the
     notification carries the total across the selection — click a single scan to
@@ -590,9 +590,9 @@ overwrites the previous result — there's nothing to undo.
 
 | Method | What it flags | Use it when |
 | --- | --- | --- |
-| **Isolated points** (default) | Points with fewer than *N* other returns within *r* metres | Almost always. It asks a local, physical question, so it's safe on fine twigs and gives the same answer however often you run it. |
+| **Isolated points** (default) | Points with fewer than *N* other returns within *r* meters | Almost always. It asks a local, physical question, so it's safe on fine twigs and gives the same answer however often you run it. |
 | **Sparse voxels** | Points in a grid cell holding too few returns | The cloud is too large for the other two to be quick. It's coarser — it can clip the last point of a thin branch. |
-| **Statistical (SOR)** | Points whose mean distance to their *k* nearest neighbours is unusually large | You need to catch a tight *clump* of stray points that the other methods leave alone, because the clump's members support each other. |
+| **Statistical (SOR)** | Points whose mean distance to their *k* nearest neighbors is unusually large | You need to catch a tight *clump* of stray points that the other methods leave alone, because the clump's members support each other. |
 
 !!! warning "Statistical (SOR) gets more aggressive each time you run it"
     SOR's threshold is computed from the whole cloud, so it's set by whatever
@@ -614,13 +614,13 @@ cloud's own point spacing; after a detection run the boxes show what it
 chose, so you can see whether the number is sensible for your scan. Untick
 it to set them yourself — for *Isolated points*, the radius is a real
 distance you can compare against your scan resolution ("my twigs have
-returns every centimetre, so 5 cm is generous").
+returns every centimeter, so 5 cm is generous").
 
 !!! tip "Auto parameters cost a pass over the cloud"
     Deriving the settings means measuring the cloud's point spacing, which is
-    the same neighbour search *Isolated points* and *Statistical (SOR)* do
+    the same neighbor search *Isolated points* and *Statistical (SOR)* do
     anyway — so for those two it's effectively free. For **Sparse voxels** it
-    isn't: that method is the fast one precisely because it does no neighbour
+    isn't: that method is the fast one precisely because it does no neighbor
     search, and auto-sizing its grid puts one back. On a very large cloud —
     the case you reached for *Sparse voxels* to handle — untick **Auto
     parameters** and type a cell size, and the run skips the measurement
@@ -642,7 +642,7 @@ the red preview is for.
       `reflectance` column, filter on *that* field instead (it's in the
       field dropdown above): those attributes measure the return's quality
       directly. Note a deviation cut preferentially removes small-object
-      returns, which helps for branch modelling but hurts leaf-area work.
+      returns, which helps for branch modeling but hurts leaf-area work.
     - **Registration error** — doubled surfaces from a bad alignment aren't
       noise. Fix the [registration](register-compare.md).
 

@@ -108,7 +108,7 @@ def test_timestamp_is_not_a_float32_extra_dim(tmp_path):
                    for k in r.extras)
 
 
-def test_absolute_clock_is_not_mislabelled_gps_week(tmp_path):
+def test_absolute_clock_is_not_mislabeled_gps_week(tmp_path):
     """An ASCII file declares no clock, so the encoding must be inferred.
 
     Getting it wrong is not cosmetic: `_read_las_into_arrays` maps

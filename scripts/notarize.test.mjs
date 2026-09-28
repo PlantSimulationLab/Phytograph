@@ -96,7 +96,7 @@ describe('isRetryableNotaryError', () => {
   it.each([
     ['bad credentials', 'Error: HTTP status code: 401. Invalid credentials.'],
     ['zip failure', 'Failed to zip application, exited with code: 1'],
-    ['unrecognised', 'Error: something else entirely went wrong'],
+    ['unrecognized', 'Error: something else entirely went wrong'],
   ])('does NOT retry a non-transport failure: %s', (_name, message) => {
     expect(isRetryableNotaryError(new Error(message))).toBe(false);
   });

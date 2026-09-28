@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "plant-organ-pointnext-s-v1",
   "name": "Plant organs (PointNeXt-S v1)",
-  "description": "Soil, stem and leaf for single herbaceous plants, potted or in a row, plus one instance per leaflet. Trained on Helios synthetic scans of eight dicot species (90 %) and hand-labelled tomato (Pheno4D), soybean (Demeter) and sugar beet (Sugar4D) (10 %). Works on scans with about 3 mm spacing or finer.",
+  "description": "Soil, stem and leaf for single herbaceous plants, potted or in a row, plus one instance per leaflet. Trained on Helios synthetic scans of eight dicot species (90 %) and hand-labeled tomato (Pheno4D), soybean (Demeter) and sugar beet (Sugar4D) (10 %). Works on scans with about 3 mm spacing or finer.",
   "task": "plant_organ",
   "arch": "pointnext",
   "hparams": {

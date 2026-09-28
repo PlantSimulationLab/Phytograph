@@ -21,7 +21,7 @@ const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 //   row 2: 0.4 0.0 0.30  ts=105.0  dev=2  target=3
 //
 // That exactness is the point: it's what proves potree hands back the REAL
-// attribute values (not normalised or rescaled ones) at the picked index.
+// attribute values (not normalized or rescaled ones) at the picked index.
 test.describe('point picker', () => {
   let session: LaunchedApp;
 
@@ -156,12 +156,12 @@ test.describe('point picker', () => {
     await expect(label.getByTestId('picked-point-scan')).toHaveText('scalars');
 
     // Coordinates: the fixture has no global shift, so world is the only column
-    // and it must reproduce the source row to millimetre precision.
+    // and it must reproduce the source row to millimeter precision.
     expect(await worldCoordsOf(label)).toEqual(['0.400', '0.000', '0.300']);
 
     // Attributes: the exact values from that row. 'Timestamp[s]' and
     // 'Target Index[]' auto-detect into the canonical multi-return slugs;
-    // 'Deviation[]' takes the generic sanitised slug.
+    // 'Deviation[]' takes the generic sanitized slug.
     const attrs = await attributesOf(label);
     expect(attrs).toMatchObject({
       timestamp: '105',
@@ -173,7 +173,7 @@ test.describe('point picker', () => {
   test('picks a point clicked NEAR rather than dead-on, in a sparse region', async () => {
     // The density regression. `Potree.pick` re-renders the visible nodes into
     // an index buffer and `findHit` only accepts a pixel that was actually
-    // written, so a point is pickable exactly where its splat rasterised. The
+    // written, so a point is pickable exactly where its splat rasterized. The
     // pick material used to inherit the DISPLAY point size (FIXED, default 1),
     // which meant 1-pixel targets: in a solid-looking region every pixel is
     // covered so any click lands, but wherever background showed through you
@@ -182,30 +182,30 @@ test.describe('point picker', () => {
     //
     // scalars.xyz draws as well-separated dots at the default framing, so an
     // offset click reproduces that: every other test here clicks the projected
-    // centre exactly, which is precisely the case that always worked.
+    // center exactly, which is precisely the case that always worked.
     await importScalars();
     await armPicker();
 
     const target: [number, number, number] = [0.4, 0.0, 0.3];
     const px = await worldToScreenPx(target);
 
-    // Far enough off-centre that a 1 px splat cannot be hit, comfortably
+    // Far enough off-center that a 1 px splat cannot be hit, comfortably
     // inside the inflated pick target. Offset diagonally so neither axis
     // alone explains a pass.
     const OFFSET_PX = 4;
     await clickViewport(px.x + OFFSET_PX, px.y - OFFSET_PX);
 
     await expect(labels()).toHaveCount(1, { timeout: 10_000 });
-    // It must resolve to the point actually under the cursor's neighbourhood —
+    // It must resolve to the point actually under the cursor's neighborhood —
     // "a label appeared" would also pass if the pick grabbed some other point,
     // which is the failure mode an over-large splat would introduce.
     expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
   });
 
-  test('an offset click still resolves to the NEAREST point, not a neighbour', async () => {
+  test('an offset click still resolves to the NEAREST point, not a neighbor', async () => {
     // Guard on the other side of the same fix: inflating the pick splat trades
     // away precision if taken too far, because potree's `findHit` breaks ties
-    // by 2D distance-to-centre with no depth test. A click nudged toward one
+    // by 2D distance-to-center with no depth test. A click nudged toward one
     // point must not be won by the adjacent one.
     await importScalars();
     await armPicker();
@@ -268,8 +268,8 @@ test.describe('point picker', () => {
     expect(coords[1]).toBe('0.000');
   });
 
-  test('reports true intensity while a scalar colour mode is active', async () => {
-    // Colouring by a scalar ALIASES that scalar's buffer into each tile's
+  test('reports true intensity while a scalar color mode is active', async () => {
+    // Coloring by a scalar ALIASES that scalar's buffer into each tile's
     // `intensity` attribute (that's how the potree gradient shader reaches it).
     // potree's picker reports a value for every named attribute, so without the
     // saved-original backup the picker would read the aliased scalar and label
@@ -279,11 +279,11 @@ test.describe('point picker', () => {
     await session.page.getByRole('button', { name: 'Display' }).click();
     const colorMode = session.page.getByTestId('display-color-mode');
     await expect(colorMode).toBeVisible();
-    // Colour by the time column. Its option value is the octree BUFFER key
+    // Color by the time column. Its option value is the octree BUFFER key
     // (`gps-time`, the LAS standard field it rides); the picker bubble still
     // reports it under Phytograph's `timestamp` slug, asserted below.
     await colorMode.selectOption('scalar:gps-time');
-    // The octree remounts with a fresh material on a colour-mode change.
+    // The octree remounts with a fresh material on a color-mode change.
     await session.page.waitForTimeout(1500);
     await waitForCameraSettled();
 
@@ -363,7 +363,7 @@ test.describe('point picker', () => {
     // Aim in the stored frame instead, using the bounds the camera reports.
     //
     // Fixture geometry: a 12-point ring per z-layer, 16 layers 0.1 m apart, with
-    // each ring's first vertex at +X and centre Y. So (max X, centre Y,
+    // each ring's first vertex at +X and center Y. So (max X, center Y,
     // min Z + 0.7) is a real vertex, mid-height on the shell facing the default
     // isometric camera. Its true file coordinate is (545000.3, 4183000, 100.7).
     const cam = await session.page.evaluate(() => (window as any).__getCameraState?.());
@@ -406,8 +406,8 @@ test.describe('point picker', () => {
     expect(Math.abs((worldY - localY) - Math.round(worldY - localY))).toBeLessThan(1e-2);
 
     // The world readout must reproduce the SOURCE FILE row — that is the whole
-    // point of adding the shift back. Tolerance is a centimetre: potree stores
-    // positions quantised to the octree's scale.
+    // point of adding the shift back. Tolerance is a centimeter: potree stores
+    // positions quantized to the octree's scale.
     expect(Math.abs(worldX - 545000.3)).toBeLessThan(0.01);
     expect(Math.abs(worldY - 4183000.0)).toBeLessThan(0.01);
     expect(Math.abs(parseFloat(both[2].world) - 100.7)).toBeLessThan(0.01);

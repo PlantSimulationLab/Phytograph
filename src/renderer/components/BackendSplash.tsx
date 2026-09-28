@@ -20,17 +20,17 @@ export function BackendSplash() {
   // shows the plainer (non-alarming) message rather than a false "first launch".
   const [firstRun, setFirstRun] = useState(false);
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
     void window.electronAPI.backend
       .getInfo()
       .then((i) => {
-        if (!cancelled) setFirstRun(i.firstRun);
+        if (!canceled) setFirstRun(i.firstRun);
       })
       .catch(() => {
         /* keep default false */
       });
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, []);
 
@@ -66,13 +66,13 @@ export function BackendSplash() {
             {firstRun ? (
               <p className="max-w-sm text-xs text-amber-200/80 leading-relaxed">
                 <span className="font-medium text-amber-200">First launch</span> —
-                initialising the Python compute backend (open3d, pyhelios) for the
+                initializing the Python compute backend (open3d, pyhelios) for the
                 first time. This can take up to a minute; every launch after this
                 will be much faster.
               </p>
             ) : (
               <p className="max-w-sm text-xs text-neutral-500 leading-relaxed">
-                Initialising the Python compute backend (open3d, pyhelios).
+                Initializing the Python compute backend (open3d, pyhelios).
               </p>
             )}
           </>

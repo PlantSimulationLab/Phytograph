@@ -14,7 +14,7 @@ const PLAIN_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree-view1.xyz
 // the renderer fell back to a flat gray/z-height ramp and the dropdown showed a
 // dead value.
 //
-// The colour mode now lives on the cloud that owns the field, so the selection
+// The color mode now lives on the cloud that owns the field, so the selection
 // is deleted along with its cloud and can never be inherited by an unrelated
 // import. What the new cloud shows is simply the scene default — this test
 // asserts the stale field is gone and the dropdown offers a mode the cloud

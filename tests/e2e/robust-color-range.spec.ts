@@ -10,13 +10,13 @@ import { resetToFreshScene } from './helpers/resetApp';
 // A colormap stretches its domain across the full ramp, so a domain taken from
 // the raw bounding box is set by the single most extreme point in the cloud.
 // outlier-extent.xyz is exactly the reported shape: 208 returns in a dense plot
-// spanning z 0..3 m, plus ONE stray at z=400. Coloured by height on the raw
+// spanning z 0..3 m, plus ONE stray at z=400. Colored by height on the raw
 // box, every real point falls in the bottom 0.75% of the gradient — the plot
-// renders as one flat colour and the height structure the user is looking for
+// renders as one flat color and the height structure the user is looking for
 // is invisible, with nothing on screen to explain why.
 //
 // The fix takes the 1st-99th percentile instead, so the ramp spans the plot and
-// the stray clamps to the top colour. These tests assert the domain actually
+// the stray clamps to the top color. These tests assert the domain actually
 // handed to the GPU material, not just the number printed on the legend: a
 // colorbar that agreed while the shaders disagreed would be worse than the bug,
 // because it would confidently describe a scale nothing is painted on.
@@ -77,7 +77,7 @@ test('the height colorbar spans the content, not the lone 400 m outlier', async 
   await expect(colorbar).toBeVisible({ timeout: 20_000 });
   const cbMax = parseFloat((await colorbar.getAttribute('data-colorbar-max')) ?? 'NaN');
 
-  // The decisive number. Raw-bounds behaviour puts this at 400.
+  // The decisive number. Raw-bounds behavior puts this at 400.
   expect(cbMax).toBeLessThan(10);
   expect(cbMax).toBeGreaterThan(2.0);
   expect(cbMax).toBeCloseTo(CONTENT_MAX_Z, 1);
@@ -125,12 +125,12 @@ test('the robust domain SURVIVES an edit', async () => {
   // The dimensioning matters and is the trap this test fell into first. A 1st-99th
   // percentile can only reject a tail thinner than 1% of the cloud, so an edit
   // that shrinks 209 points to 57 makes the lone outlier 1.75% of the data and
-  // p99 legitimately climbs to 177.68 — correct behaviour, but it looks exactly
+  // p99 legitimately climbs to 177.68 — correct behavior, but it looks exactly
   // like the regression and would make this test assert a falsehood. Keep the
   // survivor count high so the percentile still has the outlier outnumbered.
   //
   // The filter operates on the selection. `importAndColorByHeight` deselects
-  // (choosing the colour mode with nothing selected is the "colour everything"
+  // (choosing the color mode with nothing selected is the "color everything"
   // gesture), so select the row here — and only if it isn't already selected,
   // since clicking the sole selection toggles it OFF.
   const row = page.locator('[data-testid="scan-row"][data-scan-name="outlier-extent"]');

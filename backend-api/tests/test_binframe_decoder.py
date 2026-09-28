@@ -83,9 +83,9 @@ def test_a_worker_failure_surfaces_its_error_not_a_json_syntax_error():
         decode_streamed_json(stream)
 
 
-def test_a_cancelled_run_says_so():
-    stream = _marker(progress=None, message="Cancelled", cancelled=True)
-    with pytest.raises(AssertionError, match="cancelled"):
+def test_a_canceled_run_says_so():
+    stream = _marker(progress=None, message="Canceled", canceled=True)
+    with pytest.raises(AssertionError, match="canceled"):
         decode_streamed_json(stream)
 
 

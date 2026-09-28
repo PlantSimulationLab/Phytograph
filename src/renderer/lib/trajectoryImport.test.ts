@@ -1,6 +1,6 @@
 // Guards the trajectory file picker against the failure that shipped in v0.82.0:
 // the dialog listed text and binary trajectories as TWO filters, and macOS applies
-// only the first, so every .out/.sbet SBET was greyed out and unselectable. The
+// only the first, so every .out/.sbet SBET was grayed out and unselectable. The
 // backend parser worked the whole time — the format simply could not be reached
 // through the UI, which reads to a user as "SBET is not supported".
 //
@@ -33,9 +33,9 @@ vi.mock('../utils/backendApi', () => ({
 import { parseTrajectory } from '../utils/backendApi';
 
 describe('trajectory picker filters', () => {
-  it('offers exactly ONE filter, so macOS cannot grey out a supported format', () => {
+  it('offers exactly ONE filter, so macOS cannot gray out a supported format', () => {
     // The regression: two entries meant filters[0] ('csv','txt','tsv','traj') was
-    // the only one macOS honoured. Anything but a single entry reopens it.
+    // the only one macOS honored. Anything but a single entry reopens it.
     expect(buildTrajectoryFilters()).toHaveLength(1);
   });
 

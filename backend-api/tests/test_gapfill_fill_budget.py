@@ -19,7 +19,7 @@ raster is now cheap, so refusing it would reject valid work. These tests pin the
 property that mattered — a full-resolution raster fills, and stays affordable — rather
 than the mechanism that used to deliver it.)
 
-Native tests — a stubbed cloud cannot exercise real allocation behaviour.
+Native tests — a stubbed cloud cannot exercise real allocation behavior.
 
 MEASURING THIS IS THE HARD PART, and getting it wrong cost a full round trip
 across three platforms. Peak RSS is not the fill's cost: the process has already

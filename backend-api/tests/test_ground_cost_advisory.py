@@ -30,7 +30,7 @@ def test_estimate_grows_with_points_cloth_density_and_rebuild_size():
     assert more_points > base
     assert finer_cloth > base
     assert bigger_rebuild > base
-    # The rebuild term honours the converter's sampling policy: a rebuild past
+    # The rebuild term honors the converter's sampling policy: a rebuild past
     # the random-sampling knee is estimated at the faster rate.
     slow_small = main._convert_seconds(main._POTREE_RANDOM_SAMPLING_MIN_POINTS - 1)
     fast_large = main._convert_seconds(main._POTREE_RANDOM_SAMPLING_MIN_POINTS)
@@ -99,7 +99,7 @@ def test_advisory_counts_work_already_in_flight(monkeypatch):
 
 
 def test_advisory_is_judged_against_free_memory_not_total_ram(monkeypatch):
-    """A pinned budget is honoured, but an AUTO budget derates by what is free,
+    """A pinned budget is honored, but an AUTO budget derates by what is free,
     and the advisory must use the same number as the gate it warns about."""
     monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", raising=False)
     monkeypatch.setattr(main, "_COST_WARNING_SECONDS", 90.0)

@@ -51,7 +51,7 @@ def _plot():
     hag = np.concatenate(hag)
     grd = np.concatenate(grd)
     miss = np.zeros(len(pos))
-    # Sky/miss points labelled as tree 3, 1 km out: if they reached the
+    # Sky/miss points labeled as tree 3, 1 km out: if they reached the
     # measurement, tree 3's height and crown would be absurd.
     m = np.array([[500.0, 800.0, 1100.0], [-700.0, 300.0, 900.0]])
     pos = np.vstack([pos, m])
@@ -191,7 +191,7 @@ def test_ground_grid_used_without_height_above_ground():
 
 def test_partial_dem_falls_back_to_ground_labels_per_tree():
     # The DEM missed tree 12: its height_above_ground is NaN. It must take its
-    # ground from the ground-labelled points, not from its own lowest point.
+    # ground from the ground-labeled points, not from its own lowest point.
     sess = _make_session("inv-partial")
     with main._cloud_session_lock:
         hag = np.array(sess.extras[main.HEIGHT_ABOVE_GROUND_SLUG])
@@ -266,7 +266,7 @@ def test_bad_method_is_rejected():
 def test_cancel_between_trees():
     sess = _make_session("inv-cancel")
 
-    class _Cancelled:
+    class _Canceled:
         def __init__(self):
             self.calls = 0
 
@@ -276,8 +276,8 @@ def test_cancel_between_trees():
         def should_cancel(self):
             return self.calls >= 2  # after indexing starts
 
-    with pytest.raises(main.ScanCancelled):
-        main._do_tree_inventory(sess, main.TreeInventoryRequest(), progress=_Cancelled())
+    with pytest.raises(main.ScanCanceled):
+        main._do_tree_inventory(sess, main.TreeInventoryRequest(), progress=_Canceled())
 
 
 def test_cloud_replaced_mid_run_is_reported():

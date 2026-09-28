@@ -101,7 +101,7 @@ def test_pcd_to_las_identity_stashes_nothing(tmp_path):
 
 def test_pcd_to_las_writes_in_blocks(tmp_path, monkeypatch):
     """The LAS is written one `_LAS_WRITE_CHUNK` at a time; with a chunk that
-    does not divide the point count, every point and its colour still lands, in
+    does not divide the point count, every point and its color still lands, in
     order, in the same units a single write produced."""
     import laspy
 
@@ -127,7 +127,7 @@ def test_pcd_to_las_writes_in_blocks(tmp_path, monkeypatch):
     assert len(las.points) == n
     got = np.column_stack([las.x, las.y, las.z])
     np.testing.assert_allclose(got, np.round(xyz, 4), atol=1.5e-3)
-    # 8-bit colour scaled *256, as the single-write version stored it.
+    # 8-bit color scaled *256, as the single-write version stored it.
     np.testing.assert_array_equal(np.asarray(las.red) // 256, rgb[:, 0])
     np.testing.assert_array_equal(np.asarray(las.green) // 256, rgb[:, 1])
     np.testing.assert_array_equal(np.asarray(las.blue) // 256, rgb[:, 2])

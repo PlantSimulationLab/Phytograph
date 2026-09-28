@@ -9,12 +9,12 @@ import {
 import type { CloudFilters, FilterRange } from './pointCloudTypes';
 
 describe('isIntegerFilterField', () => {
-  it('recognises the per-pulse multi-return counters', () => {
+  it('recognizes the per-pulse multi-return counters', () => {
     expect(isIntegerFilterField('scalar:target_index')).toBe(true);
     expect(isIntegerFilterField('scalar:target_count')).toBe(true);
   });
 
-  it('recognises the structured-scan raster indices', () => {
+  it('recognizes the structured-scan raster indices', () => {
     expect(isIntegerFilterField('scalar:row_index')).toBe(true);
     expect(isIntegerFilterField('scalar:column_index')).toBe(true);
   });

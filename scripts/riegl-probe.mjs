@@ -9,7 +9,7 @@
 // 1 M pts/s, so emulation is not a practical cost. See docker/riegl/Dockerfile
 // for where the rest of an import's time actually goes.
 //
-// RIVLIB IS USER-SUPPLIED. Its licence forbids redistribution ("You may NOT
+// RIVLIB IS USER-SUPPLIED. Its license forbids redistribution ("You may NOT
 // distribute or modify the software..."), so it is never baked into the image
 // and never committed here. Download it yourself from RIEGL's members area and
 // point this script at it. Part 1, built for x86_64-linux-gcc9.5.0, is what the
@@ -152,7 +152,7 @@ function resolveRivlib(explicit) {
   if (!candidate) {
     fail(
       'RiVLib location not set.',
-      'RiVLib is proprietary and user-supplied — its licence forbids us from\n' +
+      'RiVLib is proprietary and user-supplied — its license forbids us from\n' +
         (WINDOWS
           ? 'shipping it. Download the x86_64-windows build from RIEGL\'s\n' +
             'members area and extract it to\n\n' +

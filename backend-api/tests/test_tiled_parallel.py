@@ -27,12 +27,12 @@ PROBE = BACKEND / "tests" / "tile_pool_probe.py"
 
 
 def _cloud(n, extent=40.0, seed=3):
-    from make_big_cloud import _tree_centres, generate_chunk
+    from make_big_cloud import _tree_centers, generate_chunk
 
     rng = np.random.default_rng(seed)
-    centres = _tree_centres(rng, extent, 9)
+    centers = _tree_centers(rng, extent, 9)
     scanner = np.array([extent / 2, extent / 2, 1.6])
-    return generate_chunk(rng, n, extent, centres, 0.5, 0.0, scanner)["xyz"]
+    return generate_chunk(rng, n, extent, centers, 0.5, 0.0, scanner)["xyz"]
 
 
 def _probe(tool, pts, workers, tmp_path, tag):

@@ -118,7 +118,7 @@ jobs:
   # the PyInstaller bundle (pytest imports backend-api/main.py directly), so it
   # starts at t=0 and reports in ~15 min regardless of cache state.
   #
-  # It builds PyHelios unconditionally, which is a behaviour change worth
+  # It builds PyHelios unconditionally, which is a behavior change worth
   # understanding: the old job built it only on a backend-cache MISS, reasoning
   # that a cache hit made it unnecessary. That was backwards. On a cache HIT the
   # lib was never built, so `import main` found no libhelios, hit the
@@ -127,7 +127,7 @@ jobs:
   # inside the pytest step where it read as slow tests rather than a build.
   # Building it up front is the same cost, deterministic, and legible.
   #
-  # Do NOT "optimise" this by caching pyhelios_build/: main.py decides staleness
+  # Do NOT "optimize" this by caching pyhelios_build/: main.py decides staleness
   # by comparing the lib's mtime against the newest .cpp/.hpp/.h under
   # helios-core/ and native/. A cache restore gives the lib its original (older)
   # mtime while git checkout stamps the sources with a fresh one, so a restored
@@ -409,9 +409,9 @@ jobs:
   # resolves to the number of matrix jobs, so --shard's denominator follows
   # automatically and can't drift out of sync with the list.
   #
-  # fail-fast is OFF, deliberately. Cancelling the sibling shards on the first
+  # fail-fast is OFF, deliberately. Canceling the sibling shards on the first
   # red one would save a few free runner-minutes and cost you the thing that
-  # actually matters: a cancelled job skips its `if: failure()` artifact upload,
+  # actually matters: a canceled job skips its `if: failure()` artifact upload,
   # destroying the traces needed to debug it (the same lesson the old 75-minute
   # timeout taught). It also means each CI round surfaces every failure at once,
   # so one local debugging session covers them all instead of discovering them
@@ -424,7 +424,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # FOUR. Six was tried and reverted — do not "optimise" this back up
+        # FOUR. Six was tried and reverted — do not "optimize" this back up
         # without reading why, because the failure mode is counterintuitive.
         #
         # The motivation was real: at four, shards measure roughly 13/16/18/24
@@ -446,7 +446,7 @@ jobs:
         # lad-*, all six qsm-*, AND both plant-generate* specs, and shard 5 was
         # the scan*/synthetic-scan*/skeleton/stitch group. With `workers: 2`
         # those heavy specs then run CONCURRENTLY, where at four they were
-        # diluted by light neighbours. Every failure was a timeout; none was a
+        # diluted by light neighbors. Every failure was a timeout; none was a
         # wrong answer — the suite ran out of budget, it did not miscompute.
         #
         # So the wall-clock win (~7 min) cost two-to-three investigations per
@@ -555,7 +555,7 @@ jobs:
   # on the box. playwright.config.ts gives the project `workers: 1`, which keeps
   # its specs off EACH OTHER but cannot keep a `main` spec off the same runner.
   # Sharding would have scattered them randomly among the main shards and put
-  # exactly that neighbour back. A dedicated job is the only placement that
+  # exactly that neighbor back. A dedicated job is the only placement that
   # actually delivers the isolation the ceilings assume — and it's ~2.4 min, so
   # it never sets the critical path.
   # --------------------------------------------------------------------------
@@ -635,7 +635,7 @@ jobs:
   # protection at this instead.
   #
   # `if: always()` so it runs even when a shard failed; the explicit result test
-  # is required because a skipped or cancelled `needs` does NOT fail a job by
+  # is required because a skipped or canceled `needs` does NOT fail a job by
   # default.
   # --------------------------------------------------------------------------
   e2e-summary:

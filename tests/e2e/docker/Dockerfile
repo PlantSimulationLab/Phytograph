@@ -2,7 +2,7 @@
 #
 # WHY: a recurring class of failure in this project passes on macOS and fails
 # only on CI's headless Linux runner (Dock-less Electron, xvfb, different GL
-# stack, different float behaviour). Diagnosing those through 45-minute CI
+# stack, different float behavior). Diagnosing those through 45-minute CI
 # round-trips is slow and error-prone, so this image reproduces the runner
 # locally.
 #

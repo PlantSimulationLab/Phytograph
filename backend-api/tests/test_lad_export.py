@@ -370,7 +370,7 @@ def test_ijk_is_derived_from_geometry_not_the_sparse_index():
 
 
 def test_single_band_dem_geotiff_is_unchanged():
-    """The multi-band generalisation must not disturb the DEM path it grew from."""
+    """The multi-band generalization must not disturb the DEM path it grew from."""
     import tifffile
     grid = np.array([[1.0, 2.0], [3.0, np.nan]])
     raw = main._dem_geotiff_bytes(grid, 100.0, 200.0, 0.5, -9999.0, 32610)
@@ -390,7 +390,7 @@ def test_single_band_dem_geotiff_is_unchanged():
 # The NoData rule was written for occluded voxels but, in practice, never fired:
 # `solved` is almost always True because Helios writes a hard leaf_area = 0 for a
 # beam-starved voxel rather than NaN. `under_sampled` is the flag that actually
-# fires, so every format must honour it exactly as it honours `solved`.
+# fires, so every format must honor it exactly as it honors `solved`.
 
 UNDER_IJK = (0, 1, 0)
 VOLUME = CELL[0] * CELL[1] * CELL[2]

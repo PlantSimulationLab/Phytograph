@@ -48,7 +48,7 @@ async function loadFramedScene() {
   );
 }
 
-// Distance from the camera to the cloud's own centre — what "zoomed in" means
+// Distance from the camera to the cloud's own center — what "zoomed in" means
 // to the user. Not |camera − target|, which a rigid zoom translation preserves.
 function distToCloud(s: any): number {
   const c = [
@@ -59,8 +59,8 @@ function distToCloud(s: any): number {
   return Math.hypot(s.position[0] - c[0], s.position[1] - c[1], s.position[2] - c[2]);
 }
 
-// Scroll in over the viewport centre and report how much closer we got.
-async function zoomInAtCentre(notches: number): Promise<number> {
+// Scroll in over the viewport center and report how much closer we got.
+async function zoomInAtCenter(notches: number): Promise<number> {
   const { page } = session;
   const box = (await page.locator('canvas').first().boundingBox())!;
   const cx = box.x + box.width / 2;
@@ -82,7 +82,7 @@ test('zoom closes on the cloud just as well with the crop box on screen as witho
   await loadFramedScene();
 
   // Baseline: no tool open.
-  const plainRatio = await zoomInAtCentre(12);
+  const plainRatio = await zoomInAtCenter(12);
   expect(plainRatio).toBeGreaterThan(2);
 
   // Reset and repeat with the crop preview up.
@@ -92,7 +92,7 @@ test('zoom closes on the cloud just as well with the crop box on screen as witho
   await page.getByTestId('tool-crop').click();
   await expect(page.getByTestId('crop-panel')).toBeVisible();
 
-  const cropRatio = await zoomInAtCentre(12);
+  const cropRatio = await zoomInAtCenter(12);
 
   // The same gesture must close on the cloud by a comparable factor. Before the
   // fix the camera stalled against the crop box's front face, so this ratio

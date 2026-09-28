@@ -62,12 +62,12 @@ export interface OctreeRef {
   // add it back; the backend session restores world coords for downstream ops.
   worldShift?: [number, number, number] | null;
   // The length unit the SOURCE FILE was in, and the factor applied to reach
-  // metres. PROVENANCE ONLY: positions are already metres everywhere in the
+  // meters. PROVENANCE ONLY: positions are already meters everywhere in the
   // app, exactly as `worldShift` records a shift that has already been
   // subtracted. Kept so the UI can explain why a scan's coordinates differ
   // from the file it came from.
   //
-  // `sourceUnitScale === 1` means "known to be metres"; `undefined`/`null`
+  // `sourceUnitScale === 1` means "known to be meters"; `undefined`/`null`
   // means the scan predates units or was never asked — different states, so
   // they are not collapsed.
   sourceUnits?: LengthUnit | null;
@@ -77,7 +77,7 @@ export interface OctreeRef {
   // Keyed by attribute name ("intensity", "rgb", "classification", …).
   // The OctreePointCloud material effect uses these to set the shader's
   // heightMin/Max + intensityRange uniforms — without them the gradient
-  // lookups all hit the same texel and the cloud renders solid colour.
+  // lookups all hit the same texel and the cloud renders solid color.
   attributeRanges?: Record<string, { min: number[]; max: number[] }>;
   // Outlier-resistant [lo, hi] per attribute slug — the 1st-99th percentile of
   // the column, measured by the backend at import over the hit points (see
@@ -122,11 +122,11 @@ export interface OctreeRef {
   // auto-detected imports.
   columnPlan?: ColumnPlan | null;
   // On-disk attribute slugs the user marked categorical in the wizard. The
-  // renderer registers these so they colour as discrete classes rather than a
+  // renderer registers these so they color as discrete classes rather than a
   // continuous gradient. See classification.ts registerCategoricalSlug.
   categoricalAttributes?: string[];
   // On-disk attribute slugs the user forced to "Scalar" that would otherwise
-  // colour categorically by name (e.g. a Miss Flag downgraded to Scalar keeps
+  // color categorically by name (e.g. a Miss Flag downgraded to Scalar keeps
   // the is_miss slug for LAD but should render as a gradient). The renderer
   // registers these as continuous overrides so the fixed Hit/Miss scheme is
   // suppressed for this cloud. See classification.ts registerContinuousSlug.
@@ -252,17 +252,17 @@ export interface PointCloudData {
   //
   // Prefer this over `bounds.size` for anything that means "how big is this
   // scene" — the camera's zoom limits, in particular. The raw size is set by the
-  // most extreme point on each axis, so a few stray returns hundreds of metres
+  // most extreme point on each axis, so a few stray returns hundreds of meters
   // out inflate it by orders of magnitude and produce zoom limits calibrated to
   // empty space instead of to the data. Undefined on clouds that predate this or
   // were built renderer-side; callers fall back to `bounds.size`.
   robustExtent?: [number, number, number];
   // The percentile box `robustExtent` was measured across (world coords, same
-  // frame as `bounds`). Prefer its centre over `bounds.center` for "where is the
-  // content" — the raw centre is the midpoint of the outlier-inflated box, which
+  // frame as `bounds`). Prefer its center over `bounds.center` for "where is the
+  // content" — the raw center is the midpoint of the outlier-inflated box, which
   // on a scene with far strays lands in empty space nowhere near the data.
   robustBounds?: { min: [number, number, number]; max: [number, number, number] };
-  // Median 3D nearest-neighbour spacing (world units), computed by the backend
+  // Median 3D nearest-neighbor spacing (world units), computed by the backend
   // at import.
   //
   // The ground-segmentation tool switches CSF recipe on it: an airborne tile and
@@ -412,11 +412,11 @@ export type PendingDeleteRegion =
   | VoxelSetRegion;
 
 /**
- * One manual-labelling edit: "inside `region`, points whose current class is in
+ * One manual-labeling edit: "inside `region`, points whose current class is in
  * `fromClasses` become `toClass`".
  *
  * Reuses `PendingDeleteRegion` rather than defining a parallel region union, so
- * crop, erase and labelling share ONE region vocabulary — a new region kind
+ * crop, erase and labeling share ONE region vocabulary — a new region kind
  * lands in `_canonical_region`/`_region_mask` once and every tool gets it.
  *
  * `fromClasses` is TerraScan's From-class gate, and `undefined` means "any
@@ -433,7 +433,7 @@ export interface LabelStroke {
   toClass: number;
   fromClasses?: number[];
   /** Classes the stroke must never change: hidden or locked when it was drawn.
-   *  Captured per stroke so a replay (undo/redo, the overlay) honours the
+   *  Captured per stroke so a replay (undo/redo, the overlay) honors the
    *  visibility and locks the user had AT THE TIME. */
   excludeClasses?: number[];
   /**
@@ -456,11 +456,11 @@ export interface LabelStroke {
 }
 
 /**
- * A cloud's pre-commit labelling state.
+ * A cloud's pre-commit labeling state.
  *
  * A SIBLING of CloudEditState, never a field on it: CloudEditState is
  * deep-cloned on every transform drag, so piggybacking a several-hundred-stroke
- * list would copy the whole labelling session on every camera-adjacent gesture.
+ * list would copy the whole labeling session on every camera-adjacent gesture.
  * The two also have different boundary rules — bake clears both, but committing
  * labels clears neither.
  */
@@ -544,7 +544,7 @@ export interface MeshData {
 //   area        — triangle surface area
 //   scan        — the source scan each triangle came from, in that scan's color
 //                 (Helios multi-scan meshes only)
-//   layer       — colour by one of a DTM's stored scalar layers (elevation /
+//   layer       — color by one of a DTM's stored scalar layers (elevation /
 //                 density / intensity / hillshade / slope / aspect). Which layer is
 //                 held in `selectedMeshLayer` (mirrors the cloud's 'scalar' mode +
 //                 selectedScalarField). The per-vertex layer values are on the mesh.
@@ -698,7 +698,7 @@ export interface MeshEntry {
   // mesh-row badge. Absent on older/legacy DEM meshes → 'dtm'.
   demSurfaceType?: 'dtm' | 'dsm' | 'chm';
   // DTM-only: the scalar LAYERS this surface carries (name → layer grid + per-vertex
-  // values + range + label). The user colours the terrain by the selected layer
+  // values + range + label). The user colors the terrain by the selected layer
   // (see selectedMeshLayer) and exports any of them as a raster. Includes
   // 'elevation' so every band is handled uniformly.
   demLayers?: Record<string, DemLayer>;
@@ -886,7 +886,7 @@ export interface LADVoxel {
   // rather than NaN, so it would otherwise read as a confident measured zero.
   // Renderers must draw these distinctly from empty air; aggregates must exclude them.
   underSampled?: boolean;
-  // True => `lad` here is an INTERPOLATION (LAD-kriging) over neighbouring reliable
+  // True => `lad` here is an INTERPOLATION (LAD-kriging) over neighboring reliable
   // voxels, not a measurement. Never counted into a measured total.
   ladFilled?: boolean;
   // ---- Leaf / wood split ---------------------------------------------------
@@ -940,7 +940,7 @@ export interface LADResultEntry {
   ladMaxOverride?: number;
   hideEmpty: boolean;        // hide cells with lad<=0 / hitCount===0
   // Which density the voxels are COLORED by: 'lad' (one-sided leaf area, the
-  // default and the historical behaviour), 'wad' (total woody surface area) or
+  // default and the historical behavior), 'wad' (total woody surface area) or
   // 'pad' (their sum). Only offered when `wood.hasWood`; absent means 'lad'.
   // Purely a display choice — it changes nothing about the stored values.
   displayField?: 'lad' | 'wad' | 'pad';
@@ -983,7 +983,7 @@ export interface LADResultEntry {
   // EPSG of the source scans when they all agree, else null. From the backend
   // (CloudSession.crs_epsg), not re-derived here.
   crsEpsg?: number | null;
-  // Full grid extents [x, y, z] in metres. Needed for the .vox header and to
+  // Full grid extents [x, y, z] in meters. Needed for the .vox header and to
   // recover the cell size (grid_size / (nx, ny, nz)) — the response has no
   // explicit cell-size field.
   gridSize?: [number, number, number];

@@ -26,7 +26,7 @@ from main import ColumnPlan, ColumnPlanEntry
 laspy = pytest.importorskip("laspy")
 
 
-# A 4-row 2x2 rasterised grid: (row, col) in {0,1}x{0,1}. Columns:
+# A 4-row 2x2 rasterized grid: (row, col) in {0,1}x{0,1}. Columns:
 # x y z row_index column_index.
 _GRID_ROWS = [
     # x     y     z     row col
@@ -92,7 +92,7 @@ def test_column_plan_pins_canonical_grid_slugs():
 
 
 def test_grid_role_via_extra_slug_also_pins_canonical():
-    """An 'extra' column whose slug IS a grid slug is canonicalised too, so a
+    """An 'extra' column whose slug IS a grid slug is canonicalized too, so a
     column carried as a scalar named 'row_index' still lands in the recovery
     raster (mirrors the multi-return slug handling)."""
     cols = [
@@ -132,7 +132,7 @@ def test_header_named_grid_columns_round_trip(tmp_path):
     ("scan_col", "column_index"),
     ("Column", "column_index"),
 ])
-def test_role_from_header_name_recognises_grid_aliases(header, expected):
+def test_role_from_header_name_recognizes_grid_aliases(header, expected):
     assert main._role_from_header_name(header) == expected
 
 

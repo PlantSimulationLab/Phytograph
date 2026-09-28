@@ -3,7 +3,7 @@
 The properties worth pinning are the ones that differ from point-to-point ICP:
 patches must be found on FOLIAGE (not just flat ground), correspondences must be
 gated on orientation as well as proximity, and the residual must be measured
-along the normal rather than between patch centres.
+along the normal rather than between patch centers.
 """
 
 import math
@@ -41,7 +41,7 @@ def _canopy(n_plants=9, per_plant=40000, seed=1):
     """Foliage: no large planar surface anywhere in it.
 
     Density matters and has to be scan-realistic. A terrestrial scan of this
-    plot has ~0.011 m between neighbouring returns; an earlier version of this
+    plot has ~0.011 m between neighboring returns; an earlier version of this
     fixture was 6x sparser at 0.066 m, and produced 60 patches against a real
     scan's 5,839 -- not because extraction was wrong, but because a cube of the
     minimum size rarely held enough points to fit a plane to. Testing patch
@@ -50,24 +50,24 @@ def _canopy(n_plants=9, per_plant=40000, seed=1):
     rng = np.random.default_rng(seed)
     out = []
     for i in range(n_plants):
-        centre = np.array([(i % 3) * 4.0, (i // 3) * 4.0, 2.5])
-        out.append(centre + rng.normal(0, 0.5, size=(per_plant, 3)))
+        center = np.array([(i % 3) * 4.0, (i // 3) * 4.0, 2.5])
+        out.append(center + rng.normal(0, 0.5, size=(per_plant, 3)))
     return np.vstack(out)
 
 
 def test_patches_are_found_on_foliage_not_only_flat_ground():
     """Subdivision finds planes where a fixed-radius planarity test does not.
 
-    The filter does not ask "is this neighbourhood planar" -- it shrinks the
+    The filter does not ask "is this neighborhood planar" -- it shrinks the
     cube until the answer is yes. That distinction is the whole reason patches
     work on vegetation, and an earlier analysis that tested fixed-radius
-    neighbourhoods concluded (wrongly) that canopy yields almost nothing.
+    neighborhoods concluded (wrongly) that canopy yields almost nothing.
     """
     canopy = _canopy()
-    centres, normals = pp.extract(canopy)
+    centers, normals = pp.extract(canopy)
 
-    assert len(centres) > 100, "foliage produced almost no patches"
-    per_1k = 1000 * len(centres) / len(canopy)
+    assert len(centers) > 100, "foliage produced almost no patches"
+    per_1k = 1000 * len(centers) / len(canopy)
     assert per_1k > 5, f"only {per_1k:.1f} patches per 1000 points of canopy"
     # Unit normals, or the orientation gate is meaningless.
     assert np.allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-9)
@@ -107,37 +107,37 @@ def test_recovers_a_known_rigid_transform():
     assert err < 0.15, f"recovered pose is {err:.3f} m from the applied transform"
 
 
-def test_the_residual_is_measured_along_the_normal_not_between_centres():
-    """Two scans subdivide independently, so patch centres do not coincide.
+def test_the_residual_is_measured_along_the_normal_not_between_centers():
+    """Two scans subdivide independently, so patch centers do not coincide.
 
-    Sliding a plane WITHIN itself moves every patch centre while leaving every
-    point on the same surface. A centre-to-centre residual counts that as error;
+    Sliding a plane WITHIN itself moves every patch center while leaving every
+    point on the same surface. A center-to-center residual counts that as error;
     the along-normal residual correctly reports zero. Measured on real scans,
-    centre matching found partners for only 3.9% of patches at the known-correct
+    center matching found partners for only 3.9% of patches at the known-correct
     pose, which is what made an earlier attempt look like a failure.
     """
     plane = _ground(extent=10.0, step=0.05, seed=3)
-    centres, normals = pp.extract(plane)
-    assert len(centres) > 50
+    centers, normals = pp.extract(plane)
+    assert len(centers) > 50
 
-    # Slide 1.5 m along the surface: geometrically identical, centres all moved.
+    # Slide 1.5 m along the surface: geometrically identical, centers all moved.
     slid = np.eye(4)
     slid[0, 3] = 1.5
-    src, tgt = pp._pairs(centres, normals, centres, normals, slid)
+    src, tgt = pp._pairs(centers, normals, centers, normals, slid)
     assert len(src) > 20, "sliding within the plane destroyed all correspondences"
 
-    moved = centres[src] + slid[:3, 3]
-    along_normal = np.abs(np.einsum('ij,ij->i', normals[tgt], centres[tgt] - moved))
-    between_centres = np.linalg.norm(centres[tgt] - moved, axis=1)
+    moved = centers[src] + slid[:3, 3]
+    along_normal = np.abs(np.einsum('ij,ij->i', normals[tgt], centers[tgt] - moved))
+    between_centers = np.linalg.norm(centers[tgt] - moved, axis=1)
 
     # The assertion is the RATIO, not an absolute distance. Patches tile the
     # plane densely, so the nearest partner after sliding sits ~0.09 m away
     # rather than the full 1.5 m -- an absolute threshold would just be a
     # statement about patch spacing. What matters is that the along-normal
-    # residual is near zero while the centre distance is not.
+    # residual is near zero while the center distance is not.
     assert np.median(along_normal) < 0.02, "along-normal residual should be ~0"
-    assert np.median(between_centres) > 10 * np.median(along_normal), (
-        f"centre distance {np.median(between_centres):.4f} m is not meaningfully "
+    assert np.median(between_centers) > 10 * np.median(along_normal), (
+        f"center distance {np.median(between_centers):.4f} m is not meaningfully "
         f"larger than the along-normal residual {np.median(along_normal):.4f} m")
 
 

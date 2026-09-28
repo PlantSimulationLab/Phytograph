@@ -120,7 +120,7 @@ class TestFillOccluded:
         far = int(np.argsort(((pos - pos[len(pos) // 2]) ** 2).sum(-1))[-1])
 
         obs = truth.copy()
-        obs[near] += 3.0            # a badly-off neighbour
+        obs[near] += 3.0            # a badly-off neighbor
         v_trust_near = np.full(len(pos), 0.05)
         v_doubt_near = v_trust_near.copy()
         v_doubt_near[near] = 50.0   # ...now declared unreliable
@@ -128,9 +128,9 @@ class TestFillOccluded:
         a, _ = lad_kriging.fill_occluded(pos, obs, v_trust_near, occ, layers, 0.5)
         b, _ = lad_kriging.fill_occluded(pos, obs, v_doubt_near, occ, layers, 0.5)
         i = len(pos) // 2
-        # Doubting the off neighbour must pull the estimate back toward truth.
+        # Doubting the off neighbor must pull the estimate back toward truth.
         assert abs(b[i] - truth[i]) < abs(a[i] - truth[i])
-        assert far != near  # sanity: the layout really has distinct neighbours
+        assert far != near  # sanity: the layout really has distinct neighbors
 
     def test_well_measured_zeros_are_valid_donors(self):
         """REGRESSION: a voxel that genuinely measured ZERO leaf area is evidence
@@ -193,8 +193,8 @@ class TestFillOccluded:
         gx, gy, gz = np.meshgrid(ax, ax, ax, indexing="ij")
         pos = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
         idx = np.rint(pos / edge).astype(int)
-        # Thin in ALL THREE axes — thinning only in x/y leaves z-neighbours adjacent,
-        # so the nearest-neighbour spacing would not actually grow.
+        # Thin in ALL THREE axes — thinning only in x/y leaves z-neighbors adjacent,
+        # so the nearest-neighbor spacing would not actually grow.
         keep = (idx[:, 0] % step == 0) & (idx[:, 1] % step == 0) & (idx[:, 2] % step == 0)
         pos = pos[keep]
         layers = np.rint(pos[:, 2] / edge).astype(int)

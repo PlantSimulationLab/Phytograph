@@ -145,7 +145,7 @@ describe('useBackendReady', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'));
   });
 
-  it('stops polling after unmount (no state updates on cancelled hook)', async () => {
+  it('stops polling after unmount (no state updates on canceled hook)', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
       okResponse(),
     );

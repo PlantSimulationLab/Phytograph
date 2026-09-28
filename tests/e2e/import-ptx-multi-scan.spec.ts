@@ -7,9 +7,9 @@ import { completeImportWizard } from './helpers/importWizard';
 // A PTX file is complete scan blocks concatenated back to back — one per scanner
 // setup, each with its own header, dimensions and registered pose. A scan is
 // DEFINED by its pose, so each block becomes its own Phytograph scan. Merging
-// them (the old behaviour, still E57's until this change) left a single origin
+// them (the old behavior, still E57's until this change) left a single origin
 // standing in for all of them, which silently breaks the LAD inversion (it takes
-// one scanner origin), centres the sky/miss display shell on the wrong point,
+// one scanner origin), centers the sky/miss display shell on the wrong point,
 // and makes the per-block row/column rasters collide.
 //
 // The fixture holds two positions with DIFFERENT dimensions and origins, which is
@@ -44,10 +44,10 @@ test('splits a multi-position PTX into one scan per scanner setup', async () => 
 
     // ...and distinguishable SWATCHES, following the same convention two
     // separately-imported files get. The regression: the single-file import
-    // passed a stateless colour picker that recomputed from the committed scan
+    // passed a stateless color picker that recomputed from the committed scan
     // list, which doesn't change until the whole import commits — so every
-    // position in one file came out the same colour. "Per-scan colour" is the
-    // default colour mode, so this is how the positions read in the viewer too.
+    // position in one file came out the same color. "Per-scan color" is the
+    // default color mode, so this is how the positions read in the viewer too.
     const colors = await rows.evaluateAll(
       (els) => els.map((e) => (e as HTMLElement).dataset.scanColor!));
     expect(colors[0]).toBe('#3b82f6');   // first free palette entry

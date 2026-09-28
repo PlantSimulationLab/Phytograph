@@ -774,6 +774,69 @@ class TestScanExportNaming:
         assert res["success"] is True, res.get("error")
         assert [f["name"] for f in res["files"]] == ["out_0.xyz", "out_1.xyz"]
 
+    # The base-position / empty-base cases, mirrored by `plannedFileNames` in
+    # src/renderer/lib/exportObjects.test.ts (the Export window's preview).
+    def test_suffix_puts_the_base_after_the_label(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos002"), _labeled("ScanPos001")],
+            base_name="myscan", base_position="suffix",
+            write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == [
+            "ScanPos002_myscan.xyz", "ScanPos001_myscan.xyz"]
+
+    def test_suffix_dedupes_like_prefix(self):
+        stems = main._scan_export_stems(
+            [_labeled("tree"), _labeled("TREE")], "out", "suffix")
+        assert stems == ["tree_out", "TREE_out_2"]
+
+    @pytest.mark.parametrize("base_name", ["", "   ", None])
+    def test_empty_base_names_files_by_label_alone(self, base_name):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos002"), _labeled("ScanPos001")],
+            base_name=base_name, write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == [
+            "ScanPos002.xyz", "ScanPos001.xyz"]
+
+    def test_empty_base_single_scan_uses_its_label(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos001.las")], base_name="",
+            write_xml=False, data_format="laz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == ["ScanPos001.laz"]
+
+    def test_empty_base_dedupes_labels(self):
+        assert main._scan_export_stems(
+            [_labeled("tree"), _labeled("tree")], "") == ["tree", "tree_2"]
+
+    def test_empty_base_xml_bundle_keeps_label_names_and_loads(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("north"), _labeled("south")],
+            base_name="", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        assert sorted(f["name"] for f in res["files"]) == [
+            "north.xyz", "scans.xml", "south.xyz"]
+        xml = _decode(res["files"], ".xml")
+        assert ">north.xyz<" in xml and ">south.xyz<" in xml
+        for f in res["files"]:
+            (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.loadXML("scans.xml")
+            assert cloud.getScanCount() == 2
+        finally:
+            os.chdir(cwd)
+
     def test_xml_bundle_renames_sidecars_and_its_references(self, tmp_path):
         # PyHelios names the sidecars <base>_<i>.xyz in C++ and writes those names
         # into the XML, so the rename has to carry the <filename> tags with it or

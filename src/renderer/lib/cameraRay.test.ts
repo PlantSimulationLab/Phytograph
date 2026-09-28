@@ -75,7 +75,7 @@ describe('projectionKindOf', () => {
 });
 
 describe('rayForNdc', () => {
-  it('points along the camera forward axis at the view centre', () => {
+  it('points along the camera forward axis at the view center', () => {
     const ray = rayForNdc(perspectiveCamera(), { x: 0, y: 0 });
     expect(ray.direction.x).toBeCloseTo(0, 6);
     expect(ray.direction.y).toBeCloseTo(0, 6);
@@ -101,9 +101,9 @@ describe('rayForNdc', () => {
     // The bug this replaces: the direction used to be the camera forward under
     // BOTH projections, with the offset near-plane origin expected to carry the
     // cursor position. It cannot — the near plane is 0.1 units from the eye
-    // here, so an off-centre origin is ~0.07 units off-axis on a ray travelling
+    // here, so an off-center origin is ~0.07 units off-axis on a ray traveling
     // hundreds of units dead ahead. Every pick landed on whatever sat at the
-    // CENTRE of the viewport, which froze the label brush's sphere mid-scene.
+    // CENTER of the viewport, which froze the label brush's sphere mid-scene.
     const cam = perspectiveCamera();
     const center = rayForNdc(cam, { x: 0, y: 0 });
     const corner = rayForNdc(cam, { x: 0.8, y: 0.8 });

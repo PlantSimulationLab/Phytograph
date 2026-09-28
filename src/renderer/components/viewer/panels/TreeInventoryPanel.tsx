@@ -99,7 +99,7 @@ interface TreeInventoryPanelProps {
 
 const GROUND_TEXT: Record<string, string> = {
   height_above_ground: 'Heights from the DEM (height above ground).',
-  ground_class: 'No DEM height column: heights from the ground-labelled points.',
+  ground_class: 'No DEM height column: heights from the ground-labeled points.',
   tree_min_z: 'No ground data: heights from each tree’s lowest point (biased on slopes). Run Segment Ground and Generate DEM first.',
 };
 
@@ -192,7 +192,7 @@ export function TreeInventoryPanel({
             <InfoHint
               data-testid="tree-inventory-fit-method-help"
               label="Circle search"
-              text="How the stem's points are picked out of the breast-height slice before the final circle fit. RANSAC tries many three-point circles and keeps the one most points agree with; randomized Hough votes for centres and radii. Both ignore branches and noise, and both end in the same precise fit. If a cluttered stem gets a no_stem or high_residual flag with one, the other is worth a try."
+              text="How the stem's points are picked out of the breast-height slice before the final circle fit. RANSAC tries many three-point circles and keeps the one most points agree with; randomized Hough votes for centers and radii. Both ignore branches and noise, and both end in the same precise fit. If a cluttered stem gets a no_stem or high_residual flag with one, the other is worth a try."
             />
           </span>
           <select
@@ -252,7 +252,7 @@ export function TreeInventoryPanel({
             <InfoHint
               data-testid="tree-inventory-competition-help"
               label="Competition (m)"
-              text="Radius for each tree's competition index (the CI column; Hegyi 1974): how crowded a tree is by its neighbours. Every tree with a DBH within this distance of the stem adds its DBH divided by this tree's DBH, divided by the distance between them, so bigger and closer neighbours count more. Higher CI means more competition. A radius near the crown radius of the larger trees is typical. Trees closer than this to the plot edge are marked in the CSV's edge column, because their neighbours outside the plot are missing and their CI reads low."
+              text="Radius for each tree's competition index (the CI column; Hegyi 1974): how crowded a tree is by its neighbors. Every tree with a DBH within this distance of the stem adds its DBH divided by this tree's DBH, divided by the distance between them, so bigger and closer neighbors count more. Higher CI means more competition. A radius near the crown radius of the larger trees is typical. Trees closer than this to the plot edge are marked in the CSV's edge column, because their neighbors outside the plot are missing and their CI reads low."
             />
           </span>
           <DebouncedNumberInput

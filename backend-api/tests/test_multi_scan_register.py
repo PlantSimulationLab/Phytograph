@@ -29,8 +29,8 @@ def _rigid(deg, t):
     return M
 
 
-def _plant(centre, n, rng, spread=0.45):
-    return np.asarray(centre) + rng.normal(0, spread, size=(n, 3))
+def _plant(center, n, rng, spread=0.45):
+    return np.asarray(center) + rng.normal(0, spread, size=(n, 3))
 
 
 def _scene(seed=4):
@@ -238,7 +238,7 @@ def test_a_graph_that_closes_costs_one_search_per_edge():
 def test_a_graph_that_does_not_close_falls_back_to_every_setting():
     """Corrupt the default setting's answer on one edge: the loops break, so
     every other setting must be tried on every edge and the per-pair search
-    must route around the bad one -- the old behaviour, reached only when it
+    must route around the bad one -- the old behavior, reached only when it
     is needed."""
     from loop_closure import _COARSE_VARIANTS, scan_graph_edges
 
@@ -258,7 +258,7 @@ def test_a_graph_that_does_not_close_falls_back_to_every_setting():
         assert np.linalg.norm(M[:2, 3] - P[:2, 3]) < 1.0
 
 
-def test_the_fine_stage_keeps_the_near_field_and_equalises_it_instead():
+def test_the_fine_stage_keeps_the_near_field_and_equalizes_it_instead():
     """The near-field cut is gone, and must not come back.
 
     It existed because a terrestrial scan is ~93% near-field BY COUNT and the
@@ -267,7 +267,7 @@ def test_the_fine_stage_keeps_the_near_field_and_equalises_it_instead():
     tripod and growing with range. Deleting everything inside 5 m fixed the
     symptom by throwing away the most accurate returns in the scan.
 
-    The fine stage now voxelises, which weights each surface by AREA rather
+    The fine stage now voxelizes, which weights each surface by AREA rather
     than by return count, so the near field no longer outvotes anything and
     there is nothing to cut. This pins the property that matters: the working
     copy the refinement runs on still CONTAINS close-range geometry, and is no
@@ -282,7 +282,7 @@ def test_the_fine_stage_keeps_the_near_field_and_equalises_it_instead():
 
     assert not hasattr(main, "_drop_near_field"), (
         "the near-field cut is back; see fine_registration's module docstring "
-        "for why voxelising replaced it")
+        "for why voxelizing replaced it")
 
     kept, _voxel = fine_registration.working_copy(cloud, budget=4000)
     radius = np.linalg.norm(kept[:, :2] - np.median(cloud[:, :2], axis=0), axis=1)

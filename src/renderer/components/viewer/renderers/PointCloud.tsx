@@ -56,10 +56,10 @@ export interface PointCloudProps {
 // vertex colors as being in the LINEAR working space and applies the
 // linear->sRGB encode at output. But sampleColormap / colorForClassValue /
 // treeInstanceColor all return sRGB *display* values — the same values the
-// colourbar and legend show. Writing those straight into the attribute meant
+// colorbar and legend show. Writing those straight into the attribute meant
 // they got encoded a second time and rendered washed out, while the
 // material.color path (THREE.Color('#hex'), which decodes sRGB->linear on
-// input) rendered the same colour correctly. A cloud coloured by
+// input) rendered the same color correctly. A cloud colored by
 // tree_instance and a per-scan child cloud split out of it therefore drew the
 // same tree in two visibly different shades — the parent too pale, the child
 // too saturated. So every generated stop is converted to linear here; the

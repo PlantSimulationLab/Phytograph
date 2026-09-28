@@ -282,7 +282,7 @@ export interface ScanParamsFromFile {
   // The instrument that captured the scan, when the format names it. RIEGL raw
   // projects do (RiVLib reports type_id, e.g. "VZ-1000"); no other file-header
   // import currently identifies its scanner, so this is usually absent. An
-  // unrecognised id is ignored rather than guessed at — see
+  // unrecognized id is ignored rather than guessed at — see
   // scanParametersFromFile.
   scanner_model?: string;
 }
@@ -355,9 +355,9 @@ const FILE_SCANNER_MODEL_IDS: Record<string, import('./scannerModels').ScannerMo
 // VZ-400i would put a model number the file never reported into the scan info
 // panel and into the exported <scannerModel>; "RIEGL VZ-series" is the honest
 // answer for an instrument we can place in a family but not identify. Models we
-// DO know get an exact entry above and are labelled exactly.
+// DO know get an exact entry above and are labeled exactly.
 //
-// Anchored to `vz` + a digit rather than matching anything unrecognised: a
+// Anchored to `vz` + a digit rather than matching anything unrecognized: a
 // Velodyne or Livox identity must not acquire a RIEGL body.
 const VZ_SERIES_RE = /^vz\d/;
 

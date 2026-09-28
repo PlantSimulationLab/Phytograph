@@ -276,9 +276,9 @@ test('crop panel × button dismisses without applying', async () => {
   await expect(row).toHaveAttribute('data-point-count', '60');
 });
 
-test('two sequentially imported scans get different palette colours', async () => {
+test('two sequentially imported scans get different palette colors', async () => {
   // Regression: both imports came out #3b82f6 (the first palette entry), so a
-  // two-scan scene rendered in one colour and per-scan colouring was useless.
+  // two-scan scene rendered in one color and per-scan coloring was useless.
   //
   // Worth stating the cause, because the obvious reading of the old code says
   // it cannot happen: the seed WAS `scans.map(s => s.color)`, with `scans`
@@ -315,7 +315,7 @@ test('two sequentially imported scans get different palette colours', async () =
 
   // Exact hexes, not merely "they differ": pinning the SET to the first two
   // palette entries also catches a second import that starts handing out some
-  // off-palette colour, which an inequality check alone would accept. As a set
+  // off-palette color, which an inequality check alone would accept. As a set
   // rather than per-row, because which scan claims blue depends on which import
   // commits first — that ordering is not what this test is about.
   const swatches = await page

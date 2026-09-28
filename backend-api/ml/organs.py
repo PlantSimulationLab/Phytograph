@@ -8,15 +8,15 @@ returns the two columns the app writes:
 - ``plant_organ``: 1 soil, 2 stem (petioles, rachises and petiolules
   included), 3 leaf. Mapped from the model's classes by NAME, as
   ``segment_wood`` maps its model's, so any ``plant_organ`` package writes the
-  same codes the renderer's scheme colours.
+  same codes the renderer's scheme colors.
 - ``leaflet_id``: 0 for every point that is not in a leaflet, 1..N otherwise,
   numbered by centroid height, lowest first. PlantCloudFit reads increasing
   leaflet labels as increasing age; on a single scan there is no age, and
   height is the proxy that holds for an upright plant (a drooping old leaf can
   still sit below a younger one).
 
-Models work in metres, but herbaceous plants are often scanned and exported
-in millimetres, and nothing in an XYZ file says which. :func:`resolve_units`
+Models work in meters, but herbaceous plants are often scanned and exported
+in millimeters, and nothing in an XYZ file says which. :func:`resolve_units`
 reads it from the cloud's size (``units="auto"``) unless the caller says, and
 warns when the size it implies is not a plant's, or could be read either way.
 
@@ -31,20 +31,20 @@ import numpy as np
 SOIL, STEM, LEAF = 1, 2, 3
 CLASS_BY_NAME = {"soil": SOIL, "stem": STEM, "leaf": LEAF}
 UNIT_SCALE = {"m": 1.0, "cm": 0.01, "mm": 0.001}
-UNIT_NAMES = {"m": "metres", "cm": "centimetres", "mm": "millimetres"}
+UNIT_NAMES = {"m": "meters", "cm": "centimeters", "mm": "millimeters"}
 
 # Above this robust diagonal (in the cloud's own units) "auto" reads the cloud
-# as millimetres. The model is for single plants, pots and short rows, which
-# are 2 cm to a few metres across: a cloud more than 30 units across is a
-# 3 cm+ plant in millimetres far more often than a 30 m+ plot in metres (which
-# the model is not for anyway). Centimetres are never guessed.
+# as millimeters. The model is for single plants, pots and short rows, which
+# are 2 cm to a few meters across: a cloud more than 30 units across is a
+# 3 cm+ plant in millimeters far more often than a 30 m+ plot in meters (which
+# the model is not for anyway). Centimeters are never guessed.
 AUTO_MM_DIAGONAL = 30.0
-# The sizes, in metres, the model is for (a seedling to a short row). Outside
+# The sizes, in meters, the model is for (a seedling to a short row). Outside
 # this the user is told the units are probably wrong. It is kept narrow on
 # purpose: a wrong unit is off by 10x-1000x, and only a narrow window turns that
 # into a warning rather than a size that still looks plausible.
 PLANT_SIZE_M = (0.02, 5.0)
-# "auto" read as millimetres with the diagonal below this: a 3-30 cm plant in
+# "auto" read as millimeters with the diagonal below this: a 3-30 cm plant in
 # mm, or a 30-300 cm plant in cm. Both are plants, so the size cannot decide;
 # the user is told which reading was taken.
 AMBIGUOUS_CM_DIAGONAL = 300.0
@@ -68,16 +68,16 @@ def resolve_units(points: np.ndarray, units: str = "auto") -> tuple[str, list[st
     if units not in UNIT_SCALE:
         raise ValueError(f"units must be 'auto', 'm', 'cm' or 'mm', not {units!r}")
     warnings = []
-    metres = diag * UNIT_SCALE[units]
+    meters = diag * UNIT_SCALE[units]
     lo, hi = PLANT_SIZE_M
-    if metres > 0 and not (lo <= metres <= hi):
+    if meters > 0 and not (lo <= meters <= hi):
         warnings.append(
-            f"Read in {UNIT_NAMES[units]}, this cloud is {metres:.3g} m across, which is not the size of a "
+            f"Read in {UNIT_NAMES[units]}, this cloud is {meters:.3g} m across, which is not the size of a "
             f"plant or pot. If that is wrong, pick its real units and run again.")
     elif auto and units == "mm" and diag <= AMBIGUOUS_CM_DIAGONAL:
         warnings.append(
-            f"Read as millimetres: a plant {metres * 100:.3g} cm across. If the cloud is in centimetres "
-            f"({diag / 100:.3g} m across), pick Centimetres and run again.")
+            f"Read as millimeters: a plant {meters * 100:.3g} cm across. If the cloud is in centimeters "
+            f"({diag / 100:.3g} m across), pick Centimeters and run again.")
     return units, warnings
 
 

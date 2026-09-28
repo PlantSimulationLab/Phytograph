@@ -243,9 +243,9 @@ def test_the_per_position_vop_is_not_part_of_the_chain(tmp_path):
 def test_sop_resolution_prefers_the_best_available_pose(tmp_path):
     """plane > voxel > pose_estimation > identity, with the status to match.
 
-    The order is an accuracy ranking: plane registration is millimetres, coarse
-    voxel registration is centimetres, and the pose estimate is about a metre.
-    Reporting a metre-level prior as "registered" would let that error pass for
+    The order is an accuracy ranking: plane registration is millimeters, coarse
+    voxel registration is centimeters, and the pose estimate is about a meter.
+    Reporting a meter-level prior as "registered" would let that error pass for
     a survey.
     """
     name = "ScanPos007"
@@ -325,7 +325,7 @@ def test_the_tilt_stays_small_which_is_why_the_ptx_rule_is_relaxed(tmp_path):
     """PRCS is a true ENU frame, so the residual roll/pitch IS the plumb tilt.
 
     _ptx_scan_params drops the azimuth sweep once roll or pitch reaches 0.5 deg
-    because for a generic pose those angles are unmodellable. Here they are the
+    because for a generic pose those angles are unmodelable. Here they are the
     inclinometer reading, and this test documents the magnitude that makes
     keeping the azimuth reasonable: under 2 degrees across the whole project.
     """
@@ -357,7 +357,7 @@ def test_a_partial_sweep_counter_rotates_by_the_yaw():
     params = {"phi_min": 10.0, "phi_max": 100.0}
     R._rotate_phi_window(params, 30.0)
     assert params["phi_min"] == pytest.approx(340.0)
-    # The span is carried rather than re-normalised, so a sweep crossing north
+    # The span is carried rather than re-normalized, so a sweep crossing north
     # stays contiguous instead of folding to 0..360.
     assert params["phi_max"] == pytest.approx(430.0)
 
@@ -379,7 +379,7 @@ def test_scan_params_carry_the_pose_only_in_the_registered_frame():
     R._attach_scan_params_extras(registered, R.FRAME_REGISTERED)
     sp = registered["scan_params"]
     # The origin is where the instrument STOOD, i.e. the SOP translation — not
-    # the GNSS prior, which would place the marker metres from its own cloud.
+    # the GNSS prior, which would place the marker meters from its own cloud.
     assert sp["origin"] == [5.0, -2.0, 0.5]
     assert sp["azimuth_offset_deg"] == pytest.approx(90.0)
     assert sp["tilt_roll_deg"] == pytest.approx(0.0, abs=1e-9)
@@ -442,7 +442,7 @@ def test_pose_gnss_rejects_nonsense(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The sensor frame: levelling a .riproject with its own inclinometer
+# The sensor frame: leveling a .riproject with its own inclinometer
 # ---------------------------------------------------------------------------
 #
 # Ground truth is RiSCAN PRO's own SOP for the same scan position, so these
@@ -560,7 +560,7 @@ def test_sensor_level_matrix_levels_a_body_frame_ground_plane():
     2.90 deg -> 6.15 deg).
 
     A point arrives in SOCS, the body frame. Level ground seen from a tilted
-    instrument is therefore `attitude.T @ p_world`, and levelling must undo
+    instrument is therefore `attitude.T @ p_world`, and leveling must undo
     exactly that. Feeding body-frame input is what makes the direction
     observable, so a transposed matrix now doubles the tilt here too.
     """
@@ -576,7 +576,7 @@ def test_sensor_level_matrix_levels_a_body_frame_ground_plane():
     # The instrument really is tilted: the ground is off-level as it sees it.
     assert _plane_tilt_deg(body) == pytest.approx(1.532, abs=0.01)
 
-    # Levelling brings it back to horizontal — and the transpose would take it
+    # Leveling brings it back to horizontal — and the transpose would take it
     # to ~3.06 deg, so this assertion is what distinguishes the two.
     assert _plane_tilt_deg(body @ matrix.T) == pytest.approx(0.0, abs=1e-9)
 
@@ -605,7 +605,7 @@ def test_sensor_frame_reports_no_residual_tilt():
 
     tilt_roll/tilt_pitch orient the scanner marker and a Helios re-export, so
     emitting the raw inclinometer reading here would tilt both by the very
-    angle levelling just removed — points and marker disagreeing. The reading
+    angle leveling just removed — points and marker disagreeing. The reading
     is not lost; it stays in `sensor_pose`.
     """
     entry = {
@@ -629,7 +629,7 @@ def test_sensor_frame_reports_no_residual_tilt():
 
 
 def test_sensor_level_matrix_applies_no_heading():
-    """Levelling must not rotate the cloud in azimuth.
+    """Leveling must not rotate the cloud in azimuth.
 
     A horizontal vector may swing by the small amount implied by tipping the
     frame upright, but nothing resembling the 10-14 deg the compass would add.
@@ -660,16 +660,16 @@ def test_sensor_level_matrix_carries_the_origin():
 #     171215_152751  roll +1.492  pitch +1.101   <- RiSCAN registered this
 #     RiSCAN SOP     roll +1.496  pitch +1.070
 #
-# Each file's own inclinometer series is internally tight; the levelling code
+# Each file's own inclinometer series is internally tight; the leveling code
 # is right and the ~1 deg gap is a scan-SELECTION mismatch. `_main_rxp` takes
 # the alphabetically first .rxp, so for a re-scanned position we import the
 # earlier abandoned capture — which affects the POINTS as much as the tilt.
 # Pre-existing and out of scope here; recorded so it is not rediscovered as a
-# levelling bug.
+# leveling bug.
 
 
-def test_levelling_reproduces_riscans_own_attitude():
-    """THE regression that matters: our levelling vs RiSCAN PRO's surveyed SOP.
+def test_leveling_reproduces_riscans_own_attitude():
+    """THE regression that matters: our leveling vs RiSCAN PRO's surveyed SOP.
 
     ScanPos004 of 2017-12-15.001 is the one position carrying both a finite
     scanner_pose_hr and a RiSCAN SOP. If the sign, axis order, or inverse
@@ -724,7 +724,7 @@ def test_sensor_frame_emits_tilt_but_never_a_heading():
     assert np.asarray(entry["sensor_matrix"]).shape == (4, 4)
 
 
-def test_a_position_with_no_sensor_pose_imports_unlevelled():
+def test_a_position_with_no_sensor_pose_imports_unleveled():
     entry = {"scan_params": {"phi_min": 0.0, "phi_max": 360.0},
              "sop": None, "origin_prior": [3.0, 4.0, 5.0]}
     R._attach_scan_params_extras(entry, R.FRAME_SENSOR)
@@ -734,16 +734,16 @@ def test_a_position_with_no_sensor_pose_imports_unlevelled():
     assert "sensor_matrix" not in entry
 
 
-def test_levelled_and_unlevelled_describe_the_cloud_not_the_tripod():
+def test_leveled_and_unleveled_describe_the_cloud_not_the_tripod():
     """The tilt fields must mean the same thing in BOTH frames.
 
-    They report the tilt the delivered CLOUD has. So levelling — which takes
+    They report the tilt the delivered CLOUD has. So leveling — which takes
     the tilt out — reports zero, and declining to level reports the tilt the
     points kept. Asserted as a pair because the bug was the pair being
-    inconsistent, not either value alone: the levelled branch emitted the raw
-    inclinometer reading (so a plumb cloud was labelled tilted) while the
-    unlevelled branch emitted nothing at all (so a genuinely tilted cloud was
-    labelled level). Each read as the other's opposite, which is precisely
+    inconsistent, not either value alone: the leveled branch emitted the raw
+    inclinometer reading (so a plumb cloud was labeled tilted) while the
+    unleveled branch emitted nothing at all (so a genuinely tilted cloud was
+    labeled level). Each read as the other's opposite, which is precisely
     backwards, and neither branch stated which frame it meant.
     """
     def build(frame):
@@ -757,19 +757,19 @@ def test_levelled_and_unlevelled_describe_the_cloud_not_the_tripod():
         R._attach_scan_params_extras(entry, frame)
         return entry
 
-    levelled = build(R.FRAME_SENSOR)["scan_params"]
-    unlevelled = build(R.FRAME_LOCAL)["scan_params"]
+    leveled = build(R.FRAME_SENSOR)["scan_params"]
+    unleveled = build(R.FRAME_LOCAL)["scan_params"]
 
-    # Levelled: the tilt is gone from the points, so it is gone from the report.
-    assert levelled["tilt_roll_deg"] == 0.0
-    assert levelled["tilt_pitch_deg"] == 0.0
+    # Leveled: the tilt is gone from the points, so it is gone from the report.
+    assert leveled["tilt_roll_deg"] == 0.0
+    assert leveled["tilt_pitch_deg"] == 0.0
 
-    # Unlevelled: the points kept it, so it is stated — never omitted, which
+    # Unleveled: the points kept it, so it is stated — never omitted, which
     # would render as "level" in the scan panel.
-    assert unlevelled["tilt_roll_deg"] == pytest.approx(1.316)
-    assert unlevelled["tilt_pitch_deg"] == pytest.approx(2.972)
+    assert unleveled["tilt_roll_deg"] == pytest.approx(1.316)
+    assert unleveled["tilt_pitch_deg"] == pytest.approx(2.972)
 
-    # Only ONE of the two carries a levelling matrix, and it is the one whose
+    # Only ONE of the two carries a leveling matrix, and it is the one whose
     # tilt reads zero — the rotation and the claim about it stay in lockstep.
     assert "sensor_matrix" in build(R.FRAME_SENSOR)
     assert "sensor_matrix" not in build(R.FRAME_LOCAL)
@@ -806,7 +806,7 @@ def test_attach_sensor_pose_prefers_the_fused_pose_then_falls_back(tmp_path):
 # placed it at exactly (0,0,0), throwing away the GNSS offset -- and importing
 # the same position a second time alongside others put it somewhere else
 # entirely. Two separately-imported scans landed on top of each other instead of
-# metres apart, which is the opposite of what the prior is for.
+# meters apart, which is the opposite of what the prior is for.
 #
 # These drive the REAL cmd_stream (not a reimplementation of its selection
 # logic) over a .PROJ, whose GNSS comes from JSON sidecars -- so the anchor
@@ -814,7 +814,7 @@ def test_attach_sensor_pose_prefers_the_fused_pose_then_falls_back(tmp_path):
 # two things that genuinely need the library are stubbed: the ctypes handle and
 # the per-position decode.
 
-# Metres apart, so a collapsed anchor is unmistakable rather than a rounding
+# Meters apart, so a collapsed anchor is unmistakable rather than a rounding
 # difference. Latitude ~38.3 matches the peach/pear project these came from.
 _GNSS_FIXTURE = {
     "ScanPos001": (38.325394, -121.5778907, -26.732),

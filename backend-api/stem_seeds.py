@@ -50,7 +50,7 @@ def cluster_cells(xy: np.ndarray, cell_m: float) -> np.ndarray:
     cells are connected through touching occupied cells (8-connectivity).
 
     Sparse: only occupied cells are indexed (a dense raster of a 100 ha plot
-    at 5 cm would be 4e8 cells), and neighbours are found by binary search
+    at 5 cm would be 4e8 cells), and neighbors are found by binary search
     on the sorted cell keys, so the cost is O(U log U) in occupied cells."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components

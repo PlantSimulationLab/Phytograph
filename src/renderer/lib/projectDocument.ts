@@ -9,7 +9,7 @@
 //   {"$buf": k, "dtype": "f32"}  a typed array, stored as buffer k
 //   {"$map": [[key, value], ...]} a Map
 //   {"$set": [...]}              a Set
-// Everything else is JSON as-is. Serialising generically, rather than per
+// Everything else is JSON as-is. Serializing generically, rather than per
 // object type, is what keeps a new field on a mesh or scan from being silently
 // dropped by the project file.
 //

@@ -233,7 +233,7 @@ _FIXTURE_XYZ = os.path.join(_FIXTURE_DIR, "leafcube.xyz")
 _FIXTURE_ORIGIN = [-5.0, 0.0, 0.5]
 
 
-def _wood_labelled_fixture(tmp_path, wood_prob=0.5, seed=0):
+def _wood_labeled_fixture(tmp_path, wood_prob=0.5, seed=0):
     """The leafcube with a `wood_class` column added to its HIT rows.
 
     Misses keep class 0 (unclassified) -- exactly what the real classifier
@@ -290,7 +290,7 @@ class TestWoodSplitRealPath:
         """
         pytest.importorskip("pyhelios")
         base = _run(_FIXTURE_XYZ, "x y z is_miss")
-        wood = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class")
+        wood = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class")
         assert wood["success"] is True, wood.get("error")
         assert wood["has_wood_classification"] is True
         b, c = base["cells"][0], wood["cells"][0]
@@ -302,12 +302,12 @@ class TestWoodSplitRealPath:
         """The split is made on each voxel's classified interception counts, and
         the reported fraction must be exactly those counts."""
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path, wood_prob=0.25), "x y z is_miss wood_class")
+        r = _run(_wood_labeled_fixture(tmp_path, wood_prob=0.25), "x y z is_miss wood_class")
         c = r["cells"][0]
         n_w, n_l = c["wood_hit_count"], c["leaf_hit_count"]
         assert n_w > 0 and n_l > 0
         assert c["wood_fraction"] == pytest.approx(n_w / (n_w + n_l), rel=1e-9)
-        # 25% wood labelling must read back as roughly a quarter.
+        # 25% wood labeling must read back as roughly a quarter.
         assert 0.2 < c["wood_fraction"] < 0.3
 
     def test_misses_are_counted_as_neither_class(self, tmp_path):
@@ -315,7 +315,7 @@ class TestWoodSplitRealPath:
         element. It must never enter an interception fraction -- counting it
         would drag the wood share toward zero."""
         pytest.importorskip("pyhelios")
-        path = _wood_labelled_fixture(tmp_path)
+        path = _wood_labeled_fixture(tmp_path)
         d = np.loadtxt(path)
         n_miss = int((d[:, 3] != 0).sum())
         assert n_miss > 0, "fixture must contain misses"
@@ -328,7 +328,7 @@ class TestWoodSplitRealPath:
 
     def test_pad_is_the_sum_of_its_parts(self, tmp_path):
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class")
+        r = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class")
         for c in r["cells"]:
             assert c["pad"] == pytest.approx(c["lad"] + c["wad"], rel=1e-9)
 
@@ -336,7 +336,7 @@ class TestWoodSplitRealPath:
         """Reported totals must be the sum over MEASURED voxels of what each
         voxel reports -- never the pre-split Helios value."""
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class", nx=4, ny=4, nz=4)
+        r = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class", nx=4, ny=4, nz=4)
         leaf = sum(c["leaf_area"] for c in r["cells"]
                    if not c.get("under_sampled") and not c.get("lad_filled"))
         woodv = sum(c["wood_area"] for c in r["cells"]
@@ -348,18 +348,18 @@ class TestWoodSplitRealPath:
         """A cloud whose every return is wood must report zero leaf area, and the
         wood area must equal the interception divided by G_wood."""
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path, wood_prob=1.0), "x y z is_miss wood_class")
+        r = _run(_wood_labeled_fixture(tmp_path, wood_prob=1.0), "x y z is_miss wood_class")
         c = r["cells"][0]
         assert c["wood_fraction"] == pytest.approx(1.0)
         assert c["lad"] == pytest.approx(0.0, abs=1e-12)
         assert c["wad"] > 0
 
     def test_all_leaf_reproduces_the_unclassified_answer(self, tmp_path):
-        """Labelling every return LEAF must return the original LAD exactly --
+        """Labeling every return LEAF must return the original LAD exactly --
         the split is then an identity, and any drift is a bug in the algebra."""
         pytest.importorskip("pyhelios")
         base = _run(_FIXTURE_XYZ, "x y z is_miss")
-        allleaf = _run(_wood_labelled_fixture(tmp_path, wood_prob=0.0),
+        allleaf = _run(_wood_labeled_fixture(tmp_path, wood_prob=0.0),
                        "x y z is_miss wood_class")
         assert allleaf["cells"][0]["wood_fraction"] == pytest.approx(0.0)
         assert allleaf["cells"][0]["lad"] == pytest.approx(
@@ -371,7 +371,7 @@ class TestWoodSplitRealPath:
         interception-weighted blend, or a branch-filled voxel would be inverted
         with the leaf coefficient."""
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class",
+        r = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class",
                  override=True)
         c = r["cells"][0]
         f, g_w = c["wood_fraction"], r["wood_gtheta"]
@@ -380,7 +380,7 @@ class TestWoodSplitRealPath:
     def test_supplied_gtheta_path_also_conserves_interception(self, tmp_path):
         pytest.importorskip("pyhelios")
         base = _run(_FIXTURE_XYZ, "x y z is_miss", override=True)
-        wood = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class",
+        wood = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class",
                     override=True)
         b, c = base["cells"][0], wood["cells"][0]
         assert (c["lad"] * 0.5 + c["wad"] * wood["wood_gtheta"]
@@ -389,13 +389,13 @@ class TestWoodSplitRealPath:
     def test_wood_gtheta_reports_where_it_came_from(self, tmp_path):
         """Every run must say whether G_wood was MEASURED or ASSUMED.
 
-        The randomly-labelled fixture has no coherent branch axis (its wood
+        The randomly-labeled fixture has no coherent branch axis (its wood
         labels are scattered over a leaf cube), so this exercises the honest
         fallback rather than the measurement; the woodcube fixture below covers
         the measured path.
         """
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class")
+        r = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class")
         assert r["wood_gtheta_source"] in ("mesh", "default")
         assert 0.0 < r["wood_gtheta"] <= 1.0
         if r["wood_gtheta_source"] == "default":
@@ -403,9 +403,9 @@ class TestWoodSplitRealPath:
 
     def test_supplied_gtheta_path_has_no_mesh_so_assumes(self, tmp_path):
         """A supplied-G(theta) run never triangulates, so there is no branch axis
-        to measure and the constant must be used -- and labelled as assumed."""
+        to measure and the constant must be used -- and labeled as assumed."""
         pytest.importorskip("pyhelios")
-        r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class",
+        r = _run(_wood_labeled_fixture(tmp_path), "x y z is_miss wood_class",
                  override=True)
         assert r["wood_gtheta_source"] == "default"
         assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
@@ -414,7 +414,7 @@ class TestWoodSplitRealPath:
 # ===========================================================================
 # The leaf+wood fixture: the only LAD fixture whose WOOD area is known
 # analytically. One scan of a combined scene (real mutual occlusion), with
-# returns labelled by distance to the known tube axes -- so `wood_class` is
+# returns labeled by distance to the known tube axes -- so `wood_class` is
 # exact geometry, not a classifier output whose error would be folded into the
 # truth. See tests/fixtures/generate_lad_woodcube.py.
 # ===========================================================================
@@ -644,7 +644,7 @@ class TestWoodCubeFixture:
         shortfall = (W.WOOD_G_DEFAULT - true_g) / true_g
         assert -0.25 < shortfall < -0.18, f"constant now off by {shortfall:.1%}"
         # Which is exactly why the mesh measurement above is worth having; this
-        # test records the size of what it recovers, not a shipped behaviour.
+        # test records the size of what it recovers, not a shipped behavior.
 
     def test_totals_and_summary_agree_on_the_fixture(self):
         """The reported totals must equal the per-voxel values, and the exported
@@ -690,7 +690,7 @@ class TestWoodAxisPerformance:
     def test_streaming_path_does_not_read_the_mesh_back(self):
         """Source-level chokepoint: the sink branch must not call
         getTriangleVerticesAll. That one edit silently reintroduces the whole-mesh
-        transfer this design exists to avoid, and no behavioural test would catch
+        transfer this design exists to avoid, and no behavioral test would catch
         it -- the answers would be identical, only the memory would blow up."""
         import inspect
         src = inspect.getsource(main._do_lad_computation)

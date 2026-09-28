@@ -28,7 +28,7 @@ test('Helios XML import aborts entirely when point data cannot load', async () =
     // First dialog:open call returns the XML (the import file picker). Every
     // subsequent call is the per-scan "Locate point-cloud file" prompt (reached
     // after the user clicks "Locate…" above) — we return null to simulate the
-    // user cancelling that picker, so no data can be attached.
+    // user canceling that picker, so no data can be attached.
     await stubOpenDialog(app, [xmlFixture, null]);
 
     const panel = page.getByTestId('scans-panel');

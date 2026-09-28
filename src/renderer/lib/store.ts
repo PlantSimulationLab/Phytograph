@@ -48,7 +48,7 @@ export interface AppSettings {
   defaultPointSize: number;
   // Global size multiplier for scan-position model markers. 1 = real-world
   // scale (a Velodyne renders at ~0.14 m, a Leica P40 at ~0.40 m); raise it to
-  // make markers easier to spot against large scans, lower it to de-emphasise
+  // make markers easier to spot against large scans, lower it to de-emphasize
   // them. Applied to every marker's fitted scale when it's built.
   scanMarkerScale: number;
   // Far-field distance (m) used ONLY by miss auto-detection's distance fallback:
@@ -75,7 +75,7 @@ export interface AppSettings {
   // default (2 M, right for a laptop; a discrete GPU draws 10 M smoothly).
   displayPointBudgetM: number | null;
   // Absolute path to the user's own RiVLib download, used to read RIEGL raw
-  // scanner projects (.riproject / .rxp). RiVLib is proprietary and its licence
+  // scanner projects (.riproject / .rxp). RiVLib is proprietary and its license
   // forbids redistribution, so Phytograph cannot ship it — the user downloads it
   // from RIEGL's members area and points us at the extracted folder (the one
   // containing bin/, include/, lib/). null = not configured, which is the only
@@ -151,7 +151,7 @@ export async function importData(jsonString: string): Promise<void> {
 
 // ==================== CLASS PALETTE LIBRARY ====================
 //
-// The app-level library of user-defined labelling palettes — the equivalent of
+// The app-level library of user-defined labeling palettes — the equivalent of
 // TerraScan's `.PTC` class-definition files: a reusable, shareable asset rather
 // than per-cloud state. (A cloud's BOUND palette is stored on its OctreeRef; this
 // is the pool a user picks from and saves back into.)
@@ -186,7 +186,7 @@ export async function deleteClassPalette(id: string): Promise<ClassPalette[]> {
   return next;
 }
 
-/** Serialise the library for sharing between collaborators. */
+/** Serialize the library for sharing between collaborators. */
 export async function exportClassPalettes(): Promise<string> {
   return JSON.stringify(await getClassPalettes(), null, 2);
 }

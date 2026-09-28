@@ -9,7 +9,7 @@ users click through.
 Two measurements, both chosen because they were MEASURED to separate the cases
 rather than because they sounded plausible:
 
-* **Planarity** — the fraction of points whose local neighbourhood is flat.
+* **Planarity** — the fraction of points whose local neighborhood is flat.
   Buildings are assemblies of large continuous planes; foliage is volumetric and
   never flat at any scale. Measured: 0.85 on a built scene against 0.12-0.14 on
   vegetation. A ~6x gap with no overlap, which is what makes a threshold here
@@ -37,14 +37,14 @@ _PLANAR_VEGETATION = 0.30     # below this, it is confidently NOT built
 _CV_PLANTED = 0.25            # below this, spacing is regular enough to be planted
 _CV_NATURAL = 0.40            # above this, spacing is irregular enough to be natural
 
-_PROBE_POINTS = 2000          # neighbourhood tests are the cost; cap them
-_NEIGHBOURS = 20
+_PROBE_POINTS = 2000          # neighborhood tests are the cost; cap them
+_NEIGHBORS = 20
 
 
 def _local_shape(points: np.ndarray) -> Tuple[float, float]:
     """(planar_fraction, vertical_fraction) over a subsample.
 
-    `planar` asks whether each point's neighbourhood collapses onto a plane —
+    `planar` asks whether each point's neighborhood collapses onto a plane —
     the smallest eigenvalue of the local covariance being negligible next to the
     largest. `vertical` further asks whether that plane stands upright, which
     distinguishes walls from ground and roofs; it is reported for diagnostics
@@ -52,12 +52,12 @@ def _local_shape(points: np.ndarray) -> Tuple[float, float]:
     """
     from scipy.spatial import cKDTree
 
-    if len(points) < _NEIGHBOURS + 1:
+    if len(points) < _NEIGHBORS + 1:
         return 0.0, 0.0
 
     idx = np.linspace(0, len(points) - 1, min(_PROBE_POINTS, len(points))).astype(int)
     tree = cKDTree(points)
-    k = min(_NEIGHBOURS, len(points))
+    k = min(_NEIGHBORS, len(points))
 
     planar = vertical = tested = 0
     for i in idx:
@@ -78,7 +78,7 @@ def _local_shape(points: np.ndarray) -> Tuple[float, float]:
 
 
 def _spacing_regularity(anchors: np.ndarray) -> Optional[float]:
-    """Coefficient of variation of nearest-neighbour distance between plants.
+    """Coefficient of variation of nearest-neighbor distance between plants.
 
     None when there are too few landmarks to say anything, which must be treated
     as "no opinion" rather than as evidence either way.

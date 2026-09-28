@@ -29,7 +29,7 @@ FORMAT = "phytograph-ml-model"
 SCHEMA_VERSION = 1
 
 # Input channels the inference path knows how to build, in the order they are
-# concatenated. "dxyz" (offset from the crop centre, metres) is mandatory.
+# concatenated. "dxyz" (offset from the crop center, meters) is mandatory.
 KNOWN_CHANNELS = {"dxyz": 3, "reflectance": 1}
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,63}$")

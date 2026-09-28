@@ -11,13 +11,13 @@ data:
   skipped a leading line containing a LETTER, so the count line read as data.
   Worse, `_autodetect_xyz_columns` sampled it for the column count, saw ONE
   column, and short-circuited the whole layout to a bare x/y/z — discarding the
-  file's colour and intensity columns entirely.
+  file's color and intensity columns entirely.
 * Canonical PTS orders columns `x y z intensity r g b`, with intensity BEFORE
-  colour. The generic autodetect only recognises an RGB triple directly after
+  color. The generic autodetect only recognizes an RGB triple directly after
   xyz, so a real 7-column PTS resolved to ['x','y','z','skip','skip','skip',
-  'skip'] — colour AND intensity dropped.
+  'skip'] — color AND intensity dropped.
 
-The measured before/after on a 4-point canonical PTS: colours `None` and
+The measured before/after on a 4-point canonical PTS: colors `None` and
 intensity `None`, versus both recovered exactly.
 """
 import numpy as np
@@ -76,7 +76,7 @@ def test_count_header_detection_is_narrow(tmp_path):
     assert main._is_pts_count_header(str(one_col)) is False
 
 
-def test_canonical_pts_layout_keeps_colour_and_intensity(tmp_path):
+def test_canonical_pts_layout_keeps_color_and_intensity(tmp_path):
     """`x y z intensity r g b` — the ordering the generic autodetect misses.
 
     Before the fix this returned ['x','y','z','skip','skip','skip','skip'].
@@ -94,7 +94,7 @@ def test_canonical_pts_layout_keeps_colour_and_intensity(tmp_path):
 
     positions, colors, intensity = main._load_xyz_arrays(str(p), None)
     assert len(positions) == 4
-    assert colors is not None, "colour was dropped"
+    assert colors is not None, "color was dropped"
     assert intensity is not None, "intensity was dropped"
     np.testing.assert_allclose(colors[0], [1.0, 0.0, 0.0], atol=1 / 255)
     np.testing.assert_allclose(intensity, [-1200, -900, -600, -300])
@@ -133,7 +133,7 @@ def test_pts_writer_emits_count_line_and_canonical_order(tmp_path):
     lines = dest.read_text().splitlines()
     assert lines[0] == "4", "canonical PTS opens with the point count"
     assert len(lines) == 5
-    # x y z intensity r g b — intensity BEFORE colour.
+    # x y z intensity r g b — intensity BEFORE color.
     first = lines[1].split()
     assert len(first) == 7
     np.testing.assert_allclose([float(v) for v in first[:3]], [1.5, 2.5, 3.5])
@@ -173,7 +173,7 @@ def test_pcd_writer_emits_a_valid_header_and_packed_rgb(tmp_path):
     assert "POINTS 4" in text
     assert "DATA ascii" in text
 
-    # Colour is a float32 BIT PATTERN holding packed 24-bit RGB, not a number.
+    # Color is a float32 BIT PATTERN holding packed 24-bit RGB, not a number.
     body = text.split("DATA ascii\n")[1].splitlines()
     assert len(body) == 4
     packed = np.float32(float(body[0].split()[3])).view(np.uint32)
@@ -181,7 +181,7 @@ def test_pcd_writer_emits_a_valid_header_and_packed_rgb(tmp_path):
             int(packed) & 0xFF] == [255, 0, 0]
 
 
-def test_pcd_without_colour_omits_the_rgb_field(tmp_path):
+def test_pcd_without_color_omits_the_rgb_field(tmp_path):
     dest = tmp_path / "out.pcd"
     main._write_points_as_pcd(dest, POINTS, None)
     text = dest.read_text()
@@ -192,7 +192,7 @@ def test_pcd_without_colour_omits_the_rgb_field(tmp_path):
 # --- round trips -------------------------------------------------------------
 
 def test_pts_round_trips_through_our_own_importer(tmp_path):
-    """Write PTS, read it back: geometry, colour and intensity all survive.
+    """Write PTS, read it back: geometry, color and intensity all survive.
 
     This is the test the whole feature hangs on — a PTS export that our importer
     cannot read back would be a format we ship and cannot consume.
@@ -221,7 +221,7 @@ def test_pcd_round_trips_through_our_own_importer(tmp_path):
 
     positions, colors, _ = main._load_ply_pcd_arrays(str(dest))
     np.testing.assert_allclose(positions, POINTS)
-    assert colors is not None, "colour was lost"
+    assert colors is not None, "color was lost"
     np.testing.assert_allclose(colors, COLORS, atol=1 / 255)
 
 
@@ -254,7 +254,7 @@ def test_export_endpoint_writes_each_new_format(client, cloud_session, tmp_path,
 
 
 def test_unknown_export_format_is_rejected(client, cloud_session, tmp_path):
-    """An unrecognised format used to fall through and SILENTLY write a LAS.
+    """An unrecognized format used to fall through and SILENTLY write a LAS.
 
     A request for `format:"bogus"` produced a LAS file under the requested name —
     a wrong file rather than an error, which is the failure mode most likely to
@@ -288,7 +288,7 @@ def test_scan_writer_supports_each_new_format(fmt, check):
     assert check(data.decode("utf-8")), f"{fmt} body not in the expected shape"
 
 
-def test_scan_pts_puts_intensity_before_colour():
+def test_scan_pts_puts_intensity_before_color():
     """The canonical order matters in the batch writer too."""
     resolved = dict(positions=POINTS, colors=COLORS, intensity=INTENSITY,
                     scalars={}, ordered=[])
@@ -296,4 +296,4 @@ def test_scan_pts_puts_intensity_before_colour():
     row = data.decode("utf-8").splitlines()[1].split()
     assert len(row) == 7
     assert float(row[3]) == pytest.approx(-1200.0)   # intensity
-    assert [int(v) for v in row[4:]] == [255, 0, 0]  # then colour
+    assert [int(v) for v in row[4:]] == [255, 0, 0]  # then color

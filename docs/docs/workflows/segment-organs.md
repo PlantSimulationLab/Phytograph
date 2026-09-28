@@ -7,7 +7,7 @@ plant-architecture fitting needs: which points are stem, and which leaf points
 belong to the same leaflet.
 
 It runs a PointNeXt network trained mostly on Helios synthetic scans of eight
-dicot species, potted and in field rows, plus a small share of hand-labelled
+dicot species, potted and in field rows, plus a small share of hand-labeled
 real plants (tomato, soybean and sugar beet). It uses an NVIDIA GPU
 (Windows/Linux) or an Apple-silicon GPU when one is available, and otherwise
 runs on the CPU. A potted plant of 100,000 points takes a few seconds.
@@ -30,19 +30,19 @@ leaf but merges small leaflets.
    **Segment Plant Organs**.
 3. Check the options:
     - **Units** — what the cloud's coordinates are in. The model works in
-      metres, and an XYZ file does not say which unit it was written in.
+      meters, and an XYZ file does not say which unit it was written in.
       **Auto** (the default) reads it from the cloud's size: anything more than
-      30 units across is taken as **millimetres**, anything smaller as
-      **metres**. Pick **Metres**, **Centimetres** or **Millimetres** to
+      30 units across is taken as **millimeters**, anything smaller as
+      **meters**. Pick **Meters**, **Centimeters** or **Millimeters** to
       override it, for example for a very small seedling scanned in
-      millimetres.
-    - **Colour result by** — **Organ** (soil / stem / leaf) or **Leaflet**.
-      Both are written either way; this only picks what the cloud is coloured
+      millimeters.
+    - **Color result by** — **Organ** (soil / stem / leaf) or **Leaflet**.
+      Both are written either way; this only picks what the cloud is colored
       by when the run finishes.
     - A **GPU**/**CPU** pill shows where the model will run. When more than
       one plant-organ model is installed, a model picker appears above it.
 4. Click **Segment Organs**. While it runs, a **Cancel** button appears beside
-   it; cancelling stops the computation and leaves the cloud unchanged.
+   it; canceling stops the computation and leaves the cloud unchanged.
 
 When it finishes, a message reports the number of leaflets, the soil, stem and
 leaf point counts, and **which units it read the cloud in**. A second message
@@ -50,10 +50,10 @@ appears when the units deserve a look:
 
 - the cloud is not plant-sized in the units used (under 2 cm or over 5 m
   across): pick the real units and run it again;
-- **Auto** read it as millimetres and it is 30 to 300 units across. That is a
-  3-30 cm plant in millimetres, but also a 30-300 cm plant in centimetres, and
+- **Auto** read it as millimeters and it is 30 to 300 units across. That is a
+  3-30 cm plant in millimeters, but also a 30-300 cm plant in centimeters, and
   the size cannot tell them apart. The message says which reading was taken; if
-  the cloud is in centimetres, pick **Centimetres** and run it again.
+  the cloud is in centimeters, pick **Centimeters** and run it again.
 
 ## The result
 
@@ -71,10 +71,10 @@ leaves are older), so software that reads increasing leaflet numbers as
 increasing age gets a sensible order. It is only a stand-in: a drooping old
 leaf can sit below a younger one.
 
-Switch between the two colourings at any time in **Display** › colour mode
-(**Plant organ** or **Leaflet**). The organ colouring shows a legend; the
-leaflet colouring does not (a tomato can have more than a hundred leaflets),
-but every leaflet gets its own colour.
+Switch between the two colorings at any time in **Display** › color mode
+(**Plant organ** or **Leaflet**). The organ coloring shows a legend; the
+leaflet coloring does not (a tomato can have more than a hundred leaflets),
+but every leaflet gets its own color.
 
 To keep only some organs, use [Filter Points](clean-point-cloud.md) on the
 **Plant organ** attribute (for example, keep Stem and Leaf to drop the soil).
@@ -92,8 +92,8 @@ Measured on plants held out of training:
 | Sugar beet (Sugar4D, real) | — | 0.92 F1 (whole leaves) |
 
 The weakest part is **small leaflets on large compound leaves**: tomato
-leaflets under about 3 cm are sometimes merged with a neighbour. Stems are
-harder than leaves (a petiole is a few millimetres across), so expect some
+leaflets under about 3 cm are sometimes merged with a neighbor. Stems are
+harder than leaves (a petiole is a few millimeters across), so expect some
 stem points at leaflet bases to be called leaf and the other way round.
 
 !!! note "Species it has not seen"

@@ -66,17 +66,17 @@ def grid_sample(
 
 
 def grid_mean(xyz: np.ndarray, voxel: float) -> tuple[np.ndarray, np.ndarray]:
-    """Voxel barycentres, used for the network's coarser levels.
+    """Voxel barycenters, used for the network's coarser levels.
 
-    Returns ``(centres, inverse)``. Barycentres rather than representative
-    points: a coarse level summarises a region, and the mean sits on the
+    Returns ``(centers, inverse)``. Barycenters rather than representative
+    points: a coarse level summarizes a region, and the mean sits on the
     surface's medial line where a single chosen point could sit on its edge.
     """
     keys = voxel_keys(xyz, voxel)
     _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
     m = len(counts)
-    centres = np.empty((m, 3), dtype=np.float64)
+    centers = np.empty((m, 3), dtype=np.float64)
     for d in range(3):  # bincount, not np.add.at: the latter is ~20x slower
-        centres[:, d] = np.bincount(inverse, weights=xyz[:, d], minlength=m)
-    centres /= counts[:, None]
-    return centres.astype(xyz.dtype, copy=False), inverse
+        centers[:, d] = np.bincount(inverse, weights=xyz[:, d], minlength=m)
+    centers /= counts[:, None]
+    return centers.astype(xyz.dtype, copy=False), inverse

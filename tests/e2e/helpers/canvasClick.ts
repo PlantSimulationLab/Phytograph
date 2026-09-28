@@ -11,7 +11,7 @@ import { expect, type Page } from '@playwright/test';
 //   - a toast (`fixed bottom-4 right-4 top-4`, z-110, cards pointer-events-auto)
 //     swallowing viewport clicks, which looks like "clicked and nothing was
 //     selected";
-//   - label-slab aiming a centreline at 0.6/0.7 canvas width and landing on the
+//   - label-slab aiming a centerline at 0.6/0.7 canvas width and landing on the
 //     cross-section panel's own Suspend button — it passed locally by luck and
 //     failed only on CI, whose window has no title bar (innerHeight 800 vs 772
 //     on macOS), so identical fractions resolve to different pixels;

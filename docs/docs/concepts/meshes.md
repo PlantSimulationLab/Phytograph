@@ -17,7 +17,7 @@ There are four ways to bring a mesh into Phytograph:
 2. **Triangulate** a point cloud — see [Triangulate a mesh](../workflows/triangulate.md).
 3. **Generate** a plant — every procedurally generated plant arrives as a mesh of stems, branches, and leaves. See [Generate a plant](../workflows/generate-plant.md).
 4. **Generate a DEM / DSM / CHM** — a gridded terrain surface reconstructed from a
-   cloud, stored as a heightmap mesh coloured by elevation and exportable as a GIS
+   cloud, stored as a heightmap mesh colored by elevation and exportable as a GIS
    raster. See [Terrain surfaces](#terrain-surfaces-dtm-dsm-chm) below and
    [Generate a DEM / DSM / CHM](../workflows/generate-dem.md).
 
@@ -50,7 +50,7 @@ First returns for the DSM are read from the cloud's multi-return `target_index`
 ### DTM layers: one surface, many bands
 
 A **DTM is a single surface that carries several scalar layers** on its grid — you
-colour the one terrain mesh by any of them (the **Color by** dropdown) and export
+color the one terrain mesh by any of them (the **Color by** dropdown) and export
 any of them as a raster. This mirrors how a point cloud carries multiple scalar
 fields. All layers are computed automatically with the DTM and share its grid:
 

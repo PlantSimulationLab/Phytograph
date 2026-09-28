@@ -93,7 +93,7 @@ export interface TreeCostWarning {
   nodes: number;           // voxels TreeIso will actually process
   node_guideline: number;  // the advisory threshold that was exceeded
   points: number;          // non-ground input points
-  decimate_res1: number;   // resolved stage-1 voxel size, metres
+  decimate_res1: number;   // resolved stage-1 voxel size, meters
   message: string;         // ready-to-display copy
 }
 
@@ -344,7 +344,7 @@ export function describeBackendError(error: unknown, action: string): Error {
     // A reason-less AbortError is a user-initiated cancel (the Cancel button
     // mirrors its signal into the request's controller without a reason).
     if (error.name === 'AbortError') {
-      return new Error(`${action} was cancelled.`);
+      return new Error(`${action} was canceled.`);
     }
     return error;
   }
@@ -472,7 +472,7 @@ export async function getMemoryBudget(signal?: AbortSignal): Promise<MemoryBudge
  * Whether RIEGL raw-project (.riproject / .rxp) import is available here, and
  * why not when it isn't.
  *
- * Reading .rxp needs RIEGL's closed-source RiVLib, whose licence forbids us
+ * Reading .rxp needs RIEGL's closed-source RiVLib, whose license forbids us
  * from shipping it — so this is a runtime probe rather than a build-time flag.
  * What else is required depends on `runtime`; see /api/riegl/status.
  */
@@ -541,7 +541,7 @@ export interface RieglStatus {
    *
    * Native only, and deliberately NOT part of `available`. Points, attributes,
    * GNSS and registration need no compiler; only no-return (sky) shots do,
-   * because on Windows that part of RiVLib is a static library RIEGL's licence
+   * because on Windows that part of RiVLib is a static library RIEGL's license
    * forbids us shipping pre-linked. Withholding the whole import over it would
    * refuse a scan the user can read perfectly well.
    */
@@ -558,7 +558,7 @@ export interface RieglStatus {
  * Build the RIEGL reader Docker image from the bundled Dockerfile.
  *
  * The image is always built locally and never pulled: publishing it would mean
- * redistributing RiVLib, which its licence forbids. The build itself carries no
+ * redistributing RiVLib, which its license forbids. The build itself carries no
  * licensed bytes (RiVLib is bind-mounted at run time), so it is safe to re-run
  * and cheap on a warm cache.
  *
@@ -585,8 +585,8 @@ export async function buildRieglImage(
  * How well a scan position is placed.
  *
  * - `registered` — a real registration result (a .PROJ's plane or voxel .sopv).
- *   Placed to the registration's own accuracy, millimetres in practice.
- * - `prior` — only the inclinometer/compass/GNSS estimate. Metre-level; the
+ *   Placed to the registration's own accuracy, millimeters in practice.
+ * - `prior` — only the inclinometer/compass/GNSS estimate. Meter-level; the
  *   user should refine it with ICP.
  * - `none` — no pose at all: an aborted acquisition, or any .riproject, which
  *   carries no registration whatsoever.
@@ -598,12 +598,12 @@ export type RieglRegistration = 'registered' | 'prior' | 'none';
  *
  * - `local` — the scanner's own frame, unrotated. Origin from the GNSS prior
  *   when there is a fix.
- * - `sensor` — additionally levelled by the position's own inclinometer, which
+ * - `sensor` — additionally leveled by the position's own inclinometer, which
  *   is survey-grade (agrees with RiSCAN PRO's SOPs to ≤0.05°). The cloud comes
  *   out plumb, so ground/DEM assumptions hold — but it is NOT turned to north
  *   and NOT aligned to the other positions: the onboard compass is 10–14° wrong
  *   on measured data, so no heading is applied and ICP still owns the rest.
- *   A position with no usable inclinometer record imports unlevelled.
+ *   A position with no usable inclinometer record imports unleveled.
  * - `registered` — the position's SOP is applied, so a .PROJ's scans land
  *   pre-aligned in the project frame.
  */
@@ -674,7 +674,7 @@ export interface RieglScanPosition {
     height_m: number;
     height_datum: string;
   } | null;
-  /** Centroid-anchored ENU offset (metres) derived from the GNSS fix. */
+  /** Centroid-anchored ENU offset (meters) derived from the GNSS fix. */
   enu?: { east_m: number; north_m: number; up_m: number } | null;
   origin_prior?: [number, number, number];
   /** Set when pulse grouping disagreed with RiVLib's echo flags. */
@@ -701,7 +701,7 @@ export interface RieglProject {
    * Whether ANY position carried a real registration. Always false for a
    * .riproject: raw scanner data carries no registration (that is what RiSCAN
    * PRO produces), so every position sits in its own frame and the
-   * GNSS-derived `origin_prior` is a metres-level seed for ICP, not a
+   * GNSS-derived `origin_prior` is a meters-level seed for ICP, not a
    * placement. A .PROJ reports what it actually found — check
    * `registered_count` and each position's `registration`, because a project
    * is routinely a mix.
@@ -771,7 +771,7 @@ export async function extractRieglProject(
   // the failure mode was ugly: the object reached the backend as
   // `keep_columns`, which 422'd with "Input should be a valid list" — rendered
   // in the UI as "[object Object]". Detecting it here costs nothing and turns a
-  // silent shape mismatch into correct behaviour.
+  // silent shape mismatch into correct behavior.
   let keep: string[] | null = null;
   let options = opts;
   if (Array.isArray(keepColumns)) {
@@ -925,7 +925,7 @@ export async function segmentGround(
 // ==================== NOISE FILTER API ====================
 
 // The three noise criteria the Filter panel's Noise section offers.
-//   'ror'         — isolated points: fewer than N other returns within r metres.
+//   'ror'         — isolated points: fewer than N other returns within r meters.
 //                   The DEFAULT. Local, physical, density-invariant, idempotent.
 //   'voxel_count' — sparse voxels: O(N), no KD-tree, for clouds too large for
 //                   the others. Coarser at branch ends.
@@ -993,7 +993,7 @@ export async function denoisePoints(
 
 /** Classify noise on a session's in-RAM points, append a `noise_class` column
  * (1=clean, 2=noise), and rebuild the octree so the flagged points RENDER in the
- * noise colour — that redraw is the preview the user judges before committing.
+ * noise color — that redraw is the preview the user judges before committing.
  * No file read, nothing deleted. */
 export async function sessionDenoise(
   sessionId: string,
@@ -1011,7 +1011,7 @@ export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
 // Which surface product to build: DTM (bare-earth ground), DSM (first-return /
 // top-of-canopy), CHM (canopy height = DSM − DTM). A DTM additionally carries a
 // bundle of scalar LAYERS (density/intensity/hillshade/slope/aspect) — see
-// DemLayer — that the renderer colours the terrain by and exports as rasters.
+// DemLayer — that the renderer colors the terrain by and exports as rasters.
 export type DemSurfaceType = 'dtm' | 'dsm' | 'chm';
 
 export interface DemGenerateRequest {
@@ -1072,7 +1072,7 @@ export interface DemGrid {
 
 // One scalar layer of a DTM surface (elevation / point density / return density /
 // intensity / hillshade / slope / aspect). `grid` is the per-cell raster (for
-// export); `vertexValues` is one value per mesh vertex (for colouring the surface,
+// export); `vertexValues` is one value per mesh vertex (for coloring the surface,
 // aligned 1:1 with `vertices`); `min`/`max` bound the colorbar; `label` is the
 // human-readable caption.
 export interface DemLayer {
@@ -1097,7 +1097,7 @@ export interface DemResult {
   surfaceSource?: string;  // DSM/CHM first-return provenance ("first_return"|"all_points")
   warning?: string;
   grid?: DemGrid;
-  // DTM scalar layers (name → layer). The renderer colours the terrain by the
+  // DTM scalar layers (name → layer). The renderer colors the terrain by the
   // selected layer and exports any of them as a raster. Present only for a DTM.
   layers?: Record<string, DemLayer>;
   // Per-point height-above-ground (point z − gap-free ground), aligned to the
@@ -1456,7 +1456,7 @@ export async function segmentWood(
  * `organ` 1=soil, 2=stem, 3=leaf, and `leaflet` 0=not a leaflet, 1..N one id
  * per leaflet, numbered by height (lowest first). Send HIT points only.
  * `units` is what the coordinates are in; 'auto' reads it from the cloud's size
- * (more than 30 units across = millimetres) and the response says which.
+ * (more than 30 units across = millimeters) and the response says which.
  */
 export type OrganUnits = 'auto' | 'm' | 'cm' | 'mm';
 
@@ -1534,9 +1534,9 @@ export interface TreeSegmentationRequest {
   // watershed for airborne / closed canopy (backend-api/chm_trees.py). The
   // TreeIso fields above are ignored for 'chm', the chm_* ones for 'treeiso'.
   method?: TreeSegmentMethod;
-  chm_cell?: number | null;      // metres; null/absent = chm_crown_scale / 12
-  chm_min_height?: number;       // metres above ground
-  chm_crown_scale?: number;      // metres; about the width of the smaller crowns
+  chm_cell?: number | null;      // meters; null/absent = chm_crown_scale / 12
+  chm_min_height?: number;       // meters above ground
+  chm_crown_scale?: number;      // meters; about the width of the smaller crowns
 }
 
 export type TreeSegmentMethod = 'treeiso' | 'chm';
@@ -1824,7 +1824,7 @@ export interface LADRequest {
   max_aspect_ratio: number;     // max triangle aspect ratio
   min_voxel_hits: number;       // min ray hits for a voxel to be solved
   // Occlusion screening: a voxel probed by less than this much TOTAL beam path
-  // (metres) is reported as occluded rather than measured. Omit to let the
+  // (meters) is reported as occluded rather than measured. Omit to let the
   // backend resolve it from the grid as 100x the mean voxel side length
   // (Soma, Pimont & Dupuy 2021) — a fixed value is not portable across
   // voxel resolutions.
@@ -1893,7 +1893,7 @@ export interface LADVoxelResult {
   // `lad_solved` is nearly always true even for a beam-starved voxel.
   path_length_total?: number | null;
   under_sampled?: boolean | null;
-  // True => `lad` is an interpolation over neighbours, not a measurement.
+  // True => `lad` is an interpolation over neighbors, not a measurement.
   lad_filled?: boolean | null;
   // ---- Leaf / wood split -------------------------------------------------
   // Present only when the cloud carried a wood/leaf classification; null or
@@ -2406,10 +2406,10 @@ export async function generatePlantStreaming(
           onProgress(parsed.progress, parsed.message);
         } else if (eventType === 'result') {
           return JSON.parse(data) as PlantGenerationResponse;
-        } else if (eventType === 'cancelled') {
+        } else if (eventType === 'canceled') {
           // The backend aborted the build and freed its memory — surface a typed
           // cancel so the caller treats it as a no-op, not a failure.
-          throw new ScanCancelledError();
+          throw new ScanCanceledError();
         } else if (eventType === 'error') {
           const parsed = JSON.parse(data);
           throw new Error(parsed.detail || 'Plant generation failed');
@@ -2969,12 +2969,12 @@ export interface PointCloudImportResponse {
 
 /**
  * Export a point cloud via the backend (LAS/LAZ via laspy, text formats via the
- * vectorised formatter).
+ * vectorized formatter).
  *
  * Streams PHP1 progress markers ahead of its JSON tail, so `onProgress` gets a
  * real percentage rather than an indeterminate spinner: formatting a text export
  * is ~97% of its wall time and the backend reports it per chunk. `signal` +
- * `onRunId` make the export cancellable — POST /api/cancel/{runId} stops the
+ * `onRunId` make the export cancelable — POST /api/cancel/{runId} stops the
  * backend work, and aborting the signal tears down the fetch.
  *
  * 10 minute budget, matching the import: a 25 M-point cloud takes ~35 s to read,
@@ -3052,6 +3052,8 @@ export interface ScanExportEntry {
 export interface ScanExportRequest {
   scans: ScanExportEntry[];
   base_name?: string;
+  // Multi-object file names: 'prefix' → <base>_<label>, 'suffix' → <label>_<base>.
+  base_position?: 'prefix' | 'suffix';
   include_misses: boolean;
   // true → write the Helios XML + per-scan data (re-loadable bundle);
   // false → write only the per-scan data files (no XML), in `data_format`.
@@ -3097,7 +3099,7 @@ export interface ScanExportResponse {
  *
  * Streams PHP1 progress markers ahead of its JSON tail, so `onProgress` gets a
  * real per-object percentage rather than an indeterminate spinner, and `signal`
- * + `onRunId` make it cancellable (POST /api/cancel/{runId} stops the backend
+ * + `onRunId` make it cancelable (POST /api/cancel/{runId} stops the backend
  * work; aborting the signal tears down the fetch).
  *
  * 10 minute budget, matching the point-cloud export: a multi-scan LAZ bundle is
@@ -3139,7 +3141,7 @@ export interface ImportPointCloudByPathResult {
 // `role` is a Helios token (x/y/z/r255/g255/b255/r/g/b/intensity/reflectance/
 // skip) or the literal 'extra' for a carried scalar field. For 'extra' columns,
 // `slug`/`label` set the on-disk attribute name + picker label (rename) and
-// `categorical` marks it for discrete colouring. `index` is the 0-based source
+// `categorical` marks it for discrete coloring. `index` is the 0-based source
 // column position.
 export interface ColumnPlanEntry {
   index: number;
@@ -3157,7 +3159,7 @@ export interface ColumnPlan {
   rgbIs255: boolean;
 }
 
-// Serialise a ColumnPlan to the backend's snake_case request shape.
+// Serialize a ColumnPlan to the backend's snake_case request shape.
 export function columnPlanToPayload(plan: ColumnPlan): {
   columns: Array<{ index: number; role: string; slug: string | null; label: string | null; categorical: boolean }>;
   rgb_is_255: boolean;
@@ -3207,8 +3209,8 @@ export interface PointCloudPreviewResponse {
   suggested_shift?: [number, number, number] | null;
   // The length unit the SOURCE declares, when it declares one ("m", "ftUS", …).
   // `units_certain` is true only when the FORMAT is authoritative — a CRS in a
-  // LAS header, or E57/RIEGL which are metres by specification. False means the
-  // format cannot say and the wizard is asking (defaulted to metres). See
+  // LAS header, or E57/RIEGL which are meters by specification. False means the
+  // format cannot say and the wizard is asking (defaulted to meters). See
   // _detect_source_units (backend).
   detected_units?: string | null;
   units_certain?: boolean;
@@ -3253,7 +3255,7 @@ export async function previewPointCloud(
 // Pulls a point-cloud file from disk via the backend rather than reading it
 // into a string in the renderer (V8 caps strings at ~512 MB, which trips on
 // multi-hundred-MB TLS scans). Backend dispatches by extension: XYZ-family
-// via pandas (honours `asciiFormat`), PLY/PCD via open3d. `asciiFormat` is
+// via pandas (honors `asciiFormat`), PLY/PCD via open3d. `asciiFormat` is
 // ignored on the PLY/PCD path.
 export async function importPointCloudByPath(
   filePath: string,
@@ -3301,9 +3303,9 @@ export async function importPointCloudByPath(
 // ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
 
 /**
- * An MTL's `Kd` is an **sRGB** display colour — that's what the format means, and
+ * An MTL's `Kd` is an **sRGB** display color — that's what the format means, and
  * what every other tool writes there. three.js's working space is LINEAR, and the
- * two places an imported mesh's colour lands both treat their input as already
+ * two places an imported mesh's color lands both treat their input as already
  * linear:
  *
  *   - `MeshData.vertexColors` -> a `color` BufferAttribute, which three.js encodes
@@ -3317,9 +3319,9 @@ export async function importPointCloudByPath(
  * (export to OBJ, re-import): the rank-0 trunk went from 176,141,87 to
  * 216,196,158 — visibly washed out, and drifting further on every extra trip.
  *
- * Converting here, at the single point where imported mesh colours enter the
+ * Converting here, at the single point where imported mesh colors enter the
  * renderer, fixes both consumers at once. This is the same fix `srgbToLinear` in
- * renderers/PointCloud.tsx applies to generated point-cloud colours, for the same
+ * renderers/PointCloud.tsx applies to generated point-cloud colors, for the same
  * reason; see renderers/pointCloudColorSpace.test.ts for the pipeline comparison.
  */
 export const srgbChannelToLinear = (c: number): number =>
@@ -3332,7 +3334,7 @@ function srgbBufferToLinear(buf: Float32Array | undefined): Float32Array | undef
   return buf;
 }
 
-/** sRGB -> linear for a single material colour triple. Undefined passes through. */
+/** sRGB -> linear for a single material color triple. Undefined passes through. */
 function srgbTripleToLinear(
   c: [number, number, number] | undefined,
 ): [number, number, number] | undefined {
@@ -3467,11 +3469,11 @@ const PROGRESS_MARKER_MAGIC = 'PHP1';
 export interface ProgressMarker {
   progress: number | null;
   message: string;
-  // The first marker of a cancellable streaming op carries its run_id (so the
-  // renderer can POST /api/cancel/{run_id}); the terminal marker of a cancelled
-  // run carries cancelled:true in place of a frame. Both optional on other markers.
+  // The first marker of a cancelable streaming op carries its run_id (so the
+  // renderer can POST /api/cancel/{run_id}); the terminal marker of a canceled
+  // run carries canceled:true in place of a frame. Both optional on other markers.
   runId?: string;
-  cancelled?: boolean;
+  canceled?: boolean;
   // The terminal marker of a FAILED run carries the error message in place of a
   // frame. These endpoints stream, so the backend has already sent `200 OK` and
   // its headers before the worker runs — a later exception cannot change the
@@ -3521,7 +3523,7 @@ export function parseProgressMarkers(
         progress: parsed.progress ?? null,
         message: parsed.message ?? '',
         runId: parsed.run_id,
-        cancelled: parsed.cancelled,
+        canceled: parsed.canceled,
         error: parsed.error,
       });
     } catch {
@@ -3534,7 +3536,7 @@ export function parseProgressMarkers(
 
 /**
  * Throw if a buffered (non-streaming) response body carries a terminal
- * `cancelled` / `error` marker in place of its payload.
+ * `canceled` / `error` marker in place of its payload.
  *
  * The streaming readers check each marker as it arrives, but the buffered
  * fallbacks (`!onProgress` / `!response.body`) read the whole body at once and
@@ -3545,7 +3547,7 @@ export function parseProgressMarkers(
 function throwIfTerminalMarker(bytes: Uint8Array): void {
   const { markers } = parseProgressMarkers(bytes, 0);
   for (const m of markers) {
-    if (m.cancelled) throw new ScanCancelledError();
+    if (m.canceled) throw new ScanCanceledError();
     if (m.error) throw new Error(m.error);
   }
 }
@@ -3644,13 +3646,13 @@ export interface ImportProgressOptions {
   onRunId?: (runId: string) => void;
 }
 
-// Thrown when the backend reports a cancelled run (a terminal PHP1 `cancelled`
+// Thrown when the backend reports a canceled run (a terminal PHP1 `canceled`
 // marker) instead of a frame. Callers catch this to treat the cancel as a
 // no-op-success (UI returns to idle) rather than surfacing an error toast.
-export class ScanCancelledError extends Error {
+export class ScanCanceledError extends Error {
   constructor() {
-    super('Operation cancelled');
-    this.name = 'ScanCancelledError';
+    super('Operation canceled');
+    this.name = 'ScanCanceledError';
   }
 }
 
@@ -3716,10 +3718,10 @@ export async function fetchBinaryFrame(
         const { markers, consumed } = parseProgressMarkers(merged, 0);
         for (const m of markers) {
           if (m.runId && onRunId) onRunId(m.runId);
-          // A `cancelled` marker means the backend aborted and freed its memory;
+          // A `canceled` marker means the backend aborted and freed its memory;
           // there is no frame to decode. Surface it as a typed abort so callers
           // can distinguish a user cancel from a real failure.
-          if (m.cancelled) throw new ScanCancelledError();
+          if (m.canceled) throw new ScanCanceledError();
           // An `error` marker means the worker raised after the 200 was already
           // committed. Throw the backend's own message rather than falling
           // through to decode a frame that was never written.
@@ -3816,7 +3818,7 @@ export async function fetchJsonWithProgress<T>(
         const { markers, consumed } = parseProgressMarkers(merged, 0);
         for (const m of markers) {
           if (m.runId && onRunId) onRunId(m.runId);
-          if (m.cancelled) throw new ScanCancelledError();
+          if (m.canceled) throw new ScanCanceledError();
           if (m.error) throw new Error(m.error);
           if (onProgress) onProgress(m.progress, m.message);
         }
@@ -3918,7 +3920,7 @@ export async function computeAlignmentDistance(
 ): Promise<AlignmentDistanceResponse> {
   console.log('Alignment distance - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'vertices:', request.mesh_vertices.length / 3);
   // The response streams PHP1 progress markers ahead of the JSON result so the
-  // renderer shows a cancellable pill; fetchJsonWithProgress owns its own
+  // renderer shows a cancelable pill; fetchJsonWithProgress owns its own
   // per-chunk-refreshed timeout. See computeLAD for the template.
   try {
     return await fetchJsonWithProgress<AlignmentDistanceResponse>(
@@ -3971,7 +3973,7 @@ export async function icpRegisterMeshToCloud(
   onRunId?: (runId: string) => void,
 ): Promise<ICPRegistrationResponse> {
   console.log('ICP registration - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'mesh vertices:', request.mesh_vertices.length / 3);
-  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  // Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
   try {
     return await fetchJsonWithProgress<ICPRegistrationResponse>(
       '/api/c2m/icp-register', request, signal, 120000, onProgress, onRunId);
@@ -3992,7 +3994,7 @@ export interface CloudToCloudICPRequest {
   source_points?: number[];     // Flattened [x, y, z, ...] source (to be moved); omit when source_source is set
   target_source?: BackendPointSource;  // octree-backed target read from disk
   source_source?: BackendPointSource;  // octree-backed source read from disk
-  /** How far the starting pose may be wrong, in metres — it sizes the FIRST
+  /** How far the starting pose may be wrong, in meters — it sizes the FIRST
    *  rung of the backend's multi-scale ladder, not the precision of the fit,
    *  which comes from the rungs below it. Omit: derived from the cloud. */
   max_correspondence_distance?: number;
@@ -4003,7 +4005,7 @@ export interface CloudToCloudICPRequest {
    * Optional starting pose as a row-major flat 4x4 (16 numbers) — the same
    * layout `transformation_matrix` comes back in. Pass the result of
    * `globalRegisterCloudToCloud` here to refine a coarse alignment instead of
-   * starting from identity. Omit for the default behaviour (identity init after
+   * starting from identity. Omit for the default behavior (identity init after
    * centroid pre-alignment).
    */
   init_transform?: number[];
@@ -4022,7 +4024,7 @@ export async function icpRegisterCloudToCloud(
   onRunId?: (runId: string) => void,
 ): Promise<ICPRegistrationResponse> {
   console.log('Cloud-to-cloud ICP - target:', request.target_points ? `${request.target_points.length / 3} pts` : `source:${request.target_source?.source_path}`, 'source:', request.source_points ? `${request.source_points.length / 3} pts` : `source:${request.source_source?.source_path}`);
-  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  // Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
   try {
     return await fetchJsonWithProgress<ICPRegistrationResponse>(
       '/api/c2c/icp-register', request, signal, 120000, onProgress, onRunId);
@@ -4156,7 +4158,7 @@ export interface MultiScanRegisterResponse {
   loops?: MultiScanLoop[];
   loops_checked?: boolean;
   loops_consistent?: boolean;
-  loops_localised?: boolean;
+  loops_localized?: boolean;
   suspect_pairs?: number[][];
   variant?: { cell: number | null; mode: string; worst_loop: number | null; tried?: unknown[] };
   /** False when there was no cycle to check (fewer than three scans), so the
@@ -4189,7 +4191,7 @@ export async function globalRegisterCloudToCloud(
 ): Promise<GlobalRegisterResponse> {
   console.log('Global registration - anchor method:', request.anchor_method ?? 'crown',
     'estimator:', request.estimator ?? 'ransac_fpfh');
-  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  // Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
   try {
     return await fetchJsonWithProgress<GlobalRegisterResponse>(
       '/api/c2c/global-register', request, signal, 300000, onProgress, onRunId);
@@ -4237,7 +4239,7 @@ export async function icpRegisterMeshToMesh(
   // in JSON.stringify before it was sent.
   meshes?: MeshToMeshBuffers | null,
 ): Promise<ICPRegistrationResponse> {
-  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  // Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
   // 3-minute timeout (mesh sampling + ICP); fetchJsonWithProgress refreshes it
   // per streamed chunk so an actively-progressing run is never aborted.
   try {
@@ -4380,9 +4382,9 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // shift was applied. The renderer persists it on the cloud's OctreeRef for
   // world-coord readouts/provenance; the backend restores world coords on read.
   world_shift?: [number, number, number] | null;
-  // The unit the SOURCE file was in, and the factor applied to reach metres.
-  // Provenance only — every position in the session is already metres. A scale
-  // of exactly 1 means "known metres"; null/absent means the scan predates
+  // The unit the SOURCE file was in, and the factor applied to reach meters.
+  // Provenance only — every position in the session is already meters. A scale
+  // of exactly 1 means "known meters"; null/absent means the scan predates
   // units or nothing was asked.
   source_units?: string | null;
   source_unit_scale?: number | null;
@@ -4403,7 +4405,7 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // angular sweep + grid resolution; PCD VIEWPOINT origin). Present only when
   // the format carried them; each field is independently optional. The renderer
   // turns this into a Scan's ScanParameters at import (XML-parity), filling any
-  // missing field from the defaults. Angles are in degrees, origin in metres.
+  // missing field from the defaults. Angles are in degrees, origin in meters.
   scan_params?: ScanParamsFromFile;
   // Outlier-resistant ground level (a low Z percentile), in the same frame as
   // `tight_bounds` — i.e. post-world_shift. Computed once at import, where the
@@ -4411,17 +4413,17 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   //
   // Use this, NOT `tight_bounds.min.z`, wherever "the ground" is meant: the raw
   // minimum is defined by a single point, so one erroneous low return (multipath,
-  // a bird, a scanner artefact) sinks it arbitrarily far. null when the backend
+  // a bird, a scanner artifact) sinks it arbitrarily far. null when the backend
   // could not compute one (empty/degenerate cloud) — fall back to the min then.
   ground_z?: number | null;
   // Outlier-resistant per-axis extent [dx, dy, dz] (see `_robust_extent` in
   // main.py). The viewer scales the camera's zoom limits from it so a handful of
-  // stray returns hundreds of metres out can't make the scene un-navigable.
+  // stray returns hundreds of meters out can't make the scene un-navigable.
   // Cannot be derived from `tight_bounds`: rejecting the tail needs the points,
   // which only exist backend-side at import. null on a degenerate cloud.
   robust_extent?: [number, number, number] | null;
-  // The percentile box `robust_extent` was measured across. Its CENTRE is the
-  // content's centre — unlike `tight_bounds`', which far outliers drag into
+  // The percentile box `robust_extent` was measured across. Its CENTER is the
+  // content's center — unlike `tight_bounds`', which far outliers drag into
   // empty space. null on a degenerate cloud.
   robust_bounds?: { min: [number, number, number]; max: [number, number, number] } | null;
   // Outlier-resistant [lo, hi] per attribute slug (see `_robust_attribute_ranges`
@@ -4430,7 +4432,7 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // nothing qualified. Includes categorical slugs: the backend cannot tell them
   // apart, so the renderer gates on its own classification registries.
   robust_attribute_ranges?: Record<string, [number, number]> | null;
-  // Median 3D nearest-neighbour spacing (see `_regime_point_spacing` in
+  // Median 3D nearest-neighbor spacing (see `_regime_point_spacing` in
   // main.py). The ground tool switches CSF recipe on it — airborne and
   // close-range clouds want opposite cloth resolutions. Measured at import
   // because an octree cloud holds no positions renderer-side. null/0 when it
@@ -4491,7 +4493,7 @@ export interface BackfillMissesRaster {
 
 /**
  * Explicitly recover a session's sky/miss points (beams that returned nothing)
- * and persist them in the backend session, so they can be visualised via the
+ * and persist them in the backend session, so they can be visualized via the
  * misses overlay and consumed by LAD (which no longer gapfills silently).
  *
  * `origin` is the scanner position (per-beam miss directions are reconstructed
@@ -4621,10 +4623,10 @@ export async function createCloudSession(
   droppedSlugs?: string[] | null,
   // Role reassignments from the wizard, `{source_slug: role}`. Only the columns
   // the user actually changed; an in-file format's auto-detection is otherwise
-  // untouched. Empty/undefined → the previous behaviour exactly.
+  // untouched. Empty/undefined → the previous behavior exactly.
   roleOverrides?: Record<string, string> | null,
   // The length unit the SOURCE file's coordinates are in, from the wizard.
-  // The backend SCALES positions to metres by this at import — before the world
+  // The backend SCALES positions to meters by this at import — before the world
   // shift and before the intermediate LAS write — so it is a scale factor, not
   // a label. undefined/null/'m' means no scaling, which is exactly what every
   // import did before units existed.
@@ -4669,7 +4671,7 @@ export async function createCloudSession(
     // A cancel is not a failure: rethrow it untouched so callers can identify it
     // by type. describeBackendError would mangle it into a generic backend
     // error and every cancel would raise an error toast.
-    if (error instanceof ScanCancelledError) throw error;
+    if (error instanceof ScanCanceledError) throw error;
     console.error('create_cloud_session failed:', error);
     throw describeBackendError(error, 'Import');
   }
@@ -4699,7 +4701,7 @@ export interface CloudScanPositions {
  * multi-block PTX holds several genuinely separate acquisitions, and a scan is
  * defined by its pose — merging them leaves one origin standing in for all of
  * them, which breaks the LAD inversion (it takes a single scanner origin), puts
- * the sky/miss display shell around the wrong centre, and makes the per-scan
+ * the sky/miss display shell around the wrong center, and makes the per-scan
  * row/column rasters collide.
  *
  * Every other format comes back as a one-element list, so callers have a single
@@ -4752,7 +4754,7 @@ export async function createCloudSessions(
     if (res.error) throw new Error(res.error);
     return res.scans ?? [];
   } catch (error) {
-    if (error instanceof ScanCancelledError) throw error;
+    if (error instanceof ScanCanceledError) throw error;
     console.error('create_multi_cloud_session failed:', error);
     throw describeBackendError(error, 'Import');
   }
@@ -4891,8 +4893,8 @@ export async function labelCloudRegion(
   }
 }
 
-/** One place where a column's unlabelled points gather (session frame). */
-export interface UnlabelledCluster {
+/** One place where a column's unlabeled points gather (session frame). */
+export interface UnlabeledCluster {
   count: number;
   center: [number, number, number];
   min: [number, number, number];
@@ -4900,15 +4902,15 @@ export interface UnlabelledCluster {
 }
 
 /**
- * Where the column's still-unlabelled points are: connected groups on a coarse
+ * Where the column's still-unlabeled points are: connected groups on a coarse
  * grid, largest first, for the label tool to step the camera through.
  */
-export async function getUnlabelledClusters(
+export async function getUnlabeledClusters(
   sessionId: string, slug?: string,
-): Promise<{ total: number; estimated?: boolean; clusters: UnlabelledCluster[] }> {
+): Promise<{ total: number; estimated?: boolean; clusters: UnlabeledCluster[] }> {
   const q = slug ? `?slug=${encodeURIComponent(slug)}` : '';
   const response = await fetch(
-    `${getBackendUrl()}/api/cloud/session/${sessionId}/unlabelled_clusters${q}`);
+    `${getBackendUrl()}/api/cloud/session/${sessionId}/unlabeled_clusters${q}`);
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
@@ -4953,7 +4955,7 @@ export async function segmentPick(
 
 /**
  * Read the current per-class counts without changing anything. Used to populate
- * the class list the moment the labelling tool opens — the renderer cannot
+ * the class list the moment the labeling tool opens — the renderer cannot
  * derive these itself because they exclude deleted rows and sky/miss points.
  */
 export async function getCloudLabelSummary(
@@ -4979,14 +4981,14 @@ export async function getCloudLabelSummary(
 
 /**
  * Undo: roll the label column back, keeping the first `editCount` edits. Omit
- * to clear all labelling on the slug. No rebuild.
+ * to clear all labeling on the slug. No rebuild.
  */
 export async function resetCloudLabelEdits(
   sessionId: string,
   editCount?: number,
   slug?: string,
   // Preferred for a GLOBAL undo: the stroke ids still surviving in the renderer,
-  // NEWEST FIRST. The session keeps up to the first one it recognises.
+  // NEWEST FIRST. The session keeps up to the first one it recognizes.
   //
   // A count cannot express this: the renderer's list counts user gestures while
   // the backend history counts recorded changes, and a gesture that painted
@@ -5022,7 +5024,7 @@ export async function resetCloudLabelEdits(
 }
 
 /**
- * Bake the label column into the octree so it colours without the client-side
+ * Bake the label column into the octree so it colors without the client-side
  * overlay. One PotreeConverter run — the slow step.
  *
  * DISPLAY ONLY: every backend op reads the in-RAM arrays, so split / filter /
@@ -5033,7 +5035,7 @@ export async function commitCloudLabels(
   sessionId: string,
   slug?: string,
   options?: {
-    // Cancellable like bake: the refresh queue's Cancel aborts the fetch and
+    // Cancelable like bake: the refresh queue's Cancel aborts the fetch and
     // POSTs /api/cancel/{run_id}, which kills the PotreeConverter child.
     signal?: AbortSignal;
     onRunId?: (runId: string) => void;
@@ -5274,7 +5276,7 @@ export async function sessionExtract(
     region?: CropOctreeRegion | null;
     scalarFilters?: ScalarFilter[] | null;
     // See sessionSplit: extract builds the child's octree, so a retained crop
-    // over several scans is cancellable through this.
+    // over several scans is cancelable through this.
     signal?: AbortSignal;
   },
 ): Promise<{ session_id: string; extracted: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
@@ -6165,7 +6167,7 @@ export interface TreeQSMResponse {
 }
 
 // One QSM per segmented tree of a session cloud. Streams per-tree progress
-// then a JSON tail; cancellable via the run id or by aborting the fetch.
+// then a JSON tail; cancelable via the run id or by aborting the fetch.
 export async function buildTreeQSMs(
   sessionId: string,
   request: TreeQSMRequest,
@@ -6183,7 +6185,7 @@ export async function buildTreeQSMs(
   );
 }
 
-// Streams per-tree PHP1 progress then a JSON tail; cancellable via the run id
+// Streams per-tree PHP1 progress then a JSON tail; cancelable via the run id
 // (/api/cancel/{run_id}) or by aborting the fetch.
 export async function runTreeInventory(
   sessionId: string,

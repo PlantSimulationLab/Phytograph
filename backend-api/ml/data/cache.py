@@ -1,4 +1,4 @@
-"""The training cache: each labelled cloud as a directory of memory-mappable
+"""The training cache: each labeled cloud as a directory of memory-mappable
 arrays, bucketed by spatial cell so a crop reads only the cells it needs.
 
 The corpus is ~25 GB, mostly ASCII, and one Helios scene is 1.4 GB of text.
@@ -49,7 +49,7 @@ def _pack(q: np.ndarray) -> np.ndarray:
 
 def write_item(cloud: Cloud, out_dir: str | Path, meta: dict,
                voxel: float = CACHE_VOXEL, cell: float = CELL, seed: int = 0) -> dict:
-    """Grid-sample, recentre, bucket and write one cloud. Returns its meta."""
+    """Grid-sample, recenter, bucket and write one cloud. Returns its meta."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     finite = np.isfinite(cloud.xyz).all(axis=1)
@@ -60,7 +60,7 @@ def write_item(cloud: Cloud, out_dir: str | Path, meta: dict,
     xyz = xyz[keep]
     sel = np.flatnonzero(finite)[keep]
     lo, hi = xyz.min(axis=0), xyz.max(axis=0)
-    # Horizontal centre and the lowest point, so z is height above the item's
+    # Horizontal center and the lowest point, so z is height above the item's
     # base (useful for inspection; the network only sees crop-relative xyz).
     origin = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
     rel = xyz - origin
@@ -179,7 +179,7 @@ class CachedItem:
     def rows_clear_of(self, codes: tuple[int, ...], min_dist: float,
                       among: tuple[int, ...]) -> np.ndarray:
         """Rows whose code is in ``among`` with no ``codes`` point within
-        ``min_dist``: the pure-foliage neighbourhoods. ``among`` is the
+        ``min_dist``: the pure-foliage neighborhoods. ``among`` is the
         task's other trained classes, so ignored ground never counts. Cached per
         worker. The ``codes`` points are thinned to a 2 cm grid first, which
         moves the boundary by at most 1.7 cm and keeps the tree small on
@@ -203,11 +203,11 @@ class CachedItem:
                 self._class_rows[key] = cand[np.isinf(d)]
         return self._class_rows[key]
 
-    def ball(self, centre: np.ndarray, radius: float) -> np.ndarray:
-        """Rows within ``radius`` of ``centre``, read cell by cell."""
+    def ball(self, center: np.ndarray, radius: float) -> np.ndarray:
+        """Rows within ``radius`` of ``center``, read cell by cell."""
         cells, starts = self._arr("cells"), self._arr("starts")
-        lo = _cell_coords(np.asarray(centre) - radius, self.cell)
-        hi = _cell_coords(np.asarray(centre) + radius, self.cell)
+        lo = _cell_coords(np.asarray(center) - radius, self.cell)
+        hi = _cell_coords(np.asarray(center) + radius, self.cell)
         grid = np.stack(np.meshgrid(*[np.arange(a, b + 1) for a, b in zip(lo, hi)],
                                     indexing="ij"), axis=-1).reshape(-1, 3)
         want = _pack(grid)
@@ -218,7 +218,7 @@ class CachedItem:
         if not ranges:
             return np.empty(0, np.int64)
         rows = np.concatenate([np.arange(a, b) for a, b in ranges])
-        d2 = ((np.asarray(self.xyz[rows], dtype=np.float32) - centre) ** 2).sum(axis=1)
+        d2 = ((np.asarray(self.xyz[rows], dtype=np.float32) - center) ** 2).sum(axis=1)
         return rows[d2 <= radius * radius]
 
 

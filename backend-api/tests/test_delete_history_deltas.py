@@ -4,7 +4,7 @@ Each committed delete used to push `sess.deleted.copy()` - a full (N,) bool
 array - so fifty erase clicks on a 100 M-point cloud cost 5 GB of undo
 history, more than the positions themselves. An erase typically touches a few
 thousand points; the history now records the indices each step newly deleted,
-and `reset_edits` replays them. Behaviour through the API is unchanged and
+and `reset_edits` replays them. Behavior through the API is unchanged and
 pinned here; the storage shape is pinned alongside it.
 """
 import numpy as np
@@ -78,7 +78,7 @@ def test_three_deletes_then_undo_two_and_undo_all(client, grid_session):
 def test_a_delete_that_removes_nothing_new_still_records_a_step(client, grid_session):
     """The renderer mirrors the stack one entry per committed delete, so a
     delete whose region only re-selects already-deleted points must still push
-    an (empty) entry, or the two stacks desynchronise and a later undo
+    an (empty) entry, or the two stacks desynchronize and a later undo
     misaddresses."""
     sid = grid_session
     client.post(f"/api/cloud/session/{sid}/delete_region", json=_box(0.0, 0.3))

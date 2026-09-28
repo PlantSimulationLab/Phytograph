@@ -17,12 +17,12 @@ export interface NoiseMethodOption {
 
 // Order is the dropdown order, and it is deliberate: the safe local method
 // first, the fast one for big clouds second, and the conventional-but-dangerous
-// statistical method last and labelled.
+// statistical method last and labeled.
 export const NOISE_METHOD_OPTIONS: NoiseMethodOption[] = [
   {
     value: 'ror',
     label: 'Isolated points (recommended)',
-    blurb: 'Flags points with too few neighbours nearby. Safe on fine twigs, and '
+    blurb: 'Flags points with too few neighbors nearby. Safe on fine twigs, and '
       + 'gives the same answer however often you run it.',
   },
   {
@@ -58,14 +58,14 @@ export interface NoiseParamField {
 export const NOISE_PARAM_FIELDS: Record<NoiseMethod, NoiseParamField[]> = {
   ror: [
     { key: 'radius', label: 'Radius (m)', integer: false, min: 0, step: 0.01 },
-    { key: 'nb_points', label: 'Min neighbours', integer: true, min: 1 },
+    { key: 'nb_points', label: 'Min neighbors', integer: true, min: 1 },
   ],
   voxel_count: [
     { key: 'voxel', label: 'Voxel size (m)', integer: false, min: 0, step: 0.01 },
     { key: 'min_points', label: 'Min points per voxel', integer: true, min: 1 },
   ],
   sor: [
-    { key: 'nb_neighbors', label: 'Neighbours (k)', integer: true, min: 2 },
+    { key: 'nb_neighbors', label: 'Neighbors (k)', integer: true, min: 2 },
     { key: 'std_ratio', label: 'Std ratio', integer: false, min: 0, step: 0.5 },
   ],
 };

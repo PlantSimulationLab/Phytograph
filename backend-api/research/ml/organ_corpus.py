@@ -1,7 +1,7 @@
-"""The herbaceous organ corpus: every labelled plant, its reader, its split and
+"""The herbaceous organ corpus: every labeled plant, its reader, its split and
 its known label errors.
 
-Three hand-labelled datasets, all dicots (grasses are deferred: a sheath and a
+Three hand-labeled datasets, all dicots (grasses are deferred: a sheath and a
 whorl are not a petiole and a stem). Their audit notes are under
 ``$PHYTOGRAPH_ORGAN_DATA/<dataset>/NOTES.md``:
 
@@ -34,7 +34,7 @@ source files is edited:
 
 - Pheno4D ``T02_0325_a``: soil and stem codes exchanged.
 - Demeter ``324_i`` organ 32 and ``14_o`` organ 60: leaflet-sized planar
-  blades labelled stem, with no children. Ignored rather than relabelled.
+  blades labeled stem, with no children. Ignored rather than relabeled.
 - Demeter ``169_o`` organ 37: a byte-identical copy of organ 39.
 """
 

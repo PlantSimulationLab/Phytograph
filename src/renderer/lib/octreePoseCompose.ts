@@ -130,7 +130,7 @@ export function unposePoint(
  * Resolve the pose the octree (and its miss shell) should render at.
  *
  * `cacheId` is the cloud's CURRENT octree id; `livePivot` is the pivot the
- * renderer will use (scene origin, else the cloud's bbox centre — see
+ * renderer will use (scene origin, else the cloud's bbox center — see
  * `renderPivot`).
  *
  * Returns the draft unchanged when there is no applicable stored pose, so the
@@ -187,7 +187,7 @@ export function hasStoredPose(
  * Rotates the box's 8 corners about `pivot` and re-bounds them. The result is a
  * LOOSE box for a rotated input (an AABB of an OBB) — that is inherent, and it is
  * why the consumers are all "roughly where is this thing" readers: framing, zoom,
- * displayOffset, brush sizing, and skip-optimisations that get safer, not
+ * displayOffset, brush sizing, and skip-optimizations that get safer, not
  * riskier, as the box grows.
  *
  * Shared by the committed-bounds update and the `data-scan-bounds` E2E attribute
@@ -229,13 +229,13 @@ export function transformBoundsAabb(
  *
  * `groundZ` is an outlier-RESISTANT low-Z percentile, not a minimum — its whole
  * reason for existing is that the raw minimum is set by a single stray return,
- * which drops the scene origin metres into the void. So it must be carried
+ * which drops the scene origin meters into the void. So it must be carried
  * through the transform as a POINT, not recomputed from the moved bounding box:
  * `moved.min.z` is the AABB of a rotated OBB of the RAW bounds, and therefore
  * sits below even the un-rotated raw minimum.
  *
- * Transformed at the bbox centre in XY, since a plane's height under a rotation
- * depends on where you sample it and the centre is the honest representative.
+ * Transformed at the bbox center in XY, since a plane's height under a rotation
+ * depends on where you sample it and the center is the honest representative.
  */
 export function transformGroundZ(
   groundZ: number,

@@ -1,4 +1,4 @@
-"""The SyntheticLiDAR_Organs corpus: every labelled item, its reader and its split.
+"""The SyntheticLiDAR_Organs corpus: every labeled item, its reader and its split.
 
 Splits are by tree (by scene for synthetic data), never by point, and they are
 fixed here rather than drawn at random each run. Every experiment is then
@@ -14,7 +14,7 @@ into training:
   never looked at during training.
 - **test_synth**: both orchard-row scenes (``_v2`` regenerates the same scene,
   so neither may train). **val_synth** is one scene per species.
-- **dense_eastern** / **dense_western**: two hand-labelled leaf-on redbuds
+- **dense_eastern** / **dense_western**: two hand-labeled leaf-on redbuds
   with dense crowns, split apart so either can be held out.
 - ``*_hl`` twins of every synthetic scene, and ``synthdense_*_hl`` sets, carry
   hand-label-like wood (``HUMAN_WOOD_MIN_LENGTH``); split names gain ``_hl``.
@@ -42,7 +42,7 @@ SYNTH_DENSE = Path(os.environ.get(
     "PHYTOGRAPH_SYNTH_DENSE", "/group/bnbaileygrp/bnbailey/phytograph_ml/synth_dense/data"))
 # A synthetic wood point stays wood only in a connected run of visible wood at
 # least this long (ml.data.relabel). 0.5 m makes an open synthetic redbud match
-# the hand-labelled western redbud (25-30 % vs 33 % of leaf > 30 cm from wood)
+# the hand-labeled western redbud (25-30 % vs 33 % of leaf > 30 cm from wood)
 # and a dense one the eastern (65-69 % vs 78 %); exact labels give 0 % on both.
 HUMAN_WOOD_MIN_LENGTH = 0.5
 REDBUD_LABELED = Path(os.environ.get(
@@ -58,7 +58,7 @@ class Entry:
     reader: str
     args: tuple
     split: str
-    noisy: bool                     # hand-labelled (True) or exact synthetic (False)
+    noisy: bool                     # hand-labeled (True) or exact synthetic (False)
     kwargs: dict = field(default_factory=dict)
     domain: str = "real"            # "real" | "synthetic"
 
@@ -123,7 +123,7 @@ def entries() -> list[Entry]:
         out.append(Entry("almond_leafoff", f.stem, "las_all", (str(f), 1), split, True,
                          {"ground_band": 0.2}))
 
-    # Hand-labelled leaf-on redbuds (Phytograph wood_class, 1 wood / 2 leaf),
+    # Hand-labeled leaf-on redbuds (Phytograph wood_class, 1 wood / 2 leaf),
     # the first real trees with a DENSE crown: eastern is 0.8 % wood, with
     # almost none visible in the crown; western 4.0 %. The public benchmark
     # trees are 13-42 % wood. Each has its own split so configs can hold

@@ -76,14 +76,14 @@ beforeEach(() => {
 });
 
 describe('ensureLabelAttribute', () => {
-  it('creates a column sized to the tile, filled with the unlabelled index', () => {
+  it('creates a column sized to the tile, filled with the unlabeled index', () => {
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
     const attr = ensureLabelAttribute(geom, 0);
     expect(attr?.count).toBe(2);
     expect(labels(geom)).toEqual([0, 0]);
   });
 
-  it('honours a non-zero unlabelled index', () => {
+  it('honors a non-zero unlabeled index', () => {
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
     ensureLabelAttribute(geom, 7);
     expect(labels(geom)).toEqual([7, 7]);
@@ -116,7 +116,7 @@ describe('applyStrokesToGeometry', () => {
   });
 
   it('applies strokes IN ORDER — later strokes win', () => {
-    // Labelling is not commutative; this is why the stroke list is never sorted.
+    // Labeling is not commutative; this is why the stroke list is never sorted.
     const geom = makeGeometry([[0, 0, 0]]);
     applyStrokesToGeometry(geom, identity, undefined, null,
       state([lowX(1), lowX(2)]));
@@ -143,7 +143,7 @@ describe('applyStrokesToGeometry', () => {
     expect(labels(fine)).toEqual([4, 4, 0, 0]);
   });
 
-  it('honours the From-class gate', () => {
+  it('honors the From-class gate', () => {
     const geom = makeGeometry([[0, 0, 0], [0.1, 0, 0]]);
     applyStrokesToGeometry(geom, identity, undefined, null, state([lowX(1)]));
     // Only repaint index 2 -> nothing matches, so this is a no-op.
@@ -167,7 +167,7 @@ describe('applyStrokesToGeometry', () => {
     expect(labels(geom)).toEqual([2, 2]);
   });
 
-  it('a class value the palette lacks reads as unlabelled, and float noise rounds', () => {
+  it('a class value the palette lacks reads as unlabeled, and float noise rounds', () => {
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
     applyStrokesToGeometry(geom, identity, undefined, [7, 64.00001, 63.99999], state([]));
     expect(labels(geom)).toEqual([0, 1, 1]);
@@ -332,7 +332,7 @@ describe('applyLabelOverlayToVisibleNodes', () => {
 
   it('clears tiles that are loaded but out of view, not only the visible ones', () => {
     // A tile out of view is hidden, not unloaded, so it kept the label buffer
-    // aliased into its intensity slot after the tool closed, and coloured by
+    // aliased into its intensity slot after the tool closed, and colored by
     // intensity it drew the labels when it came back into view.
     const seen = makeGeometry([[0, 0, 0]], {
       intensity: new THREE.BufferAttribute(new Float32Array([3]), 1),
@@ -384,7 +384,7 @@ describe('incremental replay', () => {
   const st = (ids: string[], strokes: LabelStrokeRender[]): LabelOverlayState =>
     ({ ...state(strokes), key: `p|${ids.join(',')}` });
 
-  it('recognises a key that extends the old one by whole strokes only', () => {
+  it('recognizes a key that extends the old one by whole strokes only', () => {
     const next = st(['a', 'b'], [lowX(1), lowX(2)]);
     expect(strokesAlreadyApplied('p|a', 1, next)).toBe(1);
     // `a` -> `ab` is not an extension of the stroke list, just of the text.

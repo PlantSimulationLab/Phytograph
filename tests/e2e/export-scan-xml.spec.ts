@@ -263,7 +263,7 @@ test('respects the chosen columns in the exported scan ASCII_format', async () =
   expect(exportRowNames).toContain((panelName ?? '').trim());
 
   // The scan section's column picker is present with x/y/z + the scan's
-  // colour/reflectance columns (recovered from the ASCII_format for this
+  // color/reflectance columns (recovered from the ASCII_format for this
   // octree-backed scan).
   const picker = page.getByTestId('export-scan-section').getByTestId('export-column-picker');
   await expect(picker).toBeVisible();
@@ -281,7 +281,7 @@ test('respects the chosen columns in the exported scan ASCII_format', async () =
     .toBeGreaterThan(0);
   await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
 
-  // ASCII_format keeps x y z (+ any kept colour) but NOT the unchecked reflectance.
+  // ASCII_format keeps x y z (+ any kept color) but NOT the unchecked reflectance.
   const xml = readFileSync(xmlPath, 'utf-8');
   const fmt = xml.match(/<ASCII_format>(.*?)<\/ASCII_format>/)![1].trim().split(/\s+/);
   expect(fmt.slice(0, 3)).toEqual(['x', 'y', 'z']);

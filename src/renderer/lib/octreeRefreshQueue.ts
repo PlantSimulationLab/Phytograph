@@ -31,9 +31,9 @@
  * display rebuild from silently acquiring barrier semantics it does not need
  * (and re-introducing the very wait this was built to remove).
  *
- * ── Serialisation and coalescing ──────────────────────────────────────────
+ * ── Serialization and coalescing ──────────────────────────────────────────
  * Refreshes run ONE AT A TIME: each spawns PotreeConverter, and the backend's
- * `_session_rebuild` docstring records the measurement that serialised LAS
+ * `_session_rebuild` docstring records the measurement that serialized LAS
  * writes overlapping the previous convert beat running them concurrently.
  *
  * Work COALESCES per cloud. The runner rebuilds from whatever the session holds

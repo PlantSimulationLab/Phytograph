@@ -1,20 +1,20 @@
 """ICP registration + cloud-to-mesh distance workers and their streaming pill.
 
-Two things changed when the alignment tools gained a cancellable progress pill:
+Two things changed when the alignment tools gained a cancelable progress pill:
   1. Each endpoint's body moved into a plain worker (`_do_c2c_icp`, `_do_m2m_icp`,
      `_do_c2m_icp`, `_do_c2m_distance`) taking an optional `progress` reporter, and
      the route became a `_bin_frame_streaming_response` wrapper (PHP1 markers +
      JSON tail) instead of a plain JSON handler.
   2. `run_icp_until_convergence` now polls the reporter's cancel Event between
-     20-iteration batches and raises ScanCancelled.
+     20-iteration batches and raises ScanCanceled.
 
 These tests assert the real behavior, not the absence of errors:
   * the extracted workers still produce a correct rigid transform that reduces a
     known centroid offset (the refactor didn't change the math);
-  * a reporter whose run is cancelled makes the ICP loop raise ScanCancelled
+  * a reporter whose run is canceled makes the ICP loop raise ScanCanceled
     between batches rather than running to convergence;
   * the endpoint streams the run_id up front and the JSON result as the tail,
-    and a cancelled worker yields a terminal `cancelled` marker instead.
+    and a canceled worker yields a terminal `canceled` marker instead.
 """
 
 import json
@@ -38,7 +38,7 @@ def _cube_cloud(n_side: int = 8) -> np.ndarray:
 def _seed_open3d(seed: int) -> None:
     """Pin Open3D's global RNG so mesh-surface sampling is reproducible.
     A no-op on builds without the seed API (the test then keeps its old,
-    slightly flaky behaviour rather than erroring)."""
+    slightly flaky behavior rather than erroring)."""
     try:
         import open3d as o3d
         o3d.utility.random.seed(seed)
@@ -131,7 +131,7 @@ def test_c2m_worker_recovers_known_offset_from_a_sparse_cloud():
     cloud, a 60-point target sampled the mesh with only 60 points and ICP
     converged to a different pose on every run (residuals wandering ~20-190 mm
     on identical inputs) — the random draw, not the geometry, chose the
-    correspondence. This is the c2m analogue of the c2c/m2m recovery tests,
+    correspondence. This is the c2m analog of the c2c/m2m recovery tests,
     which the suite previously had no equivalent of.
 
     Deliberately NOT seeded: the whole contract is that the result no longer
@@ -218,8 +218,8 @@ def test_worker_reports_progress_fractions():
 
 # ---- Cooperative cancellation (the ICP loop bails between batches) ----------
 
-def test_icp_loop_raises_when_cancelled():
-    """run_icp_until_convergence with a pre-set cancel Event raises ScanCancelled
+def test_icp_loop_raises_when_canceled():
+    """run_icp_until_convergence with a pre-set cancel Event raises ScanCanceled
     between batches rather than running to convergence."""
     import open3d as o3d
 
@@ -233,10 +233,10 @@ def test_icp_loop_raises_when_cancelled():
         p.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30))
 
     event = threading.Event()
-    event.set()  # cancelled before the first batch boundary
+    event.set()  # canceled before the first batch boundary
     reporter = main._ProgressReporter(queue.Queue(), event)
 
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main.run_icp_until_convergence(
             spcd, tpcd, 0.2, np.eye(4), max_iterations=100, rmse_threshold=1e-9,
             progress=reporter,
@@ -244,8 +244,8 @@ def test_icp_loop_raises_when_cancelled():
 
 
 def test_c2c_worker_propagates_cancel():
-    """The worker does not swallow ScanCancelled (its except re-raises it) so the
-    streaming wrapper can emit the terminal cancelled marker."""
+    """The worker does not swallow ScanCanceled (its except re-raises it) so the
+    streaming wrapper can emit the terminal canceled marker."""
     target = _cube_cloud()
     source = target + np.array([0.3, 0.0, 0.0])
     req = main.CloudToCloudICPRequest(
@@ -255,7 +255,7 @@ def test_c2c_worker_propagates_cancel():
     event = threading.Event()
     event.set()
     reporter = main._ProgressReporter(queue.Queue(), event)
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._do_c2c_icp(req, progress=reporter)
 
 

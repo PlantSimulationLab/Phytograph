@@ -394,10 +394,10 @@ test('segments every selected scan, keeping both halves of each', async () => {
   // that looks identical to the cloud it was just separated from defeats the
   // point of segmenting. The multi-scan case is the only one that can also pin
   // the two leftovers as distinct from EACH OTHER, and that is what forces the
-  // colour source to be an allocator rather than a one-shot allocateScanColor:
+  // color source to be an allocator rather than a one-shot allocateScanColor:
   // a one-shot re-reads the committed scan list, and React has not committed
   // the first leftover's add by the time the second is built, so both would
-  // come back the same colour.
+  // come back the same color.
   //
   // Asserted as named relationships rather than "all four rows differ" so a
   // failure says WHICH pair collided — child-matches-parent and the two
@@ -412,12 +412,12 @@ test('segments every selected scan, keeping both halves of each', async () => {
         r.getAttribute('data-scan-color') ?? '',
       ])),
     );
-    // Name=colour in the message: a bare "expected X to not be Y" cannot say
+    // Name=color in the message: a bare "expected X to not be Y" cannot say
     // which pair collided.
     const shown = Object.entries(swatches).map(([n, c]) => `${n}=${c}`).join(', ');
     for (const parent of ['scalars', 'scalars-b']) {
       const child = swatches[`${parent} (filtered out)`];
-      expect(child, `no colour on ${parent} (filtered out) — ${shown}`).toBeTruthy();
+      expect(child, `no color on ${parent} (filtered out) — ${shown}`).toBeTruthy();
       expect(child, `leftover kept its parent's swatch — ${shown}`).not.toBe(swatches[parent]);
     }
     expect(
@@ -606,7 +606,7 @@ test('previews a scalar filter live, before any commit', async () => {
 });
 
 test('previews a WIDE (float64) attribute in the right units', async () => {
-  // The trap this exists for: potree pre-normalises any attribute wider than a
+  // The trap this exists for: potree pre-normalizes any attribute wider than a
   // float32 into 0..1 on upload, while the panel's bounds come from the octree
   // metadata in FILE units. Testing 100..150 against a buffer holding 0.0..1.0
   // hides the entire cloud — silently, since a filter legitimately can.

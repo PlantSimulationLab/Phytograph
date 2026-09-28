@@ -43,26 +43,26 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   // it always reflects what's on disk (another surface could have changed it).
   useEffect(() => {
     if (!isOpen) return;
-    let cancelled = false;
+    let canceled = false;
     getSettings()
       .then((s) => {
-        if (!cancelled) setSettings(s);
+        if (!canceled) setSettings(s);
       })
       .catch(() => {});
     void window.electronAPI?.backend
       ?.getInfo()
       .then((i) => {
-        if (!cancelled) setAppVersion(i.appVersion);
+        if (!canceled) setAppVersion(i.appVersion);
       })
       .catch(() => {});
     setMemory(null);
     getMemoryBudget()
       .then((m) => {
-        if (!cancelled) setMemory(m);
+        if (!canceled) setMemory(m);
       })
       .catch(() => {});
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, [isOpen]);
 
@@ -165,7 +165,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       directory: true,
       title: 'Select the RiVLib folder',
     });
-    if (typeof picked !== 'string' || !picked) return; // cancelled
+    if (typeof picked !== 'string' || !picked) return; // canceled
     patch({ rivlibPath: picked });
     setRieglRefresh((n) => n + 1);
   }, [patch]);
@@ -176,7 +176,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   }, [patch]);
 
   // The image can only ever be built locally — publishing one would mean
-  // redistributing RiVLib, which its licence forbids. Without this button a
+  // redistributing RiVLib, which its license forbids. Without this button a
   // fresh machine reaches "image not built" with no in-app way forward.
   const [rieglStatus, setRieglStatus] = useState<RieglStatus | null>(null);
   // Null while the first probe is in flight, and while it is we say nothing

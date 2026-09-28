@@ -76,12 +76,12 @@ export function MissOctree({
   useEffect(() => {
     if (!missCacheId) return;
     const url = `app://octree/${missCacheId}/metadata.json`;
-    let cancelled = false;
+    let canceled = false;
     let pcoForCleanup: PointCloudOctree | null = null;
     manager
       .loadPointCloud(url, OctreeRequestManager)
       .then((pco) => {
-        if (cancelled) {
+        if (canceled) {
           pco.dispose();
           return;
         }
@@ -105,7 +105,7 @@ export function MissOctree({
         console.error(`Miss octree load failed for ${missCacheId}:`, err);
       });
     return () => {
-      cancelled = true;
+      canceled = true;
       if (pcoForCleanup) {
         scene.remove(pcoForCleanup);
         pcoForCleanup.dispose();
@@ -115,10 +115,10 @@ export function MissOctree({
     };
   }, [missCacheId, manager, scene, pointSize]);
 
-  // Flat-orange material. Mirrors OctreePointCloud's 'single' colour path
+  // Flat-orange material. Mirrors OctreePointCloud's 'single' color path
   // EXACTLY — the subtle parts are load-bearing: potree-core's COLOR mode only
   // activates with `newFormat=false`, the framebuffer write bypasses three.js's
-  // outputColorSpace conversion (RawShaderMaterial) so the colour is pre-encoded
+  // outputColorSpace conversion (RawShaderMaterial) so the color is pre-encoded
   // sRGB and the encoding flags are zeroed, and the shader source must be rebuilt
   // (newFormat/pointColorType are plain fields with no auto-recompile). Without
   // the recompile the cloud loads but renders nothing/garbage.

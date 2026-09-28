@@ -90,7 +90,7 @@ export interface LADProfile {
    * terrain-following grid gives every column its own base height. The level
    * bins are still exact (they are Helios cell indices, unaffected by the
    * column offsets), but `height` is then a MEAN over the level rather than a
-   * single shared elevation, so it must be labelled as height above ground.
+   * single shared elevation, so it must be labeled as height above ground.
    */
   terrainFollow: boolean;
 }

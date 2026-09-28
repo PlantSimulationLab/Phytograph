@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import * as THREE from 'three';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
-// Feedback while placing a cross-section centreline.
+// Feedback while placing a cross-section centerline.
 //
 // Without this the first click produces NOTHING on screen — the user cannot
 // tell whether it registered, where it landed, or which direction the section
@@ -12,7 +12,7 @@ import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 // Shows a marker at the placed point and, once the cursor moves, a rubber-band
 // line to it — the same "you clicked here, this is what you're making" cue the
 // crop box's two-corner draw gives.
-export function SlabCentrelinePreview({
+export function SlabCenterlinePreview({
   first,
   cursor,
   z,

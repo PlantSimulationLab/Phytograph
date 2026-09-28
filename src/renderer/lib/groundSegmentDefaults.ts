@@ -3,9 +3,9 @@
 // CSF's parameters are ABSOLUTE distances, so they're scale-dependent: a cloth
 // grid spacing and ground class-threshold tuned for a ~1 m close-range plant
 // scan (cloth 5 cm, threshold 2 cm) badly UNDER-segment a 50 m field/orchard
-// scan. At cm resolution the cloth can't drape over metre-scale terrain relief,
+// scan. At cm resolution the cloth can't drape over meter-scale terrain relief,
 // and a 2 cm class threshold rejects true ground points that settle further
-// than that from the cloth — the failure mode is "nearly everything labelled
+// than that from the cloth — the failure mode is "nearly everything labeled
 // non-ground" even when the ground is visually obvious. The fix is to seed the
 // params from the cloud's extent when the segmentation panel opens.
 //
@@ -134,7 +134,7 @@ const VEGETATION_RELIEF_RATIO = 0.7;
 // Mirrored by `_ALS_SPACING_M` / `_ALS_CLOTH` in backend-api/main.py, which the
 // DEM tool's auto path uses.
 // BOTH conditions are required, and the extent one is not redundant. Spacing
-// alone misreads a sparse SMALL cloud: 3D nearest-neighbour distance measures how
+// alone misreads a sparse SMALL cloud: 3D nearest-neighbor distance measures how
 // far apart points are in space, so a volume-filling cloud reads far sparser than
 // a surface scan of the same extent — 2000 points scattered through a 5 m cube
 // measure 0.219 m, past the cutoff. Real close-range scans sample surfaces at
@@ -157,7 +157,7 @@ function clampRound(value: number, lo: number, hi: number): number {
  * Suggested CSF defaults for a cloud, seeded from its horizontal extent and
  * vertical relief. `horizontalExtentM` is the largest X/Y span (Z is up);
  * `verticalReliefM` is the Z span (optional — omit / pass 0 for the historical
- * flat-terrain behaviour). Falls back to the plant-scale default for a
+ * flat-terrain behavior). Falls back to the plant-scale default for a
  * non-finite or non-positive extent.
  *
  * Note the relief is the cloud's bounding-box height, so a tall plant reads as

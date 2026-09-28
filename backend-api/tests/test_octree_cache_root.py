@@ -130,7 +130,7 @@ def test_macos_cache_is_not_in_the_electron_user_data_dir(clean_env, tmp_path):
     The root used to be ~/Library/Application Support/Phytograph/cache/octrees.
     `<userData>/Cache` is Chromium's HTTP cache, and the default APFS volume is
     case-insensitive, so `cache` and `Cache` were one directory — Chromium
-    empties it when it initialises its disk cache, so every app launch deleted
+    empties it when it initializes its disk cache, so every app launch deleted
     the entire octree cache (and a second concurrent instance deleted it out
     from under a running app). Asserted as "not under Application Support"
     rather than as an exact string because the bug is about who OWNS the
@@ -158,7 +158,7 @@ _USER_DATA_ROOTS = {
 
 @pytest.mark.parametrize("platform", sorted(PLATFORM_IDS))
 def test_never_resolves_inside_a_chromium_managed_cache_dir(clean_env, platform, tmp_path):
-    """Generalised form of both cache-root regressions."""
+    """Generalized form of both cache-root regressions."""
     home = tmp_path / "home"
     _pin(clean_env, PLATFORM_IDS[platform], home)
 

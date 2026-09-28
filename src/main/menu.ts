@@ -297,11 +297,11 @@ export function retainedMenuState(): MenuStatePayload {
 }
 
 /**
- * Grey out (or re-enable) the menu items the renderer reports on.
+ * Gray out (or re-enable) the menu items the renderer reports on.
  *
  * Only ids present in `enabled` are touched: an item that has never been
  * reported keeps whatever the template gave it. That asymmetry is deliberate —
- * a wrongly-greyed item is unreachable with no explanation, whereas a wrongly-
+ * a wrongly-grayed item is unreachable with no explanation, whereas a wrongly-
  * enabled one still runs its action, which reports why it did nothing.
  */
 export function applyMenuState(payload: MenuStatePayload): void {

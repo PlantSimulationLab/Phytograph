@@ -1,6 +1,6 @@
 // Static, always-visible toolbar block. Renders the commands for one *section*
 // of the registry (Tools / Create / Simulate — see lib/toolCommands.ts) grouped
-// by toolGroup. Every tool is always shown; single-input/gizmo tools grey out
+// by toolGroup. Every tool is always shown; single-input/gizmo tools gray out
 // with a tooltip when their prerequisite isn't selected, while multi-input tools
 // (which pick their own inputs in a dialog) stay enabled. This replaces the old
 // selection-conditional toolbar so users can always see every available action.
@@ -72,7 +72,7 @@ export function Toolbar({ commands, selection, title = 'Tools', groups = TOOL_GR
                     data-active={active ? 'true' : 'false'}
                     // While busy the action is in flight — ignore clicks so it
                     // can't be re-triggered, but keep the button enabled so its
-                    // spinner stays full-opacity (disabled would grey it out).
+                    // spinner stays full-opacity (disabled would gray it out).
                     onClick={() => { if (available && !busy) cmd.action(); }}
                     disabled={!available && !busy}
                     title={title}

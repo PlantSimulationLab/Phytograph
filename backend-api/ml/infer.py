@@ -9,8 +9,8 @@ k nearest voxels of a seed point. The cloud is covered crop by crop:
    mark the crop's inner ``inner_fraction`` (by distance) as covered. Crops
    are batched.
 3. Accumulate each crop's softmax into its voxels, weighted by closeness to
-   the crop centre, since predictions near a crop's rim have seen only half a
-   neighbourhood.
+   the crop center, since predictions near a crop's rim have seen only half a
+   neighborhood.
 4. Take the argmax per voxel and scatter it back to every input point through
    the inverse map.
 
@@ -20,7 +20,7 @@ so votes from different crops agree wherever the network does.
 
 Every voxel is at the inner part of at least one crop, so none is predicted
 only from a crop's edge. Crops are the same shape training sampled: a kNN ball
-around a real point, centred on it. :func:`crop_features` is shared with the
+around a real point, centered on it. :func:`crop_features` is shared with the
 trainer, so the network's input is built one way only.
 """
 
@@ -37,13 +37,13 @@ from .grid import grid_sample
 from .package import ModelPackage
 
 
-class Cancelled(Exception):
+class Canceled(Exception):
     """Raised when the cancel callback returns True between batches."""
 
 
 def crop_features(dxyz: np.ndarray, reflectance: np.ndarray | None, channels: list[str]) -> np.ndarray:
     """The network's per-point input for one crop: the channels in ``channels``
-    order. ``dxyz`` is the offset from the crop centre in metres."""
+    order. ``dxyz`` is the offset from the crop center in meters."""
     cols = []
     for c in channels:
         if c == "dxyz":
@@ -110,11 +110,11 @@ def predict(
     ["value"]``, never output indices). With ``return_probs`` it returns
     ``(values, probs)``, where ``probs`` is (N, C) float32. With
     ``return_offsets`` (a model with an offset head) the per-point centroid
-    offsets, (N, 3) float32 metres, and instance radii, (N,) float32 metres,
+    offsets, (N, 3) float32 meters, and instance radii, (N,) float32 meters,
     are appended to whatever is returned.
 
     ``progress(fraction)`` is called after each batch, and ``cancel()`` is
-    polled before each batch (raising :class:`Cancelled`).
+    polled before each batch (raising :class:`Canceled`).
     """
     import torch
 
@@ -138,10 +138,10 @@ def predict(
         return pack(np.empty(0, np.int32), np.empty((0, n_cls), np.float32),
                     (np.empty((0, 3), np.float32), np.empty(0, np.float32)))
 
-    # Centre in float64 before narrowing: georeferenced clouds (UTM) would
-    # lose millimetres in float32 otherwise.
-    centre = (xyz.min(axis=0) + xyz.max(axis=0)) / 2
-    p = xyz - centre
+    # Center in float64 before narrowing: georeferenced clouds (UTM) would
+    # lose millimeters in float32 otherwise.
+    center = (xyz.min(axis=0) + xyz.max(axis=0)) / 2
+    p = xyz - center
     keep, inverse = grid_sample(p, pkg.hierarchy.voxel)
     vox = p[keep].astype(np.float32)
     vrefl = None
@@ -177,7 +177,7 @@ def predict(
         with torch.inference_mode():
             while True:
                 if cancel is not None and cancel():
-                    raise Cancelled()
+                    raise Canceled()
                 seeds = []
                 while len(seeds) < batch_crops and cursor < m:
                     s = order[cursor]

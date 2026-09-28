@@ -189,7 +189,7 @@ def admission_budget_bytes() -> int:
     machine under momentary pressure still makes progress one job at a time
     (a lone job over the budget is admitted anyway - see `Admission`).
 
-    A PINNED budget is honoured as-is: the user said a number, and silently
+    A PINNED budget is honored as-is: the user said a number, and silently
     admitting less than it would make the setting a lie. Unmeasurable
     availability (0) also falls through to the plain budget.
     """

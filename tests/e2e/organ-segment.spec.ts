@@ -10,14 +10,14 @@ import { resetToFreshScene } from './helpers/resetApp';
 // backend-api/research/ml/organ_make_fixtures.py and neither was trained on:
 //
 // potted-tomato.xyz: a Helios synthetic 31-day tomato in a pot, from the
-//   val_synth split, at 3 mm, in METRES. Its exact labels (not in the file):
+//   val_synth split, at 3 mm, in METERS. Its exact labels (not in the file):
 //   38,559 soil, 3,205 stem and 18,981 leaf points, 112 leaflets. The model
 //   gives 38,561 / 2,933 / 19,251 and 101 leaflets; the bounds below are set
 //   around the TRUTH, wide enough for a retrained model, tight enough to fail
 //   one that has lost the stems or merged the leaflets.
 // sugar-beet-mm.xyz: a real Sugar4D plant (CC BY 4.0, see sugar-beet-mm.README.md; test split) in
-//   MILLIMETRES, 5 hand-labelled leaves plus a crown of young leaves the
-//   labellers never separated. The model finds 7 (the 5 and two young ones).
+//   MILLIMETERS, 5 hand-labeled leaves plus a crown of young leaves the
+//   labelers never separated. The model finds 7 (the 5 and two young ones).
 const TOMATO = join(repoRoot, 'tests', 'e2e', 'fixtures', 'potted-tomato.xyz');
 const BEET_MM = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sugar-beet-mm.xyz');
 
@@ -63,9 +63,9 @@ test('labels a potted tomato soil / stem / leaf and numbers its leaflets', async
 
   await page.getByTestId('tool-organ-segment').click();
   await expect(page.getByTestId('organ-segment-panel')).toBeVisible();
-  // Defaults: units read from the cloud's size, result coloured by organ.
+  // Defaults: units read from the cloud's size, result colored by organ.
   await expect(page.getByTestId('organ-units')).toHaveValue('auto');
-  await expect(page.getByTestId('organ-colour-by')).toHaveValue('organ');
+  await expect(page.getByTestId('organ-color-by')).toHaveValue('organ');
   // Where the model will run is torch's own answer, from the live backend.
   const pill = page.getByTestId('organ-ml-device');
   await expect(pill).toBeVisible({ timeout: 60_000 });
@@ -73,7 +73,7 @@ test('labels a potted tomato soil / stem / leaf and numbers its leaflets', async
 
   await page.getByTestId('organ-segment-run-button').click();
   const r = await readResultToast(page);
-  expect(r.units).toBe('metres');
+  expect(r.units).toBe('meters');
   expect(r.soil + r.stem + r.leaf).toBe(60745);
   expect(r.soil).toBeGreaterThan(36_500);   // truth 38,559
   expect(r.soil).toBeLessThan(40_500);
@@ -85,7 +85,7 @@ test('labels a potted tomato soil / stem / leaf and numbers its leaflets', async
   expect(r.leaflets).toBeLessThanOrEqual(135);
   await expect(page.getByTestId('organ-segment-panel')).toHaveCount(0);
 
-  // Coloured categorically by the organ column, with the three named classes.
+  // Colored categorically by the organ column, with the three named classes.
   const legend = page.getByTestId('class-legend');
   await expect(legend).toBeVisible({ timeout: 30_000 });
   await expect(legend).toHaveAttribute('data-legend-attribute', 'plant_organ');
@@ -93,7 +93,7 @@ test('labels a potted tomato soil / stem / leaf and numbers its leaflets', async
     await expect(legend.getByText(name, { exact: true })).toBeVisible();
   }
 
-  // Both columns were written: the leaflet ids are a colour mode of their own.
+  // Both columns were written: the leaflet ids are a color mode of their own.
   await page.getByRole('button', { name: 'Display' }).click();
   const colorMode = page.getByTestId('display-color-mode');
   await row.click();
@@ -106,23 +106,23 @@ test('labels a potted tomato soil / stem / leaf and numbers its leaflets', async
   expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(60745);
 });
 
-test('reads a millimetre scan as millimetres and can colour by leaflet', async () => {
+test('reads a millimeter scan as millimeters and can color by leaflet', async () => {
   const { page } = session;
   const row = await importOne(page, BEET_MM, 'sugar-beet-mm', 11267);
 
   await page.getByTestId('tool-organ-segment').click();
   await expect(page.getByTestId('organ-segment-panel')).toBeVisible();
-  // Non-default output: leave the cloud coloured by leaflet.
-  await page.getByTestId('organ-colour-by').selectOption('leaflet');
+  // Non-default output: leave the cloud colored by leaflet.
+  await page.getByTestId('organ-color-by').selectOption('leaflet');
   await page.getByTestId('organ-segment-run-button').click();
 
   const r = await readResultToast(page);
-  // About 400 units across: a 0.4 m plant in millimetres, not a 400 m one in metres.
-  expect(r.units).toBe('millimetres');
+  // About 400 units across: a 0.4 m plant in millimeters, not a 400 m one in meters.
+  expect(r.units).toBe('millimeters');
   expect(r.soil + r.stem + r.leaf).toBe(11267);
   expect(r.soil).toBeLessThan(200);          // Sugar4D has its soil removed
   expect(r.leaf).toBeGreaterThan(9_000);     // a beet is nearly all leaf
-  expect(r.leaflets).toBeGreaterThanOrEqual(4);   // 5 labelled leaves + young ones
+  expect(r.leaflets).toBeGreaterThanOrEqual(4);   // 5 labeled leaves + young ones
   expect(r.leaflets).toBeLessThanOrEqual(9);
 
   await page.getByRole('button', { name: 'Display' }).click();
@@ -130,7 +130,7 @@ test('reads a millimetre scan as millimetres and can colour by leaflet', async (
   await expect(page.getByTestId('display-color-mode')).toHaveValue('scalar:leaflet_id');
 });
 
-test('explicit metres on a millimetre scan warns that it is not plant-sized', async () => {
+test('explicit meters on a millimeter scan warns that it is not plant-sized', async () => {
   const { page } = session;
   await importOne(page, BEET_MM, 'sugar-beet-mm', 11267);
 
@@ -139,7 +139,7 @@ test('explicit metres on a millimetre scan warns that it is not plant-sized', as
   await page.getByTestId('organ-segment-run-button').click();
 
   const r = await readResultToast(page);
-  expect(r.units).toBe('metres');
+  expect(r.units).toBe('meters');
   const info = page.locator('[data-testid="toast-info"]').last();
   await expect(info.getByTestId('toast-message')).toContainText('not the size of a plant', { timeout: 30_000 });
 });

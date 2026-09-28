@@ -30,7 +30,7 @@ Protocol (all files live in `workdir`):
        error.txt        traceback on failure (exit code 1)
 
 `poisson` is here for a different reason than the segmentation tools: not
-cancellability but CRASH ISOLATION. Open3D 0.19.0's
+cancelability but CRASH ISOLATION. Open3D 0.19.0's
 `create_from_point_cloud_poisson` segfaults inside its own OpenMP microtask on
 roughly 6% of calls (measured on macOS/arm64 over 30 single-call trials, and
 independent of pyhelios, thread affinity, OMP_NUM_THREADS and input size). In
@@ -186,7 +186,7 @@ def run(workdir: str) -> int:
             # tile pool refuses to open unless PHYTOGRAPH_SEG_WORKER is set
             # (tiled.worker_count), because multiprocessing forks before it
             # execs and a forked copy of a process holding open3d or libhelios
-            # dies. Cancellability comes along for free -- an open3d
+            # dies. Cancelability comes along for free -- an open3d
             # estimate_normals call is a monolithic C++ loop that cannot poll a
             # flag, so killing the process is the only way to stop it.
             #
@@ -208,7 +208,7 @@ def run(workdir: str) -> int:
 
         elif tool == "trees" and params.get("method") == "chm":
             # Canopy-height-model watershed (chm_trees.py): one O(N) pass, so no
-            # tiling. Optional ground.npy (the cloud's ground-labelled points)
+            # tiling. Optional ground.npy (the cloud's ground-labeled points)
             # feeds the DTM; without it the lowest returns stand in.
             import chm_trees
             seeds_path = os.path.join(workdir, "seeds.npy")
@@ -298,7 +298,7 @@ def _watch_parent(poll_s: float = 2.0) -> None:
       * the machine kills it for any other reason.
     Each orphan holds the staged cloud plus its own compute copies — multi-GB on
     a real scan — with no parent, no terminal, and a name the user will not
-    recognise, and they stack across launches.
+    recognize, and they stack across launches.
 
     A `getppid()` poll rather than `prctl(PR_SET_PDEATHSIG)` because the latter
     is Linux-only and, being per-process, would not survive the tiled tools'

@@ -262,7 +262,7 @@ def test_full_fit_is_deterministic():
 # Divergence guard -- regression for the "giant cylinder shooting off into
 # space" bug. A Gauss-Newton fit can converge to a wild axis offset on a
 # pathological point set (e.g. crossing-branch points handed over by the
-# nearest-cylinder assignment), relocating the cylinder metres from its
+# nearest-cylinder assignment), relocating the cylinder meters from its
 # trustworthy skeleton position. The fitted CYLINDER GEOMETRY must stay near the
 # input; these assert on the geometry (not just radius), which the earlier tests
 # did NOT -- which is why the bug slipped through.
@@ -333,7 +333,7 @@ def test_divergence_guard_rejects_relocated_fit():
     """A cylinder fed points that pull its fitted axis far from the seed is flagged
     unreliable, so its geometry is NOT moved. Simulate a clean cylinder PLUS a
     cluster of off-axis points (a crossing branch) and confirm the fit either stays
-    near the seed or is flagged unreliable -- never relocates metres away."""
+    near the seed or is flagged unreliable -- never relocates meters away."""
     start, end, pts = _simulate_cylinder(
         start=[0.0, 0.0, 0.0], axis=[0, 0, 1], length=0.4,
         radius=0.03, n=3000, noise=0.001, seed=11,

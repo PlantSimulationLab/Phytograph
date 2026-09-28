@@ -47,7 +47,7 @@ through the HTTP endpoint including the ~4.5 s worker start-up, the staging of
 cloud and a flat uniform sheet come out within 10% of each other, so the figure
 is not fixture-specific. Budget roughly 4 minutes for 100 M points.
 
-A tiled normal is only correct if the tile sees the whole neighbourhood the
+A tiled normal is only correct if the tile sees the whole neighborhood the
 untiled one would. Measured against the untiled result, on a uniform cloud and
 on a TLS-like 1/r^2 density cloud:
 
@@ -109,11 +109,11 @@ DEFAULT_K = 30
 MIN_K = 4          # a plane needs 3; 4 keeps the covariance non-degenerate
 MAX_K = 200        # past this the cost is quadratic-ish for no accuracy gain
 
-# Below this a neighbourhood statistic is meaningless and every heuristic
+# Below this a neighborhood statistic is meaningless and every heuristic
 # degenerates. Matches `denoise.MIN_POINTS` for consistency across tools.
 MIN_POINTS = 100
 
-# Tile collar as a multiple of the p99 k-th nearest-neighbour distance. 1.5
+# Tile collar as a multiple of the p99 k-th nearest-neighbor distance. 1.5
 # reproduces the untiled result exactly; see the module docstring.
 _COLLAR_MULTIPLE = 1.5
 
@@ -167,15 +167,15 @@ def _tile_target_points() -> int:
 def knn_distance_percentile(points: np.ndarray, k: int, q: float = 99.0,
                             sample: int = _SPACING_SAMPLE,
                             tree: "Optional[cKDTree]" = None) -> Optional[float]:
-    """Percentile of the distance to the k-th nearest neighbour, or None.
+    """Percentile of the distance to the k-th nearest neighbor, or None.
 
     Deterministic: an evenly-spaced index sample, no RNG -- same discipline as
     `denoise._nn_distances`, and for the same reason (a stride sample of a
     SURFACE widens its apparent spacing by ~sqrt(stride), so the sample must be
-    of whole neighbourhoods, not of thinned ones).
+    of whole neighborhoods, not of thinned ones).
 
-    This is the k-TH neighbour, not the first: the collar has to contain the
-    entire neighbourhood the estimator will look at, and that is set by the k-th.
+    This is the k-TH neighbor, not the first: the collar has to contain the
+    entire neighborhood the estimator will look at, and that is set by the k-th.
     """
     finite = points[np.isfinite(points).all(axis=1)]
     if len(finite) < MIN_POINTS:
@@ -221,7 +221,7 @@ def _eigen_normals(points: np.ndarray, k: int,
     else:
         search = o3d.geometry.KDTreeSearchParamKNN(kk)
 
-    # ONE neighbourhood search, not two.
+    # ONE neighborhood search, not two.
     #
     # The obvious shape - `estimate_normals` for the directions, then
     # `estimate_covariances` for the eigenvalues curvature needs - runs the
@@ -250,7 +250,7 @@ def _eigen_normals(points: np.ndarray, k: int,
     out[:, 3] = np.nan_to_num(curvature, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     out[:, 4] = np.nan_to_num(verticality, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
-    # Zero out points whose neighbourhood could not define a plane.
+    # Zero out points whose neighborhood could not define a plane.
     #
     # `eigh` of a rank-deficient (or all-zero) covariance returns an ARBITRARY
     # orthonormal basis, and the code above then emits a unit-length normal with
@@ -267,13 +267,13 @@ def _eigen_normals(points: np.ndarray, k: int,
     #
     # Two signatures, both verified against open3d 0.19:
     #
-    #   * `total` (the covariance trace, i.e. the neighbourhood's total spread)
-    #     is 0 exactly when every neighbour coincides with the point.
+    #   * `total` (the covariance trace, i.e. the neighborhood's total spread)
+    #     is 0 exactly when every neighbor coincides with the point.
     #   * open3d returns the IDENTITY matrix when it cannot compute a covariance
-    #     at all -- a point with no neighbours inside a pinned radius. That is a
+    #     at all -- a point with no neighbors inside a pinned radius. That is a
     #     sentinel, not a measurement, and it is why the isolated-point case
     #     scored curvature 1/3: it is literally 1/(1+1+1). Detect it as three
-    #     equal unit eigenvalues, which a real neighbourhood does not produce
+    #     equal unit eigenvalues, which a real neighborhood does not produce
     #     (it would have to be perfectly isotropic AND scaled to exactly 1.0).
     identity_sentinel = np.all(np.abs(evals - 1.0) < 1e-9, axis=1)
     degenerate = ~np.isfinite(total) | (total <= 0) | identity_sentinel
@@ -288,7 +288,7 @@ def orient(result: np.ndarray, points: np.ndarray, *,
     """Flip normals in place so they face the sensor (or +Z), and return them.
 
     `origin` is either a single (3,) viewpoint or a per-point (M, 3) array of
-    beam origins. Every rule here is a per-point decision -- no neighbourhood,
+    beam origins. Every rule here is a per-point decision -- no neighborhood,
     no propagation -- which is exactly why a tiled run has no seams.
     """
     if orientation == "none" or len(result) == 0:
@@ -387,7 +387,7 @@ def compute_normals(points: np.ndarray, *, k: int = DEFAULT_K,
         res = _eigen_normals(pts, k, radius)
         return orient(res, pts, orientation=orientation, origin=origin_arr)
 
-    # Collar from the cloud's OWN k-th-neighbour distance, measured once on a
+    # Collar from the cloud's OWN k-th-neighbor distance, measured once on a
     # deterministic sample so every tile applies the same one. A per-tile
     # measurement would let tiles disagree about how much context they need.
     spacing = knn_distance_percentile(pts, k, 99.0)
@@ -469,7 +469,7 @@ def compute_normals(points: np.ndarray, *, k: int = DEFAULT_K,
         tiles = plan.tiles()
         for i, (tile, idx, core, chunk) in enumerate(tiled.iter_tiles(plan, pts)):
             if should_cancel is not None and should_cancel():
-                raise tiled.TiledCancelled()
+                raise tiled.TiledCanceled()
             res = _eigen_normals(chunk, k, radius)
             res = orient(res, chunk, orientation=orientation,
                          origin=origin_arr[idx])

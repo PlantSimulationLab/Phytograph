@@ -17,10 +17,10 @@ model users run:
 `ml/models/pointnext.py` is a PointNeXt-style segmentation network (Qian et
 al. 2022). It has a stem, four set-abstraction stages with InvResMLP blocks,
 and a feature-propagation decoder. PointNeXt's farthest-point sampling and
-ball-query CUDA kernels are replaced by a neighbour hierarchy that
+ball-query CUDA kernels are replaced by a neighbor hierarchy that
 `ml/hierarchy.py` builds on the CPU with numpy/scipy:
 
-- **Downsampling** uses voxel-grid barycentres, grown until each level has at
+- **Downsampling** uses voxel-grid barycenters, grown until each level has at
   most a quarter of the points of the level before it.
 - **Grouping** uses kNN, clamped to a radius.
 
@@ -35,7 +35,7 @@ platform. torch was already in the PyInstaller bundle (via `phytorch-lib`).
 1. Grid-sample to the model's base voxel (1 cm) and keep the inverse map.
 2. Take the next uncovered voxel as a seed and crop its 24k nearest voxels.
 3. Mark the inner 70 % of the crop, by distance, as covered.
-4. Average the softmax outputs, weighted by closeness to the crop centre.
+4. Average the softmax outputs, weighted by closeness to the crop center.
 5. Scatter the per-voxel argmax back to every input point.
 
 Training crops are built the same way (`ml/data/crops.py`) and share
@@ -70,7 +70,7 @@ twice (see the octree cache root in `CLAUDE.md`).
 Torch is never imported into the FastAPI server process, because it costs
 about 0.5 GB of RSS for the life of the backend. Inference, the device probe
 (`/api/ml/device`) and import validation all run as `_run_killable` tools in
-`seg_worker.py`, which also makes them cancellable.
+`seg_worker.py`, which also makes them cancelable.
 
 `ml/device.py` checks that a kernel actually executes rather than trusting
 `torch.cuda.is_available()`. The cu13 wheel reports True on a V100 (sm_70) and
@@ -93,11 +93,11 @@ points only, misses 0):
 | `plant_organ` | 1 soil, 2 stem, 3 leaf (mapped from the package's classes by name) |
 | `leaflet_id` | 0 none, 1..N one per leaflet, numbered by centroid height |
 
-The model works in metres. `units` ("auto", "m", "cm", "mm") says what the
+The model works in meters. `units` ("auto", "m", "cm", "mm") says what the
 cloud is in; "auto" (`resolve_units`) reads more than 30 units across as
-millimetres, and the response reports the units used plus a warning when the
+millimeters, and the response reports the units used plus a warning when the
 cloud is not plant-sized in them (outside 2 cm-5 m), or when "auto" read 30-300
-units as millimetres, which is also a plausible plant in centimetres. The bundled default is
+units as millimeters, which is also a plausible plant in centimeters. The bundled default is
 `resources/ml_models/plant-organ-pointnext-s-v1` (`registry.DEFAULT_MODELS`),
 gated by `backend-api/tests/test_ml_organ.py` on two fixtures no model was
 trained on. `backend-api/research/ml/organ_predict.py` still writes a
@@ -109,7 +109,7 @@ Three things differ from leaf/wood:
 - **Scale.** The base voxel is 2 mm, not 1 cm: a tomato petiolule is about
   1 mm across.
 - **Partial labels.** A source code may map to a *set* of classes
-  (`sem_to_allowed` in `ml/tasks.py`), and the loss maximises the probability
+  (`sem_to_allowed` in `ml/tasks.py`), and the loss maximizes the probability
   of the set. Sugar4D labels a whole beet leaf without separating petiole
   from blade, so its leaf points train "stem or leaf". A beet taproot is
   "soil or stem": certainly not leaf. A singleton set is ordinary

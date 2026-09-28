@@ -24,7 +24,7 @@ const OBJ = join(repoRoot, 'tests', 'e2e', 'fixtures', 'upslope-canopy.obj');
 // cloud". Two independent causes, the first masking the second:
 //
 //  1. A product bug in the Lmax auto-estimate: a cluster of degenerate
-//     sub-millimetre candidate triangles dominated the Otsu split, so the
+//     sub-millimeter candidate triangles dominated the Otsu split, so the
 //     estimate landed BELOW every real triangle, the seeded filter kept nothing,
 //     and the empty mesh failed the inversion with "mesh_indices is empty".
 //     Fixed by the degenerate floor + Lmax clamp in `_helios_filter_estimate`.

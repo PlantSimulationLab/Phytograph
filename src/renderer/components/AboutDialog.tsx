@@ -27,11 +27,11 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
 
   useEffect(() => {
     if (!isOpen) return;
-    let cancelled = false;
+    let canceled = false;
     void window.electronAPI.backend
       .getInfo()
       .then((i) => {
-        if (cancelled) return;
+        if (canceled) return;
         setInfo({
           appVersion: i.appVersion,
           backendVersion: i.expectedVersion,
@@ -41,10 +41,10 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
         });
       })
       .catch(() => {
-        if (!cancelled) setInfo(null);
+        if (!canceled) setInfo(null);
       });
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, [isOpen]);
 

@@ -9,7 +9,7 @@ import { PointSizeType } from 'potree-core';
 // written pixel. Aim tolerance, in effect.
 export const OCTREE_PICK_WINDOW_PX = 13;
 
-// Pixel diameter each point is rasterised at DURING THE PICK PASS ONLY.
+// Pixel diameter each point is rasterized at DURING THE PICK PASS ONLY.
 //
 // This is the whole reason sparse clouds used to be nearly unclickable.
 // `Potree.pick` re-renders the visible nodes into an index buffer and then
@@ -24,9 +24,9 @@ export const OCTREE_PICK_WINDOW_PX = 13;
 //
 // Inflating the splat here decouples the CLICK TARGET from the DISPLAY size —
 // the cloud still draws crisp at `pointSize`, but for the one off-screen pick
-// render each point covers a ~9 px disc, which is what CloudCompare
+// render each point covers a ~9 px disk, which is what CloudCompare
 // effectively does. Kept below OCTREE_PICK_WINDOW_PX so a splat cannot fill
-// the entire readback window: `findHit` breaks ties by distance-to-centre in
+// the entire readback window: `findHit` breaks ties by distance-to-center in
 // 2D with no depth test, so an over-large splat would let a point far from the
 // cursor blanket the window and win.
 //

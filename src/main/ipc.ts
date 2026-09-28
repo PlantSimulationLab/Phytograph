@@ -79,7 +79,7 @@ export function registerIpc(): void {
   // renderer picks it via the normal dialog.save() IPC first, matching how
   // exports work elsewhere), then reveal it in the OS file manager so the user
   // can drag it into a GitHub issue / email — external URLs can't carry
-  // attachments. A null destPath (user cancelled the save dialog) is a no-op.
+  // attachments. A null destPath (user canceled the save dialog) is a no-op.
   ipcMain.handle(
     IPC.LogsExport,
     async (_e, destPath: string | null): Promise<LogExportResult> => {

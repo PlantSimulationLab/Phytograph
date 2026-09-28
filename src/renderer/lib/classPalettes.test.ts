@@ -26,7 +26,7 @@ describe('validatePalette', () => {
     expect(validatePalette(OK)).toEqual([]);
   });
 
-  it('REQUIRES class 0 — merged/unlabelled points arrive as 0', () => {
+  it('REQUIRES class 0 — merged/unlabeled points arrive as 0', () => {
     // Not cosmetic: the backend's merge zero-fills a column missing from one
     // input session, so 0 must mean "unclassified" in every palette.
     const errs = paletteErrors(palette([
@@ -106,15 +106,15 @@ describe('nextFreeClassValue', () => {
 describe('distinctClassColor', () => {
   const dist = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
-  it('never hands a new class Unclassified\'s grey', () => {
-    const grey: [number, number, number] = [0.55, 0.55, 0.55];
-    const c = distinctClassColor([grey]);
-    expect(dist(c, grey)).toBeGreaterThan(0.25);
+  it('never hands a new class Unclassified\'s gray', () => {
+    const gray: [number, number, number] = [0.55, 0.55, 0.55];
+    const c = distinctClassColor([gray]);
+    expect(dist(c, gray)).toBeGreaterThan(0.25);
     // Saturated, not another neutral.
     expect(Math.max(...c) - Math.min(...c)).toBeGreaterThan(0.3);
   });
 
-  it('successive additions each get a colour unlike all their siblings', () => {
+  it('successive additions each get a color unlike all their siblings', () => {
     const colors: [number, number, number][] = [[0.55, 0.55, 0.55]];
     for (let i = 0; i < 8; i++) {
       const c = distinctClassColor(colors);
@@ -155,7 +155,7 @@ describe('scheme bridge', () => {
     // Guards the concrete regression the index remap exists to prevent.
     // potree bakes these stops into a 64-TEXEL canvas with LinearFilter, so a
     // band narrower than 1/64 of the gradient is averaged away on screen even
-    // though the stop list still names three distinct colours. Measure the BAND
+    // though the stop list still names three distinct colors. Measure the BAND
     // WIDTHS, which is what actually survives the bake.
     const TEXEL = 1 / 64;
     const widths = (stops: Array<[number, unknown]>) => {
@@ -215,8 +215,8 @@ describe('presets', () => {
 
   it('binds each preset to the COLUMN it describes, not just a vocabulary', () => {
     // The bug: every preset was bound to manual_class, so switching to ASPRS
-    // read the (empty) hand-labelling column while the cloud's real classes sat
-    // in an imported one — Ground reported 0 points and nothing coloured.
+    // read the (empty) hand-labeling column while the cloud's real classes sat
+    // in an imported one — Ground reported 0 points and nothing colored.
     expect(defaultSlugForPreset('asprs', 'manual_class')).toBe('las_classification');
     expect(defaultSlugForPreset('wood_leaf', 'manual_class')).toBe('manual_class');
     expect(defaultSlugForPreset('organ', 'manual_class')).toBe('manual_class');
@@ -311,7 +311,7 @@ describe('parsePalette', () => {
 
 // ── Labelable columns ────────────────────────────────────────────────────────
 //
-// The feature these back: the labelling tool could reach exactly four columns,
+// The feature these back: the labeling tool could reach exactly four columns,
 // so a cloud carrying its own classification (a `tree_instance` from a failed
 // tree segmentation) could not be hand-corrected at all. These assert the
 // column list and the derived class list against the shape of a REAL failing
@@ -489,7 +489,7 @@ describe('derivePaletteForColumn', () => {
     derivePaletteForColumn(col, NOW, categoricalSchemeForRange,
       buildGenericCategoricalSchemeFromValues);
 
-  it('derives the real classes of a tree-instance column, with 0 synthesised', () => {
+  it('derives the real classes of a tree-instance column, with 0 synthesized', () => {
     const p = derive(treeColumn);
     expect(p.classes.map((c) => c.value)).toEqual([0, 1, 2]);
     expect(p.classes.map((c) => c.label)).toEqual(['Unassigned', 'Tree 1', 'Tree 2']);
@@ -501,7 +501,7 @@ describe('derivePaletteForColumn', () => {
     expect(validatePalette(p)).toEqual([]);
   });
 
-  it('uses the colours the VIEWER already draws for those ids', () => {
+  it('uses the colors the VIEWER already draws for those ids', () => {
     // The assertion that proves panel and viewport agree. A palette that merely
     // had the right names would still mislabel every swatch.
     const p = derive(treeColumn);

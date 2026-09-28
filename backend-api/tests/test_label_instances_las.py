@@ -5,7 +5,7 @@
   one undoable stroke.
 - F9 LAS output: flag columns become the record's flag bits (and come back),
   the classification byte is taken from a chosen column (refused above 255),
-  and class names/colours travel in the file and come back as palettes.
+  and class names/colors travel in the file and come back as palettes.
 """
 from pathlib import Path
 
@@ -78,7 +78,7 @@ def test_from_column_maps_classes_and_leaves_unmapped_alone(client, cloud):
     assert res.json()["class_counts"] == {"0": 40}
 
 
-def test_from_column_identity_copy_honours_the_from_gate(client, cloud):
+def test_from_column_identity_copy_honors_the_from_gate(client, cloud):
     # Paint x < 5 as 9 first; an identity copy gated to Unclassified must not
     # overwrite it.
     _paint(client, cloud, [{"region": {"kind": "box", "min": [-1, -1, -1], "max": [4.5, 9, 9]},

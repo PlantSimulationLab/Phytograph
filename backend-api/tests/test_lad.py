@@ -100,7 +100,7 @@ class _FakeCloud:
 
     def gapfillMisses(self):
         self.calls.append(("gapfill",))
-        # Simulate Helios tagging synthesised misses with gapfillMisses_code=1.0
+        # Simulate Helios tagging synthesized misses with gapfillMisses_code=1.0
         # on top of the original hits (code 0.0). Two recovered misses here.
         self._gapfill_codes = [0.0, 0.0, 1.0, 1.0]
 
@@ -347,7 +347,7 @@ class TestLADRequestShaping:
 
     def test_existing_misses_skip_gapfill(self, tmp_path, stub_pyhelios):
         # A scan that already carries miss points (is_miss=1) must NOT be
-        # gapfilled — that would synthesise duplicates on top of real misses.
+        # gapfilled — that would synthesize duplicates on top of real misses.
         f = tmp_path / "scan.xyz"
         # x y z timestamp is_miss — one row flagged as an existing miss.
         f.write_text("0.1 0.1 0.5 1.0 0\n0.0 0.0 0.6 2.0 0\n9.0 9.0 9.0 3.0 1\n")
@@ -490,7 +490,7 @@ class TestLADRequestShaping:
         # edit and every import-wizard choice (column roles, dropped columns,
         # global shift), so inverting it would report a confident LAD for a
         # cloud the user never saw — silently wrong, which is worse than an
-        # error. The old behaviour was to fall back with a warning.
+        # error. The old behavior was to fall back with a warning.
         f = tmp_path / "scan.xyz"
         f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
         scan = main.HeliosScanEntry(
@@ -722,7 +722,7 @@ class TestOcclusionScreening:
         assert result["under_sampled_count"] == 0        # 800 m still clears it
 
     def test_voxel_below_the_threshold_is_flagged_and_excluded(self, tmp_path, stub_pyhelios):
-        """The core behaviour: an under-probed voxel is an ABSENCE of measurement,
+        """The core behavior: an under-probed voxel is an ABSENCE of measurement,
         so it must not contribute leaf area to the total."""
         req = _single_return_request(tmp_path)
         object.__setattr__(req, "occlusion_threshold_m", 1000.0)   # above 800 m
@@ -1416,7 +1416,7 @@ class TestMultiReturnImportColumnMapping:
 
     def test_wizard_column_plan_round_trips_multireturn_slugs(self):
         """A column plan built from the preview's suggestions (what the wizard
-        ships when the user accepts the defaults) must materialise the three
+        ships when the user accepts the defaults) must materialize the three
         per-pulse columns as extra dims under their canonical slugs."""
         resp = main._preview_ascii(_MULTI_XYZ, _MULTI_FORMAT, 20)
         # Mirror the renderer's buildColumnPlan: each column keeps its detected
@@ -1492,7 +1492,7 @@ class TestMultiReturnImportColumnMapping:
             assert bf["has_misses"] is True
             assert bf["backfilled"] > 0
             assert sess.backfilled_misses is not None
-            # The timestamp gapfill stamps every synthesised miss with its own
+            # The timestamp gapfill stamps every synthesized miss with its own
             # reconstructed pulse time, and the buffer carries them: Helios
             # groups beams by timestamp, so misses without their own would all
             # be ONE transmitted beam.
@@ -1639,7 +1639,7 @@ class TestMultiReturnImportColumnMapping:
     def test_crop_then_backfill_matches_the_uncropped_scan(self, tmp_path):
         """Scenario 2: import an already-cropped cloud (every return outside the
         grid gone before the session existed — the rows are removed, not marked
-        deleted), backfill it, run LAD. The gapfill synthesises a miss for
+        deleted), backfill it, run LAD. The gapfill synthesizes a miss for
         every pulse that lost all its returns, restoring the transmitted beams;
         the target_count inference covers the pulses that kept an in-grid
         return. Holds because this scene has nothing between scanner and grid
@@ -1669,7 +1669,7 @@ class TestMultiReturnImportColumnMapping:
 
     def test_rebackfill_after_crop_does_not_double_count(self, tmp_path):
         """Backfill, crop to the grid, then follow the crop-time toast and run
-        Backfill AGAIN. The second gapfill synthesises a miss for every pulse
+        Backfill AGAIN. The second gapfill synthesizes a miss for every pulse
         the crop deleted; the LAD reader restores those pulses' real returns
         too. A miss on a restored hit's pulse time is that pulse and is
         dropped, so nothing is counted twice."""
@@ -1858,7 +1858,7 @@ class TestLADCropWithOccluder:
     - In-app crop: the occluder and ground returns deleted — LAD unchanged,
       the reader restores them.
     - Pre-cropped import: the occluder returns were never there, so the
-      gapfill synthesises a MISS for each occluded pulse and the inversion
+      gapfill synthesizes a MISS for each occluded pulse and the inversion
       counts a blocked beam as transmitted. LAD reads low. This is the
       scenario-2 limitation and cannot be repaired from the cropped file.
     """
@@ -1951,7 +1951,7 @@ class TestLADCropWithOccluder:
         assert crop["lad"] == pytest.approx(ref["lad"], rel=1e-6)
         assert crop["beam_count"] == ref["beam_count"]
         # Pre-cropped import: the occluded pulses came back as misses (more
-        # were synthesised) and now count as transmitted, so LAD is low.
+        # were synthesized) and now count as transmitted, so LAD is low.
         assert bf_pre > bf_ref
         assert pre["lad"] < 0.8 * ref["lad"], (pre["lad"], ref["lad"])
 
@@ -1962,7 +1962,7 @@ class TestSingleReturnMissImportColumnMapping:
     A single-return scan carries no timestamp, so LAD can't recover misses by
     gapfilling — it relies on the explicit `is_miss` column the scan ships
     (0.0 return / 1.0 sky-miss). `_tokenize_ascii_format` only keeps tokens it
-    recognises as known roles; `is_miss` was absent from `_XYZ_KNOWN_ROLES`, so
+    recognizes as known roles; `is_miss` was absent from `_XYZ_KNOWN_ROLES`, so
     an `<ASCII_format>x y z is_miss</ASCII_format>` hint dropped the 4th token to
     'skip'. The column never reached the session, the cloud arrived at Helios
     with zero misses, and `calculateLeafArea` fail-fast refused it with
@@ -1986,7 +1986,7 @@ class TestSingleReturnMissImportColumnMapping:
 
     def test_wizard_column_plan_round_trips_miss_slug(self):
         """A column plan built from the preview's suggestions (what the wizard
-        ships when the user accepts the defaults) must materialise the miss
+        ships when the user accepts the defaults) must materialize the miss
         column as an extra dim under the canonical `is_miss` slug."""
         resp = main._preview_ascii(_FIXTURE_XYZ, self._FORMAT, 20)
         entries = [

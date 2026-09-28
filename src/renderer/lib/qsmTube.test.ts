@@ -63,7 +63,7 @@ describe('sweepTube UVs', () => {
     }
   });
 
-  it('advances v by true arc length in tile units (no length-normalisation)', () => {
+  it('advances v by true arc length in tile units (no length-normalization)', () => {
     // 4 nodes, 0.3 m apart => 0.9 m total => 3.6 tiles at 0.25 m.
     const { nodes, radii } = straightTube(4, 0.3, 0.05);
     const n = 8;

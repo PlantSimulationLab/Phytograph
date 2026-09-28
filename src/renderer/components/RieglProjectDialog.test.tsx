@@ -289,8 +289,8 @@ describe('RieglProjectDialog .PROJ registration', () => {
       screen.getByTestId('riegl-scan-registration-ScanPos001').dataset.registration,
     ).toBe('registered');
     // The distinction that matters to the user: "prior" is placed, but only to
-    // about a metre, so it still needs ICP. Showing it as registered would let
-    // a metre of error pass as a survey.
+    // about a meter, so it still needs ICP. Showing it as registered would let
+    // a meter of error pass as a survey.
     const prior = screen.getByTestId('riegl-scan-registration-ScanPos012');
     expect(prior.dataset.registration).toBe('prior');
     expect(prior.textContent).toMatch(/prior/i);
@@ -299,7 +299,7 @@ describe('RieglProjectDialog .PROJ registration', () => {
     ).toBe('none');
   });
 
-  it('summarises how much of the project is really registered', async () => {
+  it('summarizes how much of the project is really registered', async () => {
     // A .PROJ is routinely a MIX, so a blanket "these are aligned" would be a
     // lie about two thirds of this project.
     render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
@@ -360,7 +360,7 @@ describe('RieglProjectDialog .PROJ registration', () => {
   });
 
   it('draws the plan view from the surveyed poses when there are any', async () => {
-    // The GNSS prior and the SOP disagree by metres; plotting the prior for a
+    // The GNSS prior and the SOP disagree by meters; plotting the prior for a
     // project that knows better would show a layout the import will not produce.
     render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId('riegl-layout-plan')).toBeTruthy());
@@ -384,7 +384,7 @@ describe('RieglProjectDialog layering', () => {
   });
 });
 
-describe('RieglProjectDialog sensor levelling', () => {
+describe('RieglProjectDialog sensor leveling', () => {
   // A .riproject where only SOME positions recorded an attitude — the real
   // shape of the data (4 of 8 in 2017-12-15.001 had no usable pose record).
   const LEVELABLE = {
@@ -396,17 +396,17 @@ describe('RieglProjectDialog sensor levelling', () => {
     ],
   };
 
-  it('offers levelling for a .riproject that measured its own tilt', async () => {
+  it('offers leveling for a .riproject that measured its own tilt', async () => {
     vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
     render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
     const toggle = await screen.findByTestId('riegl-level-toggle');
-    // On by default: an unlevelled cloud silently breaks ground/DEM work.
+    // On by default: an unleveled cloud silently breaks ground/DEM work.
     expect(toggle.getAttribute('data-level-scans')).toBe('true');
-    // The claim must stay narrow — levelled is not aligned.
+    // The claim must stay narrow — leveled is not aligned.
     expect(toggle.textContent).toMatch(/does not align the scans/i);
   });
 
-  it('imports in the sensor frame when levelling is on', async () => {
+  it('imports in the sensor frame when leveling is on', async () => {
     vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
     const onResolve = vi.fn();
     render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={onResolve} />);
@@ -417,7 +417,7 @@ describe('RieglProjectDialog sensor levelling', () => {
     );
   });
 
-  it('falls back to the local frame when levelling is switched off', async () => {
+  it('falls back to the local frame when leveling is switched off', async () => {
     vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
     const onResolve = vi.fn();
     render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={onResolve} />);
@@ -434,11 +434,11 @@ describe('RieglProjectDialog sensor levelling', () => {
     render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
     const toggle = await screen.findByTestId('riegl-level-toggle');
     // ScanPos002 has no sensor_pose (ScanPos003 errored and is unselectable),
-    // so the user is told it imports unlevelled rather than finding out later.
+    // so the user is told it imports unleveled rather than finding out later.
     expect(toggle.textContent).toMatch(/1 of the 2 selected positions recorded no tilt/i);
   });
 
-  it('resets to levelling-on when the dialog is reopened', async () => {
+  it('resets to leveling-on when the dialog is reopened', async () => {
     // A choice made for one project must not silently carry into the next —
     // the same rule keepLocal follows.
     vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
@@ -465,7 +465,7 @@ describe('RieglProjectDialog sensor levelling', () => {
     expect(screen.queryByTestId('riegl-level-toggle')).toBeNull();
   });
 
-  it('never offers levelling for a .PROJ, which has real registration', async () => {
+  it('never offers leveling for a .PROJ, which has real registration', async () => {
     vi.mocked(inspectRieglProject).mockResolvedValue({
       ...PROJ,
       scans: PROJ.scans.map((s) => ({

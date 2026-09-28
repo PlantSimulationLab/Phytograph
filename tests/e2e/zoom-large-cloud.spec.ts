@@ -38,21 +38,21 @@ test('a scroll burst on a 13M-point cloud converges without reversing', async ()
 
   const state = () => page.evaluate(() => (window as any).__getCameraState());
   const s0 = await state();
-  const centre = s0.contentCenter.map((v: number, i: number) => v - s0.displayOffset[i]);
+  const center = s0.contentCenter.map((v: number, i: number) => v - s0.displayOffset[i]);
   const distTo = (s: any) => Math.hypot(
-    s.position[0] - centre[0], s.position[1] - centre[1], s.position[2] - centre[2],
+    s.position[0] - center[0], s.position[1] - center[1], s.position[2] - center[2],
   );
 
   const box = (await page.locator("canvas").first().boundingBox())!;
 
   // Both reported spots: middle of the scene, and the periphery.
   for (const [label, fx, fy] of [
-    ['centre', 0.5, 0.5],
+    ['center', 0.5, 0.5],
     ['periphery', 0.30, 0.82],
   ] as const) {
     // Start each case from the framed view. Without this the second case begins
     // wherever the first left the camera — inside the tree — where "distance to
-    // the content centre" no longer means "how zoomed in am I".
+    // the content center" no longer means "how zoomed in am I".
     await page.evaluate(() => (window as any).__resetPointCloudCamera?.());
     await page.waitForTimeout(300);
 
@@ -81,7 +81,7 @@ test('a scroll burst on a 13M-point cloud converges without reversing', async ()
 
     // ── Pacing: no stall, no lurch, no over-zoom ────────────────────────────
     //
-    // Deliberately NOT "distance to the content centre falls every notch".
+    // Deliberately NOT "distance to the content center falls every notch".
     // That distance is a projection of the real motion onto a single axis, so
     // with the cursor off to one side, flying at what it points to legitimately
     // increases it — asserting otherwise would assert zoom-to-cursor away.
@@ -153,9 +153,9 @@ test('a hard zoom in past the ground then back out never escapes the scene', asy
   await page.waitForTimeout(300);
 
   const s0 = await state();
-  const centre = s0.contentCenter.map((v: number, i: number) => v - s0.displayOffset[i]);
+  const center = s0.contentCenter.map((v: number, i: number) => v - s0.displayOffset[i]);
   const distTo = (s: any) => Math.hypot(
-    s.position[0] - centre[0], s.position[1] - centre[1], s.position[2] - centre[2],
+    s.position[0] - center[0], s.position[1] - center[1], s.position[2] - center[2],
   );
   const scale = s0.zoomLimits.scale;
 

@@ -5,7 +5,7 @@
         IN.txt OUT.txt
 
 ``IN`` is an ASCII ``x y z [...]`` table (extra columns are ignored, so a
-hand-labelled Pheno4D file works). ``OUT`` is ``x y z label`` in the input's
+hand-labeled Pheno4D file works). ``OUT`` is ``x y z label`` in the input's
 own units, which is the layout ``LabeledCloud::readASCIICloud`` reads with the
 default schema: 0 soil, 1 stem (petioles included), >= 2 one leaflet each.
 
@@ -41,7 +41,7 @@ UNITS = {"m": 1.0, "cm": 0.01, "mm": 0.001}
 
 
 def label_cloud(xyz_m: np.ndarray, pkg, model, device: str = "cpu", cluster_kw: dict | None = None) -> np.ndarray:
-    """PlantCloudFit labels (0 soil, 1 stem, >= 2 leaflet) for points in metres, +z up."""
+    """PlantCloudFit labels (0 soil, 1 stem, >= 2 leaflet) for points in meters, +z up."""
     task = TASKS[pkg.task]
     values, offsets, radii = predict(model, pkg, xyz_m, device=device, batch_crops=16, return_offsets=True)
     name_of = {c["value"]: c["name"] for c in pkg.classes}

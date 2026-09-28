@@ -153,7 +153,7 @@ things come as a package, and a long-running endpoint wants all three:
 
 - The worker runs via `run_in_executor`, i.e. **off the event loop**. A handler
   that blocks inline freezes the entire backend for its duration — which also
-  makes it uncancellable, since `POST /api/cancel/{run_id}` can't be serviced.
+  makes it uncancelable, since `POST /api/cancel/{run_id}` can't be serviced.
 - The `run_id` rides the first PHP1 marker, so the client can cancel; the stream
   loop also watches for client disconnect.
 - Because the 200 is already out, an exception can only reach the client as a
@@ -164,7 +164,7 @@ segmentation workers) are spawned via `os.posix_spawn` into their own process
 group and killed with `_kill_seg_worker` — `subprocess.Popen`'s fork path
 crashes the child on macOS when libhelios/open3d GLFW are loaded.
 
-**Every native child must use that path, not just the cancellable ones.** The
+**Every native child must use that path, not just the cancelable ones.** The
 crash is about the spawn mechanism, not cancellation: `Popen` fork()s the loaded
 image whenever `close_fds` is true (its default), and libhelios' GLFW (via the
 lidar→visualizer plugin) plus open3d's own bundled copy register duplicate
@@ -174,7 +174,7 @@ and `_stream_riegl_container`) was the last `Popen` holdout and failed exactly
 this way, reporting only `RIEGL reader failed (exit -11)`.
 
 It is **order-dependent**, which is what makes it easy to miss: the GLFW runtime
-has to be *initialised*, not merely imported, so a reader spawn only dies once
+has to be *initialized*, not merely imported, so a reader spawn only dies once
 something has already built a cloud session in the same process. In tests that
 is `extract` (builds a session) followed by `inspect` (spawns the reader again);
 in the app it is any import after the first. `docker` keeps `Popen` — the CLI is

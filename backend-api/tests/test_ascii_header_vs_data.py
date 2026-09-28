@@ -13,12 +13,12 @@ correctness and a minute of wall clock:
     so a file whose data rows all contain letters was walked end to end and then
     answered wrong: `_detect_ascii_delimiter` returned None (falling back to
     whitespace, silently wrong for a comma file) and `_autodetect_xyz_columns`
-    returned a bare x/y/z that discards the file's real colour/intensity
+    returned a bare x/y/z that discards the file's real color/intensity
     columns. On a 223 MB `%e` file that scan cost 18.4 s versus 0.05 s for the
     same data written as plain decimals, and it runs twice per preview, on a
     request the wizard fires in parallel for every file in an import batch.
 
-The test bar is behavioural: the delimiter, the skiprows count, the recovered
+The test bar is behavioral: the delimiter, the skiprows count, the recovered
 header names and the detected roles, over the delimiter/header shapes the
 importer actually meets — plus an explicit bound on how much of a large file the
 sniff is allowed to touch.
@@ -35,7 +35,7 @@ import main
 #
 # The `sci`/`nan`/`inf` rows are the regression cases: letter-bearing data with
 # NO header, which must report skiprows=0 and header=None so the first point
-# survives. Everything else pins the pre-existing behaviour that must not move.
+# survives. Everything else pins the pre-existing behavior that must not move.
 CASES = [
     ("ws_header.xyz", "x y z\n1.0 2.0 3.0\n4.0 5.0 6.0\n",
      "whitespace", 1, ["x", "y", "z"]),
@@ -108,7 +108,7 @@ def test_scientific_notation_keeps_every_point(write):
 
 
 def test_letter_bearing_data_does_not_defeat_column_autodetect(write):
-    """Colour/intensity columns must survive a `%e` first row.
+    """Color/intensity columns must survive a `%e` first row.
 
     `_autodetect_xyz_columns` skipped every letter-bearing row, so its sample
     came back empty and it fell through to a bare x/y/z — silently discarding

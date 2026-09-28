@@ -7,7 +7,7 @@ import { octreeAttributeSlug } from './pointCloudHelpers';
 // (usesFixedColumnOrder) and a couple of standard dimensions can't be dropped at
 // all (LAS_LOCKED_KINDS).
 //
-// A "column" is one exportable field. Geometry (x/y/z) and colour (r/g/b) are
+// A "column" is one exportable field. Geometry (x/y/z) and color (r/g/b) are
 // fixed slugs; every other field is a named scalar (intensity, is_miss, a custom
 // scan column, a class label, …).
 //
@@ -19,7 +19,7 @@ import { octreeAttributeSlug } from './pointCloudHelpers';
 
 import type { PointCloudData } from './pointCloudTypes';
 
-// Slugs for the always-available geometry + colour columns.
+// Slugs for the always-available geometry + color columns.
 export const GEOMETRY_SLUGS = ['x', 'y', 'z'] as const;
 export const COLOR_SLUGS = ['r', 'g', 'b'] as const;
 
@@ -48,8 +48,8 @@ export interface ExportColumn {
 // PTS and PCD deliberately do NOT: each has a FIXED positional/structural schema
 // that a reader decodes by position, so a user-chosen subset or order produces a
 // file that still parses and is read wrong. PTS is `x y z intensity r g b` (drop
-// intensity and every reader takes column 3 as red); PCD packs colour into one
-// float-bit-cast `rgb` field and its reader returns position + colour only.
+// intensity and every reader takes column 3 as red); PCD packs color into one
+// float-bit-cast `rgb` field and its reader returns position + color only.
 export const COLUMN_PICKER_FORMATS = new Set([
   'xyz', 'txt', 'csv', 'ply', 'las', 'laz', 'asc', 'scan',
 ]);
@@ -74,14 +74,14 @@ export function usesFixedColumnOrder(format: string): boolean {
 //   * intensity — present in the core record of every LAS point format (0-3), so
 //     deselecting it could only write zeros, never remove the field. A checkbox
 //     that silently meant "zero this" would be worse than stating the limit.
-// Colour is deliberately NOT here: dropping r/g/b selects point format 1, which
+// Color is deliberately NOT here: dropping r/g/b selects point format 1, which
 // has no RGB dimension at all — a real omission. (It comes bundled with GPS time,
 // since the point format is a menu rather than a free choice of dimensions.)
 export const LAS_LOCKED_KINDS = new Set<ExportColumn['kind']>(['geometry', 'intensity']);
 
 // Apply LAS/LAZ rules to a column list: the dimensions that cannot be omitted are
 // forced on and locked, so the picker can only offer choices the format can
-// actually honor. Everything else (colour, scalars, labels) stays as the user set
+// actually honor. Everything else (color, scalars, labels) stays as the user set
 // it. Mirrors `lockGeometryForScanXml`, which does the same for a scan bundle.
 export function lockFixedDimsForLas(columns: ExportColumn[]): ExportColumn[] {
   return columns.map(c =>
@@ -100,7 +100,7 @@ export interface AvailableColumnsOptions {
   // Helios ASCII_format hint (e.g. "row column x y z r g b reflectance") for an
   // octree/session-backed cloud whose points live on disk — its scalar columns
   // aren't in the in-RAM `scalarFields`, so we recover them from the format
-  // string instead. Tokens x/y/z and r/g/b are handled as geometry/colour; the
+  // string instead. Tokens x/y/z and r/g/b are handled as geometry/color; the
   // rest become scalar columns.
   asciiFormat?: string | null;
   // The octree's per-attribute names, from `OctreeRef.attributeRanges` (keys) —
@@ -111,7 +111,7 @@ export interface AvailableColumnsOptions {
   // empty Float32Array and never sets colors/intensities/scalarFields), and
   // `asciiFormat` is populated only by the Helios-XML importer — so without this
   // the picker degenerated to bare x/y/z for every LAS/LAZ/E57/PLY/XYZ import.
-  // The colour-by dropdown, the scalar filter and the point-pick inspector all
+  // The color-by dropdown, the scalar filter and the point-pick inspector all
   // already read this same source; export was the one consumer that didn't.
   octreeAttributes?: string[];
   // The octree's per-attribute min/max (`OctreeRef.attributeRanges`), used to
@@ -145,11 +145,11 @@ function _isDegenerateRange(range?: { min: number[]; max: number[] }): boolean {
   return range.min.every(v => v === 0) && range.max.every(v => v === 0);
 }
 
-// Octree attribute names that are geometry/colour/intensity rather than scalars,
+// Octree attribute names that are geometry/color/intensity rather than scalars,
 // plus PotreeConverter's schema plumbing. Kept parallel to
 // OCTREE_BUILTIN_ATTRIBUTES in pointCloudHelpers.ts, but export treats `rgb` and
 // `intensity` as REAL exportable columns (they map to r/g/b and intensity slugs)
-// rather than hiding them the way the colour-by picker does.
+// rather than hiding them the way the color-by picker does.
 const _OCTREE_NON_SCALAR = new Set([
   'position', 'normal', 'indices', 'spacing',
   'return number', 'number of returns',
@@ -162,13 +162,13 @@ const _OCTREE_NON_SCALAR = new Set([
 
 const _OCTREE_COLOR_NAMES = new Set(['rgb', 'rgba', 'color']);
 
-// Tokens in a Helios ASCII_format that are geometry/colour (not extra scalars).
+// Tokens in a Helios ASCII_format that are geometry/color (not extra scalars).
 const _GEO_COLOR_TOKENS = new Set([
   'x', 'y', 'z', 'r', 'g', 'b', 'r255', 'g255', 'b255',
 ]);
 
-// Build the default, ordered column list for a cloud: x y z, then colour (if the
-// cloud has colours), then intensity (if present), then every other scalar field
+// Build the default, ordered column list for a cloud: x y z, then color (if the
+// cloud has colors), then intensity (if present), then every other scalar field
 // in a stable order. Everything is selected by default so a plain export is
 // lossless; the user prunes from there.
 export function defaultExportColumns(
@@ -215,7 +215,7 @@ export function defaultExportColumns(
   }
   for (const name of octreeAttrs) {
     const lower = name.toLowerCase();
-    // Colour/geometry/plumbing aren't scalar columns; `intensity` is handled
+    // Color/geometry/plumbing aren't scalar columns; `intensity` is handled
     // separately below so it keeps its dedicated slug and ordering.
     if (_OCTREE_NON_SCALAR.has(lower) || _OCTREE_COLOR_NAMES.has(lower)) continue;
     if (lower === 'intensity') continue;
@@ -268,8 +268,8 @@ export function selectedSlugs(columns: ExportColumn[]): string[] {
 }
 
 // Resolve one column slug's value for point index `i` to a string cell. Geometry
-// and colour come from the typed arrays; everything else from scalarFields /
-// intensities. Colour is written as 0-255 ints (the ASCII convention used by the
+// and color come from the typed arrays; everything else from scalarFields /
+// intensities. Color is written as 0-255 ints (the ASCII convention used by the
 // importer's r255/g255/b255 roles). Unknown/absent slugs emit '0' so column count
 // stays stable.
 export function cellValue(
@@ -327,7 +327,7 @@ export function buildBareAsciiExport(
 }
 
 // The canonical PTS column order: `x y z intensity r g b`, intensity BEFORE
-// colour. Both trailing groups are optional, their order is not — a reader
+// color. Both trailing groups are optional, their order is not — a reader
 // identifies PTS columns positionally, so writing them in any other order
 // yields a file that still parses and is read WRONG (drop intensity and the
 // reader takes column 3 as red). That is why PTS takes no column picker.
@@ -343,7 +343,7 @@ export function ptsColumnSlugs(
 // Build a canonical `.pts`: a leading point-COUNT line, then one row per point
 // in `ptsColumnSlugs` order. The count line is what distinguishes PTS from a
 // bare column file for Cyclone/CloudCompare, and Phytograph's own importer
-// recognises it (`_is_pts_count_header`), so this round-trips.
+// recognizes it (`_is_pts_count_header`), so this round-trips.
 export function buildPtsExport(
   data: Pick<PointCloudData, 'positions' | 'colors' | 'intensities' | 'scalarFields'> & { pointCount: number },
 ): string {
@@ -357,9 +357,9 @@ export function buildPtsExport(
 
 // Build an ASCII PCD (PCL's Point Cloud Data format).
 //
-// Fixed schema — position + optional colour — and no column picker, because
+// Fixed schema — position + optional color — and no column picker, because
 // PCD packs RGB into ONE float-bit-cast field and the reader Phytograph uses
-// for it (open3d) returns position and colour only, dropping intensity and
+// for it (open3d) returns position and color only, dropping intensity and
 // every scalar. Offering more fields would write a file that re-imports short.
 export function buildPcdExport(
   data: Pick<PointCloudData, 'positions' | 'colors'> & { pointCount: number },
@@ -398,7 +398,7 @@ export function buildPcdExport(
     const r = Math.min(255, Math.max(0, Math.round(c[i * 3] * 255)));
     const g = Math.min(255, Math.max(0, Math.round(c[i * 3 + 1] * 255)));
     const b = Math.min(255, Math.max(0, Math.round(c[i * 3 + 2] * 255)));
-    // PCD stores packed 24-bit colour in a float32's BIT PATTERN, not its value.
+    // PCD stores packed 24-bit color in a float32's BIT PATTERN, not its value.
     u32[0] = ((r << 16) | (g << 8) | b) >>> 0;
     lines.push(`${x} ${y} ${z} ${f32[0]}`);
   }

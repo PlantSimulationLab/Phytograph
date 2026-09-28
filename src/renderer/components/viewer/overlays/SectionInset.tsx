@@ -10,7 +10,7 @@ const PAD = 8;
  *
  * A face-on section shows a thin slice with no sense of where in the cloud it
  * is. Paging through with `,` / `.` makes that worse: every slice looks alike.
- * This is the "you are here" — the cloud's footprint in grey, the slab as a
+ * This is the "you are here" — the cloud's footprint in gray, the slab as a
  * blue band that moves as the section steps. Display-only (pointer-events off)
  * so it never steals a click meant for the viewport.
  */

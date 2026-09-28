@@ -1,7 +1,7 @@
 """The cancel must KILL the PotreeConverter child, not merely stop waiting on it.
 
 Before this change the converter ran under `subprocess.run`, which retains no
-handle — the child was unreachable, so a "cancelled" import kept churning to
+handle — the child was unreachable, so a "canceled" import kept churning to
 completion in the background. This is the test that proves the kill is real.
 
 `_run_potree_converter` is driven directly rather than over HTTP: the subject
@@ -22,7 +22,7 @@ import main
 
 
 def test_cancel_kills_the_converter_child_process(tmp_path, monkeypatch):
-    """A cancelled import must leave no PotreeConverter running — and no orphaned
+    """A canceled import must leave no PotreeConverter running — and no orphaned
     grandchildren either, since the real converter forks its own workers."""
     if os.name == "nt":
         pytest.skip("POSIX process-group kill; Windows kills by pid only")
@@ -62,7 +62,7 @@ def test_cancel_kills_the_converter_child_process(tmp_path, monkeypatch):
     t = threading.Thread(target=fire, daemon=True)
     t.start()
     started = time.time()
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._run_potree_converter(las, out_dir, cancel_event=cancel_event, poll=0.05)
     elapsed = time.time() - started
     t.join(timeout=5)

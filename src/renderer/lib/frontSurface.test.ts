@@ -104,7 +104,7 @@ describe('buildDepthLimit', () => {
 });
 
 describe('forEachDrawnPoint', () => {
-  it('visits visible tiles only, in world, and honours keep', () => {
+  it('visits visible tiles only, in world, and honors keep', () => {
     const tile = (xs: number[], visible: boolean, children: any[] = []) => {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.Float32BufferAttribute(xs.flatMap((x) => [x, 0, 0]), 3));

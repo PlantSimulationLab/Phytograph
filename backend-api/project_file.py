@@ -142,7 +142,7 @@ def _json_default(o):
         return o.item()
     if hasattr(o, "model_dump"):
         return o.model_dump()
-    raise TypeError(f"{type(o).__name__} is not JSON-serialisable")
+    raise TypeError(f"{type(o).__name__} is not JSON-serializable")
 
 
 # ==================== sessions ====================

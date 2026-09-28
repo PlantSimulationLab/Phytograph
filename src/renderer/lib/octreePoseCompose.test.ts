@@ -155,7 +155,7 @@ describe('composeCloudPose', () => {
     expect(naiveDiffers, 'fixture must distinguish composition from Euler addition').toBe(true);
   });
 
-  it('honours a pivot that MOVED between commit and render', () => {
+  it('honors a pivot that MOVED between commit and render', () => {
     // storedPose.pivot is frozen at commit; the scene origin can move afterwards.
     // The rendered result must still match the stored matrix exactly.
     const commitPivot: [number, number, number] = [1000, -500, 30];
@@ -224,7 +224,7 @@ describe('transformBoundsAabb', () => {
   });
 
   it('rotates about the PIVOT, not the origin', () => {
-    // The failure this catches is worth thousands of metres on a UTM scene.
+    // The failure this catches is worth thousands of meters on a UTM scene.
     const pivot = { x: 500_000, y: 4_200_000, z: 0 };
     const far = {
       min: new THREE.Vector3(pivot.x - 1, pivot.y - 1, 0),
@@ -250,16 +250,16 @@ describe('transformBoundsAabb', () => {
 });
 
 describe('transformGroundZ', () => {
-  const centre = { x: 0, y: 0 };
+  const center = { x: 0, y: 0 };
 
   it('a pure translation shifts it exactly', () => {
-    expect(transformGroundZ(3, centre, { x: 0, y: 0, z: 7 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }))
+    expect(transformGroundZ(3, center, { x: 0, y: 0, z: 7 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }))
       .toBeCloseTo(10, 6);
   });
 
   it('a turn about Z leaves a ground level alone', () => {
     // Spinning about the vertical cannot change how high the ground is.
-    expect(transformGroundZ(2.5, centre, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 90 }, { x: 0, y: 0, z: 0 }))
+    expect(transformGroundZ(2.5, center, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 90 }, { x: 0, y: 0, z: 0 }))
       .toBeCloseTo(2.5, 6);
   });
 
@@ -277,7 +277,7 @@ describe('transformGroundZ', () => {
     const rot = { x: 20, y: 0, z: 0 };
     const pivot = { x: 0, y: 0, z: 0 };
     const movedBox = transformBoundsAabb(box, { x: 0, y: 0, z: 0 }, rot, pivot);
-    const movedGround = transformGroundZ(ground, centre, { x: 0, y: 0, z: 0 }, rot, pivot);
+    const movedGround = transformGroundZ(ground, center, { x: 0, y: 0, z: 0 }, rot, pivot);
 
     expect(movedGround).toBeGreaterThan(movedBox.min.z + 1);
     expect(Math.abs(movedGround - ground)).toBeLessThan(3);

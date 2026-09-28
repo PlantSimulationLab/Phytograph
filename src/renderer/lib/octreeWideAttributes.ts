@@ -1,4 +1,4 @@
-// Wide (>4-byte) octree attributes and potree's pre-normalisation of them.
+// Wide (>4-byte) octree attributes and potree's pre-normalization of them.
 //
 // potree's binary decoder fills a Float32Array GPU buffer for every scalar
 // attribute. A value wider than a float32 — a `double` gps-time, an int64 —
@@ -11,11 +11,11 @@
 //     }
 //     buffer[i] = (value - offset) * scale;     // → 0..1
 //
-// Everything that reads such a buffer back — the colour shader's value range
+// Everything that reads such a buffer back — the color shader's value range
 // (OctreePointCloud) and the point picker's attribute bubble (PointPicker) —
 // has to know this, or it reports 0.034 where the file says 105. The shader
 // side was fixed first and the picker missed it: an ASCII time column used to
-// arrive as a float32 extra dim (no normalisation) until the import writers
+// arrive as a float32 extra dim (no normalization) until the import writers
 // moved it to the LAS gps_time field for precision, at which point every
 // picked timestamp silently became a fraction. Keeping the rule in one place
 // means the next reader of a wide buffer cannot miss it either.
@@ -43,13 +43,13 @@ function findAttribute(octree: unknown, field: string): PotreeAttribute | null {
 }
 
 /** True when the octree attribute is wider than a float32 — i.e. potree's
- *  decoder pre-normalised its GPU buffer into 0..1. */
+ *  decoder pre-normalized its GPU buffer into 0..1. */
 export function isWideOctreeAttribute(octree: unknown, field: string): boolean {
   const a = findAttribute(octree, field);
   return typeof a?.type?.size === 'number' && a.type.size > 4;
 }
 
-/** The [lo, hi] potree normalised a WIDE attribute against, or null when the
+/** The [lo, hi] potree normalized a WIDE attribute against, or null when the
  *  attribute is not wide (its buffer holds raw values) or has no usable range.
  *  A degenerate range (hi <= lo) also yields null: potree's scale would be
  *  infinite there and the buffer holds garbage no inverse can recover. */
@@ -64,11 +64,11 @@ export function wideOctreeAttributeRange(octree: unknown, field: string): [numbe
   return [lo, hi];
 }
 
-/** Map one normalised buffer value back onto its real range.
+/** Map one normalized buffer value back onto its real range.
  *
  *  The buffer is a float32, so the value it carries is only good to about
  *  (hi − lo) · 2⁻²⁴ absolute — anything finer is rounding noise from the
- *  normalise/denormalise round trip, and it shows: a file value of exactly 105
+ *  normalize/denormalize round trip, and it shows: a file value of exactly 105
  *  over [100, 247.5] came back as 105.00000009 and printed as "105.0000" where
  *  the source column says "105". Rounding to the decimal place one order
  *  coarser than that quantum discards only digits the buffer never had. */
@@ -81,7 +81,7 @@ export function denormalizeWideValue(v: number, lo: number, hi: number): number 
   return Number(raw.toFixed(decimals));
 }
 
-/** Undo potree's 0..1 normalisation on the wide entries of a picked point's
+/** Undo potree's 0..1 normalization on the wide entries of a picked point's
  *  {attribute: value} bag, in place. Non-wide entries are left untouched (their
  *  buffers hold the raw values), as is anything non-numeric. */
 export function denormalizeWideAttributes(octree: unknown, values: Record<string, unknown>): void {

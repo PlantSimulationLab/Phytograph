@@ -198,7 +198,7 @@ test(`crop on ${FIXTURE_N.toLocaleString()}-point octree keeps heap under ${HEAP
     // should keep ~50%. Use a ±10% band to absorb fixture-side stochastic
     // variation (uniform random gives σ~√n on the count for a 50/50
     // partition; at 1M points that's ±0.05% but we want headroom for
-    // smaller fixture sizes too) plus LAS quantisation drift at the
+    // smaller fixture sizes too) plus LAS quantization drift at the
     // boundary.
     const expectedLow = Math.floor(FIXTURE_N * 0.40);
     const expectedHigh = Math.ceil(FIXTURE_N * 0.60);

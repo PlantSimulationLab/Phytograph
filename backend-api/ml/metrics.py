@@ -40,11 +40,11 @@ def scores(cm: np.ndarray, names: list[str]) -> dict:
 
 
 def boundary_mask(xyz: np.ndarray, truth_idx: np.ndarray, radius: float = 0.02) -> np.ndarray:
-    """True for points with a differently labelled neighbour within ``radius``.
+    """True for points with a differently labeled neighbor within ``radius``.
 
     Hand labels are least reliable exactly there, so every real-data score is
     also reported with this band excluded. A model that loses points only in
-    the band is disagreeing with the labeller, not necessarily with the tree.
+    the band is disagreeing with the labeler, not necessarily with the tree.
     """
     from scipy.spatial import cKDTree
 

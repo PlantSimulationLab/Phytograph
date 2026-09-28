@@ -21,7 +21,7 @@ import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octree
 // Step 1 exists because step 2 alone is only correct from a near-top-down
 // view. Projecting every click onto one flat plane at the scene floor means
 // that from an orbited view a click aimed at a tree crown carries on past it
-// to the ground, landing the corner metres from what the user clicked; the
+// to the ground, landing the corner meters from what the user clicked; the
 // more oblique the camera, the further it slides, and a near-grazing ray is
 // ill-conditioned enough that a one-pixel move sweeps a large world distance.
 // That "it won't go where I put it" is what the ground-only version felt like.
@@ -39,7 +39,7 @@ export function BoxDrawRaycaster({
   // Live octrees to surface-pick against. `Potree.pick` returns the nearest
   // hit across all of them, so no distance comparison is needed here.
   // Omitted or empty ⇒ ground-plane only, which is what the cross-section
-  // centreline wants: picking mid-canopy there put the line metres from the
+  // centerline wants: picking mid-canopy there put the line meters from the
   // intended geometry, so that call site deliberately stays flat.
   //
   // Both hit paths report DISPLAY-space coordinates (potree hits come back in

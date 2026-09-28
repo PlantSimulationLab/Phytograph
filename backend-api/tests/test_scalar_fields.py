@@ -1,6 +1,6 @@
 """Unit tests for backend-api/scalar_fields.py — the pure expression/stats layer.
 
-Endpoint-level behaviour (session mutation, octree rebuild, miss masking against
+Endpoint-level behavior (session mutation, octree rebuild, miss masking against
 a real CloudSession) lives in test_scalar_field_endpoints.py.
 """
 
@@ -121,7 +121,7 @@ def test_percentile_aggregate(cols):
     assert np.allclose(values, 3.0)
 
 
-def test_aggregate_honours_the_mask(cols):
+def test_aggregate_honors_the_mask(cols):
     """An aggregate is measured over the masked rows only.
 
     This is what keeps `mean(intensity)` equal to the mean the Stats tab shows,
@@ -302,7 +302,7 @@ ALIASES = {"time": "timestamp", "gpstime": "timestamp", "elevation": "z",
 def test_canonical_alias_is_rejected(slug):
     """A field named `time` would be re-resolved to `timestamp` on re-import.
 
-    Matched after the SAME normalisation import applies — an exact match let
+    Matched after the SAME normalization import applies — an exact match let
     `Time` and `GPS_Time` through, and import folds both into `timestamp`."""
     with pytest.raises(sf.SlugError) as exc:
         sf.validate_slug(slug, aliases=ALIASES)
@@ -394,7 +394,7 @@ def test_empty_and_all_nan_columns():
     assert "mean" not in d          # no NaN statistics leak to the UI
 
 
-def test_explicit_bin_count_is_honoured_within_bounds():
+def test_explicit_bin_count_is_honored_within_bounds():
     rng = np.random.default_rng(4)
     h = sf.describe(rng.normal(0, 1, 10_000), bins=32)["histogram"]
     assert len(h["counts"]) == 32

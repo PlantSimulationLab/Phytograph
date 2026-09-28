@@ -10,7 +10,7 @@
 //
 // So the renderer keeps its own label column per tile, applies the pending
 // strokes to it on the CPU, and aliases it into the `intensity` slot that
-// potree's INTENSITY_GRADIENT path already colours from. Full density,
+// potree's INTENSITY_GRADIENT path already colors from. Full density,
 // immediate feedback, no backend round trip. The backend stays the source of
 // truth and is reconciled on commit.
 //
@@ -102,7 +102,7 @@ export interface LabelOverlayState {
    * (0, 1, 2…); copying values straight in painted a committed 64 as whatever
    * sat at position 64 (or off the end of the gradient), and made the From gate
    * compare positions with values. A value the palette lacks reads as
-   * unlabelled.
+   * unlabeled.
    */
   valueToIndex: ReadonlyMap<number, number>;
 }
@@ -111,7 +111,7 @@ export interface LabelOverlayState {
  * Get (creating if absent) a tile's label column, sized to its point count.
  *
  * Float32 rather than Uint8 despite the 4x size: the INTENSITY_GRADIENT path
- * reads a float and normalises it through `intensityRange`, and a normalised
+ * reads a float and normalizes it through `intensityRange`, and a normalized
  * integer attribute risks a driver-dependent path in the RawShaderMaterial.
  * The cost is bounded by the point budget (2M points -> 8 MB), not by cloud
  * size, because only LOADED tiles carry one.
@@ -163,7 +163,7 @@ export function applyStrokesToGeometry(
     return;
   }
 
-  // Reset to the committed baseline (or unlabelled) before replaying, in
+  // Reset to the committed baseline (or unlabeled) before replaying, in
   // palette INDEX space like everything else in this buffer. Class values come
   // in runs (the octree groups points spatially), so remember the last lookup.
   if (baseLabels && baseLabels.length === count) {
@@ -261,7 +261,7 @@ function geometryWorldBox(
 }
 
 /**
- * Point a tile's `intensity` at the label column so the gradient shader colours
+ * Point a tile's `intensity` at the label column so the gradient shader colors
  * by it. Backs up whatever was there first — which may itself be an
  * already-aliased scalar; that is fine, it is only a reference — so restore is
  * exact. Idempotent by reference compare, like `swapScalarIntoIntensity`.
@@ -344,7 +344,7 @@ export function applyLabelOverlayToVisibleNodes(
  * Remove the overlay from every LOADED tile (tool close / rebuild landed).
  *
  * Loaded, not visible: a tile out of view is hidden, not unloaded, and it kept
- * the label buffer aliased into its intensity slot, so coloured by intensity it
+ * the label buffer aliased into its intensity slot, so colored by intensity it
  * drew labels when it came back into view. `traverse` visits the octree's whole
  * object tree, hidden children included; evicted tiles have left the tree and
  * their buffers go with them, so nothing needs to be remembered here.
@@ -371,7 +371,7 @@ export function clearLabelOverlayFromVisibleNodes(octree: any, statsId?: string)
  * The DOM cannot show GPU state, so a spec has no other way to tell "the right
  * points got painted" from "nothing happened". Follows the convention
  * `publishCropMaskStats` set: expose a NARROW FACT, never the scene graph.
- * `painted` counts points whose index differs from unlabelled, over the loaded
+ * `painted` counts points whose index differs from unlabeled, over the loaded
  * tiles.
  *
  * `__labelOverlay` is whichever cloud painted last, which is ambiguous once two

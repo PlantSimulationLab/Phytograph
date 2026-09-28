@@ -9,7 +9,7 @@ module exists for:
 
   - a **central leader that ends in a symmetric 'Y'** (eastern redbud): rank 0
     should stop at the fork and BOTH arms become rank 1;
-  - a **headed / open-centre orchard tree** (almond): a short thick trunk cut at
+  - a **headed / open-center orchard tree** (almond): a short thick trunk cut at
     ~0.5-0.9 m that splits into 3-5 co-dominant scaffolds. Rank 0 should end at
     the heading cut, not trace the trunk plus one scaffold as a single shoot.
 
@@ -36,7 +36,7 @@ signal is buried.) So this pass runs AFTER ``correct_radii``. It changes only
 ``rank`` / ``shoot_id`` labels -- never geometry -- so Stage D's point assignment
 and Stage E's per-shoot monotone taper still see the full physical axis, which is
 what we want: a trunk-plus-scaffold really is one smooth taper even when it is
-correctly labelled as two shoots.
+correctly labeled as two shoots.
 
 THE TEST
 --------
@@ -162,7 +162,7 @@ def _growth_length(qsm: QSM, kids: dict[int, list[int]]) -> dict[int, float]:
 
 def _dir_back(cid: int, by_id: dict, parent_of: dict[int, int], window: float) -> np.ndarray:
     """Unit direction of the axis ARRIVING at cylinder ``cid``, measured over
-    ``window`` metres walking up the parent chain (or as far as it goes)."""
+    ``window`` meters walking up the parent chain (or as far as it goes)."""
     end = by_id[cid].end
     start = by_id[cid].start
     acc = 0.0
@@ -183,7 +183,7 @@ def _dir_fwd(
     cid: int, by_id: dict, kids: dict[int, list[int]], gl: dict[int, float], window: float
 ) -> np.ndarray:
     """Unit direction of the subtree LEAVING cylinder ``cid``, measured over
-    ``window`` metres following the largest-GrowthLength child at each step (the
+    ``window`` meters following the largest-GrowthLength child at each step (the
     child's own axis, i.e. where that branch is actually heading)."""
     start = by_id[cid].start
     end = by_id[cid].end

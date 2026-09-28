@@ -12,21 +12,21 @@
 // Two things make that decision non-obvious, and both produce silently wrong
 // pixels rather than an error:
 //
-// 1. **Wide attributes are pre-normalised.** potree's decoder rescales any
+// 1. **Wide attributes are pre-normalized.** potree's decoder rescales any
 //    attribute wider than a float32 (a `double` gps_time, an int64) into 0..1
 //    before upload — see lib/octreeWideAttributes.ts. But the Filter panel's
 //    bounds come from `data.octree.attributeRanges`, which are in FILE units.
 //    Testing `[105.2, 105.8]` against a buffer holding 0.034 hides the whole
 //    cloud. We convert the BOUNDS into buffer space once here, rather than
-//    denormalising every point: it is cheaper, and it avoids
+//    denormalizing every point: it is cheaper, and it avoids
 //    `denormalizeWideValue`'s display rounding, which has no business deciding
 //    whether a point survives a filter.
 //
-// 2. **The `intensity` slot may be aliased away.** In scalar colour mode
+// 2. **The `intensity` slot may be aliased away.** In scalar color mode
 //    `swapScalarIntoIntensity` points `geometry.attributes.intensity` at a
 //    DIFFERENT field's buffer and stashes the real one under
 //    ORIG_INTENSITY_ATTRIBUTE. A filter on intensity that reads the live slot
-//    would silently filter by whatever the user happens to be colouring by.
+//    would silently filter by whatever the user happens to be coloring by.
 //    This is the same trap the point picker fell into once already.
 //
 // Pure + stateless — no THREE, no React, no potree types. Unit-testable
@@ -67,10 +67,10 @@ export const EMPTY_FILTER_SPEC: OctreeFilterSpec = Object.freeze({
 function toBufferSpace(range: FilterRange, lo: number, hi: number): FilterRange {
   const span = hi - lo;
   // Round each bound to FLOAT32, because that is the precision the value it
-  // will be compared against was stored at. potree normalises in float64 and
+  // will be compared against was stored at. potree normalizes in float64 and
   // then writes the result into a Float32Array, so a point sitting exactly ON
   // the bound can round UP past a float64 bound and be dropped — measured on
-  // the gps_time fixture, where t=150.0 over [100, 247.5] normalises to
+  // the gps_time fixture, where t=150.0 over [100, 247.5] normalizes to
   // 0.33898305084745762 but reads back as 0.33898305892944336, losing the
   // boundary point. Widening the bound to the same float32 grid makes the
   // comparison exact at the edges, which is where a range filter is most often
@@ -109,7 +109,7 @@ export function resolveOctreeFilterSpec(
   if (filters.intensity?.enabled) {
     clauses.push({
       source: {
-        // Read the ORIGINAL intensity when the scalar colour mode has aliased
+        // Read the ORIGINAL intensity when the scalar color mode has aliased
         // the live slot away; fall back to the live slot when it has not (the
         // stash only exists after the first swap).
         kind: 'attribute',
@@ -124,7 +124,7 @@ export function resolveOctreeFilterSpec(
     const range = filters.scalarFields[slug];
     if (!range?.enabled) continue;
     // A categorical filter is matched by rounded class id, which potree never
-    // normalises (class columns are narrow), so only continuous ranges need
+    // normalizes (class columns are narrow), so only continuous ranges need
     // the buffer-space conversion.
     const wideRange = range.selectedClasses
       ? null

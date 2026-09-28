@@ -441,9 +441,9 @@ describe('qsmExtForFormat / serializeQsm', () => {
 
 // The bug this suite exists for: the OBJ exporter wrote geometry ONLY -- no
 // `mtllib`, no `usemtl`, no sibling .mtl -- so a QSM opened in Blender/CloudCompare
-// was untextured grey, and every appearance choice the user made in the viewport
-// (rank palette, per-shoot hues, a picked colour, a bark photo) was silently
-// dropped. `Kd` via `usemtl` is the only colour channel that portably survives OBJ.
+// was untextured gray, and every appearance choice the user made in the viewport
+// (rank palette, per-shoot hues, a picked color, a bark photo) was silently
+// dropped. `Kd` via `usemtl` is the only color channel that portably survives OBJ.
 describe('OBJ materials', () => {
   const bundle = (appearance = {}) =>
     qsmToCylinderMeshObjBundle(fixtureQsm(), { baseName: 'tree', ...appearance });
@@ -475,7 +475,7 @@ describe('OBJ materials', () => {
     // A user saving as `tree.v2.obj` means the stem `tree.v2`. Eating the `.v2`
     // (as the label sanitizer does, correctly, for a source filename) would emit
     // `mtllib tree.mtl` beside a file named `tree.v2.obj` — a reference to
-    // nothing, which loads as untextured grey just like having no MTL at all.
+    // nothing, which loads as untextured gray just like having no MTL at all.
     const files = bundle({ baseName: 'tree.v2' } as never);
     const objName = files[0].name;
     const mtlName = files.find(f => f.name.endsWith('.mtl'))!.name;
@@ -511,7 +511,7 @@ describe('OBJ materials', () => {
     expect(obj.indexOf('\nusemtl ')).toBeLessThan(firstFace);
   });
 
-  it('rank mode writes one material per rank, carrying the rank palette colour', () => {
+  it('rank mode writes one material per rank, carrying the rank palette color', () => {
     const kd = kdByMaterial(mtlOf(bundle({ colorMode: 'rank' })));
     // The fixture has rank 0 (trunk) and rank 1 (scaffold) -> two materials.
     expect(Object.keys(kd).sort()).toEqual(['rank_0', 'rank_1']);
@@ -532,7 +532,7 @@ describe('OBJ materials', () => {
     expect(kd.shoot_0).not.toEqual(kd.shoot_1);
   });
 
-  it("color mode writes the user's picked colour as Kd, in sRGB", () => {
+  it("color mode writes the user's picked color as Kd, in sRGB", () => {
     const kd = kdByMaterial(mtlOf(bundle({ colorMode: 'color', solidColor: '#8b6f47' })));
     expect(Object.keys(kd)).toEqual(['qsm_color']);
     // sRGB, NOT three.js's linearized channels: 0x8b/255 = 0.545, not 0.256.
@@ -608,7 +608,7 @@ describe('OBJ bark texture', () => {
     expect(fine.some((v, i) => Math.abs(v - coarse[i]) > 1e-6)).toBe(true);
   });
 
-  it('degrades to a flat bark colour when the image is missing or undecodable', () => {
+  it('degrades to a flat bark color when the image is missing or undecodable', () => {
     for (const bad of [null, { data: 'not base64 @@@', mime: 'image/png' }]) {
       const files = bundle(bad as never);
       // No texture file, no dangling map_Kd naming a file we never wrote.
@@ -792,14 +792,14 @@ describe('OBJ leaves', () => {
 
 
 // The reported bug: import a QSM CSV -> export to OBJ -> re-import, and the tree
-// came back lighter and desaturated. `Kd` in an MTL is an **sRGB** display colour,
+// came back lighter and desaturated. `Kd` in an MTL is an **sRGB** display color,
 // but three.js treats both landing spots (a `color` BufferAttribute, and
 // `new THREE.Color(r,g,b)`'s numeric form) as LINEAR and encodes them to sRGB at
 // output — so an unconverted Kd was encoded twice. Measured on the rank-0 trunk:
 // 176,141,87 became 216,196,158, drifting further on every extra trip.
-describe('OBJ colour round-trip', () => {
+describe('OBJ color round-trip', () => {
   // three.js's output encode (WebGLRenderer outputColorSpace) — the last step
-  // before the framebuffer, for a colour held in the linear working space.
+  // before the framebuffer, for a color held in the linear working space.
   const linearToSrgbOut = (v: number) =>
     v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
   // The REAL importer conversion, imported from utils/backendApi rather than
@@ -854,7 +854,7 @@ describe('OBJ colour round-trip', () => {
   });
 
   it('survives repeated round-trips without drifting', () => {
-    // The failure compounds: each unconverted trip lightens the colour again. Ten
+    // The failure compounds: each unconverted trip lightens the color again. Ten
     // simulated round-trips must land exactly where one does.
     const start = rankColorRgb(0);
     let kd = [...start];
@@ -865,11 +865,11 @@ describe('OBJ colour round-trip', () => {
     for (let i = 0; i < 3; i++) expect(kd[i]).toBeCloseTo(start[i], 6);
   });
 
-  it('encodes leaf colours, which are stored linear, back to sRGB', () => {
+  it('encodes leaf colors, which are stored linear, back to sRGB', () => {
     // Leaf materials come from meshExport's resolveMaterials, reading LINEAR
     // vertexColors — the opposite convention from the tube palette. Writing them
     // raw would make the foliage too dark and over-saturated (the same bug
-    // mirrored), so the writer must encode exactly these and not the tube colours.
+    // mirrored), so the writer must encode exactly these and not the tube colors.
     const LEAF_LINEAR = 0.216;
     const q = {
       ...fixtureQsm(),
@@ -891,7 +891,7 @@ describe('OBJ colour round-trip', () => {
     const mtl = qsmToCylinderMeshObjBundle(q, { baseName: 'tree', colorMode: 'rank' })
       .find(f => f.name.endsWith('.mtl'))!.text!;
     // 0.216 linear encodes to ~0.5 sRGB. Unconverted it would still read 0.216.
-    // Compared at 4 dp: the colour is stored in a Float32Array, and that ulp of
+    // Compared at 4 dp: the color is stored in a Float32Array, and that ulp of
     // rounding reaches the 6th decimal place of the encoded value.
     const [r] = kdOf(mtl, 'leaf');
     expect(r).toBeCloseTo(linearToSrgbOut(LEAF_LINEAR), 4);

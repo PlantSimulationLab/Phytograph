@@ -3,7 +3,7 @@
 A task's ``classes`` become the model package's class schema, so their
 ``value``/``name``/``color`` are what the app writes and shows. ``wood_leaf``
 is deliberately the ``wood_class`` column the geometric segmenter writes (1 =
-wood, 2 = leaf, colours from ``WOOD_SCHEME_CLASSES`` in
+wood, 2 = leaf, colors from ``WOOD_SCHEME_CLASSES`` in
 ``src/renderer/lib/classification.ts``). An ML result is then a drop-in for
 LAD, export, split and remove, which all read that column.
 """
@@ -21,7 +21,7 @@ TASKS = {
             {"value": 2, "name": "Leaf", "color": "#4db04f"},
         ],
         # SEM code -> output index. Petioles are leaf in the synthetic organ
-        # grouping, as hand labellers treat them. Fruit and ground are
+        # grouping, as hand labelers treat them. Fruit and ground are
         # ignored: the tool, like the geometric one, expects ground removed,
         # and fruit is neither class.
         "sem_to_index": {SEM_WOOD: 0, SEM_LEAF: 1},

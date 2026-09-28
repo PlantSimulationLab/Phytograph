@@ -39,10 +39,10 @@ export function useImageTexture(
       return;
     }
 
-    let cancelled = false;
+    let canceled = false;
     const img = new Image();
     img.onload = () => {
-      if (cancelled) return;
+      if (canceled) return;
       const tex = new THREE.Texture(img);
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.wrapS = THREE.RepeatWrapping;
@@ -60,14 +60,14 @@ export function useImageTexture(
       setTexture(tex);
     };
     img.onerror = (e) => {
-      if (cancelled) return;
+      if (canceled) return;
       console.error('[useImageTexture] Failed to load texture from base64:', e);
       setTexture(null);
     };
     img.src = `data:${mimeType};base64,${base64Data}`;
 
     return () => {
-      cancelled = true;
+      canceled = true;
       if (currentRef.current) {
         currentRef.current.dispose();
         currentRef.current = null;

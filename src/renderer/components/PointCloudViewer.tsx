@@ -10,7 +10,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -103,7 +103,7 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction, SceneAction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
-import { getUnlabelledClusters, getLabelExtent, segmentPick, type UnlabelledCluster } from '../utils/backendApi';
+import { getUnlabeledClusters, getLabelExtent, segmentPick, type UnlabeledCluster } from '../utils/backendApi';
 import { screenStrokeTileTest } from '../lib/strokeTileTest';
 import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
@@ -120,11 +120,11 @@ import {
 import { projectionKindOf } from '../lib/cameraRay';
 import {
   slabToBox, slabPredicate, slabToPayload, stepSlab, slabCoverage, slabCenter,
-  defaultSlabForBounds, slabViewPose, slabFromCentreline,
+  defaultSlabForBounds, slabViewPose, slabFromCenterline,
   type SlabRegion, type SlabStepMode,
 } from '../lib/crossSection';
 import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
-import { SlabCentrelinePreview } from './viewer/gizmos/SlabCentrelinePreview';
+import { SlabCenterlinePreview } from './viewer/gizmos/SlabCenterlinePreview';
 import { SlabDragPreview } from './viewer/gizmos/SlabDragPreview';
 import { LabelBrushOctree } from './viewer/gizmos/LabelBrushOctree';
 import { LabelBrushCursor } from './viewer/gizmos/LabelBrushCursor';
@@ -297,7 +297,7 @@ import { renameSlugInOctreeRef, dropSlugFromOctreeRef } from '../lib/scalarField
 import type { PickerItem } from './ObjectPicker';
 import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
-import { OrganSegmentPanel, type OrganColourBy } from './viewer/panels/OrganSegmentPanel';
+import { OrganSegmentPanel, type OrganColorBy } from './viewer/panels/OrganSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
@@ -874,9 +874,9 @@ export default function PointCloudViewer({
   // fresh material (see the key on <OctreePointCloud>). A rename is not a
   // different field — same values, new name — and keying on the name made it
   // remount, which disposes the drawn octree and re-streams it from nothing:
-  // every cloud coloured by the renamed field blinked. So a rename records
+  // every cloud colored by the renamed field blinked. So a rename records
   // "`slug` is still what `token` was", and the key uses the token. Pruned the
-  // moment the cloud is coloured by anything else (effect below), so two
+  // moment the cloud is colored by anything else (effect below), so two
   // genuinely different fields can never share a token.
   const scalarKeyAliasRef = useRef(new Map<string, { slug: string; token: string }>());
   const scalarKeyToken = (cloudId: string, field: string | undefined): string | undefined => {
@@ -932,7 +932,7 @@ export default function PointCloudViewer({
   // Which octrees have reported their first painted tiles. An OctreePointCloud
   // that MOUNTS directly into a gradient mode (height/scalar) — e.g. a freshly
   // imported cloud while the scene-default colorMode is already 'height' —
-  // compiles its colour shader before any tiles exist, so the first tiles render
+  // compiles its color shader before any tiles exist, so the first tiles render
   // with a stale (grayscale) program until something forces a recompile. The
   // colorMode/field remount key only fires on a *change*, not on mount-into.
   //
@@ -956,7 +956,7 @@ export default function PointCloudViewer({
   // Historically this ALSO forced a fresh-material remount, because a cloud
   // whose first paint landed before its material effect ran could render with
   // potree-core's DEFAULT pointColorType (elevation) instead of our material —
-  // a flat z-height/grey ramp until the user toggled colour mode and back. That
+  // a flat z-height/gray ramp until the user toggled color mode and back. That
   // remount is gone (it was the per-tree-split flicker); the material effect on
   // mount plus the per-frame material re-assert cover the same case.
   const handleOctreeFirstTiles = useCallback((cacheId: string) => {
@@ -1002,7 +1002,7 @@ export default function PointCloudViewer({
   const [noiseProgress, setNoiseProgress] = useState<string | null>(null);
   const [noiseError, setNoiseError] = useState<string | null>(null);
   // Keyed by cloud id: a detection belongs to the cloud it ran on, so selecting
-  // a different cloud must not show its neighbour's result.
+  // a different cloud must not show its neighbor's result.
   const [noiseResults, setNoiseResults] = useState<Map<string, DenoiseStats>>(new Map());
   const noiseAbortRef = useRef<AbortController | null>(null);
   const [showGrid, setShowGrid] = useState(true);
@@ -1038,7 +1038,7 @@ export default function PointCloudViewer({
   // Absent entry means 'solid'. The colormap is shared with point-cloud scalar
   // modes.
   const [meshColorModes, setMeshColorModes] = useState<Map<string, MeshColorMode>>(new Map());
-  // Which DTM scalar layer each DEM mesh is coloured by (name → layer key), when its
+  // Which DTM scalar layer each DEM mesh is colored by (name → layer key), when its
   // color mode is 'layer'. Mirrors the cloud's colorMode='scalar' + selectedScalarField.
   const [selectedMeshLayer, setSelectedMeshLayer] = useState<Map<string, string>>(new Map());
   // Which mesh rows have their inline "Color by" section expanded.
@@ -1085,7 +1085,7 @@ export default function PointCloudViewer({
   // --- Compute Normals -------------------------------------------------------
   const [showComputeNormalsPanel, setShowComputeNormalsPanel] = useState(false);
   const [normalsNeighbors, setNormalsNeighbors] = useState(30);
-  // A plain neighbour COUNT is the default, and the radius is opt-in, because a
+  // A plain neighbor COUNT is the default, and the radius is opt-in, because a
   // terrestrial scan's return density falls as 1/r^2: a fixed radius that is
   // right at 5 m finds almost nothing at 40 m. Unlike CSF's cloth resolution
   // this parameter therefore needs no extent-derived seeding — k is scale-free.
@@ -1159,7 +1159,7 @@ export default function PointCloudViewer({
   const [groundSlopeSmooth, setGroundSlopeSmooth] = useState(false);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
   // "Split into ground + plant clouds" runs AFTER the panel (and its inline
-  // spinner) has closed and the recoloured parent is already on screen, so
+  // spinner) has closed and the recolored parent is already on screen, so
   // without this the user watches a finished-looking viewport for the 10-15 s
   // the backend spends building the two child octrees. Mirrors
   // treeSplitProgress; drives the top-center StatusPill.
@@ -1170,7 +1170,7 @@ export default function PointCloudViewer({
   // the selected cloud's horizontal extent AND vertical relief each time the
   // ground panel OPENS. CSF's params are absolute distances, so a fixed default
   // that suits a ~1 m plant scan badly under-segments a 50 m field (nearly
-  // everything labelled non-ground); and a coarse, stiff cloth tuned for a large
+  // everything labeled non-ground); and a coarse, stiff cloth tuned for a large
   // FLAT field bridges over a large SLOPED tile and only finds the valley floor.
   // groundSegmentDefaultsForExtent picks the right recipe from the X/Y extent
   // (Z is up, so size.z is the vertical relief), and the user can still override
@@ -1213,14 +1213,14 @@ export default function PointCloudViewer({
   //
   // The boolean version had a silent hole: the effect also depends on `clouds`,
   // which churns (octree refresh, point-count update, a bake settling). A
-  // re-render mid-flight ran the cleanup — cancelling the pending response —
+  // re-render mid-flight ran the cleanup — canceling the pending response —
   // while `wasOpen` was already true, so the guard skipped and NO replacement
   // request went out. The panel then showed "Compute Normals" with no staleness
   // warning on a cloud whose normals were stale: precisely the state this
   // feature exists to surface, lost in the window right after a bake, which is
   // when a user is most likely to open the panel.
   //
-  // Keying off the session id makes a cancelled fetch self-healing: the ref
+  // Keying off the session id makes a canceled fetch self-healing: the ref
   // still holds the previous key, so the very next render re-issues it.
   const normalsStatusKey = useRef<string | null>(null);
   useEffect(() => {
@@ -1238,24 +1238,24 @@ export default function PointCloudViewer({
     setNormalsCostWarning(null);
     if (!sessionId) return;
 
-    let cancelled = false;
+    let canceled = false;
     let settled = false;
     void sessionNormalsStatus(sessionId)
       .then((s) => {
         settled = true;
-        if (!cancelled) setNormalsStatus({ hasNormals: s.has_normals, stale: s.stale });
+        if (!canceled) setNormalsStatus({ hasNormals: s.has_normals, stale: s.stale });
       })
       .catch(() => {
         // Advisory only — but clear the key so a transient failure retries on
         // the next render rather than latching "no normals" for the session.
         settled = true;
-        if (!cancelled) normalsStatusKey.current = null;
+        if (!canceled) normalsStatusKey.current = null;
       });
     return () => {
-      cancelled = true;
+      canceled = true;
       // Cleanup runs on every dep change, not just on close. If the request had
       // not answered yet, releasing the key is what makes the next render
-      // re-issue it — without this the cancelled response is simply lost and
+      // re-issue it — without this the canceled response is simply lost and
       // the panel silently keeps its "no normals" default.
       if (!settled) normalsStatusKey.current = null;
     };
@@ -1296,7 +1296,7 @@ export default function PointCloudViewer({
   const [organSegmentInProgress, setOrganSegmentInProgress] = useState(false);
   const [organSegmentError, setOrganSegmentError] = useState<string | null>(null);
   const [organUnits, setOrganUnits] = useState<OrganUnits>('auto');
-  const [organColourBy, setOrganColourBy] = useState<OrganColourBy>('organ');
+  const [organColorBy, setOrganColorBy] = useState<OrganColorBy>('organ');
   const [organModelId, setOrganModelId] = useState<string | null>(null);
   // Wood/leaf segmentation state (geometric, non-ML).
   const [showWoodSegmentPanel, setShowWoodSegmentPanel] = useState(false);
@@ -1335,7 +1335,7 @@ export default function PointCloudViewer({
   const [treeSegmentCostWarning, setTreeSegmentCostWarning] = useState<string | null>(null);
   const treeCostAcknowledgedRef = useRef(false);
   // "Split into one cloud per tree" runs AFTER the panel (and its inline
-  // spinner) has closed and the recoloured parent is already on screen, so
+  // spinner) has closed and the recolored parent is already on screen, so
   // without this the user watches a finished-looking viewport while the backend
   // builds one octree per tree. Drives the top-center StatusPill.
   const [treeSplitProgress, setTreeSplitProgress] = useState<{ label: string; value: number | null } | null>(null);
@@ -1530,18 +1530,18 @@ export default function PointCloudViewer({
   useEffect(() => {
     if (qsmColorMode !== 'texture' || barkListLoaded.current) return;
     barkListLoaded.current = true;
-    let cancelled = false;
+    let canceled = false;
     getBarkTextures()
-      .then((names) => { if (!cancelled && names.length) setQSMBarkNames(names); })
+      .then((names) => { if (!canceled && names.length) setQSMBarkNames(names); })
       .catch(() => { /* keep the fallback list */ });
-    return () => { cancelled = true; };
+    return () => { canceled = true; };
   }, [qsmColorMode]);
 
   // Fetch the selected bark image (base64 + MIME). Only while texture mode is
   // active, so the ~500KB payload isn't pulled for users who never texture a QSM.
   useEffect(() => {
     if (qsmColorMode !== 'texture') return;
-    let cancelled = false;
+    let canceled = false;
     setQSMBarkError(null);
     const source =
       qsmBarkSource.mode === 'builtin'
@@ -1549,7 +1549,7 @@ export default function PointCloudViewer({
         : { texturePath: qsmBarkSource.path };
     getBarkTexture(source)
       .then((resp) => {
-        if (cancelled) return;
+        if (canceled) return;
         if (resp.success && resp.data_base64) {
           setQSMBarkTexture({ data: resp.data_base64, mime: resp.mime || 'image/jpeg' });
         } else {
@@ -1559,9 +1559,9 @@ export default function PointCloudViewer({
         }
       })
       .catch((e) => {
-        if (!cancelled) setQSMBarkError(e instanceof Error ? e.message : String(e));
+        if (!canceled) setQSMBarkError(e instanceof Error ? e.message : String(e));
       });
-    return () => { cancelled = true; };
+    return () => { canceled = true; };
   }, [qsmColorMode, qsmBarkSource]);
 
   // Pick a bark image off disk. Mirrors AddLeavesPopup's handlePickPng.
@@ -1689,9 +1689,9 @@ export default function PointCloudViewer({
       return;
     }
     const xmlDir = xmlPath ? dirname(xmlPath) : '';
-    // One colour per <scan> in the XML. The shared allocator keeps cycling past
+    // One color per <scan> in the XML. The shared allocator keeps cycling past
     // the 8th entry; accumulating into a set and re-asking for "the first free
-    // colour" freezes on one colour instead, which an XML with more than 8
+    // color" freezes on one color instead, which an XML with more than 8
     // scans would hit.
     const allocateColor = createScanColorAllocator(scans.map(s => s.color));
     // Renumber labels off the current count so an import after manual
@@ -1711,7 +1711,7 @@ export default function PointCloudViewer({
       total: heliosScans.length,
       label: 'Preparing…',
     });
-    bulkImportCancelledRef.current = false;
+    bulkImportCanceledRef.current = false;
     try {
       // Phase 1: resolve every referenced file FIRST (keeps the existing
       // missing-file prompt), and split scans into those with data
@@ -1769,10 +1769,10 @@ export default function PointCloudViewer({
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
             // 'm' is the right default here, not a guess: with no wizard there
-            // is nobody to ask, and metres is what every import assumed before
+            // is nobody to ask, and meters is what every import assumed before
             // units existed — so this path behaves exactly as it always has.
             inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], droppedSlugs: [], keptSlugs: [], worldShift: null, units: 'm' as const, trajectory: null }));
-        if (!results) return; // user cancelled the wizard
+        if (!results) return; // user canceled the wizard
       }
 
       // Phase 3: build the Scans. Wizard results carry data; params-only
@@ -1793,7 +1793,7 @@ export default function PointCloudViewer({
           // A cancel stops the remaining scans too. This pathway is
           // all-or-nothing (see the failures check below), so we bail out of the
           // whole bundle rather than importing a partial set.
-          if (r && bulkImportCancelledRef.current) break;
+          if (r && bulkImportCanceledRef.current) break;
           if (r) {
             const controller = new AbortController();   // fresh per scan
             bulkImportAbortRef.current = controller;
@@ -1824,7 +1824,7 @@ export default function PointCloudViewer({
                 // defaults here, so an XML bundle's LAS/PLY scans ignored them.
                 r.droppedSlugs, r.roleOverrides ?? null,
                 // The source unit the wizard resolved. The backend scales
-                // positions to metres by it at session create — there is no
+                // positions to meters by it at session create — there is no
                 // second chance once the session and its octree exist.
                 r.units, r.scalarLabels ?? null);
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
@@ -1848,9 +1848,9 @@ export default function PointCloudViewer({
             } catch (err) {
               // A cancel is the user's choice, not a load failure — it must not
               // join `failures` (which raises an error toast below).
-              if (err instanceof ScanCancelledError || controller.signal.aborted
+              if (err instanceof ScanCanceledError || controller.signal.aborted
                   || (err instanceof Error && err.name === 'AbortError')) {
-                bulkImportCancelledRef.current = true;
+                bulkImportCanceledRef.current = true;
                 break;
               }
               failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
@@ -1859,9 +1859,9 @@ export default function PointCloudViewer({
         }
         newScans.push(scan);
       }
-      // Cancelled: this pathway is all-or-nothing, so add NOTHING and return
+      // Canceled: this pathway is all-or-nothing, so add NOTHING and return
       // quietly. The modal closing is the feedback; no toast (nothing happened).
-      if (bulkImportCancelledRef.current) return;
+      if (bulkImportCanceledRef.current) return;
       if (failures.length > 0) {
         const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
         const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
@@ -1997,7 +1997,7 @@ export default function PointCloudViewer({
   const [alignmentInputs, setAlignmentInputs] = useState<{ cloudId: string; meshId: string } | null>(null);
   // ICP (Iterative Closest Point) snap-to-fit state
   const [isRunningICP, setIsRunningICP] = useState(false);
-  // Cancellable progress-pill state for the alignment tools (mirrors LAD/backfill).
+  // Cancelable progress-pill state for the alignment tools (mirrors LAD/backfill).
   // The three ICP tools (c2c / m2m / c2m snap-to-fit) share one pill; the c2m
   // distance compare gets its own (the tools never overlap in time).
   const [icpProgress, setIcpProgress] = useState<{ label: string; value: number | null } | null>(null);
@@ -2165,7 +2165,7 @@ export default function PointCloudViewer({
   // bare label is already accurate.
   const [cropProgress, setCropProgress] =
     useState<{ label: string; value: number | null } | null>(null);
-  // One AbortController for the WHOLE apply, not per scan: cancelling a 6-scan
+  // One AbortController for the WHOLE apply, not per scan: canceling a 6-scan
   // crop must stop the loop rather than only the in-flight cloud. `cropRunIdRef`
   // carries the backend run id so Cancel can hard-kill a streaming stage instead
   // of merely detaching the fetch. Mirrors filterAbortRef/filterRunIdRef.
@@ -2283,9 +2283,9 @@ export default function PointCloudViewer({
   // cancelImport: tell the backend to stop, THEN tear down the fetch.
   const bulkImportAbortRef = useRef<AbortController | null>(null);
   const bulkImportRunIdRef = useRef<string | null>(null);
-  const bulkImportCancelledRef = useRef(false);
+  const bulkImportCanceledRef = useRef(false);
   const cancelBulkImport = useCallback(() => {
-    bulkImportCancelledRef.current = true;
+    bulkImportCanceledRef.current = true;
     if (bulkImportRunIdRef.current) void cancelRun(bulkImportRunIdRef.current);
     bulkImportAbortRef.current?.abort();
   }, []);
@@ -2315,7 +2315,7 @@ export default function PointCloudViewer({
   // Whether anything is registered at all — gates "Reset Registration" in the
   // palette and (pushed over IPC) in the native menu bar. Reactive state rather
   // than a `scansRef` read, because the command registry memo has to RECOMPUTE
-  // when it flips or the greyed-out state would never update.
+  // when it flips or the grayed-out state would never update.
   const anyScanRegistered = useMemo(() => scansAll.some(s => s.registration != null), [scansAll]);
 
   // Edit mode and per-cloud edit states
@@ -2399,7 +2399,7 @@ export default function PointCloudViewer({
 
   // ── Measurement (the same armed picker, doing something else with a click) ─
   // `pickerMode` decides what a pick means: 'inspect' places a label (the
-  // original behaviour), the rest accumulate vertices into a Measurement.
+  // original behavior), the rest accumulate vertices into a Measurement.
   // A mode rather than a second tool — they share the armed viewport, the pick
   // path and the Escape handling, so two tools would only have to exclude each
   // other and duplicate all of it.
@@ -2593,7 +2593,7 @@ export default function PointCloudViewer({
   // Camera-facing square indicator transform that follows the cursor.
   const [eraseBrushMatrix, setEraseBrushMatrix] = useState<THREE.Matrix4 | null>(null);
 
-  // ── Manual labelling ──────────────────────────────────────────────────────
+  // ── Manual labeling ──────────────────────────────────────────────────────
   // The tool paints a per-point class column. Phase 1 reuses the EXISTING
   // polygon lasso as its selection primitive (draw → close → the region becomes
   // a stroke), so there is no new selection code here; the slab and the brush
@@ -2604,12 +2604,12 @@ export default function PointCloudViewer({
   // never has to be frozen here.
   const [showSectionPanel, setShowSectionPanel] = useState(false);
   const [slab, setSlab] = useState<SlabRegion | null>(null);
-  // Two-click centreline placement, reusing BoxDrawRaycaster's ground picks.
+  // Two-click centerline placement, reusing BoxDrawRaycaster's ground picks.
   const [slabDrawState, setSlabDrawState] = useState<'idle' | 'awaiting-a' | 'awaiting-b'>('idle');
   // Mirror of the two-click draw state for the raycaster's mounted handler,
   // which cannot see later renders. Assigned during render, not in an effect —
   // an effect runs after paint and the second click can beat it.
-  // Mirrors of the draw state for RENDERING the in-progress centreline. The ref
+  // Mirrors of the draw state for RENDERING the in-progress centerline. The ref
   // above drives the handler (which cannot see later renders); these drive the
   // preview, which must re-render.
   const [slabFirstPointState, setSlabFirstPointState] =
@@ -2631,7 +2631,7 @@ export default function PointCloudViewer({
    */
   const [slabSuspended, setSlabSuspended] = useState(false);
 
-  // E2E seam for the centreline placement feedback. Publishes the two facts a
+  // E2E seam for the centerline placement feedback. Publishes the two facts a
   // test can't otherwise see — the first click landed, and the rubber band is
   // tracking — without exposing the scene graph. Mirrors __labelOverlay.
   useEffect(() => {
@@ -2698,7 +2698,7 @@ export default function PointCloudViewer({
   const [labelBrushCursor, setLabelBrushCursor] =
     useState<{ center: THREE.Vector3; radius: number } | null>(null);
   const [labelBrushPainting, setLabelBrushPainting] = useState(false);
-  // Palette bound to the labelled cloud. Seeded from the cloud's OctreeRef when
+  // Palette bound to the labeled cloud. Seeded from the cloud's OctreeRef when
   // the tool opens, else from the wood/leaf preset (the common correction case).
   const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
   const [showPaletteEditor, setShowPaletteEditor] = useState(false);
@@ -2709,7 +2709,7 @@ export default function PointCloudViewer({
    */
   const [newColumnDraft, setNewColumnDraft] = useState<ClassPalette | null>(null);
   /**
-   * The COLUMN being labelled. Tracked separately from `labelPalette.slug`
+   * The COLUMN being labeled. Tracked separately from `labelPalette.slug`
    * because it must survive a palette edit, and because it is what the picker
    * binds to. Remembered per cloud in `labelColumnByCloudRef` so re-opening the
    * tool returns to the column the user was working in.
@@ -2721,10 +2721,10 @@ export default function PointCloudViewer({
   const [labelVisibleClasses, setLabelVisibleClasses] = useState<Set<number>>(new Set());
   // Classes no stroke may change, whatever its From gate (the padlocks).
   const [labelLockedClasses, setLabelLockedClasses] = useState<Set<number>>(new Set());
-  // The unlabelled-point finder: where the column's unlabelled points gather,
+  // The unlabeled-point finder: where the column's unlabeled points gather,
   // and which of those places the camera is on. Null until first used.
   const [labelFinder, setLabelFinder] =
-    useState<{ clusters: UnlabelledCluster[]; index: number; total: number; estimated: boolean } | null>(null);
+    useState<{ clusters: UnlabeledCluster[]; index: number; total: number; estimated: boolean } | null>(null);
   // null = "Any visible" (no class gate) — see LabelPanel.
   const [labelFromClasses, setLabelFromClasses] = useState<Set<number> | null>(null);
   // Uncommitted strokes and the dirty flag, per (cloud, column) — see
@@ -2816,7 +2816,7 @@ export default function PointCloudViewer({
    * Which leaves one thing that MUST NOT be dropped in the meantime: the
    * overlay. `labelStrokes` is cleared at commit (the tool is free again — new
    * column, different cloud, close the panel), so without somewhere else to
-   * keep them the painted points would revert to their old colours the instant
+   * keep them the painted points would revert to their old colors the instant
    * the user clicked Save, and stay reverted for the length of the rebuild.
    * Held here instead, keyed by cloud so the paint survives closing the tool or
    * moving to another scan, and dropped only by the rebuild that carries it.
@@ -3068,7 +3068,7 @@ export default function PointCloudViewer({
       for (const cloud of clouds) {
         if (!newIdSet.has(cloud.id) || !cloud.data.bounds) continue;
         // Frame the CONTENT: prefer the backend's percentile box over the raw
-        // AABB. A few stray returns hundreds of metres out (multipath, birds, a
+        // AABB. A few stray returns hundreds of meters out (multipath, birds, a
         // mis-registered scan) otherwise set the framing, which parks the camera
         // far enough back to hold THEM and aims it at the empty space between
         // them — the imported cloud lands as an off-axis speck, and no amount of
@@ -3260,7 +3260,7 @@ export default function PointCloudViewer({
     // A section is a VIEW STATE — like the camera or the point budget — not a
     // mode. Modes are mutually exclusive; view states are not. Treating it as a
     // mode meant opening Label closed the section (losing the clip and the
-    // stroke bound), and reaching over to adjust thickness mid-labelling closed
+    // stroke bound), and reaching over to adjust thickness mid-labeling closed
     // the Label panel and the user's class selection with it.
     //
     // It stacks below the active tool's panel instead (see the panel mount).
@@ -3504,7 +3504,7 @@ export default function PointCloudViewer({
 
   // Frame a newly added scan on its own — but ONLY when the add tripped the
   // frame-mismatch check (a far-off UTM trajectory). Without this, the
-  // CameraController union-frames the whole scene and a scan millions of metres
+  // CameraController union-frames the whole scene and a scan millions of meters
   // from the origin plane collapses to sub-pixel ("auto-fits to nothing"). A
   // normal same-frame add is deliberately left to the union framing. Mirrors the
   // mesh/skeleton new-id effects; setTimeout(50) lets __frameSelection register.
@@ -3580,7 +3580,7 @@ export default function PointCloudViewer({
     if (labelQueue.pending() > 0) void labelQueue.idle().then(go); else go();
   }, [scene, labelQueue]);
 
-  // Forward ref to the cloud being labelled — declared here because the window
+  // Forward ref to the cloud being labeled — declared here because the window
   // seams above are registered before labelTargetCloud exists.
   const labelTargetCloudRef = useRef<{ id: string } | null>(null);
 
@@ -3605,8 +3605,8 @@ export default function PointCloudViewer({
     // useless for asserting hard point counts — and hard counts are the only way
     // to prove the section actually bounds what a stroke paints.
     (window as any).__setSlab = (next: SlabRegion) => setSlab(next);
-    // E2E seams for the labelling preview. The overlay's own __labelOverlay
-    // fact counts the CPU buffer, which is filled in EVERY colour mode — it
+    // E2E seams for the labeling preview. The overlay's own __labelOverlay
+    // fact counts the CPU buffer, which is filled in EVERY color mode — it
     // cannot tell you whether the shader actually SAMPLES it. These two expose
     // the render mode the selected cloud is really in, and let a spec put it
     // into a mode that ignores the intensity slot (as a real RGB scan does).
@@ -3947,7 +3947,7 @@ export default function PointCloudViewer({
         // The SOURCE UNIT is part of the rebuild descriptor. This re-reads the
         // raw file, which is still in its original unit — without this a
         // feet-unit cloud comes back 3.28x larger, silently, and every
-        // metre-calibrated tool downstream then measures the wrong cloud.
+        // meter-calibrated tool downstream then measures the wrong cloud.
         // Positions 5-11 are defaults; units is the 12th.
         null, null, undefined, undefined, undefined, null, null,
         octreeInfo.sourceUnits ?? null,
@@ -4172,9 +4172,9 @@ export default function PointCloudViewer({
           next.set(cloudId, { ...hold, failed: true });
           return next;
         });
-        const cancelled = (err instanceof DOMException && err.name === 'AbortError')
-          || err instanceof ScanCancelledError;
-        if (!cancelled) {
+        const canceled = (err instanceof DOMException && err.name === 'AbortError')
+          || err instanceof ScanCanceledError;
+        if (!canceled) {
           showToast({
             title: describeBackendError(err, 'Commit labels').message,
             message: 'The labels are still on the cloud — commit again to bake them in.',
@@ -4211,7 +4211,7 @@ export default function PointCloudViewer({
       baked, current, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
     ));
     if (reason.labelSlug) {
-      // The octree now carries the column, so colour by it — the step that used
+      // The octree now carries the column, so color by it — the step that used
       // to happen inline at the end of a blocking commit.
       setCloudColorMode(cloudId, { mode: 'scalar', field: reason.labelSlug });
       setLabelCommitHolds((prev) => {
@@ -4269,8 +4269,8 @@ export default function PointCloudViewer({
    *
    * Safe by construction, which is why the pill offers it: the deletions are
    * already committed on the backend and the per-tile mask is already drawing
-   * the cropped result, so a cancelled rebuild costs only the space the hidden
-   * points keep occupying in an octree nobody sees them through. A cancelled
+   * the cropped result, so a canceled rebuild costs only the space the hidden
+   * points keep occupying in an octree nobody sees them through. A canceled
    * bake also leaves the session pristine, so the mask and the backend stay in
    * agreement.
    */
@@ -4399,15 +4399,15 @@ export default function PointCloudViewer({
     const derivedCounts: number[] = [];
     // Number of new "(segment)" clouds added this apply — drives the toast.
     let segmentedCount = 0;
-    // Derived clouds (segment / retained crop) take a FRESH palette colour, the
+    // Derived clouds (segment / retained crop) take a FRESH palette color, the
     // same as any other newly created scan. Inheriting the source's swatch (the
-    // old behaviour) made a segment indistinguishable from its parent in the
+    // old behavior) made a segment indistinguishable from its parent in the
     // viewer, which is precisely the thing a segment exists to separate.
     //
     // An ALLOCATOR, not a one-shot allocateScanColor: one apply can span several
     // selected clouds, each contributing a child, and those children are added
     // across awaits — a per-call read of the scan list would hand out the same
-    // colour to every child added before React commits. Seeded from the live
+    // color to every child added before React commits. Seeded from the live
     // scans (via the ref, not the closure's stale snapshot).
     const nextDerivedColor = createScanColorAllocator(scansRef.current.map(s => s.color));
 
@@ -4658,7 +4658,7 @@ export default function PointCloudViewer({
                   'cropped',
                 ),
                 visible: true,
-                // Fresh palette colour, like any newly created scan — see
+                // Fresh palette color, like any newly created scan — see
                 // nextDerivedColor.
                 color: nextDerivedColor(),
                 data,
@@ -4816,7 +4816,7 @@ export default function PointCloudViewer({
       // arrays. These have no backend session and their positions already live
       // in `data.positions`, so there is nothing to re-read from disk — every
       // file-imported cloud is session-backed and handled above. (Flat clouds
-      // here are renderer-synthesised / stitched overlays.)
+      // here are renderer-synthesized / stitched overlays.)
 
       // In-renderer crop. Two-pass over typed arrays (count, then
       // fill). Used for stitched clouds (no sourcePath), clouds with
@@ -4940,7 +4940,7 @@ export default function PointCloudViewer({
             'cropped',
           ),
           visible: true,
-          // Fresh palette colour — see the octree path above.
+          // Fresh palette color — see the octree path above.
           color: nextDerivedColor(),
           data: keptData,
           params: cloud.params
@@ -4972,7 +4972,7 @@ export default function PointCloudViewer({
     // A per-scan progress reporter outlives the statement that builds it — it is
     // handed to a call that is still running. The previous version closed over a
     // `let i` that was incremented BEFORE the await, so every marker for scan k
-    // was labelled k+2 and scaled into k+1's slice: a 4-scan crop showed
+    // was labeled k+2 and scaled into k+1's slice: a 4-scan crop showed
     // "Cropping plot_d.laz (5 of 4)…", ran the bar past 100%, and then jumped
     // BACKWARDS when the next scan set its own slice start. Passing the index in
     // copies it into the closure at construction, so a reporter can only ever
@@ -5018,7 +5018,7 @@ export default function PointCloudViewer({
     const runId = cropRunIdRef.current;
     if (runId) void cancelRun(runId).catch(() => {});
     cropAbortRef.current?.abort();
-    setCropProgress({ label: 'Cancelling crop…', value: null });
+    setCropProgress({ label: 'Canceling crop…', value: null });
   }, []);
 
   // Apply erased points permanently - removes erased points and bakes in translation
@@ -5244,7 +5244,7 @@ export default function PointCloudViewer({
     // Tying this to `showSectionPanel` meant opening the Label tool (which
     // closes the section panel, since they share a slot) silently switched the
     // whole section off — the clip, the wireframe, and the slab carried on each
-    // stroke. The user set up a section, went to paint in it, and the labelling
+    // stroke. The user set up a section, went to paint in it, and the labeling
     // tool behaved exactly as if no section existed.
     //
     // The section is a VIEWING CONTEXT, not a modal tool: it stays in effect
@@ -5271,7 +5271,7 @@ export default function PointCloudViewer({
    * Oriented clip-box transform for the active slab. Null when no section, or
    * while the section is suspended.
    *
-   * This is the ONLY path by which the slab clips the view — labelling reads
+   * This is the ONLY path by which the slab clips the view — labeling reads
    * `slab` directly (see paintLabelStroke). That separation is deliberate:
    * suspending the clip shows the whole cloud WITHOUT silently unbounding the
    * paint, which would otherwise let a stroke sweep the full depth while the
@@ -5283,9 +5283,9 @@ export default function PointCloudViewer({
   );
   /**
    * The suspended section, drawn as a ghost: the whole cloud is visible, with
-   * the slab in its own colours and everything outside it grey — so "Show full
+   * the slab in its own colors and everything outside it gray — so "Show full
    * cloud" gives context without losing sight of where the section is. Not
-   * while a new centreline is being placed: the old section is about to be
+   * while a new centerline is being placed: the old section is about to be
    * replaced, and highlighting it would point at the wrong place.
    */
   const slabGhostMatrix = useMemo(
@@ -5341,12 +5341,12 @@ export default function PointCloudViewer({
     );
   }, []);
 
-  /** Second click of the centreline: build the slab and frame it. */
-  const commitSlabCentreline = useCallback((ax: number, ay: number, bx: number, by: number) => {
+  /** Second click of the centerline: build the slab and frame it. */
+  const commitSlabCenterline = useCallback((ax: number, ay: number, bx: number, by: number) => {
     if (!sectionBounds) return;
     // Shared with the while-you-drag preview, so what the second click produces
     // is exactly the box that was on screen a moment earlier.
-    const next = slabFromCentreline(
+    const next = slabFromCenterline(
       { x: ax, y: ay }, { x: bx, y: by }, sectionBounds,
     );
     setSlab(next);
@@ -5414,17 +5414,17 @@ export default function PointCloudViewer({
     return () => clearTimeout(timer);
   }, [sectionTargetId, sectionEditKey]);
 
-  // ── Manual labelling ──────────────────────────────────────────────────────
+  // ── Manual labeling ──────────────────────────────────────────────────────
 
-  // The cloud being labelled (single selection, session-backed).
+  // The cloud being labeled (single selection, session-backed).
   const labelTargetCloud = useMemo(() => {
     if (!showLabelPanel || selectedIds.size !== 1) return null;
     const cloud = clouds.find(c => selectedIds.has(c.id));
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
-  // The line tool draws in a section, so it needs one on the cloud being labelled.
+  // The line tool draws in a section, so it needs one on the cloud being labeled.
   const labelLineAvailable = !!labelTargetCloud && !!slab && sectionTargetCloud?.id === labelTargetCloud.id;
-  // World Z extent of the labelled cloud: the limiting box spans it by default.
+  // World Z extent of the labeled cloud: the limiting box spans it by default.
   const labelTargetZ = useMemo(() => {
     const b = labelTargetCloud?.data.bounds;
     const tz = labelTargetCloud ? getEditState(labelTargetCloud.id).translation.z : 0;
@@ -5444,7 +5444,7 @@ export default function PointCloudViewer({
   const labelDirty = labelPendingEntry.dirty;
 
   /**
-   * The columns of the labelled cloud the tool can paint into.
+   * The columns of the labeled cloud the tool can paint into.
    *
    * Enumerated from the SAME `octreeScalarFieldOptions` the Color-by and Filter
    * pickers use, so the three cannot disagree about which columns a cloud has.
@@ -5537,7 +5537,7 @@ export default function PointCloudViewer({
             // Send the WHOLE surviving id list, newest first. A gesture that
             // recorded nothing is absent from the history, so naming only the
             // last one could match nothing; the backend keeps up to the first id
-            // it recognises, which is exactly "everything the user still has".
+            // it recognizes, which is exactly "everything the user still has".
             const ids = op.surviving.map(s => s.strokeId).reverse();
             void labelQueue.run(op.cloudId,
               () => resetCloudLabelEdits(sessionId, undefined, op.slug, ids)).then(apply).catch(fail);
@@ -5577,7 +5577,7 @@ export default function PointCloudViewer({
   // Phytograph has no project save/load — File > Save opens the export panel and
   // the scene lives only in React state plus backend session RAM. For every
   // other tool that is survivable: a triangulation re-runs in seconds. A
-  // labelling session is IRREPLACEABLE hand-made work, so losing it to a stray
+  // labeling session is IRREPLACEABLE hand-made work, so losing it to a stray
   // File > New or a window close is a different class of harm.
   //
   // Guard the exits we can. Real autosave/session restore is separate design
@@ -5591,7 +5591,7 @@ export default function PointCloudViewer({
   // pushes this count (with the scene's emptiness) over IPC.SceneDirty, and
   // src/main/quitConfirm.ts raises a native message box from the 'close' /
   // 'before-quit' handlers, where preventDefault() can cancel the quit outright.
-  // That keeps the dialog cancellable, styleable by the OS, and — because it is
+  // That keeps the dialog cancelable, styleable by the OS, and — because it is
   // suppressed under PHYTOGRAPH_E2E — incapable of wedging a Playwright
   // teardown the way beforeunload did.
   //
@@ -5757,7 +5757,7 @@ export default function PointCloudViewer({
    * reappearing as Unknown/Leaf/Petiole under the organ palette).
    */
   const refreshLabelCounts = useCallback(async (
-    sessionId: string, slug: string, cancelled?: () => boolean,
+    sessionId: string, slug: string, canceled?: () => boolean,
   ) => {
     // Stamp the request. A summary fetch is a READ of state that a paint may be
     // about to change, so a slow reply must never clobber a newer write: paint
@@ -5767,7 +5767,7 @@ export default function PointCloudViewer({
     const seq = ++labelCountsSeqRef.current;
     try {
       const res = await getCloudLabelSummary(sessionId, slug);
-      if (cancelled?.() || seq !== labelCountsSeqRef.current) return;
+      if (canceled?.() || seq !== labelCountsSeqRef.current) return;
       setLabelClassCounts(
         Object.fromEntries(
           Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
@@ -5775,7 +5775,7 @@ export default function PointCloudViewer({
       );
     } catch {
       // Only costs the readout; the next stroke's response repopulates it.
-      if (!cancelled?.() && seq === labelCountsSeqRef.current) setLabelClassCounts({});
+      if (!canceled?.() && seq === labelCountsSeqRef.current) setLabelClassCounts({});
     }
   }, []);
 
@@ -5783,7 +5783,7 @@ export default function PointCloudViewer({
    * Make `next` the live palette.
    *
    * Shared by preset cycling and the editor, because switching palettes is
-   * never just a colour change: class VALUES differ between vocabularies, so
+   * never just a color change: class VALUES differ between vocabularies, so
    * the visible set, the active class, the From-gate and — critically — the
    * counts must all be re-derived. `labelClassCounts` is keyed by class value,
    * so carrying a stale map renders one column's numbers under another's names.
@@ -5795,7 +5795,7 @@ export default function PointCloudViewer({
     setLabelFinder(null);
     setLabelActiveClass(prev => (
       // Keep the user's active class if the new palette still has it, so an
-      // edit that only renames or recolours does not move their brush.
+      // edit that only renames or recolors does not move their brush.
       next.classes.some(c => c.value === prev && c.value !== UNCLASSIFIED_VALUE)
         ? prev
         : next.classes.find(c => c.value !== UNCLASSIFIED_VALUE)?.value ?? UNCLASSIFIED_VALUE
@@ -5811,7 +5811,7 @@ export default function PointCloudViewer({
    *
    * Derived from the column's own values when it HAS any — that is what shows a
    * failed tree segmentation its real Tree 1 / Tree 2. An EMPTY column has
-   * nothing to derive from, so the hand-labelling column falls back to the
+   * nothing to derive from, so the hand-labeling column falls back to the
    * wood/leaf preset (this app's common correction) rather than to a palette
    * holding only "Unclassified", which would give the user nothing to paint.
    */
@@ -5857,12 +5857,12 @@ export default function PointCloudViewer({
   }, []);
 
   /**
-   * The stock vocabularies that describe the column currently being labelled.
+   * The stock vocabularies that describe the column currently being labeled.
    *
    * A preset names a class list AND the column it applies to, so only some of
    * them are meaningful for a given column: ASPRS describes an imported LAS
    * classification byte, ground/non-ground describes what the segmentation
-   * wrote, and wood-leaf/organs are hand-labelling vocabularies. A column with
+   * wrote, and wood-leaf/organs are hand-labeling vocabularies. A column with
    * none (a `tree_instance`, a user's own) simply has no presets, and the
    * button is disabled rather than cycling the user somewhere else.
    */
@@ -5896,11 +5896,11 @@ export default function PointCloudViewer({
   // at mount: it is a disk read that only this panel needs.
   useEffect(() => {
     if (!showPaletteEditor) return;
-    let cancelled = false;
+    let canceled = false;
     void getClassPalettes()
-      .then(list => { if (!cancelled) setPaletteLibrary(list); })
-      .catch(() => { if (!cancelled) setPaletteLibrary([]); });
-    return () => { cancelled = true; };
+      .then(list => { if (!canceled) setPaletteLibrary(list); })
+      .catch(() => { if (!canceled) setPaletteLibrary([]); });
+    return () => { canceled = true; };
   }, [showPaletteEditor]);
 
   /**
@@ -5920,8 +5920,8 @@ export default function PointCloudViewer({
     // A brand-new column exists only in this palette until the first stroke, so
     // nothing else has told the process-wide registry it is a CLASS column.
     // Without this it renders as a continuous gradient everywhere outside the
-    // labelling tool, and `robustScalarRange` would percentile-trim it — which
-    // drops its rarest class off the colour ramp.
+    // labeling tool, and `robustScalarRange` would percentile-trim it — which
+    // drops its rarest class off the color ramp.
     registerCategoricalSlug(next.slug);
     const cloud = labelTargetCloud;
     const octreeInfo = cloud?.data.octree;
@@ -6001,11 +6001,11 @@ export default function PointCloudViewer({
     //      Only when there is EXACTLY one: two bound palettes (reachable today
     //      by cycling presets) give no basis to choose, and guessing wrong
     //      paints the wrong column silently.
-    //   2. The hand-labelling column, when the cloud already has one.
+    //   2. The hand-labeling column, when the cloud already has one.
     //   3. The cloud's own classification, when it carries exactly one worth
     //      editing. THIS is what opens a failed tree segmentation on
     //      `tree_instance` instead of on an empty wood/leaf vocabulary.
-    //   4. The hand-labelling column, which the backend creates on first paint.
+    //   4. The hand-labeling column, which the backend creates on first paint.
     const remembered = labelColumnByCloudRef.current.get(labelTargetCloud.id);
     const bound = palettes ? Object.keys(palettes) : [];
     const ownClassifications = labelColumns.filter(
@@ -6040,10 +6040,10 @@ export default function PointCloudViewer({
     // total would disagree with every later update.
     const sessionId = labelTargetCloud.data.octree?.sessionId;
     if (sessionId) {
-      let cancelled = false;
-      void refreshLabelCounts(sessionId, palette.slug, () => cancelled);
+      let canceled = false;
+      void refreshLabelCounts(sessionId, palette.slug, () => canceled);
       // Guard against a late reply landing after the user switched clouds.
-      return () => { cancelled = true; };
+      return () => { canceled = true; };
     }
     // Only when the TARGET changes — re-running on every palette edit would
     // clobber the user's in-progress class list.
@@ -6234,7 +6234,7 @@ export default function PointCloudViewer({
       } catch (err) {
         rollbackStroke();
         rollbackPair();
-        showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
+        showToast({ title: describeBackendError(err, 'Labeling').message, type: 'error' });
       }
     });
   }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
@@ -6244,7 +6244,7 @@ export default function PointCloudViewer({
       // must be dependencies. Omitting them froze `slab` at its first-render
       // value — null — so every stroke drawn inside a section shipped WITHOUT
       // its slab. The overlay reads the live slab, so the preview showed the
-      // section-bounded paint while the backend labelled unbounded (or, with
+      // section-bounded paint while the backend labeled unbounded (or, with
       // the polygon covering the viewport, everything). Preview and truth
       // silently disagreed, which is the exact failure C1-R warns about.
       slab, sectionTargetCloud,
@@ -6264,11 +6264,11 @@ export default function PointCloudViewer({
       .map((c) => ({ slug: c.slug, label: c.label, classes: (bound?.[c.slug] ?? paletteForColumn(c, c.slug)).classes }));
   }, [labelTargetCloud, labelPalette, labelColumns, paletteForColumn]);
   const handlePrelabel = useCallback((
-    source: string, map: Record<string, number> | null, onlyUnlabelled: boolean,
+    source: string, map: Record<string, number> | null, onlyUnlabeled: boolean,
   ) => {
     void paintLabelStrokeRef.current?.(WHOLE_CLOUD, {
       toClass: UNCLASSIFIED_VALUE,
-      fromClasses: onlyUnlabelled ? [UNCLASSIFIED_VALUE] : undefined,
+      fromClasses: onlyUnlabeled ? [UNCLASSIFIED_VALUE] : undefined,
       fromColumn: { slug: source, ...(map ? { map } : {}) },
     });
   }, []);
@@ -6351,7 +6351,7 @@ export default function PointCloudViewer({
           type: unknown.length ? 'info' : 'success',
           title: `Loaded ${strokes.length} stroke${strokes.length === 1 ? '' : 's'}${file.slug !== slug ? ` (saved from ${file.slug})` : ''}`,
           message: unknown.length
-            ? `Class value${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not in this class set: add ${unknown.length === 1 ? 'it' : 'them'} to see ${unknown.length === 1 ? 'it' : 'them'} coloured.`
+            ? `Class value${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not in this class set: add ${unknown.length === 1 ? 'it' : 'them'} to see ${unknown.length === 1 ? 'it' : 'them'} colored.`
             : undefined,
         });
       } catch (err) {
@@ -6448,7 +6448,7 @@ export default function PointCloudViewer({
 
   /**
    * Finish a LINE-tool polyline: each clicked pixel is cast onto the section's
-   * centre plane and becomes an [along, z] vertex, and the stroke paints the
+   * center plane and becomes an [along, z] vertex, and the stroke paints the
    * chosen side of that line — within the slab, which paintLabelStroke ANDs in
    * as it does for every stroke drawn in a section. Null unless the line tool
    * is live, so closePolygonFrom falls through to the lasso. Assigned in render
@@ -6458,7 +6458,7 @@ export default function PointCloudViewer({
    * The Pick tool: a click (not a drag) on the viewport labels the piece under
    * the cursor. The surface point comes from the same depth probe zoom uses;
    * the backend segments the cloud (cached), resolves the piece — grown to its
-   * neighbours facing the same way on Shift+click — and returns it as a
+   * neighbors facing the same way on Shift+click — and returns it as a
    * voxel set, which then goes through paintLabelStroke like any stroke.
    */
   const labelPickRef = useRef<(clientX: number, clientY: number, grow: boolean) => void>(() => {});
@@ -6647,7 +6647,7 @@ export default function PointCloudViewer({
   //
   // Strokes carry a class VALUE, but the overlay paints a dense palette INDEX:
   // potree bakes its step gradient into 64 texels, so a palette living at
-  // 64..255 would blend into one colour on screen.
+  // 64..255 would blend into one color on screen.
   const buildLabelOverlayState = useCallback((
     palette: ClassPalette, strokeList: LabelStroke[],
   ): LabelOverlayState => {
@@ -6849,10 +6849,10 @@ export default function PointCloudViewer({
 
   /**
    * Move the camera to the next (or previous) place where the column's
-   * unlabelled points gather. Re-read from the backend every step, so places
-   * the user has labelled since drop out. The first step also shows only the
+   * unlabeled points gather. Re-read from the backend every step, so places
+   * the user has labeled since drop out. The first step also shows only the
    * Unclassified points, which is what makes the stragglers visible at all in
-   * a mostly-labelled cloud (Alt-click a class to bring the rest back).
+   * a mostly-labeled cloud (Alt-click a class to bring the rest back).
    */
   const stepLabelFinder = useCallback(async (dir: 1 | -1) => {
     const cloud = labelTargetCloud;
@@ -6860,7 +6860,7 @@ export default function PointCloudViewer({
     const palette = labelPaletteRef.current;
     if (!cloud || !sessionId || !palette) return;
     try {
-      const { clusters, total, estimated = false } = await getUnlabelledClusters(sessionId, palette.slug);
+      const { clusters, total, estimated = false } = await getUnlabeledClusters(sessionId, palette.slug);
       if (clusters.length === 0) {
         setLabelFinder({ clusters, index: -1, total, estimated });
         return;
@@ -6873,14 +6873,14 @@ export default function PointCloudViewer({
       const c = clusters[index];
       const size = new THREE.Vector3(
         c.max[0] - c.min[0], c.max[1] - c.min[1], c.max[2] - c.min[2]);
-      // A single point has no extent; frame a small neighbourhood instead.
+      // A single point has no extent; frame a small neighborhood instead.
       const floor = Math.max(size.x, size.y, size.z) || 0.5;
       size.max(new THREE.Vector3(floor, floor, floor).multiplyScalar(0.25));
       (window as any).__frameSelection?.({
         center: new THREE.Vector3(c.center[0], c.center[1], c.center[2]), size,
       });
     } catch (err) {
-      showToast({ title: describeBackendError(err, 'Finding unlabelled points').message, type: 'error' });
+      showToast({ title: describeBackendError(err, 'Finding unlabeled points').message, type: 'error' });
     }
   }, [labelTargetCloud, labelFinder, showToast]);
   const labelFinderStepRef = useRef(stepLabelFinder);
@@ -7041,7 +7041,7 @@ export default function PointCloudViewer({
     const slug = labelPalette?.slug;
     if (!cloudId || !slug) return;
     if (labelPendingEntry.strokes.length === 0 && !labelPendingEntry.dirty) return;
-    // E2E shortens the wait through `__labelIdleBakeMs`; the behaviour is the same.
+    // E2E shortens the wait through `__labelIdleBakeMs`; the behavior is the same.
     const ms = Number((window as any).__labelIdleBakeMs) || LABEL_IDLE_BAKE_MS;
     const t = setTimeout(() => { void bakeLabelColumn(cloudId, slug); }, ms);
     return () => clearTimeout(t);
@@ -7114,11 +7114,11 @@ export default function PointCloudViewer({
       scene.boundary([cloud.id]);
       showToast({ title: `Applied deletions — ${baked.point_count.toLocaleString()} points remain`, type: 'success' });
     } catch (err) {
-      // User cancelled — not a failure. The session is untouched: bake does
+      // User canceled — not a failure. The session is untouched: bake does
       // every mutation AFTER the octree build returns, so a cancel mid-build
       // leaves the pending deletions exactly as they were.
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      if (err instanceof ScanCancelledError) return;
+      if (err instanceof ScanCanceledError) return;
       showToast({
         title: `Apply deletions failed: ${err instanceof Error ? err.message : String(err)}`,
         type: 'error',
@@ -7144,7 +7144,7 @@ export default function PointCloudViewer({
 
   // Recover sky/miss points (beams that returned nothing) for the selected
   // session-backed scans and persist them in the backend session, so they can be
-  // visualised and consumed by LAD (which no longer gapfills silently). Misses are
+  // visualized and consumed by LAD (which no longer gapfills silently). Misses are
   // reconstructed from the scan's timestamp and/or row/column grid. This mutates
   // the backend session in place — a destructive boundary, not a reversible
   // transaction. Per-scan loop with an aggregate skip summary for multi-select.
@@ -7186,7 +7186,7 @@ export default function PointCloudViewer({
         const oct = cloud.data.octree!;
         // The backend gapfills against the session's STORED points (world − worldShift);
         // params.origin / oct.scanOrigin are WORLD-frame, so shift them into the STORED
-        // frame or the reconstructed misses fan from a point millions of metres off the
+        // frame or the reconstructed misses fan from a point millions of meters off the
         // hits. No-op when the cloud carries no shift. Mirrors buildLADRequest.
         const ws = oct.worldShift ?? [0, 0, 0];
         // Whether this cloud has a REAL scanner position. The `[0,0,0]` below is
@@ -7235,7 +7235,7 @@ export default function PointCloudViewer({
         const bandEnd = (i + 0.85) / n;
         // Benchmark: ~35 s for 14M points. We pace the creep a bit FASTER than the
         // real wall-clock (~23 s for 14M here) and front-load the curve, so the bar
-        // is near the band end when the gapfill actually finishes — minimising the
+        // is near the band end when the gapfill actually finishes — minimizing the
         // forward jump when the real "Storing" marker snaps it onward. Floored so a
         // tiny cloud still animates briefly rather than snapping.
         const estimatedMs = Math.max(1200, cloud.data.pointCount / 600);
@@ -7279,7 +7279,7 @@ export default function PointCloudViewer({
         // on that hits id. So a posed cloud would keep posing a miss shell that
         // already has the transform baked in, drawing it at DOUBLE the rotation.
         // On a real scan, with misses projected ~1 km out, that puts the sky
-        // shell hundreds of metres off the tree it belongs to, silently.
+        // shell hundreds of meters off the tree it belongs to, silently.
         //
         // This is the one rebuild path the cacheId gate cannot cover, because it
         // is the only one that refreshes a derived octree without changing the id
@@ -7791,7 +7791,7 @@ export default function PointCloudViewer({
       }
     }
 
-    // One AbortController + one pill for the whole run: cancelling mid-way
+    // One AbortController + one pill for the whole run: canceling mid-way
     // stops the loop rather than only the in-flight cloud, so a 6-scan filter
     // the user changed their mind about does not grind through five more
     // reconversions.
@@ -8003,7 +8003,7 @@ export default function PointCloudViewer({
     const emptied: { id: string; name: string }[] = [];
     let leftoverCount = 0;
     let failed = 0;
-    // Fresh palette colour per leftover cloud, same as the crop tool's segment
+    // Fresh palette color per leftover cloud, same as the crop tool's segment
     // (see nextDerivedColor in handleApplyCrop): a segment that keeps its
     // parent's swatch is invisible as a separate scan. Allocator rather than a
     // one-shot, because this loop adds a child per selected scan across awaits.
@@ -8222,7 +8222,7 @@ export default function PointCloudViewer({
           return;
         }
       }
-      // 'N' / Shift+N step through the places unlabelled points gather.
+      // 'N' / Shift+N step through the places unlabeled points gather.
       if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const el = document.activeElement as HTMLElement | null;
         const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
@@ -8645,7 +8645,7 @@ export default function PointCloudViewer({
       cMin = cMin ? (cMin.map((v, i) => Math.min(v, lo[i])) as [number, number, number]) : lo;
       cMax = cMax ? (cMax.map((v, i) => Math.max(v, hi[i])) as [number, number, number]) : hi;
     }
-    // Falls back to the raw centre when no cloud carries a percentile box
+    // Falls back to the raw center when no cloud carries a percentile box
     // (mesh-only scene, renderer-side synthetic data, an older cloud).
     const contentCenter: [number, number, number] = cMin && cMax
       ? [(cMin[0] + cMax[0]) / 2, (cMin[1] + cMax[1]) / 2, (cMin[2] + cMax[2]) / 2]
@@ -9064,7 +9064,7 @@ export default function PointCloudViewer({
     // edge, because one leg reached 90 m beyond it). The trajectory still counts
     // toward `min`/`max` so the camera FRAMES the whole path and a data-less
     // moving scan doesn't blank the viewport; it just no longer votes on where
-    // the centre is.
+    // the center is.
     const contentMin = min.clone();
     const contentMax = max.clone();
 
@@ -9121,18 +9121,18 @@ export default function PointCloudViewer({
 
     // Prefer the clouds' PERCENTILE box. A terrestrial scan carries a sparse
     // halo of very distant returns — sky/atmospheric hits, a treeline 3 km off,
-    // the odd multipath artefact — and they define the raw AABB while
+    // the odd multipath artifact — and they define the raw AABB while
     // contributing essentially nothing to look at. Measured on a real RIEGL
-    // single scan (ScanPos002): the raw box centre sits at (1605, −978) while
+    // single scan (ScanPos002): the raw box center sits at (1605, −978) while
     // the content sits at (59, 20) — the pivot lands ~1.8 km from the data. The
     // camera FRAMES fine (it already uses the percentile box) so nothing looks
     // wrong until the first orbit, which swings the whole cloud out of the
-    // frustum because the rotation centre is a kilometre away.
+    // frustum because the rotation center is a kilometer away.
     //
     // Falls back to the raw content box (clouds+meshes+skeletons, scanners
     // excluded) when no cloud carries a percentile box — a mesh-only scene,
     // renderer-side synthetic data, or a cloud imported before robust_bounds
-    // existed — and to the full centre when there is no content at all (a
+    // existed — and to the full center when there is no content at all (a
     // data-less moving scan), whose trajectory midpoint is the only thing there
     // is to look at.
     const contentCenter = isFinite(robustMin.x)
@@ -9353,7 +9353,7 @@ export default function PointCloudViewer({
   //
   // `groundZ`, NOT `min.z`: the raw minimum is defined by a single point, so one
   // erroneous return below the terrain (and real scans carry a few) drops the
-  // origin metres into the void. groundZ is a low percentile computed once at
+  // origin meters into the void. groundZ is a low percentile computed once at
   // import — see PointCloudData.groundZ.
   //
   // Keyed on `staticBounds` — NOT `combinedBounds` — on purpose: staticBounds is
@@ -9367,7 +9367,7 @@ export default function PointCloudViewer({
   // scanner markers and the whole platform trajectory, so a drone leg that runs
   // wide of the plot pushes the pivot off the cloud (measured: 11.7 m outside its
   // north edge) — and, worse, it is defined by the clouds' far outliers, which on
-  // a terrestrial scan sit kilometres out (measured: pivot 1.8 km from the data).
+  // a terrestrial scan sit kilometers out (measured: pivot 1.8 km from the data).
   // See the contentCenter derivation in staticBounds.
   const sceneOrigin = useMemo<[number, number, number]>(
     () => sceneOriginOverride
@@ -9559,7 +9559,7 @@ export default function PointCloudViewer({
   //     still there, so the anchor rides along. A measurement's distance and
   //     angle are invariant under a rigid transform, so dropping one here
   //     would discard the user's work for no reason. This is what the previous
-  //     single-signature version got wrong: nudging a cloud one metre silently
+  //     single-signature version got wrong: nudging a cloud one meter silently
   //     deleted every label on it.
   //   * the cloud's GEOMETRY changes (crop applied, erase, filter, re-bake,
   //     split) — the anchored point may no longer exist and cannot be carried
@@ -9633,7 +9633,7 @@ export default function PointCloudViewer({
     // (`renderPivot(sceneOrigin, bounds.center)`), so rotating a WORLD
     // coordinate about it computes R·(local + shift − pivot) + pivot instead of
     // R·(local − pivot) + pivot + shift — an error of (R·shift − shift), which
-    // on a UTM cloud under a 90° turn is thousands of kilometres. `world` is a
+    // on a UTM cloud under a 90° turn is thousands of kilometers. `world` is a
     // pure function of `local` (world = local + worldShift), so it is
     // re-derived by the caller rather than transformed.
     const moveLocal = (cloudId: string, p: [number, number, number]): [number, number, number] => {
@@ -9724,13 +9724,13 @@ export default function PointCloudViewer({
   // That covers the common case where geometry sits a little above 0 (e.g. a
   // scan rig mounted ~1.25 m up, with the real ground at 0). Only when the whole
   // scene lives far from the origin — a UTM-style coordinate system where 0 is
-  // hundreds/thousands of metres below everything — do we fall back to the
+  // hundreds/thousands of meters below everything — do we fall back to the
   // computed extent floor, since 0 there is meaningless (and invisible).
   const gridFloor = useMemo(() => {
     const upAxis = gridPlane === 'z-up' ? 'z' : 'y';
     // For the z-up (real) case use the outlier-resistant ground rather than the
     // raw minimum: a few noise points below the terrain would otherwise drop the
-    // grid metres under the scene, exactly where it reads as "the ground is
+    // grid meters under the scene, exactly where it reads as "the ground is
     // wrong". The y-up display mode has no equivalent estimate, so it keeps the
     // extent floor. Note this also feeds `distFromZero` below, so a scene whose
     // only sub-zero content is noise can still snap the grid to 0.
@@ -9820,7 +9820,7 @@ export default function PointCloudViewer({
       // scale, Move to Origin, Fit to Scans) in its own floating TransformPanel
       // — but the only way in was the transform button on the mesh's own row in
       // the Meshes panel, and this button was gated `requires: 'cloud'`, so it
-      // greyed out for the exact selection it can serve. A MESH selection now
+      // grayed out for the exact selection it can serve. A MESH selection now
       // opens that panel; a cloud keeps the editMode draft it always had.
       //
       // Mesh wins when both are selected: the cloud path is a draft the panel
@@ -9872,7 +9872,7 @@ export default function PointCloudViewer({
       //
       // `requires: null` because it acts on whatever is registered rather than
       // on the selection; `isDisabled` is what actually gates it, on whether
-      // ANY scan carries a registration. That predicate greys it out in the
+      // ANY scan carries a registration. That predicate grays it out in the
       // Cmd+K palette AND is pushed to the native menu (see the MenuState
       // effect below), so the item is dead in both places rather than live-
       // looking and then reporting that it had nothing to do.
@@ -9987,7 +9987,7 @@ export default function PointCloudViewer({
       if (cmd.id === 'cloud-translate' || cmd.id === 'skeleton-translate' || cmd.category === 'View') {
         return cmd;
       }
-      // isDisabled greys the button out (Toolbar reads isCommandAvailable) AND
+      // isDisabled grays the button out (Toolbar reads isCommandAvailable) AND
       // suppresses the palette/Cmd+K/menu paths (they guard on isCommandAvailable
       // before firing). The action is neutered too as belt-and-suspenders.
       return { ...cmd, action: () => {}, isDisabled: () => true };
@@ -10041,7 +10041,7 @@ export default function PointCloudViewer({
     // Every scan present in the scene (data clouds + param-only scanner
     // markers), regardless of selection — gates picker-driven multi-input tools
     // (triangulate / stitch / align / LAD) so they stay clickable whenever any
-    // scan exists and only grey out in a truly empty scene. Loading a Helios
+    // scan exists and only gray out in a truly empty scene. Loading a Helios
     // scan XML (e.g. almond.xml) creates param-only scans with no point data;
     // those still count, so the tools' own modals can take over from there.
     totalScanCount: scans.length,
@@ -11218,7 +11218,7 @@ export default function PointCloudViewer({
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
   // Save exported content to a user-chosen path. Returns the written file name,
-  // or null if the user cancelled the save dialog.
+  // or null if the user canceled the save dialog.
   //
   // This MUST await a real save dialog + fs write rather than clicking an
   // `<a download>`: under Electron an anchor download is handled out-of-band by
@@ -11300,7 +11300,7 @@ export default function PointCloudViewer({
           // LAS/LAZ ignore it (fixed schema + named extra dimensions).
           ...(columns && columns.length ? { columns } : {}),
           // LAS/LAZ: the column for the classification byte, and the class
-          // names and colours, so another program (or a re-import) shows the
+          // names and colors, so another program (or a re-import) shows the
           // classes by name rather than as bare numbers.
           ...(opts?.las && opts.las.classificationColumn !== undefined
             ? { classification_column: opts.las.classificationColumn ?? '' } : {}),
@@ -11371,7 +11371,7 @@ export default function PointCloudViewer({
     }
 
     if (format === 'pcd') {
-      // Fixed schema (position + colour) — see buildPcdExport for why PCD takes
+      // Fixed schema (position + color) — see buildPcdExport for why PCD takes
       // no column selection.
       const saved = await writeToPath(buildPcdExport(data), destPath);
       return { fileName: saved, pointCount: data.pointCount };
@@ -11420,14 +11420,14 @@ export default function PointCloudViewer({
     } else if (format === 'ply') {
       // PLY takes a column selection (an ASCII PLY names each column as a
       // `property`, so a chosen scalar round-trips by name). Honor the picker's
-      // slugs; fall back to geometry + colour when none were passed, which is
+      // slugs; fall back to geometry + color when none were passed, which is
       // the layout this branch always wrote before the picker covered PLY.
       let slugs = columns ?? [];
       if (slugs.length === 0) {
         slugs = ['x', 'y', 'z'];
         if (data.colors) slugs.push('r', 'g', 'b');
       }
-      // Declare each column with the type PLY expects: colour is uchar 0-255,
+      // Declare each column with the type PLY expects: color is uchar 0-255,
       // geometry and scalars are float.
       const PLY_PROPS: Record<string, string> = {
         x: 'float x', y: 'float y', z: 'float z',
@@ -11607,7 +11607,7 @@ export default function PointCloudViewer({
 
     // Ask WHERE first. The save dialog has to come before the progress pill:
     // raising the pill first left it spinning behind the file browser, claiming
-    // work was underway while we were still waiting on the user. Cancelling here
+    // work was underway while we were still waiting on the user. Canceling here
     // must leave no trace — no pill, no file, no toast.
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
     const destPath = await window.electronAPI?.dialog.save({
@@ -11652,7 +11652,7 @@ export default function PointCloudViewer({
       // A user cancel is not a failure — the pill's X aborts the signal, which
       // surfaces as a reason-less AbortError (see describeBackendError).
       if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
-        showToast({ title: 'Export cancelled', type: 'info' });
+        showToast({ title: 'Export canceled', type: 'info' });
       } else {
         showToast({ title: 'Export Failed', type: 'error',
           message: error instanceof Error ? error.message : 'Unknown error' });
@@ -11804,7 +11804,7 @@ export default function PointCloudViewer({
       asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
       // …and from the octree's own attribute list, which is the only source that
       // covers a plain LAS/LAZ/E57/PLY import (no ASCII_format, no in-RAM
-      // scalarFields). Same input the colour-by and scalar-filter pickers use.
+      // scalarFields). Same input the color-by and scalar-filter pickers use.
       octreeAttributes: Object.keys(c.data.octree?.attributeRanges ?? {}),
       // …and the ranges themselves, so the all-zero LAS schema dims
       // PotreeConverter invents for a bare XYZ source (intensity, classification,
@@ -11821,7 +11821,7 @@ export default function PointCloudViewer({
     });
   }, [clouds, selectedIds, labelPending]);
 
-  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = [], baseName: string = 'scans') => {
+  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = [], baseName: string = 'scans', basePosition: 'prefix' | 'suffix' = 'prefix') => {
     const entries: ScanExportEntry[] = [];
     for (const id of scanIds) {
       const e = buildScanExportEntry(id);
@@ -11863,8 +11863,8 @@ export default function PointCloudViewer({
     const sep = dir.includes('\\') ? '\\' : '/';
     // Mirror the backend's own reading of the name (basename minus one
     // extension), so a pasted path or a typed "myscan.laz" can't leak into it.
-    const chosenBase = (baseName.trim().split(/[\\/]/).pop() ?? '')
-      .replace(/\.[A-Za-z0-9]{1,8}$/, '').trim() || 'scans';
+    // Empty is deliberate: the files are then named by their objects alone.
+    const chosenBase = exportBaseName(baseName);
 
     // The path is chosen — the work now begins. Dismiss the modal and raise the
     // StatusPill so the (5-10 s, no-stream) serialize/encode/write isn't a silent
@@ -11882,7 +11882,8 @@ export default function PointCloudViewer({
       // point-cloud export does it).
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const resp = await exportScanXml({
-        scans: entries, base_name: chosenBase, include_misses: includeMisses,
+        scans: entries, base_name: chosenBase, base_position: basePosition,
+        include_misses: includeMisses,
         write_xml: writeXml, data_format: dataFormat,
         // Let the backend write straight into the chosen folder. Taking the files
         // back as base64 put every scan's bytes in one JSON body, which overran
@@ -11919,7 +11920,7 @@ export default function PointCloudViewer({
       // A user cancel is not a failure — the pill's X aborts the signal, which
       // surfaces as a reason-less AbortError (see describeBackendError).
       if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
-        showToast({ title: 'Export cancelled', type: 'info' });
+        showToast({ title: 'Export canceled', type: 'info' });
       } else {
         showToast({ title: 'Export Failed', type: 'error',
           message: error instanceof Error ? error.message : 'Unknown error' });
@@ -11954,7 +11955,7 @@ export default function PointCloudViewer({
       ? [`Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`]
       : [];
 
-    // Ask where to save before doing any work. Cancelling here must leave no
+    // Ask where to save before doing any work. Canceling here must leave no
     // trace — no files, no toast.
     let savePath: string | null = null;
     if (window.electronAPI) {
@@ -11963,7 +11964,7 @@ export default function PointCloudViewer({
         title: `Export mesh (${format.toUpperCase()})`,
         filters: [{ name: `${format.toUpperCase()} mesh`, extensions: [format] }],
       });
-      if (!savePath) return; // cancelled
+      if (!savePath) return; // canceled
     }
 
     try {
@@ -12405,7 +12406,7 @@ export default function PointCloudViewer({
     // session (like an imported cloud); attach the octree ref carrying the cache
     // id + session id + miss flag + projected-miss octree id so it renders via
     // OctreePointCloud and session-backed ops (triangulation, LAD, crop, the
-    // MissOctree overlay) read the points by session_id instead of serialising
+    // MissOctree overlay) read the points by session_id instead of serializing
     // the whole cloud inline. `result.session` is absent only when the scan
     // returned no hits or the octree build failed, leaving a plain flat cloud.
     let octree: PointCloudData['octree'];
@@ -12599,7 +12600,7 @@ export default function PointCloudViewer({
       }
       const rayWork = Math.max(totalPulses, 1) * Math.max(options.raysPerPulse, 1);
       // Pace the creep to roughly track real ray-trace wall-clock so the bar sits
-      // near the band end as the scan finishes (minimising the snap when the real
+      // near the band end as the scan finishes (minimizing the snap when the real
       // "Extracting hits" marker arrives). Floored so a tiny scan still animates.
       const estimatedMs = Math.max(1500, rayWork / 400);
 
@@ -12769,12 +12770,12 @@ export default function PointCloudViewer({
     } catch (error) {
       // User-initiated cancel isn't a failure. Either the fetch aborted
       // (AbortError) or the backend acknowledged the cancel with a terminal
-      // marker (ScanCancelledError) — both surface as a neutral notice.
+      // marker (ScanCanceledError) — both surface as a neutral notice.
       if (
         (error instanceof DOMException && error.name === 'AbortError') ||
-        error instanceof ScanCancelledError
+        error instanceof ScanCanceledError
       ) {
-        showToast({ title: 'Scan cancelled', type: 'info' });
+        showToast({ title: 'Scan canceled', type: 'info' });
         return;
       }
       console.error('Synthetic LiDAR scan failed:', error);
@@ -13302,10 +13303,10 @@ export default function PointCloudViewer({
           : `Created ${newMeshes.length} meshes with ${totalTriangles.toLocaleString()} triangles total`,
       });
     } catch (error) {
-      // User-initiated cancel (pill X) — fetch abort OR a backend cancelled
+      // User-initiated cancel (pill X) — fetch abort OR a backend canceled
       // marker — is not an error to surface.
       if ((error instanceof DOMException && error.name === 'AbortError')
-          || error instanceof ScanCancelledError) {
+          || error instanceof ScanCanceledError) {
         setTriangulationError(null);
       } else {
         console.error('Triangulation error:', error);
@@ -13333,7 +13334,7 @@ export default function PointCloudViewer({
   // session clouds via sessionExtract (parent untouched), for flat clouds in
   // memory.
   // Detect noise on EVERY selected cloud: classify every point into a
-  // `noise_class` column (1 = clean, 2 = noise), colour by it, and pre-select it
+  // `noise_class` column (1 = clean, 2 = noise), color by it, and pre-select it
   // in the field dropdown with only "Clean" kept.
   //
   // That last step is the whole design: it arms the panel's EXISTING Remove /
@@ -13416,7 +13417,7 @@ export default function PointCloudViewer({
       // --- Flat cloud: classify in memory, write the scalar field. ---
       // Hit points only. A miss sits ~1 km out along its beam, so including
       // them would both blow up the KD-tree extent and poison the
-      // nearest-neighbour spacing every auto parameter is derived from.
+      // nearest-neighbor spacing every auto parameter is derived from.
       const displayData = ps.data;
       const count = displayData.pointCount;
       const { points, hitIndices, droppedMisses } = ps.hits;
@@ -13434,12 +13435,12 @@ export default function PointCloudViewer({
       }, abort.signal);
       if (!response.success) throw new Error(response.error || 'Noise detection failed');
 
-      // The backend labelled the HIT subset, so its result is indexed against
+      // The backend labeled the HIT subset, so its result is indexed against
       // `points`, not the cloud — writing it directly would mislabel every
       // point after the first miss.
       //
       // Fill NOISE_CLEAN, not the usual 0: a miss is a ray that hit nothing,
-      // not a bad return, and labelling it "clean" means no commit path can
+      // not a bad return, and labeling it "clean" means no commit path can
       // ever sweep it into a noise cloud and cost this cloud its Beer's-law
       // transmission denominator for LAD.
       const labels = scatterToFullLength(response.labels, hitIndices, count, NOISE_CLEAN);
@@ -13492,7 +13493,7 @@ export default function PointCloudViewer({
       // Panel state, not per-cloud state: one field dropdown and one parameter
       // set serve the whole selection.
       setSelectedFilterField(`scalar:${NOISE_CLASS_ATTRIBUTE}`);
-      // Auto mode fills the (greyed) inputs with what the backend resolved, so
+      // Auto mode fills the (grayed) inputs with what the backend resolved, so
       // the user can see the numbers and switch to manual from there rather
       // than starting blank. The PRIMARY's numbers: they are the ones the
       // result box below is reporting, and a sibling's would contradict it.
@@ -13529,12 +13530,12 @@ export default function PointCloudViewer({
       buildPointSource, onUpdateCloud, setCloudColorMode, defaultFiltersFor]);
 
   // Drop the detection for the given clouds: clears the result box, the
-  // noise_class filter and the noise colouring. The `noise_class` COLUMN stays
+  // noise_class filter and the noise coloring. The `noise_class` COLUMN stays
   // on each cloud (harmless, and re-running overwrites it) — this only undoes
   // the UI arming.
   //
   // Takes a LIST because Detect now arms the whole selection: clearing only the
-  // primary would leave the siblings coloured red and still armed, so the next
+  // primary would leave the siblings colored red and still armed, so the next
   // Remove would take points the panel no longer showed a reason for.
   const clearNoiseDetection = useCallback((cloudIds: string[]) => {
     setNoiseResults(prev => {
@@ -13570,7 +13571,7 @@ export default function PointCloudViewer({
     normalsAbortRef.current = abort;
 
     // Consume any pending "Compute Anyway" confirmation, so a later run on a
-    // different cloud has to earn its own acknowledgement.
+    // different cloud has to earn its own acknowledgment.
     const acknowledgeCost = normalsAckCostRef.current;
     normalsAckCostRef.current = false;
     setNormalsCostWarning(null);
@@ -13602,7 +13603,7 @@ export default function PointCloudViewer({
       const sessionId = octreeInfo.sessionId;
 
       // Defer the octree rebuild on a big cloud: the columns land (so export,
-      // meshing and any later reuse can see them) while the COLOURING catches
+      // meshing and any later reuse can see them) while the COLORING catches
       // up on the background refresh queue. Same trade the ground split makes.
       const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
       const meta = await sessionComputeNormals(
@@ -13629,7 +13630,7 @@ export default function PointCloudViewer({
         : meta.orientation_source === 'scan_origin'
           ? ' Oriented toward the scan origin.'
           : meta.orientation_source === 'centroid'
-            ? ' No sensor position known — oriented toward the cloud centre.'
+            ? ' No sensor position known — oriented toward the cloud center.'
             : '';
       showToast({
         type: 'success',
@@ -13638,7 +13639,7 @@ export default function PointCloudViewer({
       });
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (error instanceof ScanCancelledError) return;
+      if (error instanceof ScanCanceledError) return;
       if (error instanceof CostWarningError) {
         normalsAckCostRef.current = true;
         setNormalsCostWarning(error.costWarning.message);
@@ -13810,24 +13811,24 @@ export default function PointCloudViewer({
       return;
     }
     const sessionIds = scalarTargets.map(c => c.data.octree!.sessionId!);
-    let cancelled = false;
+    let canceled = false;
     const abort = new AbortController();
     setScalarStatsLoading(true);
     setScalarStats(null);
     setScalarStatsError(null);
     scalarFieldStatsMulti(sessionIds, scalarSelectedSlug, abort.signal)
-      .then(res => { if (!cancelled) setScalarStats(res.stats ?? null); })
+      .then(res => { if (!canceled) setScalarStats(res.stats ?? null); })
       .catch(error => {
         if (abort.signal.aborted) return;
         console.error('Scalar field stats error:', error);
-        if (cancelled) return;
+        if (canceled) return;
         setScalarStats(null);
         // The backend's 400s here explain themselves (the coordinate-frame
         // refusal names why), so show the message rather than an empty panel.
         setScalarStatsError(describeBackendError(error, 'Measure the field').message);
       })
-      .finally(() => { if (!cancelled) setScalarStatsLoading(false); });
-    return () => { cancelled = true; abort.abort(); };
+      .finally(() => { if (!canceled) setScalarStatsLoading(false); });
+    return () => { canceled = true; abort.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showScalarFieldsPanel, scalarTab, scalarTargetKey, scalarSelectedSlug,
       scalarListings]);
@@ -13858,8 +13859,8 @@ export default function PointCloudViewer({
    * Evaluate the expression on EVERY checked cloud, one after another.
    *
    * Sequential rather than parallel: each call mutates its session's arrays and
-   * may rebuild an octree, and the backend's admission control would serialise
-   * the big ones anyway. Modelled on `handleDetectNoise` — the house shape for
+   * may rebuild an octree, and the backend's admission control would serialize
+   * the big ones anyway. Modeled on `handleDetectNoise` — the house shape for
    * a multi-target run that has to survive a failure partway through.
    */
   const handleComputeScalarField = useCallback(async () => {
@@ -14049,21 +14050,21 @@ export default function PointCloudViewer({
    *
    * A rename changes the field's identity, and three separate stores point at
    * it by name. Deleting a field needs none of this — a GC effect already drops
-   * a colour mode whose field the cloud no longer carries — but a rename would
-   * otherwise silently fall back to the default colouring and drop the user's
+   * a color mode whose field the cloud no longer carries — but a rename would
+   * otherwise silently fall back to the default coloring and drop the user's
    * filter, which reads as the rename having broken something.
    */
   const migrateScalarSlug = useCallback((cloudId: string, from: string, to: string) => {
     // Keep the octree component's identity across the rename — see
-    // scalarKeyAliasRef. Recorded before the colour mode moves, so the render
+    // scalarKeyAliasRef. Recorded before the color mode moves, so the render
     // that sees the new field name also sees its old token.
     scalarKeyAliasRef.current.set(cloudId, { slug: to, token: scalarKeyToken(cloudId, from) ?? from });
     setCloudColorModes(prev => {
-      // A cloud with no override of its own is coloured by the SCENE DEFAULT.
+      // A cloud with no override of its own is colored by the SCENE DEFAULT.
       // If that default is the renamed field, pin this cloud to the new name
       // explicitly: the default cannot move yet, because other clouds in the
       // same run are still waiting for their own rename to land and would
-      // lose their colouring — and remount — if it moved under them. The
+      // lose their coloring — and remount — if it moved under them. The
       // default itself is moved once the whole run is done (see
       // handleManageScalarField).
       const current = prev.get(cloudId)
@@ -14196,7 +14197,7 @@ export default function PointCloudViewer({
             else registerContinuousSlug(result.slug);
           }
           if (renamed) {
-            // Per cloud, because the colour mode and the filters are per cloud.
+            // Per cloud, because the color mode and the filters are per cloud.
             // Note `colorRanges` is keyed `scalar:<slug>` GLOBALLY, so only the
             // first call actually moves that key and the rest no-op — which is
             // correct, not a bug to "fix" into N-way duplication.
@@ -14227,9 +14228,9 @@ export default function PointCloudViewer({
       if (succeeded.length > 0) {
         setScalarSelectedSlug(action === 'delete' ? null : resultSlug);
       }
-      // Move the scene-default colour field now that every renamed cloud has
+      // Move the scene-default color field now that every renamed cloud has
       // been pinned to the new name (see migrateScalarSlug) — unless a cloud
-      // outside this run still carries the old name and is coloured by it.
+      // outside this run still carries the old name and is colored by it.
       if (action === 'rename' && resultSlug !== slug && selectedScalarField === slug
           && succeeded.length > 0
           && !cloudsRef.current.some(c =>
@@ -14298,7 +14299,7 @@ export default function PointCloudViewer({
     groundSegmentAbortRef.current = abort;
 
     // Consume any pending "Segment Anyway" confirmation: this run carries the
-    // acknowledgement, and the armed state is cleared so a later run on a
+    // acknowledgment, and the armed state is cleared so a later run on a
     // different cloud prompts again rather than silently inheriting it.
     const acknowledgeCost = groundCostAcknowledgedRef.current;
     groundCostAcknowledgedRef.current = false;
@@ -14345,7 +14346,7 @@ export default function PointCloudViewer({
           sessionId, { ...csfParams, defer_octree: willSplit, acknowledge_cost: acknowledgeCost },
           abort.signal);
         retireLabelColumn(id, GROUND_CLASS_ATTRIBUTE);
-        // The parent keeps ALL points, classified + coloured by ground_class.
+        // The parent keeps ALL points, classified + colored by ground_class.
         // A deferred run carries no octree fields — adopting them would hand the
         // renderer a pre-column octree it would treat as current — so the update
         // waits for the `parent` block the split returns.
@@ -14355,7 +14356,7 @@ export default function PointCloudViewer({
         setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
         setShowGroundSegmentPanel(false);
         // Record what auto mode measured NOW, not in the toast below: the split
-        // is cancellable, and a cancel returns from the catch — which would
+        // is cancelable, and a cancel returns from the catch — which would
         // throw away a tolerance the backend has already measured and returned.
         const autoNote = noteAutoThreshold(meta.class_threshold_used);
 
@@ -14364,7 +14365,7 @@ export default function PointCloudViewer({
         // `sessionExtract` round-trips, i.e. two serial octree builds with no
         // progress signal — the server now slices both subsets under one lock and
         // builds their octrees concurrently, streaming per-child progress into
-        // the StatusPill. `includeMisses` keeps the old per-extract behaviour of
+        // the StatusPill. `includeMisses` keeps the old per-extract behavior of
         // duplicating the sky/miss shell onto each child (LAD's denominator).
         if (willSplit) {
           setGroundSplitProgress({ label: 'Splitting into ground + plant clouds…', value: null });
@@ -14388,12 +14389,12 @@ export default function PointCloudViewer({
                 { diverged: true },
               ),
               visible: true,
-              // Swatch colours come from the ground_class scheme itself, so a
+              // Swatch colors come from the ground_class scheme itself, so a
               // child cloud reads as the class the viewer paints and the two
               // can't drift.
               color: classColorHex(GROUND_CLASS_ATTRIBUTE, c.value) ?? '#4caf50',
             });
-            // Each child carries the ground_class column, so colour it by that
+            // Each child carries the ground_class column, so color it by that
             // rather than leaving it on the scene default. Two reasons: the
             // class legend is built ONLY from VISIBLE clouds, so hiding the
             // parent below would otherwise take the Ground / Non-ground legend
@@ -14438,7 +14439,7 @@ export default function PointCloudViewer({
         throw new Error(response.error || 'Ground segmentation failed');
       }
 
-      // The backend labelled the HIT subset, so its result is indexed against
+      // The backend labeled the HIT subset, so its result is indexed against
       // `points`, not the cloud. Scatter back to full length before it touches a
       // scalar field or the split loop below -- writing it directly would
       // mislabel every point after the first miss. Misses take the default fill
@@ -14527,12 +14528,12 @@ export default function PointCloudViewer({
           + noteAutoThreshold(response.class_threshold_used),
       });
     } catch (error) {
-      // User cancelled — not a failure. Two shapes: the Cancel button aborted
+      // User canceled — not a failure. Two shapes: the Cancel button aborted
       // the fetch, or (split path) the backend acknowledged the cancel with a
-      // `cancelled` marker before the abort landed. The tree twin catches both;
+      // `canceled` marker before the abort landed. The tree twin catches both;
       // missing the second turned a user-initiated cancel into a red toast.
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (error instanceof ScanCancelledError) return;
+      if (error instanceof ScanCanceledError) return;
       // A 409 cost advisory is a confirmation prompt, not an error: arm
       // "Segment Anyway" instead of surfacing a failure toast.
       if (error instanceof CostWarningError) {
@@ -14554,7 +14555,7 @@ export default function PointCloudViewer({
 
   // Generate a DEM (Digital Elevation Model) from the selected cloud's ground
   // points. The bare-earth surface comes back as a heightmap mesh (stored as a
-  // MeshEntry tagged method:'dem', coloured by elevation) plus the regular grid
+  // MeshEntry tagged method:'dem', colored by elevation) plus the regular grid
   // (kept on the mesh's demGrid for raster export). Optionally writes a
   // height_above_ground scalar onto the source cloud (a CHM precursor).
   const handleGenerateDEM = useCallback(async () => {
@@ -14606,7 +14607,7 @@ export default function PointCloudViewer({
         demLayers: result.layers,
       };
       addMesh(meshEntry, undefined, `Generate ${productLabel}`);
-      // A DTM defaults to colouring by its elevation LAYER; DSM/CHM (no layers)
+      // A DTM defaults to coloring by its elevation LAYER; DSM/CHM (no layers)
       // fall back to solid (their geometry IS the value; a colorbar isn't needed).
       if (result.layers?.elevation) {
         setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'layer'));
@@ -14687,7 +14688,7 @@ export default function PointCloudViewer({
         if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
         if (wantHAG) retireLabelColumn(id, HEIGHT_ABOVE_GROUND_ATTRIBUTE);
         finishMesh(result, surface);
-        // The HAG column was baked into the rebuilt octree; refresh + recolour.
+        // The HAG column was baked into the rebuilt octree; refresh + recolor.
         if (wantHAG && result.cacheId && result.rawMeta) {
           onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
           registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
@@ -14764,10 +14765,10 @@ export default function PointCloudViewer({
         message: `${totalCells.toLocaleString()} cells${lastWarning ? ` — ${lastWarning}` : ''}`,
       });
     } catch (error) {
-      // User cancelled (Cancel button → fetch abort or a terminal `cancelled`
+      // User canceled (Cancel button → fetch abort or a terminal `canceled`
       // stream marker) — not a failure, no error toast/banner. Surfaces produced
       // before the cancel stay in the scene.
-      if (abort.signal.aborted || error instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || error instanceof ScanCanceledError) return;
       console.error('DEM generation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'DEM generation failed';
       setDemError(errorMessage);
@@ -14898,11 +14899,11 @@ export default function PointCloudViewer({
   }, [selectedIds, clouds]);
 
   // Segment wood vs leaf points (geometric, non-ML: verticality + low-sphericity).
-  // Writes a `wood_class` scalar attribute (1=wood, 2=leaf) and colours by it.
+  // Writes a `wood_class` scalar attribute (1=wood, 2=leaf) and colors by it.
   // Mirrors handleGroundSegment: session (octree) clouds run on the in-RAM array
   // and append the column (sessionSegmentWood) — no file re-read; flat clouds get
   // labels written into scalarFields. `woodMode` selects the output:
-  //  - 'label':  keep all points, classified + coloured.
+  //  - 'label':  keep all points, classified + colored.
   //  - 'split':  additionally emit wood-only and leaf-only child clouds.
   //  - 'remove': drop the wood points, leaving a leaf-only cloud (wood removal).
   const handleWoodSegment = useCallback(async () => {
@@ -15062,7 +15063,7 @@ export default function PointCloudViewer({
       }
       setShowWoodSegmentPanel(false);
     } catch (error) {
-      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      // User canceled (Cancel button aborted the fetch) — not a failure.
       if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Wood/leaf segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Wood/leaf segmentation failed';
@@ -15115,7 +15116,7 @@ export default function PointCloudViewer({
           });
           onUpdateCloud(id, buildSessionOctreeData(r, octreeInfo, baseName, undefined, { diverged: true }));
         } else {
-          // Label in place; the parent keeps ALL points, coloured by wood_class.
+          // Label in place; the parent keeps ALL points, colored by wood_class.
           // A deferred run carries no octree fields — the split's `parent` block
           // supplies them below.
           if (!meta.octree_deferred) {
@@ -15157,12 +15158,12 @@ export default function PointCloudViewer({
                 { diverged: true },
               ),
               visible: true,
-              // Swatch colours come from the wood_class scheme itself, so a
+              // Swatch colors come from the wood_class scheme itself, so a
               // child cloud reads as the class the viewer paints and the two
               // can't drift.
               color: classColorHex(WOOD_CLASS_ATTRIBUTE, c.value) ?? '#4caf50',
             });
-            // Colour each child BY wood_class rather than leaving it on the
+            // Color each child BY wood_class rather than leaving it on the
             // scene default — same reasoning as the ground split: the class
             // legend is built only from VISIBLE clouds, so hiding the parent
             // below would otherwise take the Wood / Leaf legend with it.
@@ -15187,7 +15188,7 @@ export default function PointCloudViewer({
 
       // --- Flat cloud: classify in memory, write scalarFields. ---
       // Sky/miss points are excluded before the PCA/connectivity pass — they sit
-      // ~1 km out and hang the neighbour graph. Labels come back indexed against
+      // ~1 km out and hang the neighbor graph. Labels come back indexed against
       // the hit subset and are scattered to full length below.
       const displayData = ps.data;
       const count = displayData.pointCount;
@@ -15302,7 +15303,7 @@ export default function PointCloudViewer({
   // invokes the current-woodMode version.
   segmentOneWoodCloudRef.current = segmentOneWoodCloud;
 
-  // Plant organs (ML, backend-api/ml/organs.py). Writes TWO columns and colours
+  // Plant organs (ML, backend-api/ml/organs.py). Writes TWO columns and colors
   // by the one the panel picks: `plant_organ` (1 soil, 2 stem, 3 leaf) and
   // `leaflet_id` (0 = not a leaflet, 1..N numbered by height). One cloud at a
   // time: the model is for a single plant or pot, so there is no together-mode.
@@ -15315,7 +15316,7 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => c.id === id);
     if (!cloud) return;
     const params = { units: organUnits, ...(organModelId ? { model_id: organModelId } : {}) };
-    const field = organColourBy === 'leaflet' ? LEAFLET_ID_ATTRIBUTE : PLANT_ORGAN_ATTRIBUTE;
+    const field = organColorBy === 'leaflet' ? LEAFLET_ID_ATTRIBUTE : PLANT_ORGAN_ATTRIBUTE;
     setOrganSegmentInProgress(true);
     setOrganSegmentError(null);
     const abort = new AbortController();
@@ -15352,7 +15353,7 @@ export default function PointCloudViewer({
       }
       setCloudColorMode(id, { mode: 'scalar', field });
       setShowOrganSegmentPanel(false);
-      const unitName = { m: 'metres', cm: 'centimetres', mm: 'millimetres' }[counts.units ?? 'm'];
+      const unitName = { m: 'meters', cm: 'centimeters', mm: 'millimeters' }[counts.units ?? 'm'];
       showToast({
         type: 'success',
         title: 'Plant Organ Segmentation Complete',
@@ -15373,7 +15374,7 @@ export default function PointCloudViewer({
       setOrganSegmentInProgress(false);
       organSegmentAbortRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits, organModelId, organColourBy]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits, organModelId, organColorBy]);
 
   // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
   // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
@@ -15393,7 +15394,7 @@ export default function PointCloudViewer({
     treeSegmentAbortRef.current = abort;
 
     // Consume any pending "Segment Anyway" confirmation: this run carries the
-    // acknowledgement, and the armed state is cleared so a subsequent run on a
+    // acknowledgment, and the armed state is cleared so a subsequent run on a
     // different cloud prompts again rather than silently inheriting it.
     const acknowledgeCost = treeCostAcknowledgedRef.current;
     treeCostAcknowledgedRef.current = false;
@@ -15439,7 +15440,7 @@ export default function PointCloudViewer({
             message: `Segmented in ${meta.tiling.tiles_run} tiles; ${truncated} tree${truncated === 1 ? '' : 's'} may have been cut off at a tile's ${meta.tiling.buffer_m} m buffer. Widen the tile buffer beyond the widest crown and run again.`,
           });
         }
-        // The parent keeps ALL points, coloured by tree_instance.
+        // The parent keeps ALL points, colored by tree_instance.
         retireLabelColumn(id, TREE_INSTANCE_ATTRIBUTE);
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
@@ -15475,8 +15476,8 @@ export default function PointCloudViewer({
               { diverged: true },
             ),
             visible: true,
-            // Each child carries ITS TREE's colour from the tree_instance
-            // colormap, so the scan-list swatches match the recoloured parent
+            // Each child carries ITS TREE's color from the tree_instance
+            // colormap, so the scan-list swatches match the recolored parent
             // (a single shared green told the user nothing about which row is
             // which tree). `value` is the tree id; ids <= 0 are excluded above.
             color: crownColorForTreeId(c.value) ?? '#4caf50',
@@ -15521,7 +15522,7 @@ export default function PointCloudViewer({
       const count = displayData.pointCount;
       const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
       const { points, hitIndices, aligned, droppedMisses } = collectHitPoints(displayData, {
-        // If a prior ground segmentation labelled (but didn't delete) the
+        // If a prior ground segmentation labeled (but didn't delete) the
         // ground, pass those labels so TreeIso excludes ground instead of
         // clustering it — filtered in lockstep with the positions.
         ground: groundField?.values,
@@ -15628,10 +15629,10 @@ export default function PointCloudViewer({
         ].filter(Boolean).join(' '),
       });
     } catch (error) {
-      // User cancelled (Cancel button aborted the fetch, or the split pill's
+      // User canceled (Cancel button aborted the fetch, or the split pill's
       // cancel reached the backend worker) — not a failure.
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (error instanceof ScanCancelledError) return;
+      if (error instanceof ScanCanceledError) return;
       // Session path: a 409 cost advisory is a confirmation prompt, not an
       // error. Arm "Segment Anyway" instead of surfacing a failure toast.
       if (error instanceof CostWarningError) {
@@ -15786,7 +15787,7 @@ export default function PointCloudViewer({
     } catch (error) {
       // A cancel (X on the pill, or the fetch abort) surfaces as a neutral
       // no-op — the user asked to stop, not an error.
-      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
+      if (ctrl.signal.aborted || error instanceof ScanCanceledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'Alignment Failed', message: errorMessage });
       console.error('Alignment computation error:', error);
@@ -15911,7 +15912,7 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
-      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
+      if (ctrl.signal.aborted || error instanceof ScanCanceledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'ICP Failed', message: errorMessage });
       console.error('ICP registration error:', error);
@@ -16354,7 +16355,7 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
-      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
+      if (ctrl.signal.aborted || error instanceof ScanCanceledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'Cloud-to-Cloud ICP Failed', message: errorMessage });
       console.error('Cloud-to-cloud ICP error:', error);
@@ -16461,7 +16462,7 @@ export default function PointCloudViewer({
 
   // Register three or more scans as a SET, cross-checked by loop closure.
   //
-  // Not an optimisation over looping the pairwise call: it registers every pair
+  // Not an optimization over looping the pairwise call: it registers every pair
   // and then asks whether the poses agree with each other. That question cannot
   // be asked of a single pair, and it is the only thing that catches a
   // row-shifted alignment on a repetitive planting — such a pose lands plant on
@@ -16518,7 +16519,7 @@ export default function PointCloudViewer({
       // not a mix, so a single inline cloud forces every scan inline. Session
       // sources are far cheaper (no megabytes of JSON), hence the preference.
       const allSourced = payloads.every(p => p.kind === 'source');
-      // Decimate before serialising. A JS number[] costs ~8 bytes per value on
+      // Decimate before serializing. A JS number[] costs ~8 bytes per value on
       // the wire but the BACKEND turns it into a Python list at ~32 bytes each,
       // and pydantic copies it during validation. Sending three full scans that
       // way was measured at a 45 GB physical footprint. Registration matches
@@ -16613,7 +16614,7 @@ export default function PointCloudViewer({
       }
     } catch (error) {
       if ((error as Error)?.name === 'AbortError') {
-        showToast({ type: 'info', title: 'Auto-Register', message: 'Cancelled' });
+        showToast({ type: 'info', title: 'Auto-Register', message: 'Canceled' });
       } else {
         showToast({ type: 'error', title: 'Auto-Register',
           message: (error as Error)?.message ?? 'Registration failed' });
@@ -16998,7 +16999,7 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
-      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
+      if (ctrl.signal.aborted || error instanceof ScanCanceledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'Mesh-to-Mesh ICP Failed', message: errorMessage });
       console.error('Mesh-to-mesh ICP error:', error);
@@ -17178,7 +17179,7 @@ export default function PointCloudViewer({
         message: `Length: ${skeletonData.totalLength.toFixed(2)}m, ${skeletonData.pointCount} points`,
       });
     } catch (error) {
-      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      // User canceled (Cancel button aborted the fetch) — not a failure.
       if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Skeleton extraction error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Skeleton extraction failed';
@@ -17495,7 +17496,7 @@ export default function PointCloudViewer({
 
     const ext = qsmExtForFormat(format);
     // Suggested name for the single-QSM Save dialog: the QSM's display label,
-    // filesystem-sanitised, with the format's extension.
+    // filesystem-sanitized, with the format's extension.
     const suggestedName = `${sanitizeQsmFilename(qsmDisplayLabel(targets[0]))}.${ext}`;
 
     // Where the files go. Single export resolves to an explicit, user-editable
@@ -17511,12 +17512,12 @@ export default function PointCloudViewer({
           title: `Export QSM (${format.toUpperCase()})`,
           filters: [{ name: `QSM ${format.toUpperCase()}`, extensions: [ext] }],
         });
-        if (!singlePath) return; // cancelled
+        if (!singlePath) return; // canceled
       } else {
-        // directory:true returns a single folder path (or null when cancelled).
+        // directory:true returns a single folder path (or null when canceled).
         const picked = await window.electronAPI.dialog.open({ directory: true, title: 'Choose export folder' });
         dir = typeof picked === 'string' ? picked : null;
-        if (!dir) return; // cancelled
+        if (!dir) return; // canceled
       }
     } else if (targets.length > 1) {
       showToast({ type: 'error', title: 'Export', message: 'Select a single QSM to export in browser mode.' });
@@ -17544,7 +17545,7 @@ export default function PointCloudViewer({
         // typed a full path, so the stem must come from THAT — not from the QSM's
         // label. Getting this backwards writes `mtllib <label>.mtl` next to a file
         // actually named `<typed>.obj`, i.e. a reference to a file that doesn't
-        // exist, which loads as untextured grey exactly like having no MTL at all.
+        // exist, which loads as untextured gray exactly like having no MTL at all.
         const sep = (singlePath ?? dir ?? '').includes('\\') ? '\\' : '/';
         const slash = singlePath ? singlePath.lastIndexOf(sep) : -1;
         const outDir = singlePath
@@ -17556,7 +17557,7 @@ export default function PointCloudViewer({
 
         // OBJ is a BUNDLE, not a file: the .obj plus its sibling .mtl (and, in
         // texture mode, the bark image the MTL names). Without those the tree
-        // arrives in Blender as untextured grey geometry — every appearance
+        // arrives in Blender as untextured gray geometry — every appearance
         // choice the user made in the viewport silently dropped. CSV/PLY come
         // back as a one-entry bundle so the write loop below is uniform.
         //
@@ -19262,13 +19263,13 @@ export default function PointCloudViewer({
     return () => { delete (window as any).__meshColorSignature; };
   }, [meshTriangleColors]);
 
-  // Test hook: the distinct per-vertex colours on the selected mesh (or the only
-  // mesh), quantised and capped. Complements __meshColorSignature above, which
-  // only sees meshes with a built per-triangle colour buffer — a textured plant
-  // renders through TexturedPlantMesh and never gets one, so its vertex colours
-  // (the ONLY thing colouring untextured organs like petioles and internodes)
+  // Test hook: the distinct per-vertex colors on the selected mesh (or the only
+  // mesh), quantized and capped. Complements __meshColorSignature above, which
+  // only sees meshes with a built per-triangle color buffer — a textured plant
+  // renders through TexturedPlantMesh and never gets one, so its vertex colors
+  // (the ONLY thing coloring untextured organs like petioles and internodes)
   // are invisible to that hook. A mean would hide the failure this guards: a
-  // handful of correct leaf colours averaged with grey organs still looks
+  // handful of correct leaf colors averaged with gray organs still looks
   // plausible, so we expose the palette and let the test assert on membership.
   useEffect(() => {
     (window as any).__meshVertexColorPalette = (meshId?: string) => {
@@ -19311,7 +19312,7 @@ export default function PointCloudViewer({
   // scan provenance (and the matching colors) on the resulting mesh.
   // Resolves to the created MeshEntry on success (so callers can chain off the
   // mesh — e.g. the LAD tool triangulates then immediately reuses the result),
-  // or null if it bailed (already running, cancelled, or backend error). When
+  // or null if it bailed (already running, canceled, or backend error). When
   // `opts.ownProgress` is false the caller drives the running/progress/abort UI
   // itself (the LAD chain shows ONE combined progress bar across triangulate +
   // invert and owns the AbortController), so we don't touch isHeliosRunning /
@@ -19545,7 +19546,7 @@ export default function PointCloudViewer({
         });
       }
     } catch (err) {
-      if (signal.aborted || err instanceof ScanCancelledError) return null;
+      if (signal.aborted || err instanceof ScanCanceledError) return null;
       // When chained (no own progress), let the caller surface the failure with
       // its own context (a re-throw would be swallowed by its try/catch anyway);
       // the standalone path shows the toast here.
@@ -19693,7 +19694,7 @@ export default function PointCloudViewer({
             signal: abort.signal,
             onProgress: (p, msg) => setLadProgress({ label: msg, value: p }),
             // Route the triangulation phase's run id to the LAD cancel handler so
-            // cancelling during triangulation cancels the backend run too.
+            // canceling during triangulation cancels the backend run too.
             onRunId: (runId) => { ladRunIdRef.current = runId; },
           },
         );
@@ -19886,7 +19887,7 @@ export default function PointCloudViewer({
         message: `Computed LAD for ${voxels.length.toLocaleString()} voxels (max ${max.toFixed(2)} m²/m³)`,
       });
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({
         type: 'error',
         title: 'Leaf Area Density Failed',
@@ -19927,7 +19928,7 @@ export default function PointCloudViewer({
   // That also decides the destination: no alpha crowns means exactly one file, so
   // the native Save dialog is right; alpha crowns mean N+1 files, which a save
   // dialog can't express, so we ask for a FOLDER instead (mirroring handleExportQSMs).
-  // Returns a sentence for the completion toast, or '' if the user cancelled.
+  // Returns a sentence for the completion toast, or '' if the user canceled.
   const exportCrownTable = useCallback(async (
     args: CrownFitStartArgs, rows: CrownCsvRow[],
   ): Promise<string> => {
@@ -19964,7 +19965,7 @@ export default function PointCloudViewer({
       directory: true, title: 'Choose a folder for the crown export',
     });
     const dir = typeof picked === 'string' ? picked : null;
-    if (!dir) return ''; // cancelled
+    if (!dir) return ''; // canceled
 
     for (const r of alphaRows) {
       const data = crownToMeshData(r.crown);
@@ -19999,7 +20000,7 @@ export default function PointCloudViewer({
     crownFitAbortRef.current = abort;
     crownFitRunIdRef.current = null;
     const allMeshes: MeshEntry[] = [];
-    // Colours already in use (existing meshes + the scans being fit + crowns
+    // Colors already in use (existing meshes + the scans being fit + crowns
     // assigned this run), so the auto-assigned no-tree-id crowns stay distinct
     // from each other, from existing meshes, and from their own source scans.
     const usedCrownColors = new Set<string>([
@@ -20056,9 +20057,9 @@ export default function PointCloudViewer({
         for (const crown of response.crowns) {
           const treeSuffix = crown.tree_instance_id > 0 ? ` [tree ${crown.tree_instance_id}]` : '';
           const shapeLabel = CROWN_SHAPE_LABELS[args.shape] ?? args.shape;
-          // Colour: match the tree_instance colormap when the crown came from a
-          // segmented tree (a) so the crown reads with the same colour as its
-          // tree; otherwise auto-assign a distinct colour per crown (b), tracking
+          // Color: match the tree_instance colormap when the crown came from a
+          // segmented tree (a) so the crown reads with the same color as its
+          // tree; otherwise auto-assign a distinct color per crown (b), tracking
           // the ones already used across this whole run + existing meshes.
           const treeColor = crownColorForTreeId(crown.tree_instance_id);
           const color = treeColor ?? allocateCrownColor(usedCrownColors);
@@ -20107,7 +20108,7 @@ export default function PointCloudViewer({
         showToast({ type: 'error', title: 'Crown Fit', message: 'No crowns were fitted.' });
       }
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({
         type: 'error',
         title: 'Crown Fit Failed',
@@ -20237,7 +20238,7 @@ export default function PointCloudViewer({
         message: `Measured ${res.trees.length} tree${res.trees.length === 1 ? '' : 's'}.`,
       });
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       setTreeInventoryError(err instanceof Error ? err.message : 'Tree inventory failed.');
     } finally {
       setTreeInventoryRunning(false);
@@ -20374,7 +20375,7 @@ export default function PointCloudViewer({
         message: `Built ${entries.length} QSM${entries.length === 1 ? '' : 's'}${failed ? `; ${failed} tree(s) failed (see the QSM metrics CSV)` : ''}.`,
       });
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       setTreeQsmError(err instanceof Error ? err.message : 'Tree QSM build failed.');
     } finally {
       setTreeQsmRunning(false);
@@ -20483,7 +20484,7 @@ export default function PointCloudViewer({
       (window as any).__markProjectClean?.();
       showToast({ type: 'success', title: 'Project Saved', message: `Saved ${path.split(/[\\/]/).pop()}.` });
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({ type: 'error', title: 'Save Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
       setProjectBusy(null);
@@ -20524,7 +20525,7 @@ export default function PointCloudViewer({
       setPendingProject({ path, doc, sessionMap: res.session_map ?? {} });
       await (window as any).__resetSceneForProject?.();
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({ type: 'error', title: 'Open Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
       setProjectBusy(null);
@@ -20664,7 +20665,7 @@ export default function PointCloudViewer({
   const cancelGroundSegment = useCallback(() => {
     // Stop the backend worker first when a run-id arrived (the ground/plant split
     // streams one); it drops the child sessions it had already registered, so a
-    // cancelled split doesn't strand a second copy of the cloud in the sidecar.
+    // canceled split doesn't strand a second copy of the cloud in the sidecar.
     if (groundSplitRunIdRef.current) void cancelRun(groundSplitRunIdRef.current);
     groundSegmentAbortRef.current?.abort();
     groundSegmentAbortRef.current = null;
@@ -20682,7 +20683,7 @@ export default function PointCloudViewer({
   const cancelWoodSegment = useCallback(() => {
     // Stop the backend worker first when a run-id arrived (the wood/leaf split
     // streams one); it drops the child sessions it had already registered, so a
-    // cancelled split doesn't strand a second copy of the cloud in the sidecar.
+    // canceled split doesn't strand a second copy of the cloud in the sidecar.
     if (woodSplitRunIdRef.current) void cancelRun(woodSplitRunIdRef.current);
     woodSegmentAbortRef.current?.abort();
     woodSegmentAbortRef.current = null;
@@ -20694,7 +20695,7 @@ export default function PointCloudViewer({
   const cancelTreeSegment = useCallback(() => {
     // Stop the backend worker first when a run-id arrived (the per-tree split
     // streams one); it drops the child sessions it had already registered, so a
-    // cancelled split doesn't strand a second copy of the cloud in the sidecar.
+    // canceled split doesn't strand a second copy of the cloud in the sidecar.
     if (treeSplitRunIdRef.current) void cancelRun(treeSplitRunIdRef.current);
     treeSegmentAbortRef.current?.abort();
     treeSegmentAbortRef.current = null;
@@ -20854,10 +20855,10 @@ export default function PointCloudViewer({
       }
 
     } catch (error) {
-      // A user-initiated cancel — fetch abort OR the backend's cancelled event —
+      // A user-initiated cancel — fetch abort OR the backend's canceled event —
       // is not an error.
-      if (abort.signal.aborted || error instanceof ScanCancelledError) {
-        console.log('[Plant] Generation cancelled by user');
+      if (abort.signal.aborted || error instanceof ScanCanceledError) {
+        console.log('[Plant] Generation canceled by user');
       } else {
         console.error('Plant generation failed:', error);
         showToast({ title: `Plant generation failed: ${error}`, type: 'error' });
@@ -21541,7 +21542,7 @@ export default function PointCloudViewer({
       // Encode GIF, then save it where the user chooses. An `<a download>` click
       // would be serviced out-of-band by Electron (its own Save-As, invisible to
       // us) and return immediately — so the old success toast fired before the
-      // file existed, and a cancelled save still reported success.
+      // file existed, and a canceled save still reported success.
       gif.on('finished', (blob: Blob) => {
         void (async () => {
           try {
@@ -21788,10 +21789,10 @@ export default function PointCloudViewer({
     }
     // Intensity keeps its fixed 0..1 domain and is NOT made robust here.
     //
-    // For a flat cloud that is already true: the parser min-max normalises the
+    // For a flat cloud that is already true: the parser min-max normalizes the
     // column into 0..1 at import (pointCloudParsers.ts), so the domain is 0..1
     // by construction. The outlier damage there happens during that
-    // normalisation, upstream of any range this function could return — fixing
+    // normalization, upstream of any range this function could return — fixing
     // it means changing the parser, not this line.
     //
     // An octree cloud never reaches the scalar branch below under `intensity`
@@ -21938,7 +21939,7 @@ export default function PointCloudViewer({
       const scan = scans.find(s => s.id === cloud.id);
       // Resolve the class list against THIS cloud, so a user-defined palette
       // bound to the column wins over the by-name default. Without it a user
-      // who renames "Tree 1" to "North row" in the labelling tool sees their
+      // who renames "Tree 1" to "North row" in the labeling tool sees their
       // name in that panel while the legend still says "Tree 1" — the palette
       // is per-cloud, and the by-name resolvers are process-wide and cannot
       // express it. A caller-supplied scheme is authoritative in
@@ -21947,7 +21948,7 @@ export default function PointCloudViewer({
       // Only when the user has BOUND a palette to the column. The by-name
       // suppression in `colorChannel` stands otherwise: tree_instance ids are
       // arbitrary nominal labels and a plot routinely holds 100+ trees, so the
-      // default stays "colour the points, draw no legend". A palette is an
+      // default stays "color the points, draw no legend". A palette is an
       // explicit statement that these classes have meaning the user authored,
       // and it is the only thing that can carry their names — which is the
       // whole point of being able to rename Tree 1 to "North row".
@@ -21986,7 +21987,7 @@ export default function PointCloudViewer({
       const mode = meshColorModes.get(mesh.id);
       if (!mode || mode === 'solid') continue;
       if (mode === 'scan') {
-        // Source-scan colouring is categorical, but its palette is the mesh's
+        // Source-scan coloring is categorical, but its palette is the mesh's
         // own per-scan swatches rather than a registered classification
         // scheme — so hand the scheme in explicitly.
         const legend = meshScanLegendFor(mesh);
@@ -22072,7 +22073,7 @@ export default function PointCloudViewer({
   //
   // A grouped entry ("5 scans") applies the change to all its members, which is
   // exactly what the caption promises. Categorical entries get no colormap
-  // picker — their colours come from the classification scheme, not a ramp.
+  // picker — their colors come from the classification scheme, not a ramp.
   const renderLegendEditor = useCallback((entry: LegendEntry) => {
     if (entry.kind !== 'continuous') {
       return (
@@ -22132,7 +22133,7 @@ export default function PointCloudViewer({
       // default ±5 origin box (size ≈ 17.3), which would blank the viewport.
       data-scene-bounds-size={combinedBounds.size.length().toFixed(2)}
       data-scene-center={`${combinedBounds.center.x.toFixed(1)},${combinedBounds.center.y.toFixed(1)},${combinedBounds.center.z.toFixed(1)}`}
-      // The bounds FLOOR. The default scene origin is laterally the centre but
+      // The bounds FLOOR. The default scene origin is laterally the center but
       // vertically this, so a test asserting the origin's ground anchor needs it
       // — data-scene-center alone cannot distinguish the floor from the
       // mid-height.
@@ -22221,24 +22222,24 @@ export default function PointCloudViewer({
           const cloudPose = getCloudPose(cloud);
           const isSelected = selectedIds.has(cloud.id);
           // This cloud's OWN color mode (its override, else the scene default).
-          // Every colour decision below reads these, not the global state, so
+          // Every color decision below reads these, not the global state, so
           // two clouds can sit in different modes at once.
           const rawColorMode = colorModeFor(cloud.id);
-          // While the labelling tool is open on THIS cloud, force scalar mode.
+          // While the labeling tool is open on THIS cloud, force scalar mode.
           //
           // The overlay writes classes into the `intensity` attribute slot, but
           // that slot is only ever SAMPLED under PointColorType.INTENSITY_GRADIENT
           // — i.e. scalar mode. In 'rgb' / 'per-scan' / 'height' the shader
           // ignores it entirely, so the labels are computed and uploaded and then
           // simply not drawn: counts move in the panel, viewport never changes.
-          // The user's own colour choice is SUSPENDED, not overwritten — closing
+          // The user's own color choice is SUSPENDED, not overwritten — closing
           // the tool restores it, because this is a render-time override rather
           // than a write to the cloud's stored mode.
           //
           // Any cloud CARRYING an overlay gets it, not only the tool's target:
           // a closed panel's uncommitted strokes and a commit still rebuilding
           // are overlays on a cloud the tool is not open on, and under the
-          // user's own colour mode they were uploaded and never drawn, so the
+          // user's own color mode they were uploaded and never drawn, so the
           // labels looked undone the moment the panel closed.
           const isLabelTarget = labelTargetCloud?.id === cloud.id;
           const overlaySlug = labelOverlayByCloud.get(cloud.id)?.slug;
@@ -22308,7 +22309,7 @@ export default function PointCloudViewer({
                   // loads), so re-mount cost is one shader compile per
                   // mode switch — measured at ~10 ms.
                   // Re-mount also when the selected scalar field changes, not
-                  // just the colour mode — switching the field needs a fresh
+                  // just the color mode — switching the field needs a fresh
                   // material + BindingStates so the new attribute's buffer
                   // (swapped into `intensity`) binds correctly.
                   // NOT keyed on the first-paint generation any more. That used
@@ -22349,11 +22350,11 @@ export default function PointCloudViewer({
                       : undefined
                   }
                   pointSize={pointSize}
-                  // 'per-scan' renders as a uniform single-colour swatch
-                  // (the cloud's own colour), same convention as the flat
+                  // 'per-scan' renders as a uniform single-color swatch
+                  // (the cloud's own color), same convention as the flat
                   // PointCloud dispatch below. 'x' and 'y' don't have a
                   // clean octree equivalent yet (no axis-scalar shader),
-                  // so they fall through to 'height' which colours by Z.
+                  // so they fall through to 'height' which colors by Z.
                   colorMode={
                     cloudColorMode === 'per-scan'
                       ? 'single'
@@ -22415,8 +22416,8 @@ export default function PointCloudViewer({
                   // longer holds the excluded points; a live preview opened
                   // meanwhile is ANDed with it inside the renderer.
                   committedFilters={getEditState(cloud.id).committedFilters ?? null}
-                  // Live labelling preview — only for the cloud being labelled.
-                  // Live labelling preview. Per CLOUD, not "the cloud the panel
+                  // Live labeling preview — only for the cloud being labeled.
+                  // Live labeling preview. Per CLOUD, not "the cloud the panel
                   // is open on": a committed-but-unbaked hold keeps painting
                   // after the tool has been closed or moved to another scan,
                   // which is what stops the labels reverting the moment the
@@ -22877,7 +22878,7 @@ export default function PointCloudViewer({
           // params.origin / params.trajectory are WORLD-frame, but the cloud renders
           // in its STORED frame (world − worldShift); subtract worldShift so the
           // marker (and its trajectory path) sit ON the cloud rather than millions of
-          // metres away. Folded into the display-offset wrapper. No-op without a shift.
+          // meters away. Folded into the display-offset wrapper. No-op without a shift.
           const ws = scan.data?.octree?.worldShift ?? [0, 0, 0];
           return (
             // Render-only precision safety net: the marker's origin is a world
@@ -23063,7 +23064,7 @@ export default function PointCloudViewer({
             })}
             // The scene's robust floor (lowest per-cloud floor, tracking any
             // live translation) — never a hardcoded 0, which put every
-            // ground-plane pick on a georeferenced scan tens of metres below
+            // ground-plane pick on a georeferenced scan tens of meters below
             // its terrain.
             groundZ={combinedBounds.groundZ - displayOffset.z}
             displayOffset={displayOffset}
@@ -23075,14 +23076,14 @@ export default function PointCloudViewer({
             either labels the point under the cursor or places a measurement
             vertex, depending on `pickerMode`. Picks across EVERY visible octree
             cloud plus the flat ones, so it needs no selection. */}
-        {/* Cross-section: two ground-plane clicks place the centreline, reusing
+        {/* Cross-section: two ground-plane clicks place the centerline, reusing
             the crop tool's raycaster rather than a new gizmo. The wireframe
             shows where the slab sits; the projection override flattens the view
             so a 2-D lasso selects what it visually encloses. */}
         {sectionTargetCloud && slabDrawState !== 'idle' && (
           <BoxDrawRaycaster
             // Pick on the GROUND, not the mid-height of the cloud. Raycasting a
-            // plane floating in mid-canopy put the clicks metres away from the
+            // plane floating in mid-canopy put the clicks meters away from the
             // geometry the user was aiming at, so the section landed somewhere
             // unrelated to what they clicked on.
             groundZ={sectionBounds
@@ -23112,7 +23113,7 @@ export default function PointCloudViewer({
                 slabDrawRef.current = { state: 'idle', first: null };
                 setSlabCursor(null);
                 slabCursorRef.current = null;
-                commitSlabCentreline(a.x, a.y, x, y);
+                commitSlabCenterline(a.x, a.y, x, y);
               }
             }}
             onMove={(x, y) => {
@@ -23142,7 +23143,7 @@ export default function PointCloudViewer({
           />
         )}
         {sectionTargetCloud && slabDrawState === 'awaiting-b' && slabFirstPointState && (
-          <SlabCentrelinePreview
+          <SlabCenterlinePreview
             first={slabFirstPointState}
             cursor={slabCursor}
             z={sectionTargetCloud.data.groundZ ?? sectionBounds?.min.z ?? 0}
@@ -23263,7 +23264,7 @@ export default function PointCloudViewer({
               sceneOrigin[2] - displayOffset.z,
             )}
             // Fixed on-screen size, not bounds-derived: on a survey-scale cloud a
-            // bounds-sized gizmo is kilometres wide, so zooming into any detail
+            // bounds-sized gizmo is kilometers wide, so zooming into any detail
             // pushed every handle off screen. `size` is now just the glyph's
             // nominal unit — the pixel span is what the user sees.
             size={1}
@@ -23436,7 +23437,7 @@ export default function PointCloudViewer({
         )}
 
         {/* Label tool's LIMITING box: placed with the crop tool's two-click
-            raycaster, spanning the labelled cloud's full height (the panel's Z
+            raycaster, spanning the labeled cloud's full height (the panel's Z
             fields trim it). Shown whenever Box mode is on, so the user can see
             what bounds their strokes. */}
         {labelTargetCloud && labelBoxDraw !== 'idle' && (
@@ -23678,7 +23679,7 @@ export default function PointCloudViewer({
                 // anchor depends on a GPU/CPU pick against streamed geometry,
                 // so a spec that paints before the octree has tiles gets a
                 // correct refusal that looks like a broken brush.
-                // The CENTRE rides along because "the brush is anchored" and
+                // The CENTER rides along because "the brush is anchored" and
                 // "the brush is anchored WHERE THE POINTER IS" are different
                 // claims, and only the second one was ever false: a pick that
                 // ignored the cursor still reported ok, so a spec could only
@@ -23705,7 +23706,7 @@ export default function PointCloudViewer({
           );
         })()}
 
-        {/* Where the brush will paint, in the active class's colour. */}
+        {/* Where the brush will paint, in the active class's color. */}
         {labelBrushActive && labelBrushCursor && (
           <LabelBrushCursor
             center={labelBrushCursor.center}
@@ -23954,7 +23955,7 @@ export default function PointCloudViewer({
                 />
                 {/* Pending-segment preview. Turns amber while the pointer is
                     parked on a panel: the segment is drawn to the CLAMPED point
-                    (the edge of the blocker), and the colour change says a
+                    (the edge of the blocker), and the color change says a
                     click there would be refused rather than placed. */}
                 {cursor && (
                   <line
@@ -24203,7 +24204,7 @@ export default function PointCloudViewer({
       )}
 
       {/* Bake ("permanently apply deletions") — one full PotreeConverter run
-          with no other on-screen signal. Cancelling leaves the session pristine
+          with no other on-screen signal. Canceling leaves the session pristine
           because every mutation happens after the build returns. */}
       {bakeProgress && (
         <StatusPill
@@ -24227,7 +24228,7 @@ export default function PointCloudViewer({
       )}
 
       {/* Ground/plant split status. The Ground Segmentation panel (and its
-          inline spinner) closes as soon as the recoloured parent lands, so this
+          inline spinner) closes as soon as the recolored parent lands, so this
           pill is the only signal that the backend is still building the two
           child octrees — 10-15 s on a large cloud. */}
       {groundSplitProgress && (
@@ -24240,7 +24241,7 @@ export default function PointCloudViewer({
       )}
 
       {/* Per-tree split status. The Segment Trees panel (and its inline
-          spinner) closes as soon as the recoloured parent lands, so this pill is
+          spinner) closes as soon as the recolored parent lands, so this pill is
           the only signal that the backend is still building one octree per tree
           — a minute-scale job on a large plot. */}
       {treeSplitProgress && (
@@ -24257,17 +24258,17 @@ export default function PointCloudViewer({
           finish before its region can be shipped) and the BACKGROUND queue an
           applied crop hands its octree rebuild to.
 
-          The background half is cancellable and the blocking half is not, which
+          The background half is cancelable and the blocking half is not, which
           is the honest split: abandoning a blocking refresh would leave the edit
           unapplied, whereas the crop is already applied and already on screen
-          through its per-tile mask — cancelling only leaves the deleted points
+          through its per-tile mask — canceling only leaves the deleted points
           occupying space in an octree nobody draws them from. */}
       {(() => {
         // A label bake shows NOTHING. The pill earns its place on a crop
         // refresh by offering a Cancel — an action, on work the user can weigh
         // up (the crop is already drawn through its mask, so abandoning the
         // rebuild costs only wasted space in an octree nobody looks through).
-        // A label bake offers no such choice: cancelling it would quietly undo
+        // A label bake offers no such choice: canceling it would quietly undo
         // a save the user was just told had happened, so the button cannot be
         // there — and a progress indicator with nothing to decide and nothing
         // to wait for only asks the user to wait. The toast has already told
@@ -24827,17 +24828,17 @@ export default function PointCloudViewer({
                       isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
-                    {/* Line 1 — disclosure chevron + colour swatch + the name, on a row of
+                    {/* Line 1 — disclosure chevron + color swatch + the name, on a row of
                         its own. The name used to share a line with the action icons, which in
                         a 256px panel left it only a few characters before the ellipsis. */}
                     <div className="flex items-center gap-1.5 min-w-0">
                       {/* Disclosure chevron — LEADING, not in the line-2 icon strip.
-                          It has to be somewhere that is never the row's visual centre:
+                          It has to be somewhere that is never the row's visual center:
                           the row's own click selects the scan, Playwright and users
-                          both aim at the centre, and this button stops propagation. In
+                          both aim at the center, and this button stops propagation. In
                           the strip it sat immediately after a `flex-1` subtitle, so on a
                           short subtitle ("60 pts") it drifted inward and landed exactly
-                          on the centre — swallowing the selection click. Leading is also
+                          on the center — swallowing the selection click. Leading is also
                           where a disclosure triangle belongs, and it keeps the chevron
                           in the SAME place on every row instead of moving with the
                           subtitle's width.
@@ -25112,9 +25113,9 @@ export default function PointCloudViewer({
                       {/* ALWAYS shown, including at 0/0. This row states the
                           tilt the CLOUD has, and "level" is an answer, not a
                           missing one. Hiding the zero case made the two RIEGL
-                          import paths read as each other's opposite: a levelled
-                          import (plumb, but labelled with the raw inclinometer
-                          reading) looked tilted, while an unlevelled one (which
+                          import paths read as each other's opposite: a leveled
+                          import (plumb, but labeled with the raw inclinometer
+                          reading) looked tilted, while an unleveled one (which
                           really is off plumb) showed no tilt row at all and so
                           looked level. `tiltRollDeg` is a required field with a
                           0 default, so there is never a value to omit. */}
@@ -25757,7 +25758,7 @@ export default function PointCloudViewer({
         <Toolbar commands={guardedCommands} selection={toolSelection} title="Create" groups={CREATE_GROUPS} />
 
         {/* Tools — analysis operations on existing data. Renders from the single
-            command registry; unavailable single-input tools grey out, multi-input
+            command registry; unavailable single-input tools gray out, multi-input
             tools stay enabled. (See lib/toolCommands.ts.)
             Note: synthetic scanning (Simulate) is reached from the Simulate menu
             and the Scans panel, so it has no dedicated left-toolbar block.
@@ -25769,7 +25770,7 @@ export default function PointCloudViewer({
       {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
           and applies to every selected scan when N > 1. */}
       {/* The label tool borrows crop's polygon draw state for its lasso, so
-          suppress crop's OWN panel while labelling — otherwise two panels stack
+          suppress crop's OWN panel while labeling — otherwise two panels stack
           at the same position and the top one swallows the other's clicks. */}
       {editMode === 'crop' && selectedIds.size > 0 && !labelTargetCloud && (() => {
         const closeCropPanel = () => {
@@ -26334,7 +26335,7 @@ export default function PointCloudViewer({
             setSlabFirstPointState(null);
             setSlabCursor(null);
             // Stop clipping while picking. Redrawing left the OLD section
-            // clipping the view, so the user was aiming the new centreline at a
+            // clipping the view, so the user was aiming the new centerline at a
             // cloud that was still cut away — you cannot aim at what is hidden.
             // The drag preview shows the box being made, so the old section is
             // not needed on screen. Reinstated when the second click commits.
@@ -26434,12 +26435,12 @@ export default function PointCloudViewer({
             return next;
           })}
           // Protect = every class except Unclassified locked, so strokes only
-          // ever label what is not labelled yet. Off unlocks everything.
+          // ever label what is not labeled yet. Off unlocks everything.
           onToggleProtect={() => setLabelLockedClasses((prev) => {
-            const labelled = labelPalette.classes
+            const labeled = labelPalette.classes
               .map((c) => c.value).filter((v) => v !== UNCLASSIFIED_VALUE);
-            const on = labelled.length > 0 && labelled.every((v) => prev.has(v));
-            return on ? new Set() : new Set(labelled);
+            const on = labeled.length > 0 && labeled.every((v) => prev.has(v));
+            return on ? new Set() : new Set(labeled);
           })}
           onIsolateClass={(v) => setLabelVisibleClasses((prev) => {
             // Already isolated on this class: show everything again.
@@ -26582,7 +26583,7 @@ export default function PointCloudViewer({
           onDelete={(slug) => { void handleManageScalarField('delete', slug); }}
           onColorBy={(slug) => {
             // Every checked cloud: the list only offers fields they ALL carry,
-            // so colouring just the first would be arbitrary.
+            // so coloring just the first would be arbitrary.
             registerContinuousSlug(slug);
             for (const c of scalarTargets) {
               setCloudColorMode(c.id, { mode: 'scalar', field: slug });
@@ -26751,13 +26752,13 @@ export default function PointCloudViewer({
       {showOrganSegmentPanel && selectedIds.size === 1 && (
         <OrganSegmentPanel
           units={organUnits}
-          colourBy={organColourBy}
+          colorBy={organColorBy}
           modelId={organModelId}
           inProgress={organSegmentInProgress}
           error={organSegmentError}
           onClose={() => setShowOrganSegmentPanel(false)}
           onUnitsChange={setOrganUnits}
-          onColourByChange={setOrganColourBy}
+          onColorByChange={setOrganColorBy}
           onModelIdChange={setOrganModelId}
           onSegment={handleOrganSegment}
           onCancel={cancelOrganSegment}
@@ -27321,7 +27322,7 @@ export default function PointCloudViewer({
           the panel's own buttons. It swallowed DEM's Run button on CI (the
           click timed out on "scalar-overlay subtree intercepts pointer
           events"), while passing locally where the legend was narrower and only
-          covered the button's right edge, leaving the centre Playwright clicks
+          covered the button's right edge, leaving the center Playwright clicks
           clear. A passive readout must never outrank an interactive panel. */}
       <div
         data-testid="scalar-overlay"
@@ -27373,7 +27374,7 @@ export default function PointCloudViewer({
             {/* Color by. Applies to the SELECTED clouds when there is a
                 selection, else sets the scene default that unselected clouds
                 follow — so the long-standing "change it for everything"
-                behaviour is what you get with nothing selected, and picking a
+                behavior is what you get with nothing selected, and picking a
                 scan first scopes the change to it. Options are derived from a
                 representative cloud (first selected-visible, else first
                 visible): X/Y are hidden for octree clouds, and that cloud's
@@ -27852,8 +27853,8 @@ export default function PointCloudViewer({
                         )}
                         {/* A command gated by `isDisabled` rather than `requires`
                             has no selection to fix, so the hint above says
-                            nothing. Without this it greys out with no reason
-                            given — the exact dead-item problem the greying is
+                            nothing. Without this it grays out with no reason
+                            given — the exact dead-item problem the graying is
                             meant to solve. */}
                         {!cmd.available && !cmd.requires && cmd.id === 'cloud-unregister' && (
                           <span className="text-[10px] text-neutral-500 italic" data-testid="command-unavailable-reason">
@@ -28139,7 +28140,7 @@ export default function PointCloudViewer({
             - add-params-to: attach params to an existing data-only scan
             - edit: update an existing scan's params and label
           The "Import from XML" affordance inside the popup uses the bulk
-          callback to materialise N scans at once, optionally auto-attaching
+          callback to materialize N scans at once, optionally auto-attaching
           point data referenced by <filename>. */}
       <ScanParametersPopup
         isOpen={scanPopupState.kind !== 'closed'}
@@ -28213,7 +28214,7 @@ export default function PointCloudViewer({
 
             // Frame-mismatch check: a trajectory/scan imported in a projected CRS
             // (e.g. UTM, ~10^6 m) added to an origin-based scene sits millions of
-            // metres away, so the union auto-fit collapses everything to sub-pixel
+            // meters away, so the union auto-fit collapses everything to sub-pixel
             // ("auto-fits to nothing"). Detect it, warn with a one-click recenter,
             // and frame the new scan on its own so it stays visible. This runs
             // BEFORE onAddScan, while combinedBounds still reflects the pre-add

@@ -19,7 +19,7 @@ When you extract a skeleton, Phytograph reports:
 
 ## Extraction method
 
-Phytograph uses a single **BFS graph** method: it builds a neighbourhood graph
+Phytograph uses a single **BFS graph** method: it builds a neighborhood graph
 over the cloud, roots it at the trunk base, and traces branches outward to
 recover the centerline and its topology.
 

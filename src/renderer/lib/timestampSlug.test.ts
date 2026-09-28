@@ -37,12 +37,12 @@ function build() {
 // The time column has TWO correct names, one per layer. Conflating them is the
 // bug this file exists for, in both directions:
 //
-//   - Renaming the octree attribute to `timestamp` broke COLOUR-BY:
+//   - Renaming the octree attribute to `timestamp` broke COLOR-BY:
 //     swapScalarIntoIntensity does a bare `geometry.attributes[field]` lookup
 //     against PotreeConverter's own buffer key, so the lookup missed, the swap
 //     silently no-opped, and the shader kept the previous buffer — points stayed
-//     coloured by intensity while the legend showed the 85–233 s timestamp range.
-//     ("Colour by timestamp looks like garbage.")
+//     colored by intensity while the legend showed the 85–233 s timestamp range.
+//     ("Color by timestamp looks like garbage.")
 //
 //   - Leaving it as `gps-time` in the export picker broke EXPORT: the backend
 //     allowlist keys off `timestamp`, so the column was either absent or written
@@ -55,13 +55,13 @@ describe('the time column keeps its buffer key and exports under its slug', () =
     expect(Object.keys(ranges)).not.toContain('timestamp');
   });
 
-  it('offers colour-by under the BUFFER key so the swap resolves', () => {
+  it('offers color-by under the BUFFER key so the swap resolves', () => {
     const data = build();
     const opts = octreeScalarFieldOptions(
       data.octree?.attributeRanges, data.octree?.attributeLabels,
     ).map(o => o.value);
     // `octreeScalarFieldOptions().value` is fed straight to
-    // swapScalarIntoIntensity. A `timestamp` here is the garbage-colour bug.
+    // swapScalarIntoIntensity. A `timestamp` here is the garbage-color bug.
     expect(opts).toContain('gps-time');
     expect(opts).not.toContain('timestamp');
   });

@@ -1,5 +1,5 @@
 name: final_S_finetune_s0
-description: "Leaf/wood PointNeXt-S: synthetic pre-training, then fine-tuned on hand-labelled real trees (seed 0)."
+description: "Leaf/wood PointNeXt-S: synthetic pre-training, then fine-tuned on hand-labeled real trees (seed 0)."
 task: wood_leaf
 cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
 out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs

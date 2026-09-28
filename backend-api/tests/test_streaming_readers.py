@@ -15,7 +15,7 @@ import main
 
 def _cloud(n=5000, seed=0):
     rng = np.random.default_rng(seed)
-    # Sub-millimetre detail on UTM-scale coordinates: a 1 mm LAS would lose it.
+    # Sub-millimeter detail on UTM-scale coordinates: a 1 mm LAS would lose it.
     xyz = rng.uniform(0, 20, (n, 3)) + [612000.0, 4270000.0, 100.0]
     xyz += rng.uniform(0, 1e-3, (n, 3))
     rgb = rng.integers(0, 256, (n, 3))
@@ -129,7 +129,7 @@ def test_truncated_binary_pcd_is_a_clear_error(tmp_path):
     assert "truncated" in e.value.detail
 
 
-def test_ply_positions_keep_sub_millimetre_precision(tmp_path):
+def test_ply_positions_keep_sub_millimeter_precision(tmp_path):
     from plyfile import PlyData, PlyElement
     xyz, *_ = _cloud(n=1000)
     v = np.zeros(len(xyz), dtype=[("x", "f8"), ("y", "f8"), ("z", "f8")])

@@ -6,7 +6,7 @@ import { treeOverlaySegments } from '../../../lib/treeInventory';
 // DBH circles and stem-base markers for a tree inventory, drawn as line
 // segments in DISPLAY space. The vertices are computed in float64 in
 // `treeOverlaySegments` (world − worldShift − displayOffset) before they reach
-// the float32 buffer, so UTM-scale plots keep millimetre precision. The
+// the float32 buffer, so UTM-scale plots keep millimeter precision. The
 // selected tree is drawn in a second, brighter pass.
 interface TreeInventoryOverlayProps {
   trees: TreeInventoryTree[];

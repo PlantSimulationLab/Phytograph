@@ -28,7 +28,7 @@ test('imports a PTX, recovers its sky/miss points, and toggles the overlay', asy
     // Path-backed import routes through the wizard. PTX defines its own column
     // layout, so the roles are read-only — but the rows themselves are plain
     // ASCII behind a fixed header, so the preview DOES show real values. That is
-    // how a user checks the column count and the intensity/colour scales before
+    // how a user checks the column count and the intensity/color scales before
     // committing, and it costs ~2 ms even on a multi-GB file.
     await expect(page.getByTestId('import-wizard-preview-row').first())
       .toBeVisible({ timeout: 20_000 });

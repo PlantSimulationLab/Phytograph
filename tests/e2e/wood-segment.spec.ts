@@ -16,7 +16,7 @@ const FIXTURE2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf2.xyz
 // workflow — segmentation computes its own `wood_class`.
 //
 // Drives the real DOM against the live backend: import (→ octree) → select →
-// open the Wood/Leaf panel → run → assert the cloud is re-coloured by the
+// open the Wood/Leaf panel → run → assert the cloud is re-colored by the
 // discrete `wood_class` attribute, and that the Split and Remove-wood output
 // modes produce the expected child cloud / reduced point count.
 //
@@ -34,7 +34,7 @@ test.beforeEach(async () => {
   await resetToFreshScene(session.app, session.page);
 });
 
-test('segments wood vs leaf and colours by the wood_class attribute', async () => {
+test('segments wood vs leaf and colors by the wood_class attribute', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
@@ -54,8 +54,8 @@ test('segments wood vs leaf and colours by the wood_class attribute', async () =
   await page.getByTestId('wood-mode').selectOption('split');
   await page.getByTestId('wood-segment-run-button').click();
 
-  // The discrete class legend proves the cloud is coloured categorically by
-  // wood_class (wood vs leaf), not a continuous gradient or solid colour.
+  // The discrete class legend proves the cloud is colored categorically by
+  // wood_class (wood vs leaf), not a continuous gradient or solid color.
   const legend = page.getByTestId('class-legend');
   await expect(legend).toBeVisible({ timeout: 60_000 });
   await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
@@ -141,20 +141,20 @@ test('segments two selected scans together and labels both', async () => {
 
   await page.getByTestId('wood-segment-run-button').click();
 
-  // Both scans should be labelled by wood_class (the discrete legend appears,
+  // Both scans should be labeled by wood_class (the discrete legend appears,
   // and neither scan was deleted — aggregate writes labels back in place).
   const legend = page.getByTestId('class-legend');
   await expect(legend).toBeVisible({ timeout: 60_000 });
   await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
   await expect(legend.getByText('Wood', { exact: true })).toBeVisible();
   await expect(legend.getByText('Leaf', { exact: true })).toBeVisible();
-  // Both original scans survive with their original point counts (labelled,
+  // Both original scans survive with their original point counts (labeled,
   // not split or removed).
   expect(parseInt((await row1.getAttribute('data-point-count')) ?? '0', 10)).toBe(4240);
   expect(parseInt((await row2.getAttribute('data-point-count')) ?? '0', 10)).toBe(3360);
 });
 
-// A REAL tree, not the toy above: LeWoS tree 1 (tropical, hand-labelled,
+// A REAL tree, not the toy above: LeWoS tree 1 (tropical, hand-labeled,
 // decimated to 50k points), shared with the backend's accuracy gates. The
 // benchmark held it out of the model's training (backend-api/research/ml/
 // corpus.py), so this is the shipped model on a tree it has never seen.

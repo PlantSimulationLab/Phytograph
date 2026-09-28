@@ -43,7 +43,7 @@ reference project's unambiguous range is 497 m against a 142 m scan extent).
 
 COORDINATE FRAMES. A .riproject carries no registration (that is what RiSCAN PRO
 produces), so every scan position is its own frame with the origin at the
-scanner, and its GNSS fix is a metres-level prior for ICP rather than
+scanner, and its GNSS fix is a meters-level prior for ICP rather than
 survey-grade truth. A .PROJ carries real SOPs, so `--frame registered` places
 each position in the project frame directly; see load_sop for the chain and
 decompose_sop for how the rotation is folded into ScanParameters.
@@ -128,7 +128,7 @@ def _add_rivlib_dll_directory(lib_path: str) -> None:
         pass
 
 # Batch size for point reads. 200k points is ~3.2 MB of xyz + ~3.2 MB of
-# attributes, which keeps the C->numpy copy amortised without a large resident
+# attributes, which keeps the C->numpy copy amortized without a large resident
 # buffer. Measured throughput at this size is ~2.3 M pts/s under emulation.
 _READ_CHUNK = 200_000
 
@@ -176,7 +176,7 @@ _ANCHOR_PROBE_POINTS = 250_000
 # emit ONLY NaN rows (4 of 8 in one project). Those, and any position whose
 # receiver never locked, fall through every rung to the ceiling and read exactly
 # what they read before -- which is what keeps the hk_incl fallback's averaging
-# window, and every other prefix-sensitive behaviour, unchanged.
+# window, and every other prefix-sensitive behavior, unchanged.
 _PROBE_LADDER = (5_000, 50_000)
 
 # Points whose range is below this are the scanner seeing itself (mount, tripod
@@ -250,7 +250,7 @@ class RxpError(RuntimeError):
 # see its header comment for why on_shot_end and not on_gap.
 #
 # Built on first use rather than at image-build time: the shim links against
-# libscanifc.so, which is bind-mounted at run time because RIEGL's licence
+# libscanifc.so, which is bind-mounted at run time because RIEGL's license
 # forbids baking it into the image.
 
 # WHY A COMPILER IS NEEDED AT ALL WHEN THE POINTS PATH IS NOT. Both native
@@ -274,9 +274,9 @@ class RxpError(RuntimeError):
 # and no C++ ones, and pointcloud lives only inside scanlib-mt.lib, a static
 # archive. So the Windows shim STATICALLY links RIEGL code -- which is also
 # precisely why we could not ship it prebuilt even setting ABI aside: the DLL
-# would contain RIEGL's own object code, and their licence forbids
+# would contain RIEGL's own object code, and their license forbids
 # redistributing that. Building from the user's own SDK copy keeps the same
-# licence posture the container was designed around.
+# license posture the container was designed around.
 #
 # Two no-compiler routes were measured and rejected before settling on this.
 # The demultiplexer cannot help: on a VZ-1000 every shot is carried inside
@@ -342,10 +342,10 @@ def _shim_source_dir() -> str:
 
 
 def _in_container() -> bool:
-    """Whether this reader is the containerised one.
+    """Whether this reader is the containerized one.
 
     Set by the Dockerfile. sys.platform cannot answer it -- the container and a
-    native Linux host are both "linux" -- and the two want opposite behaviour in
+    native Linux host are both "linux" -- and the two want opposite behavior in
     two places: where the built shim is cached, and what a load failure should
     blame. An explicit marker states the intent rather than inferring it from
     something that happens to correlate.
@@ -586,7 +586,7 @@ def _compile_shim_msvc(src_dir: str, src: str, out: str) -> None:
         # must run in one shell -- but every path here can contain spaces, and
         # Python's Windows argument quoting backslash-escapes the inner quotes
         # of a `cmd /c "call ... && cl ..."` string, so cmd receives \"C:\Program
-        # Files\... and reports it as an unrecognised command. Writing the
+        # Files\... and reports it as an unrecognized command. Writing the
         # script to a file sidesteps cmd's quoting rules entirely.
         script = os.path.join(work, "build_shim.bat")
         with open(script, "w", encoding="utf-8") as fh:
@@ -763,7 +763,7 @@ def _build_shim() -> str:
     cannot be committed, so without this a runner that HAS a compiler but not
     the SDK fails at the linker — an error, not the "no toolchain" state the
     import knows how to degrade through. It is also the hook for an
-    organisation that would rather build the shim once and deploy it than have
+    organization that would rather build the shim once and deploy it than have
     every workstation carry a C++ toolchain.
     """
     prebuilt = os.environ.get("PHYTOGRAPH_RXP_SHIM")
@@ -833,7 +833,7 @@ class _Scanifc:
         if not os.path.exists(lib_path):
             raise RxpError(
                 f"RiVLib not found at {lib_path}. The library is user-supplied "
-                "(RIEGL licence forbids redistribution): the container "
+                "(RIEGL license forbids redistribution): the container "
                 "bind-mounts it at /rivlib, and a native run reads it from the "
                 "folder configured in Settings."
             )
@@ -1145,9 +1145,9 @@ def load_sop(pos_dir: str, vpp_dir: str | None) -> tuple[np.ndarray, str]:
     Returns (4x4, status) where status is one of:
 
       "registered" — a .sopv from plane (or coarse voxel) registration. Placed
-                     to the registration's own accuracy, millimetres here.
+                     to the registration's own accuracy, millimeters here.
       "prior"      — only pose_estimation.sop, i.e. the inclinometer/compass/
-                     GNSS estimate. Metre-level; the user should refine by ICP.
+                     GNSS estimate. Meter-level; the user should refine by ICP.
       "none"       — no pose at all (an aborted acquisition). Identity.
 
     The reference position is the reason "prior" is a first-class outcome and
@@ -1185,7 +1185,7 @@ def decompose_sop(sop: np.ndarray) -> dict:
 
     NOTE ON DIVERGING FROM THE PTX RULE. _ptx_scan_params drops the azimuth
     sweep entirely once |roll| or |pitch| reaches 0.5 deg, because for a generic
-    PTX pose those angles are an unmodellable rotation and reporting a rotated
+    PTX pose those angles are an unmodelable rotation and reporting a rotated
     sweep as the instrument's own would be a lie. Here they are not generic:
     they are the inclinometer reading (pose_estimation.sop's `accuracy` block
     quotes ~0.01 deg on both), so emitting the tilt AND the yaw-corrected phi
@@ -1215,7 +1215,7 @@ def sensor_level_matrix(
     reads back, with yaw held at zero) maps the INSTRUMENT's body frame to the
     world. The points arrive in SOCS, i.e. the body frame, so expressing them
     level in the world is `attitude @ p` — the attitude itself, NOT its
-    transpose. Saying "levelling applies the inverse of the attitude" is true
+    transpose. Saying "leveling applies the inverse of the attitude" is true
     only of a vector already in world coordinates, which no point here is.
 
     An earlier revision returned the transpose on exactly that reasoning, and
@@ -1317,7 +1317,7 @@ def _pose_gnss(path: str) -> dict | None:
 #                        <?>, <lon*1e9>, <lat*1e9>, <height_mm>, ...
 #
 # Longitude precedes latitude, both as integers scaled by 1e9. Height is
-# millimetres and is ELLIPSOIDAL, so near Davis CA it reads about -26.7 m while
+# millimeters and is ELLIPSOIDAL, so near Davis CA it reads about -26.7 m while
 # the orthometric elevation is about +16 m (geoid separation ~ -30 m). Do not
 # present it as elevation without a geoid model.
 _HK_GPS_LON_IDX = 5
@@ -1397,7 +1397,7 @@ def parse_hk_inclination(hk_path: str) -> dict | None:
     We AVERAGE rather than take the first, which is the opposite of
     parse_hk_gps's deliberate first-fix rule. The reasoning differs because the
     signals differ: a GNSS receiver wanders ~1 m over a scan, so averaging
-    blends a moving estimate, whereas a levelled tripod does not drift and the
+    blends a moving estimate, whereas a leveled tripod does not drift and the
     ~0.01 deg spread between inclinometer records is pure sensor noise. Taking
     one sample throws away a 160x noise reduction for nothing.
 
@@ -1459,7 +1459,7 @@ def parse_scanner_pose_hr(hk_path: str) -> dict | None:
         GNSS fix resolves. Every field, not just the position ones.
       * Some positions emit ONLY NaN rows (4 of 8 in one project). A scan
         position legitimately having no pose is not an error; the caller falls
-        back to hk_incl and then to no levelling at all.
+        back to hk_incl and then to no leveling at all.
 
     So this scans for the first row that is finite THROUGHOUT, and returns None
     rather than raising when there is none.
@@ -1500,11 +1500,11 @@ def attach_sensor_pose(entry: dict, hk_path: str) -> None:
                           sensor_level_matrix).
       "hk_incl"         — the raw inclinometer, averaged over the scan. No
                           heading at all.
-      (absent)          — the position has neither, and imports unlevelled.
+      (absent)          — the position has neither, and imports unleveled.
 
     That last case is ordinary, not exceptional: 4 of 8 positions in one real
     project emit only NaN pose rows. Callers must treat a missing `sensor_pose`
-    as "no levelling available" rather than as an error.
+    as "no leveling available" rather than as an error.
     """
     pose = parse_scanner_pose_hr(hk_path)
     if pose is not None:
@@ -1897,7 +1897,7 @@ _WGS84_E2 = _WGS84_F * (2.0 - _WGS84_F)
 
 
 def gnss_to_enu(fixes: list[dict | None]) -> list[dict | None]:
-    """Convert per-scan lat/lon/height to metres in a local ENU frame anchored
+    """Convert per-scan lat/lon/height to meters in a local ENU frame anchored
     at the centroid of the fixes.
 
     Anchoring at the centroid (rather than using raw lat/lon, or ECEF, or UTM)
@@ -1907,7 +1907,7 @@ def gnss_to_enu(fixes: list[dict | None]) -> list[dict | None]:
     int32 offsets overflowing on projected clouds. Small numbers avoid both.
 
     Uses the proper WGS84 meridional/normal radii rather than a flat
-    degrees-to-metres constant, since the scale error of the naive version is
+    degrees-to-meters constant, since the scale error of the naive version is
     ~0.3% at this latitude and would show up as a systematic stretch across a
     survey.
     """
@@ -1922,7 +1922,7 @@ def gnss_to_enu(fixes: list[dict | None]) -> list[dict | None]:
     lat0_rad = math.radians(lat0)
     sin_lat = math.sin(lat0_rad)
     denom = math.sqrt(1.0 - _WGS84_E2 * sin_lat * sin_lat)
-    # Metres per radian, north and east, at the anchor latitude.
+    # Meters per radian, north and east, at the anchor latitude.
     m_per_rad_north = _WGS84_A * (1.0 - _WGS84_E2) / (denom**3)
     m_per_rad_east = _WGS84_A * math.cos(lat0_rad) / denom
 
@@ -1987,7 +1987,7 @@ def targets_from_timestamps(
 
     Returns (target_index, target_count) as float32, 1-based, both exact.
 
-    Vectorised because this runs over ~14 M points per scan: run boundaries come
+    Vectorized because this runs over ~14 M points per scan: run boundaries come
     from a single diff, and the within-run index is a cumulative count minus the
     running start offset.
     """
@@ -2114,7 +2114,7 @@ def extract_scan(
 
     MISSES ARE NOT RECOVERED HERE. A .rxp records only returns; no-return shots
     are simply absent rather than flagged, so `is_miss` is written as all-zero
-    and the caller reports has_misses=false. Synthesising misses from the .pat
+    and the caller reports has_misses=false. Synthesizing misses from the .pat
     raster is deliberately Phase 7 work — it needs the true beam grid, and
     getting it wrong corrupts LAD silently rather than erroring.
     """
@@ -2159,7 +2159,7 @@ def extract_scan(
             xyz_view = np.ctypeslib.as_array(xyz_buf)[:n]
             attr_view = np.ctypeslib.as_array(attr_buf)[:n]
 
-            # Each append MUST materialise a new array, because the ctypes
+            # Each append MUST materialize a new array, because the ctypes
             # buffers are reused on the next read() and a view would alias the
             # following batch's bytes. `np.stack` and `.astype()` (which
             # defaults to copy=True) both do that already, so no explicit
@@ -2178,7 +2178,7 @@ def extract_scan(
             # Timestamps group returns into pulses. They are concatenated and
             # grouped ONCE over the whole scan rather than per batch: a pulse's
             # returns can straddle a read boundary, and grouping per batch would
-            # split it into two short pulses, mislabelling both.
+            # split it into two short pulses, mislabeling both.
             time_chunks.append(np.ctypeslib.as_array(time_buf)[:n].astype(np.uint64))
 
             total += n
@@ -2216,7 +2216,7 @@ def extract_scan(
         record.y = xyz[:, 1]
         record.z = xyz[:, 2]
 
-        # LAS `intensity` is uint16 and is what the viewer colours by default.
+        # LAS `intensity` is uint16 and is what the viewer colors by default.
         # RIEGL reflectance is dB relative to a white diffuse target and is
         # negative for most natural surfaces, so it is rescaled rather than
         # cast. The window matches PDAL's rxp reader defaults (-25..+5 dB), so
@@ -2286,7 +2286,7 @@ def extract_scan(
 #
 # WHY STREAM INSTEAD OF WRITING LAS HERE: measured on a 13.1 M-point position,
 # RiVLib decoding costs ~7 s but encoding a LAS costs ~37 s — 84% of the work,
-# purely serialisation. The SAME laspy write takes ~1.2 s on the arm64 host:
+# purely serialization. The SAME laspy write takes ~1.2 s on the arm64 host:
 # x86 emulation is ~30x slower at the bit-packing. So the container should do
 # only what it alone can do (call RiVLib) and hand raw arrays to the host, which
 # writes the LAS PotreeConverter needs at native speed. That also removes ~800 MB
@@ -2324,7 +2324,7 @@ _STREAM_MAGIC = b"PHRX"
 #    loudly ("Rebuild the reader image") instead of reporting a .PROJ as empty.
 # 4: added the `sensor` frame — per-scan `sensor_pose` / `sensor_matrix` from
 #    the instrument's own inclinometer. Bumped for the same reason: a v3 image
-#    silently omits both, so a "levelled" import would quietly not be levelled,
+#    silently omits both, so a "leveled" import would quietly not be leveled,
 #    which is far worse than an error because the cloud still looks fine.
 _STREAM_VERSION = 4
 
@@ -2545,7 +2545,7 @@ def stream_scan(
         # Drop columns this instrument does not actually populate. The VZ-1000
         # leaves background_radiation entirely NaN, and several flag bits are
         # constant-zero for a given scanner; surfacing those as scalars the user
-        # can colour by is just noise in the picker. Which columns survive is
+        # can color by is just noise in the picker. Which columns survive is
         # reported per scan so the wizard lists only the real ones.
         optional = {"background_radiation": background, **flag_cols}
         carried = {}
@@ -2553,7 +2553,7 @@ def stream_scan(
             if not np.isfinite(_v).any():
                 continue          # all NaN: instrument does not record it
             if float(np.nanmin(_v)) == float(np.nanmax(_v)):
-                continue          # constant: no information to colour by
+                continue          # constant: no information to color by
             carried[_k] = _v
 
         _write_scan_arrays(out_dir, {
@@ -2606,7 +2606,7 @@ def stream_scan(
 
 FRAME_REGISTERED = "registered"
 FRAME_LOCAL = "local"
-# Levelled by the position's own inclinometer: plumb-corrected but NOT rotated
+# Leveled by the position's own inclinometer: plumb-corrected but NOT rotated
 # to north and NOT aligned to the other positions. The only frame a .riproject
 # can offer beyond raw local, since it carries no registration.
 FRAME_SENSOR = "sensor"
@@ -2653,7 +2653,7 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
                          scanner's own origin (0,0,0) when we don't. No rotation
                          of any kind.
       FRAME_SENSOR     — the same origin, plus the instrument's own inclinometer
-                         applied as a levelling rotation. Emits the tilt but
+                         applied as a leveling rotation. Emits the tilt but
                          NEVER a heading; see below.
       FRAME_REGISTERED — the SOP translation, i.e. where the instrument actually
                          stood in PRCS, with the rotation split across
@@ -2663,7 +2663,7 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
     an instruction to rotate anything — the cloud is transformed backend-side in
     _riegl_arrays_to_las_result. The marker mesh, the coverage shell and a
     Helios re-export all read them, so emitting an angle the points did not get
-    (or omitting one they did) silently desynchronises the three.
+    (or omitting one they did) silently desynchronizes the three.
     """
     params = entry.get("scan_params")
     if params is None:
@@ -2690,7 +2690,7 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
         params["origin"] = origin
         # LEVEL, BY CONSTRUCTION. These fields state the instrument's residual
         # tilt away from plumb *in the frame the points are now in*, and that is
-        # exactly the tilt levelling just removed — so the honest value here is
+        # exactly the tilt leveling just removed — so the honest value here is
         # zero, not the raw reading. Emitting the reading instead tilts the
         # marker mesh (and a Helios re-export) by the very angle the cloud no
         # longer has, which is the "angle the points did not get" failure the
@@ -2707,21 +2707,21 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
                 pose["roll_deg"], pose["pitch_deg"], origin
             )
         ]
-        # NO azimuth_offset_deg and NO _rotate_phi_window: levelling applies no
+        # NO azimuth_offset_deg and NO _rotate_phi_window: leveling applies no
         # heading, so the sweep still describes the scanner's own frame. The
         # pose's yaw stays in `sensor_pose` as metadata — it is 10-14 deg wrong
         # on measured data (see sensor_level_matrix).
     else:
         params["origin"] = entry.get("origin_prior") or [0.0, 0.0, 0.0]
-        # UNLEVELLED, AND THAT IS WORTH SAYING OUT LOUD. The points kept the
+        # UNLEVELED, AND THAT IS WORTH SAYING OUT LOUD. The points kept the
         # tilt the instrument had, so the cloud really is off plumb by this
         # much — state it whenever the position measured it. Leaving it absent
-        # (which is what this branch used to do) made an unlevelled import
-        # look level while a levelled one, still carrying the raw reading,
+        # (which is what this branch used to do) made an unleveled import
+        # look level while a leveled one, still carrying the raw reading,
         # looked tilted: the two cases read as each other's opposite, and the
         # frame each described was never stated. The pair of branches now says
         # the same thing in both directions — this is the tilt the CLOUD has,
-        # zero once levelling has taken it out.
+        # zero once leveling has taken it out.
         if pose is not None:
             params["tilt_roll_deg"] = float(pose["roll_deg"])
             params["tilt_pitch_deg"] = float(pose["pitch_deg"])
@@ -3011,7 +3011,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
 # How long to wait for the host to load a finished position before giving up
 # and decoding the next one anyway. The host's work per position is a session
 # build plus a PotreeConverter run — seconds, not minutes — so a long stall
-# means it has died or been cancelled. Pressing on then is the right call: the
+# means it has died or been canceled. Pressing on then is the right call: the
 # run is already doomed and blocking forever would just hang the container.
 _CONSUME_TIMEOUT_S = 900.0
 
@@ -3068,7 +3068,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
     # centroid of the fixes in pass 1, so filtering first would anchor a
     # single-position import at ITS OWN fix and place that scan at (0,0,0) --
     # discarding the GNSS offset the user selected it for, and putting two
-    # separately-imported positions on top of each other instead of metres
+    # separately-imported positions on top of each other instead of meters
     # apart. The anchor must be a property of the PROJECT, not of the selection,
     # or the same scan lands somewhere different depending on what it was
     # imported alongside. Pass 2 filters instead (see `selected` below).

@@ -16,7 +16,7 @@ export interface RieglProjectDialogProps {
   /** Absolute path to the .riproject / .PROJ directory, or null when closed. */
   projectPath: string | null;
   rivlibPath: string | null;
-  /** Resolves with the chosen positions and frame, or null if cancelled. */
+  /** Resolves with the chosen positions and frame, or null if canceled. */
   onResolve: (selection: RieglProjectSelection | null) => void;
 }
 
@@ -31,7 +31,7 @@ export interface RieglProjectDialogProps {
  * which differs by layout:
  *
  *   .riproject — the scans are UNREGISTERED. They come off the scanner in their
- *     own frames, and the GNSS-derived layout shown here is a metres-level prior
+ *     own frames, and the GNSS-derived layout shown here is a meters-level prior
  *     for seeding ICP, not a placement.
  *   .PROJ — registration is present but usually PARTIAL. In the reference olive
  *     project only 9 of 24 positions registered; the rest fall back to the
@@ -57,7 +57,7 @@ const REGISTRATION_BADGE: Record<
     label: 'prior only',
     title:
       'No registration result — placed from the inclinometer/compass/GNSS ' +
-      'estimate, which is accurate to about a metre. Refine with ICP.',
+      'estimate, which is accurate to about a meter. Refine with ICP.',
     className: 'text-amber-400',
   },
   none: {
@@ -86,8 +86,8 @@ export function RieglProjectDialog({
   // use them by default, and the user who wants the exact scanner-local LAD
   // raster is the one making the deliberate choice.
   const [keepLocal, setKeepLocal] = useState(false);
-  // Levelling a .riproject is ON by default: the inclinometer is survey-grade
-  // and an unlevelled cloud silently breaks ground/DEM assumptions.
+  // Leveling a .riproject is ON by default: the inclinometer is survey-grade
+  // and an unleveled cloud silently breaks ground/DEM assumptions.
   const [levelScans, setLevelScans] = useState(true);
 
   useEffect(() => {
@@ -130,9 +130,9 @@ export function RieglProjectDialog({
     });
   }, []);
 
-  // Plan-view extents, used to normalise the mini-map. Drawn from the surveyed
+  // Plan-view extents, used to normalize the mini-map. Drawn from the surveyed
   // poses where a project has them and the GNSS prior otherwise, so a .PROJ
-  // shows its real geometry rather than a metres-level approximation of it.
+  // shows its real geometry rather than a meters-level approximation of it.
   const layout = useMemo(() => {
     const pts = (project?.scans ?? [])
       .map(planPoint)
@@ -160,7 +160,7 @@ export function RieglProjectDialog({
   // A .PROJ is imported registered unless the user opts out; a .riproject has
   // no registration to apply, so it is never "registered" whatever is ticked.
   const useRegistered = isProj && !keepLocal;
-  // ...but a .riproject CAN still be levelled by each position's own
+  // ...but a .riproject CAN still be leveled by each position's own
   // inclinometer, which is a different and much weaker claim than registration:
   // plumb-correct, not aligned. Only offered when at least one selected
   // position actually measured an attitude — several real projects have
@@ -399,7 +399,7 @@ export function RieglProjectDialog({
               {/* A .riproject has no registration, but it does carry the
                   instrument's own inclinometer — enough to stand the cloud
                   upright, not to align it. Kept verbally distinct from the
-                  .PROJ toggle below so "levelled" is never read as "placed". */}
+                  .PROJ toggle below so "leveled" is never read as "placed". */}
               {canLevel && (
                 <label
                   data-testid="riegl-level-toggle"
@@ -433,7 +433,7 @@ export function RieglProjectDialog({
                           {selected.size - levelableSelected} of the{' '}
                           {selected.size} selected position
                           {selected.size === 1 ? '' : 's'} recorded no tilt and
-                          will import unlevelled.
+                          will import unleveled.
                         </>
                       )}
                     </span>
@@ -487,7 +487,7 @@ export function RieglProjectDialog({
                           {' '}
                           The rest fall back to the scanner&rsquo;s own
                           inclinometer/GNSS estimate &mdash; accurate to about a
-                          metre, so refine them with ICP.
+                          meter, so refine them with ICP.
                         </>
                       )}
                     </span>
@@ -500,7 +500,7 @@ export function RieglProjectDialog({
                           ? ' Raw scanner data carries no alignment. Each position is stood upright by its own tilt sensor, but imports into its own frame'
                           : ' Raw scanner data has no alignment, so each position imports into its own frame'}
                       {anyGnss
-                        ? ', offset by its GNSS fix — a metres-level starting point for ICP, not a placement.'
+                        ? ', offset by its GNSS fix — a meters-level starting point for ICP, not a placement.'
                         : '. No GNSS fix was found, so all positions import at the origin.'}
                     </span>
                   )}

@@ -29,7 +29,7 @@ import main
 def _install_fake_converter(monkeypatch, barrier=None):
     """Replace `_run_potree_converter` with a stub that mimics a slow build:
     it writes a `metadata.json` into the staging dir (so the cache looks valid)
-    after a small delay, optionally synchronised on a barrier so all in-flight
+    after a small delay, optionally synchronized on a barrier so all in-flight
     builders overlap and actually contend for the staging dir."""
     def fake(input_las: Path, out_dir: Path, cancel_event=None, poll: float = 0.2) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)

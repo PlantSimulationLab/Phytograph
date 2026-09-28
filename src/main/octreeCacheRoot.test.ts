@@ -105,7 +105,7 @@ describe('resolveOctreeCacheRoot', () => {
     expect(root.startsWith(join(HOME, 'Library', 'Caches'))).toBe(true);
   });
 
-  // Generalised form of both regressions: no platform may resolve into a
+  // Generalized form of both regressions: no platform may resolve into a
   // directory Chromium owns. Chromium's disk cache lives at <userData>/Cache
   // and it wipes stray entries there; on a case-insensitive volume any segment
   // that case-folds to "cache" under the user-data dir lands inside it.

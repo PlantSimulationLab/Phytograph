@@ -5,17 +5,17 @@
 
 Two hypotheses, tested separately because they call for opposite fixes:
 
-**Label conventions** (``conventions``). Hand labellers paint a boundary; the ray tracer knows it.
+**Label conventions** (``conventions``). Hand labelers paint a boundary; the ray tracer knows it.
 If humans systematically put the stem/leaf line somewhere else -- a painted stem that runs into
 the blade base, a petiolule counted as leaflet -- a model trained on exact synthetic labels is
 "wrong" by human standards exactly there, however real its input looks. The signature is errors
-concentrated within a few millimetres of human label boundaries, and leaning one way. Both the
+concentrated within a few millimeters of human label boundaries, and leaning one way. Both the
 real-only and the synthetic-only model are run on the real test plants, and each error is placed
-by its distance to the nearest differently labelled point (the human boundary). The real-only
+by its distance to the nearest differently labeled point (the human boundary). The real-only
 model has learned the human convention, so the part of the synthetic model's excess error that
 sits in the boundary band is the convention gap; the part far from any boundary is appearance.
 The same pass measures what a "stem" label looks like geometrically on either side (how planar
-the neighbourhood of a stem point beside a leaf is: a painted stem that covers blade is planar).
+the neighborhood of a stem point beside a leaf is: a painted stem that covers blade is planar).
 
 **Appearance** (``appearance``). Local-geometry features (SyntheticLiDAR_Organs' pcmetrics:
 surface thickness, planarity, linearity, curvature...) at radii matched to herbaceous organs, per
@@ -65,7 +65,7 @@ def boundary_distance(xyz: np.ndarray, truth: np.ndarray, cls_a: int, cls_b: int
 
 
 def local_planarity(xyz: np.ndarray, queries: np.ndarray, radius: float) -> np.ndarray:
-    """(l2 - l3) / l1 of each query's neighbourhood in xyz, NaN below 5 neighbours."""
+    """(l2 - l3) / l1 of each query's neighborhood in xyz, NaN below 5 neighbors."""
     tree = cKDTree(xyz)
     out = np.full(len(queries), np.nan)
     for i, nb in enumerate(tree.query_ball_point(queries, radius)):
@@ -162,7 +162,7 @@ def conventions(args):
             xyz, truth = xyz[keep], truth[keep]
             pred = predict(model, pkg, xyz, device=device, batch_crops=16) - 1
             lab = truth >= 0
-            # distance to the nearest differently labelled point = distance to the human boundary
+            # distance to the nearest differently labeled point = distance to the human boundary
             tree_by = {c: cKDTree(xyz[truth == c]) for c in range(3) if (truth == c).any()}
             dist = np.full(len(xyz), np.inf)
             for c in tree_by:
@@ -197,7 +197,7 @@ def conventions(args):
         report[name] = out
         print(name, json.dumps(out, indent=1), flush=True)
 
-    # What a stem label looks like beside a leaf: planarity of the neighbourhood of stem points within
+    # What a stem label looks like beside a leaf: planarity of the neighborhood of stem points within
     # 3 mm of a leaf point, and linearity-ish of leaf points within 3 mm of stem. Real (test plants)
     # against exact synthetic labels of the same species.
     geom = {}

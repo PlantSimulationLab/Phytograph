@@ -15,7 +15,7 @@ const FIXTURE_B = join(repoRoot, 'tests', 'e2e', 'fixtures', 'noisy-tree-b.xyz')
  * or split them.
  *
  * Detect does NOT remove anything. It writes a `noise_class` column (1=clean,
- * 2=noise), colours the cloud by it so the flagged points show red, and
+ * 2=noise), colors the cloud by it so the flagged points show red, and
  * pre-selects `scalar:noise_class` in the field dropdown with only "Clean"
  * checked — which arms the panel's EXISTING Filter/Segment buttons. That is why
  * the commits below are the same `filter-remove` / `filter-segment` buttons the
@@ -268,7 +268,7 @@ test('an over-aggressive result is flagged and gated behind a confirmation', asy
   await openNoiseSection();
 
   await page.getByTestId('filter-noise-auto').uncheck();
-  // Demanding 12 neighbours inside 2 cm is denser than even the trunk, so this
+  // Demanding 12 neighbors inside 2 cm is denser than even the trunk, so this
   // flags ~91% of the cloud — an obviously-wrong parameter choice that still
   // leaves points behind, so it is the noise guard under test here and not the
   // empty-result delete dialog.

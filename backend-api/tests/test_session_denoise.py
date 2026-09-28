@@ -5,9 +5,9 @@ what the ENDPOINT does around them — which is where the miss-exclusion traps
 live:
 
   (a) misses must never reach the KD-tree. A miss is projected ~1 km out, so it
-      would both blow up the tree's extent and poison the nearest-neighbour
+      would both blow up the tree's extent and poison the nearest-neighbor
       spacing the auto parameters are derived from.
-  (b) misses must come back labelled CLEAN, not the house-convention 0, so no
+  (b) misses must come back labeled CLEAN, not the house-convention 0, so no
       commit path can ever move one into a noise cloud and cost the parent its
       Beer's-law transmission denominator.
 
@@ -99,9 +99,9 @@ async def test_misses_never_reach_the_compute(session, spy):
 
 
 @pytest.mark.asyncio
-async def test_misses_are_labelled_clean_not_zero(session, spy):
-    """Defence in depth. `session_split` already forces misses onto the kept
-    side; labelling them CLEAN means no future refactor of that guard can move a
+async def test_misses_are_labeled_clean_not_zero(session, spy):
+    """Defense in depth. `session_split` already forces misses onto the kept
+    side; labeling them CLEAN means no future refactor of that guard can move a
     miss into a noise cloud."""
     await _denoise(session, spy)
     col = session.extras[denoise.NOISE_CLASS_SLUG]
@@ -125,7 +125,7 @@ async def test_flagged_count_covers_hits_only(session, spy):
 @pytest.mark.asyncio
 async def test_spacing_estimate_is_unaffected_by_misses(spy):
     """The 2,500x error this codebase has hit repeatedly: misses DEFINE the
-    nearest-neighbour distribution if they are not excluded."""
+    nearest-neighbor distribution if they are not excluded."""
     with_misses = _make_session(session_id="with_misses", n_misses=40)
     without = _make_session(session_id="without_misses", n_misses=0)
     try:
@@ -201,10 +201,10 @@ async def test_deleted_points_are_excluded_and_the_column_stays_full_length(sess
 
 @pytest.mark.asyncio
 async def test_cancellation_leaves_the_session_pristine(session, monkeypatch):
-    async def cancelled(*a, **kw):
+    async def canceled(*a, **kw):
         raise main.ClientDisconnected()
 
-    monkeypatch.setattr(main, "_run_killable", cancelled)
+    monkeypatch.setattr(main, "_run_killable", canceled)
     with pytest.raises(main.HTTPException) as exc:
         await main.session_denoise(session.session_id,
                                    main.SessionDenoiseRequest(), http_request=None)

@@ -148,7 +148,7 @@ test('lists plain clouds alongside scans and blocks them only where the format n
   await expect(plainRow).toHaveAttribute('data-checked', 'false');
 
   // Switch to Data only: the plain cloud becomes writable again, and the
-  // checkmarks the XML mode had to grey out come back rather than being lost.
+  // checkmarks the XML mode had to gray out come back rather than being lost.
   await page.getByTestId('export-scan-mode-data').click();
   await page.getByTestId('export-scan-format-xyz').click();
   await expect(plainRow).toHaveAttribute('data-disabled', 'false');

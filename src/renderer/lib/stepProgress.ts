@@ -10,7 +10,7 @@
 //
 // That is not hypothetical. The crop apply loop incremented `i` immediately
 // before `await processOne(cloudId)`, so every bake progress marker for scan k
-// was labelled k+2 and scaled into k+1's slice: a 4-scan crop displayed
+// was labeled k+2 and scaled into k+1's slice: a 4-scan crop displayed
 // "Cropping plot_d.laz (5 of 4)…", overshot 100%, and then SNAPPED BACKWARDS
 // when the next scan set the bar to its own start.
 //
@@ -18,7 +18,7 @@
 // closure at construction, so the reporter cannot see a later step. Call sites
 // build one reporter per step and never mutate a shared counter.
 //
-// Deliberately dependency-free and pure so the behaviour is unit-testable
+// Deliberately dependency-free and pure so the behavior is unit-testable
 // without mounting the 20k-line viewer component (same reasoning as
 // sequentialApply.test.tsx).
 

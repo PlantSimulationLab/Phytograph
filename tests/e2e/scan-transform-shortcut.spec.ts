@@ -17,7 +17,7 @@ import { resetToFreshScene } from './helpers/resetApp';
 // So every assertion here reads the value back through a real surface: the
 // scan row's data-scan-origin attribute, or the dialog's own inputs.
 //
-// Two behaviours that are NOT the same as the cloud gesture and are asserted
+// Two behaviors that are NOT the same as the cloud gesture and are asserted
 // separately below: a scan transform applies on commit (there is no panel
 // OK/Cancel draft in the way), and it is skipped entirely while the Transform
 // Point Cloud tool is open, so `t` there keeps meaning "move the points".
@@ -80,7 +80,7 @@ test.describe('scan transform shortcuts', () => {
   //
   // Checks first rather than clicking unconditionally, because a plain click on
   // the row that is ALREADY the sole selection deselects it (that toggle is real
-  // product behaviour — see handleToggleScanSelection in App.tsx). Scans created
+  // product behavior — see handleToggleScanSelection in App.tsx). Scans created
   // via `addScanPosition` start unselected, but a scan imported through the
   // wizard is auto-selected, so an unconditional click turns it OFF and every
   // shortcut afterwards has no target. translate-cloud.spec.ts documents the

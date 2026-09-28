@@ -1,9 +1,9 @@
 # Dense-crown fix (2026-09-25). Same recipe as the shipped final_S_finetune_s0
 # (fine-tune from the seed-0 synthetic pre-training), plus clear-of-wood crop
-# seeding, the hand-labelled redbud(s) dense_eastern, dense_western, and five leaf-off almonds (all wood,
+# seeding, the hand-labeled redbud(s) dense_eastern, dense_western, and five leaf-off almonds (all wood,
 # the counterexample to 'a dense crown mass is leaf').
 name: dense_both_lo
-description: "Leaf/wood PointNeXt-S, clear-of-wood seeding + both labelled redbuds + five leaf-off almonds."
+description: "Leaf/wood PointNeXt-S, clear-of-wood seeding + both labeled redbuds + five leaf-off almonds."
 task: wood_leaf
 cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
 out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs

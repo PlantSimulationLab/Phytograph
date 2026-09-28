@@ -236,7 +236,7 @@ def test_oversize_cloud_rejected_with_actionable_error(client, monkeypatch):
 
 def test_node_count_matches_treeiso_decimation_exactly():
     """`_count_treeiso_nodes` must agree BIT-FOR-BIT with the vendored
-    `decimate_pcd` it stands in for — including the mean-centring
+    `decimate_pcd` it stands in for — including the mean-centering
     `_process_point_cloud` applies first, which shifts voxel boundaries (skipping
     it mis-counts by a few percent). An estimate here would be unsafe: a density
     model was tried and ranged from 0.1× to 49× the true count."""
@@ -444,7 +444,7 @@ def _treeiso_params_defaults():
 
 def test_auto_decimation_leaves_small_dense_cloud_at_paper_defaults():
     """A small, dense (TLS-scale) cloud decimates fine — params stay untouched,
-    so close-range behaviour is bit-for-bit unchanged."""
+    so close-range behavior is bit-for-bit unchanged."""
     rng = np.random.default_rng(0)
     # 20k points in a 1 m box, ~few-mm spacing — well under the 50k early-out.
     pts = rng.uniform(0, 1.0, size=(20_000, 3))
@@ -520,7 +520,7 @@ def test_large_sparse_cloud_segments_in_bounded_time():
             cy + rng.normal(0, 0.1, kt),
             rng.uniform(0, 8.0, kt),
         ]
-        # Crown: a 3 m-radius ball centred at ~11 m.
+        # Crown: a 3 m-radius ball centered at ~11 m.
         kc = 18_000
         crown = np.c_[
             cx + rng.normal(0, 3.0, kc),
@@ -661,15 +661,15 @@ def test_endpoint_inline_from_ply_source(client, make_file_session):
 # (`tree_8.asc`, 23.9 M pts): a single focal tree cropped out of an orchard, so
 # every SURROUNDING tree appears as a trunkless crown fragment. Stage 3 flags a
 # trunkless fragment as a merge candidate (correctly — it has no stem of its
-# own) and then merges it into the best-scoring neighbour with NO distance
-# ceiling: `min3DSpacing` only enters the score exponentially. The neighbour's
+# own) and then merges it into the best-scoring neighbor with NO distance
+# ceiling: `min3DSpacing` only enters the score exponentially. The neighbor's
 # branches, a measured 0.878 m away in mid-air at z≈3.3 m, were absorbed into the
 # focal tree. `max_outlier_gap` is the knob that exists to prevent exactly this,
 # and it was threaded from the UI through the request model into TreeIsoParams
 # and then read by nothing — `isolate_gaps` was vendored but never called.
 
 
-def _ball(rng, n, centre, radius):
+def _ball(rng, n, center, radius):
     """`n` points uniformly inside a ball — a BOUNDED blob.
 
     Deliberately not a Gaussian: a normal cloud's tails reach far past its
@@ -680,14 +680,14 @@ def _ball(rng, n, centre, radius):
     """
     direction = rng.normal(0, 1, (n, 3))
     direction /= np.linalg.norm(direction, axis=1, keepdims=True)
-    return centre + direction * radius * rng.uniform(0, 1, (n, 1)) ** (1 / 3)
+    return center + direction * radius * rng.uniform(0, 1, (n, 1)) ** (1 / 3)
 
 
 def _two_bodies(gap: float, seed: int = 0):
-    """A trunked tree plus a trunkless crown fragment separated by `gap` metres.
+    """A trunked tree plus a trunkless crown fragment separated by `gap` meters.
 
     Mirrors the real failure's geometry: the fragment has no stem reaching the
-    ground, so stage 3 treats it as something to be merged into a neighbour.
+    ground, so stage 3 treats it as something to be merged into a neighbor.
     `gap` is the true closest approach between the two bodies (negative to make
     them overlap).
     """
@@ -714,7 +714,7 @@ def _two_bodies(gap: float, seed: int = 0):
 
 
 @requires_treeiso
-def test_distant_fragment_is_not_merged_into_its_neighbour():
+def test_distant_fragment_is_not_merged_into_its_neighbor():
     """A body separated by more than `max_outlier_gap` is its own instance."""
     from treeiso.treeiso_core import segment_trees, TreeIsoParams
 
@@ -834,7 +834,7 @@ def test_default_gap_preserves_ground_truth_tree_count():
 def test_split_gap_is_floored_at_point_spacing():
     """A gap below the cloud's own spacing must not disconnect a tree from itself.
 
-    Below roughly 2x the median nearest-neighbour distance the connectivity test
+    Below roughly 2x the median nearest-neighbor distance the connectivity test
     stops measuring tree structure and starts measuring sampling. The failure is
     not "splits too eagerly" — it inverts: every component falls under the debris
     guards and gets reabsorbed, so the two obviously-separate bodies below come
@@ -1000,7 +1000,7 @@ def test_multi_trunk_instances_are_flagged():
     """
     # Denser than the collapse fixture: this tests the DETECTOR against a known
     # partition, so the trunks want enough points to cluster reliably. The
-    # collapse behaviour is irrelevant here.
+    # collapse behavior is irrelevant here.
     per_tree = 4000
     trunk_frac = 0.15
     points = _five_trees_two_rows(per_tree=per_tree, trunk_frac=trunk_frac)

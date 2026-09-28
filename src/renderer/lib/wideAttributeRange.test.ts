@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 //     }
 //     buffer[i] = (value - offset) * scale;
 //
-// A float64 column therefore reaches the GPU already normalised to 0..1; a
+// A float64 column therefore reaches the GPU already normalized to 0..1; a
 // float32 column reaches it raw. This is the whole bug: our shader range was
 // taken from the metadata's raw extrema in both cases.
 function potreeDecode(value: number, typeSize: number, range: [number, number]): number {
@@ -31,10 +31,10 @@ function shaderT(buffer: number, intensityRange: [number, number]): number {
 const RANGE: [number, number] = [85.153654794, 233.566786486];
 const SAMPLES = [85.16, 132.07, 180.0, 233.56];
 
-describe('wide (>4-byte) octree attributes colour correctly', () => {
+describe('wide (>4-byte) octree attributes color correctly', () => {
   it('a float64 column is flat if the shader uses the RAW range', () => {
     // The reported symptom: "the range is correct (85-233) but all points have
-    // the same colour". Every sample clamps to the same texel.
+    // the same color". Every sample clamps to the same texel.
     const ts = SAMPLES.map(v => shaderT(potreeDecode(v, 8, RANGE), RANGE));
     expect(new Set(ts).size).toBe(1);
     expect(ts.every(t => t === 0)).toBe(true);
@@ -64,7 +64,7 @@ describe('wide (>4-byte) octree attributes colour correctly', () => {
 
 // The gate itself. Guarding this is what keeps the fix from silently no-opping:
 // if the property path to potree's parsed attribute table were wrong,
-// isWideOctreeAttribute would return false for everything and the flat-colour
+// isWideOctreeAttribute would return false for everything and the flat-color
 // bug would come straight back with all tests still green.
 describe('isWideOctreeAttribute reads potree\'s own attribute table', () => {
   // Shape as potree-core builds it: PointCloudOctree.pcoGeometry

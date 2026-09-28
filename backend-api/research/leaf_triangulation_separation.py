@@ -25,12 +25,12 @@ HOW IT WORKS (no C++ changes, no product UI)
 3. Triangulate the returned points through the SAME product path
    (``main._do_helios_computation``) with ``Lmax = inf`` so ALL candidate triangles
    survive. Delaunay reuses hit points as mesh vertices, so each triangle vertex maps
-   back to its ``organ_id`` (nearest-neighbour lookup against the labelled hits).
+   back to its ``organ_id`` (nearest-neighbor lookup against the labeled hits).
 4. Label each candidate triangle valid (all-same organ) vs erroneous (spans >=2 organs)
    and record its longest edge -- the variable the ``Lmax`` filter actually thresholds.
 5. Compute the GROUND-TRUTH separability (how separable the valid/erroneous longest-edge
    populations are) and several LABEL-FREE statistics that try to predict it + suggest
-   ``Lmax`` from the pooled, unlabelled longest edges. Compare.
+   ``Lmax`` from the pooled, unlabeled longest edges. Compare.
 
 Sweeping plant model / age / scanner count / scan resolution, we check whether a
 label-free confidence tracks ground truth and whether the suggested ``Lmax`` lands near
@@ -78,13 +78,13 @@ DEFAULT_NOISES = [0.0, 0.005, 0.015]
 
 
 # ----------------------------------------------------------------------------------
-# Scene construction + per-organ ground-truth labelling
+# Scene construction + per-organ ground-truth labeling
 # ----------------------------------------------------------------------------------
 
 def close_context(ctx) -> None:
     """Free a Context's native resources. Context exposes cleanup via the context-manager
     protocol (``__exit__``) / destructor rather than a ``close()`` method; we build it
-    outside a ``with`` block (it must outlive labelling to be scanned), so release it
+    outside a ``with`` block (it must outlive labeling to be scanned), so release it
     explicitly here."""
     if ctx is not None:
         ctx.__exit__(None, None, None)
@@ -101,7 +101,7 @@ def label_organs(ctx, plant_uuids: List[int]) -> int:
     invoked once per leaflet (PlantArchitecture.cpp ~2017/2044, ind_from_tip =
     tip/left/right), each returning its own objID. So the three leaflets receive three
     distinct organ_ids, and a triangle bridging two leaflets of the same compound leaf is
-    correctly labelled erroneous -- which is exactly the case that matters most, since
+    correctly labeled erroneous -- which is exactly the case that matters most, since
     leaflets sit closer together than separate leaves. (Verified: bean yields ~one
     leaflet-sized object per leaflet, each a single contiguous patch.)"""
     objs = ctx.getUniquePrimitiveParentObjectIDs(list(plant_uuids), include_zero=False)
@@ -115,7 +115,7 @@ def label_organs(ctx, plant_uuids: List[int]) -> int:
         covered.update(int(u) for u in uu)
         next_id += 1
     # Any primitive with no parent object (sentinel object 0) gets its own id so the
-    # scene is fully labelled and no hit comes back without an organ_id.
+    # scene is fully labeled and no hit comes back without an organ_id.
     for u in plant_uuids:
         if int(u) not in covered:
             ctx.setPrimitiveDataInt(int(u), "organ_id", next_id)
@@ -166,7 +166,7 @@ def plan_scanners(lo: np.ndarray, hi: np.ndarray, n_scanners: int,
         for cor in corners:
             z_, a_ = _helios_spherical(o, cor)
             zeniths.append(z_)
-            # Unwrap each corner's azimuth to within pi of the centre so min/max don't
+            # Unwrap each corner's azimuth to within pi of the center so min/max don't
             # straddle the 0/2pi seam.
             azimuths.append(center_az + ((a_ - center_az + math.pi) % (2.0 * math.pi) - math.pi))
         zeniths = np.array(zeniths)
@@ -216,7 +216,7 @@ def build_labeled_plant(model: str, age: float, seed: Optional[int] = None):
 
 def scan_plant(ctx, scanners: List[Scanner], n_theta: int, n_phi: int,
                range_noise: float = 0.0, angle_noise: float = 0.0):
-    """Synthetic-scan the labelled scene. Returns (xyz (M,3), organ (M,), scan_id (M,))
+    """Synthetic-scan the labeled scene. Returns (xyz (M,3), organ (M,), scan_id (M,))
     where ``organ`` is the per-hit organ_id (NaN if the struck primitive had none).
 
     ``range_noise`` (m) is Gaussian along-beam range jitter and ``angle_noise`` (rad) is
@@ -268,12 +268,12 @@ _KEEP_ALL = 1.0e9
 def triangulate_candidates(xyz: np.ndarray, organ: np.ndarray, sid: np.ndarray,
                            scanners: List[Scanner], n_theta: int, n_phi: int):
     """Triangulate the scanned points via the shipping ``_do_helios_computation`` with
-    no edge/aspect filter. Returns (max_edge (T,), erroneous (T, bool), n_unlabelled).
+    no edge/aspect filter. Returns (max_edge (T,), erroneous (T, bool), n_unlabeled).
 
     ``max_edge`` is each candidate triangle's longest edge -- exactly the quantity the
     product's ``Lmax`` filter thresholds. ``erroneous`` is the ground-truth label
-    (triangle spans >=2 organs). Triangles touching an unlabelled vertex are excluded
-    from both arrays and counted in ``n_unlabelled``."""
+    (triangle spans >=2 organs). Triangles touching an unlabeled vertex are excluded
+    from both arrays and counted in ``n_unlabeled``."""
     from main import _do_helios_computation, HeliosTriangulationRequest, HeliosScanEntry
     from scipy.spatial import cKDTree
 
@@ -302,7 +302,7 @@ def triangulate_candidates(xyz: np.ndarray, organ: np.ndarray, sid: np.ndarray,
     T = np.asarray(res["triangles"], dtype=np.int64)
 
     # Map each output vertex back to the organ of its source hit. Delaunay reuses hit
-    # points as vertices, so the nearest labelled hit is the same point (distance ~0,
+    # points as vertices, so the nearest labeled hit is the same point (distance ~0,
     # robust to the %.6g temp-file round-trip _do_helios_computation does internally).
     tree = cKDTree(xyz)
     _, idx = tree.query(V, k=1)
@@ -316,12 +316,12 @@ def triangulate_candidates(xyz: np.ndarray, organ: np.ndarray, sid: np.ndarray,
     ])
     oa, ob, oc = vert_organ[T[:, 0]], vert_organ[T[:, 1]], vert_organ[T[:, 2]]
 
-    labelled = np.isfinite(oa) & np.isfinite(ob) & np.isfinite(oc)
-    n_unlabelled = int((~labelled).sum())
-    e = e[labelled]
-    oa, ob, oc = oa[labelled], ob[labelled], oc[labelled]
+    labeled = np.isfinite(oa) & np.isfinite(ob) & np.isfinite(oc)
+    n_unlabeled = int((~labeled).sum())
+    e = e[labeled]
+    oa, ob, oc = oa[labeled], ob[labeled], oc[labeled]
     erroneous = ~((oa == ob) & (ob == oc))
-    return e, erroneous, n_unlabelled
+    return e, erroneous, n_unlabeled
 
 
 # ----------------------------------------------------------------------------------
@@ -353,7 +353,7 @@ def rank_auc(scores: np.ndarray, positive: np.ndarray) -> float:
 
 
 def optimal_threshold(edges: np.ndarray, erroneous: np.ndarray) -> Tuple[float, float, float, float]:
-    """Label-optimal Lmax* = longest-edge threshold minimising balanced error (mean of
+    """Label-optimal Lmax* = longest-edge threshold minimizing balanced error (mean of
     valid-drop rate and erroneous-keep rate). Returns
     (Lmax*, balanced_error, valid_recall, erroneous_contamination) at Lmax*."""
     valid = ~erroneous
@@ -375,7 +375,7 @@ def optimal_threshold(edges: np.ndarray, erroneous: np.ndarray) -> Tuple[float, 
 
 
 # ----------------------------------------------------------------------------------
-# Label-free statistics -- computed from the pooled, UNLABELLED longest edges. These
+# Label-free statistics -- computed from the pooled, UNLABELED longest edges. These
 # are the candidates we are validating; "decide empirically" means scoring each below.
 # ----------------------------------------------------------------------------------
 
@@ -385,7 +385,7 @@ def _log_edges(edges: np.ndarray) -> np.ndarray:
 
 def stat_otsu(edges: np.ndarray, nbins: int = 256) -> Tuple[float, float]:
     """Otsu's threshold on log(longest edge). Returns (suggested_Lmax, confidence).
-    The threshold maximises the between-class variance of the two implied populations;
+    The threshold maximizes the between-class variance of the two implied populations;
     the confidence is the separability eta = max between-class / total variance, in
     [0, 1] (1 = perfectly separated two modes, 0 = unimodal). Hand-rolled from a numpy
     histogram so the harness has no scikit-image dependency."""
@@ -448,7 +448,7 @@ def stat_gmm(edges: np.ndarray, iters: int = 200) -> Tuple[float, float]:
 
 
 def stat_nn_spacing(xyz: np.ndarray, k_mult: float = 4.0) -> Tuple[float, float]:
-    """Baseline: Lmax = k * median nearest-neighbour spacing. No confidence (returns nan)."""
+    """Baseline: Lmax = k * median nearest-neighbor spacing. No confidence (returns nan)."""
     from scipy.spatial import cKDTree
 
     if len(xyz) < 2:
@@ -473,7 +473,7 @@ class RunResult:
     n_hits: int
     n_candidates: int
     erroneous_frac: float
-    n_unlabelled: int
+    n_unlabeled: int
     # Ground truth
     gt_auc: float
     lmax_optimal: float
@@ -523,7 +523,7 @@ def run_one(model: str, age: float, n_scanners: int, resolution: int,
         print(f"  [skip] {tag}: only {len(xyz)} hits")
         return None
 
-    edges, erroneous, n_unlabelled = triangulate_candidates(
+    edges, erroneous, n_unlabeled = triangulate_candidates(
         xyz, organ, sid, scanners, resolution, resolution)
     if len(edges) < 16 or erroneous.all() or (~erroneous).all():
         print(f"  [skip] {tag}: {len(edges)} candidates, "
@@ -549,7 +549,7 @@ def run_one(model: str, age: float, n_scanners: int, resolution: int,
         model=model, age=age, n_scanners=n_scanners, resolution=resolution,
         range_noise=range_noise,
         n_organs=n_org, n_hits=len(xyz), n_candidates=len(edges),
-        erroneous_frac=float(erroneous.mean()), n_unlabelled=n_unlabelled,
+        erroneous_frac=float(erroneous.mean()), n_unlabeled=n_unlabeled,
         gt_auc=gt_auc, lmax_optimal=lmax_opt, gt_balanced_error=gt_bal_err,
         gt_valid_recall=gt_recall, gt_contamination=gt_contam,
         otsu_lmax=otsu_lmax, otsu_confidence=otsu_conf,

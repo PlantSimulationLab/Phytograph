@@ -47,7 +47,7 @@ export interface EraseBrushOctreeProps {
   // world transform, or null when off-canvas.
   onBrushTransformChange: (matrix: THREE.Matrix4 | null) => void;
   // True while the mouse button is held down stamping — drives the indicator
-  // colour (red) and the gizmo-dragging flag in the parent.
+  // color (red) and the gizmo-dragging flag in the parent.
   onErasingChange: (erasing: boolean) => void;
 }
 
@@ -140,7 +140,7 @@ export function EraseBrushOctree({
             // Erase mode runs under the ortho override for its whole session,
             // and potree derives its pick window from the ray DIRECTION — which
             // every parallel ray shares, so the window would sit on the view
-            // centre and the preview box would take its depth from whatever is
+            // center and the preview box would take its depth from whatever is
             // in the middle of the screen. See `pickPixelForNdc`.
             pixelPosition: pickPixelForNdc(gl, mouseNdc),
           });

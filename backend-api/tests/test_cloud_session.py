@@ -196,7 +196,7 @@ def test_bake_with_everything_deleted_returns_empty_no_crash(client, cache_root,
 def test_bake_streams_progress_and_a_cancel_leaves_the_session_pristine(
         client, cache_root, grid_xyz, monkeypatch):
     """Bake is one full PotreeConverter run — the deliberately-slow step — so it
-    must stream progress and be cancellable.
+    must stream progress and be cancelable.
 
     Regression: it used to be a silent POST with no progress, no run id and no
     cancel, and the renderer set no busy state at all, so the Erase panel's
@@ -393,7 +393,7 @@ def test_session_segment_trees_excludes_labeled_ground(client, cache_root, tmp_p
     sess = main._cloud_sessions[sid]
     n = len(sess.positions)
     # Label the flat slab (z≈0) as ground, the rest as plant — exactly the state
-    # left by a ground segmentation that was kept (labelled) but not deleted.
+    # left by a ground segmentation that was kept (labeled) but not deleted.
     gclass = np.where(
         sess.positions[:, 2] < 0.25, main.GROUND_CLASS_GROUND, main.GROUND_CLASS_PLANT
     ).astype(np.float32)
@@ -401,7 +401,7 @@ def test_session_segment_trees_excludes_labeled_ground(client, cache_root, tmp_p
         main._session_add_extra_column(
             sess, main.GROUND_CLASS_SLUG, main.GROUND_CLASS_LABEL, gclass
         )
-    assert int((gclass == main.GROUND_CLASS_GROUND).sum()) > 0  # slab really is labelled
+    assert int((gclass == main.GROUND_CLASS_GROUND).sum()) > 0  # slab really is labeled
 
     res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={})
     assert res.status_code == 200, res.text
@@ -455,7 +455,7 @@ def test_session_filter_deletes_excluded_points_no_file_read(client, cache_root,
     )
     assert res.status_code == 200, res.text
     # The filter streams PHP1 progress markers ahead of its JSON tail (the
-    # octree rebuild is the slow, cancellable step), so decode rather than .json().
+    # octree rebuild is the slow, cancelable step), so decode rather than .json().
     body = decode_streamed_json(res.content)
     assert body["rebuilt"] is True
     assert body["point_count"] == expected_keep
@@ -869,7 +869,7 @@ def test_extract_by_column_cancel_stops_builds_and_leaks_no_child_sessions(
 
     # Fire the cancel once EVERY build has entered `_session_rebuild`, i.e. once
     # all of them are past the start-of-build checkpoint. That is the window the
-    # old code could not observe. (Cancelling earlier proves nothing: the
+    # old code could not observe. (Canceling earlier proves nothing: the
     # start-of-build checkpoint has always caught that case, which is why K > the
     # pool size never leaked.)
     import threading as _threading
@@ -914,9 +914,9 @@ def test_extract_by_column_child_las_write_does_not_hold_the_session_lock(
     time. A freshly-sliced child is registered under an id the client has not
     been told, so nothing can mutate it and the lock buys nothing.
 
-    The writes are still serialised — on `_las_write_lock`, not the global one.
+    The writes are still serialized — on `_las_write_lock`, not the global one.
     That throttle is deliberate: letting them run concurrently measured ~20%
-    SLOWER end to end, because serialised writes let one child's PotreeConverter
+    SLOWER end to end, because serialized writes let one child's PotreeConverter
     overlap the next child's write."""
     sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",

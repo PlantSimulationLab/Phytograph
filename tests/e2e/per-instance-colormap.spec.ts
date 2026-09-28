@@ -16,7 +16,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // scene default set in the Display panel.
 //
 // Asserting on DOM state alone would not catch a regression to the old
-// behaviour (the two selects would still *show* different values while the
+// behavior (the two selects would still *show* different values while the
 // geometry painted identically), so the decisive assertions here read real
 // pixels off the WebGL canvas.
 
@@ -39,7 +39,7 @@ type ColorSig = { r: number; g: number; b: number; n: number };
 // Why not read the canvas: the E2E launcher hides the window, and an offscreen
 // Electron WebGL context reads back black through toDataURL/drawImage (the same
 // limitation documented in plant-generate.spec.ts and worked around by
-// tests/e2e/visual/capture-plant.mjs). Asserting the colour BUFFER is the
+// tests/e2e/visual/capture-plant.mjs). Asserting the color BUFFER is the
 // strongest check available in-process, and it is what a per-instance colormap
 // regression would actually corrupt — under the old global model both meshes'
 // buffers were rebuilt from one shared colormap.
@@ -80,14 +80,14 @@ function colorDistance(
 //
 // Ball Pivoting is deterministic on this fixture, and measurably so: 40/40
 // triangulations across 20 fresh scenes produced 109 triangles and a
-// byte-identical colour signature every time (and the whole loop ran in 43 s,
+// byte-identical color signature every time (and the whole loop ran in 43 s,
 // against minutes for the Poisson version). That also strengthens the file —
 // the two meshes are now identical, so "both follow the default, so their
-// colours converge" is an exact equality rather than a tolerance around two
+// colors converge" is an exact equality rather than a tolerance around two
 // different reconstructions.
 //
 // Nothing here depends on Poisson: these tests need two meshes carrying
-// per-triangle scalar colour, which any triangulated mesh provides.
+// per-triangle scalar color, which any triangulated mesh provides.
 async function makeTwoMeshes(page: Page, app: LaunchedApp['app']) {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
@@ -114,7 +114,7 @@ async function makeTwoMeshes(page: Page, app: LaunchedApp['app']) {
   }
 }
 
-// Expand a mesh row and put it into a scalar colour mode so its colormap
+// Expand a mesh row and put it into a scalar color mode so its colormap
 // picker is offered.
 async function colorMeshBy(page: Page, index: number, mode: string) {
   const row = page.getByTestId('mesh-row').nth(index);
@@ -180,7 +180,7 @@ test('the scene default repaints only the meshes still inheriting it', async () 
     await expect(pickers.nth(0)).toHaveValue('jet');
     await expect(pickers.nth(1)).toHaveValue('magma');
 
-    // …and prove it in the colour data, not just the dropdowns: mesh 1's
+    // …and prove it in the color data, not just the dropdowns: mesh 1's
     // buffer must have been rebuilt, mesh 0's must be byte-identical.
     await page.waitForTimeout(500);
     const after = await meshColorSignatures(page);
@@ -203,7 +203,7 @@ test('the scene default repaints only the meshes still inheriting it', async () 
   await expect(pickers.nth(0)).toHaveValue(defaultName);
   await expect(pickers.nth(1)).toHaveValue(defaultName);
 
-  // Both meshes now share the default, so their colours must converge: mesh 0
+  // Both meshes now share the default, so their colors must converge: mesh 0
   // repaints away from jet and lands on whatever mesh 1 is using.
   //
   // The two meshes are Ball Pivoting reconstructions of the same cloud, which is
@@ -219,7 +219,7 @@ test('the scene default repaints only the meshes still inheriting it', async () 
   ).toBeGreaterThan(0.05);
   expect(
     colorDistance(afterReset[ids[0]], afterReset[ids[1]]),
-    'both meshes now follow the same default, so their colours should converge',
+    'both meshes now follow the same default, so their colors should converge',
   ).toBeLessThan(0.02);
 });
 
@@ -239,9 +239,9 @@ test('one mesh repaints on its own colormap while the other keeps its colors', a
     { timeout: 15_000 }).toBe(2);
   const before = await meshColorSignatures(page);
   // Both meshes were built from the same colormap, so their buffers carry real
-  // colour data. Guard the measurement before comparing against it.
-  expect(before[ids[0]].n, 'mesh 0 should have colour data').toBeGreaterThan(50);
-  expect(before[ids[1]].n, 'mesh 1 should have colour data').toBeGreaterThan(50);
+  // color data. Guard the measurement before comparing against it.
+  expect(before[ids[0]].n, 'mesh 0 should have color data').toBeGreaterThan(50);
+  expect(before[ids[1]].n, 'mesh 1 should have color data').toBeGreaterThan(50);
 
   // jet's low end is deep blue where viridis's is dark purple, and its high end
   // is red where viridis's is yellow — a large, unambiguous shift.
@@ -253,7 +253,7 @@ test('one mesh repaints on its own colormap while the other keeps its colors', a
   const moved = colorDistance(before[ids[0]], after[ids[0]]);
   const untouched = colorDistance(before[ids[1]], after[ids[1]]);
 
-  // The decisive pair: the overridden mesh's colours really changed…
+  // The decisive pair: the overridden mesh's colors really changed…
   expect(
     moved,
     `mesh 0 should repaint (was rgb(${before[ids[0]].r.toFixed(2)},${before[ids[0]].g.toFixed(2)},${before[ids[0]].b.toFixed(2)}) now rgb(${after[ids[0]].r.toFixed(2)},${after[ids[0]].g.toFixed(2)},${after[ids[0]].b.toFixed(2)}))`,
@@ -262,7 +262,7 @@ test('one mesh repaints on its own colormap while the other keeps its colors', a
   // exactly what failed: both buffers moved together.
   expect(
     untouched,
-    `mesh 1 must keep its colours (was rgb(${before[ids[1]].r.toFixed(2)},${before[ids[1]].g.toFixed(2)},${before[ids[1]].b.toFixed(2)}) now rgb(${after[ids[1]].r.toFixed(2)},${after[ids[1]].g.toFixed(2)},${after[ids[1]].b.toFixed(2)}))`,
+    `mesh 1 must keep its colors (was rgb(${before[ids[1]].r.toFixed(2)},${before[ids[1]].g.toFixed(2)},${before[ids[1]].b.toFixed(2)}) now rgb(${after[ids[1]].r.toFixed(2)},${after[ids[1]].g.toFixed(2)},${after[ids[1]].b.toFixed(2)}))`,
   ).toBeLessThan(1e-6);
 });
 
@@ -343,7 +343,7 @@ test('legends name their geometry and dedupe across objects sharing a channel', 
 
   // Both meshes share one channel (same mode, same inherited colormap), so the
   // stack folds them into a SINGLE entry captioned by the group — the clutter
-  // fix. Two separate unlabelled colorbars was the old behaviour.
+  // fix. Two separate unlabeled colorbars was the old behavior.
   const stack = page.getByTestId('legend-stack');
   await expect(stack).toBeVisible();
   await expect(page.getByTestId('mesh-colorbar')).toHaveCount(1);

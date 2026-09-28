@@ -9,7 +9,7 @@ CPU (no GPU required):
   visible.
 - **Canopy height (airborne)** — finds each treetop in a canopy height model and
   splits the canopy between them. Use it for airborne and drone scans, and for
-  dense canopies where TreeIso merges neighbouring trees.
+  dense canopies where TreeIso merges neighboring trees.
 
 ---
 
@@ -44,11 +44,11 @@ Both methods isolate **above-ground tree structure**, so deal with the ground fi
 with [Segment ground points](segment-ground.md). You have two options:
 
 - **Remove** the ground points, or
-- **Label** them (run ground segmentation and keep the labelled cloud without
+- **Label** them (run ground segmentation and keep the labeled cloud without
   deleting the ground). When the cloud carries a `ground_class` label,
   Segment Trees automatically excludes the ground points — only the plant points
   are segmented, and the ground keeps tree ID `0` ("Unassigned"). **Canopy
-  height** also uses the labelled ground points as its terrain model; on a
+  height** also uses the labeled ground points as its terrain model; on a
   ground-removed cloud it uses the lowest returns instead.
 
 If the cloud has never been through Ground Segmentation, the completion
@@ -62,7 +62,7 @@ tree.
 
 1. **Import** your scan (see [Import & export](import-export.md)) and, if needed,
    run [Segment ground points](segment-ground.md) — either keep the non-ground
-   cloud or keep the labelled cloud (the ground is excluded automatically).
+   cloud or keep the labeled cloud (the ground is excluded automatically).
 2. **Select** the cloud in the scan list.
 3. Open the **Segment Trees** tool from the toolbar (the trees/forest icon in
    the **Tools** › Segmentation group) or the command palette
@@ -75,7 +75,7 @@ tree.
       sizes everything else. Default `2.5`, which suited every stand it was
       checked on, planted or natural (see
       [Tree segmentation methods](../concepts/tree-segmentation-methods.md#how-the-settings-were-calibrated)).
-      Tune it by what you see: lower it if neighbouring trees come out as one,
+      Tune it by what you see: lower it if neighboring trees come out as one,
       raise it if one crown is split into several. **If unsure, err low** —
       too small splits crowns, which is easy to see; too large merges trees,
       which is easy to miss.
@@ -84,7 +84,7 @@ tree.
     - **CHM cell (m)** — grid size of the canopy height model. Leave it empty
       (*auto*) to use one twelfth of **Crown scale** (kept between 0.1 and
       1 m). It follows the crown size rather than the point density, so sparse
-      scans get a fine grid too; a coarse grid merges neighbouring trees.
+      scans get a fine grid too; a coarse grid merges neighboring trees.
 
     For **TreeIso**, adjust these if needed. The size-dependent settings (the internal
    decimation and the max-gap below) are seeded from the cloud's extent each time
@@ -97,11 +97,11 @@ tree.
       grouping; the most influential knob. Default `15`.
     - **Max intra-tree gap (m)** — the largest gap (from occlusion) still
       treated as belonging to one tree. Default `2.0` (seeded larger for very
-      large tiles). Lower it when trees stand close together so neighbours aren't
+      large tiles). Lower it when trees stand close together so neighbors aren't
       merged.
     - **Separate trees beyond (m)** — after trees are assembled, any part of one
       tree sitting further than this from the rest of it is treated as a
-      different tree. Default `0.65`. Lower it if a neighbour's branches are
+      different tree. Default `0.65`. Lower it if a neighbor's branches are
       absorbed into the tree you want; raise it if one tree is broken into
       pieces. Note this is the **opposite** of the gap above: that one *joins* an
       occluded limb back to its tree, this one *separates* bodies too far apart
@@ -118,21 +118,21 @@ tree.
 
 ## Results
 
-The cloud is recoloured by the `tree_instance` attribute: each tree gets a
-distinct colour. Points TreeIso could not assign keep ID `0` ("Unassigned",
-shown grey). (No legend is shown for tree instances — with one entry per tree it
+The cloud is recolored by the `tree_instance` attribute: each tree gets a
+distinct color. Points TreeIso could not assign keep ID `0` ("Unassigned",
+shown gray). (No legend is shown for tree instances — with one entry per tree it
 would fill the viewport and the IDs are arbitrary anyway.) If you enabled
 **Split**, one new cloud per tree (`… (tree N)`) is added to the list, each
-carrying the same colour that tree has in the recoloured cloud — so the swatches
-in the scan list match what you see in the viewer. The recoloured original is
+carrying the same color that tree has in the recolored cloud — so the swatches
+in the scan list match what you see in the viewer. The recolored original is
 hidden automatically, so you see the per-tree clouds rather than the whole cloud
 drawn on top of them. Tick its eye icon in the scan list to bring it back.
 
-The split runs after the recoloured cloud appears, and each per-tree cloud gets
+The split runs after the recolored cloud appears, and each per-tree cloud gets
 its own display octree — on a large plot with many trees that takes a while. A
 **Building _n_ of _N_ clouds…** status pill at the top of the viewer tracks the
 progress; the per-tree clouds all appear in the scan list when it finishes.
-Cancelling from the pill leaves the recoloured parent cloud in place and adds no
+Canceling from the pill leaves the recolored parent cloud in place and adds no
 per-tree clouds.
 
 ## Seeding trunks (optional)
@@ -184,7 +184,7 @@ first draft. How it decides is on
 settings are hidden for it.*
 
 A plot too big to segment at once is segmented in square **tiles**, each
-with a buffer of its neighbours' points. Every tree is then kept from the
+with a buffer of its neighbors' points. Every tree is then kept from the
 one tile its stem stands in, so trees crossing tile lines stay whole.
 
 | Setting | Default | Meaning |
@@ -212,14 +212,14 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 
 - Results are best on ground-removed, reasonably dense clouds.
 - Trees are automatically separated where one instance's own points are split by
-  a wide 3D gap, so a neighbouring tree's branches are not absorbed into the tree
+  a wide 3D gap, so a neighboring tree's branches are not absorbed into the tree
   you are measuring. This matters most when you have **cropped the cloud around a
   single tree**: the surrounding trees then appear as crown fragments with no
   trunk, which is exactly the shape the segmentation is otherwise inclined to
   attach to the nearest complete tree.
-- If neighbouring trees still merge into one, lower **Separate trees beyond**
+- If neighboring trees still merge into one, lower **Separate trees beyond**
   first — that is the knob for this — then **Max intra-tree gap**. If whole
-  crowns are merged (not just a neighbour's branches), try **Canopy height**.
+  crowns are merged (not just a neighbor's branches), try **Canopy height**.
 - **If several trees come back as one instance each — for example an orchard
   returning one instance per row — re-run the tool.** This is a known defect in
   the underlying graph-cut solver, which occasionally fails to divide the cloud
@@ -257,6 +257,6 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 ## See also
 
 - [Segment ground points](segment-ground.md)
-- [Fit a crown & metrics](fit-crown.md) — fits one crown per tree once trees are labelled.
+- [Fit a crown & metrics](fit-crown.md) — fits one crown per tree once trees are labeled.
 - [Concepts: Point clouds](../concepts/point-clouds.md)
 - [Reference: Color modes](../reference/color-modes.md)

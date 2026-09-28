@@ -63,7 +63,7 @@ def test_scalar_labels_rename_an_in_file_column_display_only(client, tmp_path):
     # overrides all name the column by it.
     assert "Deviation" in after, sorted(after)
     assert after["Deviation"]["label"] == "Leaf wetness"
-    # Only the named column is relabelled.
+    # Only the named column is relabeled.
     assert after["Amplitude"].get("label") == before["Amplitude"].get("label")
 
 
@@ -76,7 +76,7 @@ def test_scalar_labels_do_not_resurrect_a_dropped_column(client, tmp_path):
 
 
 def test_role_overrides_reach_create_multi(client, tmp_path):
-    # `shot_count` is not a spelling auto-detection recognises, so without the
+    # `shot_count` is not a spelling auto-detection recognizes, so without the
     # override it stays an anonymous scalar.
     p = _write_las(tmp_path / "role.las", shot_count=2.0)
 

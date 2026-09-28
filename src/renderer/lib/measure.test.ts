@@ -203,7 +203,7 @@ describe('completion rules', () => {
   });
 
   it('auto-commits a distance and an angle but never a polyline', () => {
-    // This is the whole behavioural difference: a polyline keeps growing until
+    // This is the whole behavioral difference: a polyline keeps growing until
     // the user closes it, so it must not commit itself at two vertices.
     expect(autoCommitsAt('distance', 2)).toBe(true);
     expect(autoCommitsAt('angle', 3)).toBe(true);
@@ -251,19 +251,19 @@ describe('formatLength', () => {
     expect(formatLength(123.456789)).toBe('123.46');
   });
 
-  it('uses 3 decimals in the metre range', () => {
+  it('uses 3 decimals in the meter range', () => {
     expect(formatLength(1.23456)).toBe('1.235');
     expect(formatLength(0.25)).toBe('0.250');
   });
 
-  it('keeps 3 decimals down to a millimetre', () => {
-    // Sub-metre is the common case here, and it matches the 3-decimal
+  it('keeps 3 decimals down to a millimeter', () => {
+    // Sub-meter is the common case here, and it matches the 3-decimal
     // coordinate rows shown directly above the length in the same bubble.
     expect(formatLength(0.012345)).toBe('0.012');
     expect(formatLength(0.0012)).toBe('0.001');
   });
 
-  it('goes exponential below a millimetre rather than printing zeros', () => {
+  it('goes exponential below a millimeter rather than printing zeros', () => {
     expect(formatLength(0.0000123)).toBe('1.230e-5');
   });
 
@@ -284,8 +284,8 @@ describe('formatLength', () => {
 });
 
 describe('formatLengthWithUnit', () => {
-  it('appends the metre suffix for display', () => {
-    // Honest now that units are normalised at import — see the module header.
+  it('appends the meter suffix for display', () => {
+    // Honest now that units are normalized at import — see the module header.
     expect(formatLengthWithUnit(1.5)).toBe('1.500 m');
     expect(formatLengthWithUnit(123.456)).toBe('123.46 m');
   });
@@ -340,7 +340,7 @@ describe('primaryValue', () => {
   });
 });
 
-describe('clipboard serialisation', () => {
+describe('clipboard serialization', () => {
   it('writes a summary row plus one row per vertex', () => {
     const csv = measurementsToCsv([measurement('distance', [[0, 0, 0], [3, 4, 0]])]);
     const lines = csv.split('\n');
@@ -369,7 +369,7 @@ describe('clipboard serialisation', () => {
     expect(measurementsToCsv([m])).toContain('"has,comma"');
   });
 
-  it('serialises several measurements into one sheet', () => {
+  it('serializes several measurements into one sheet', () => {
     const a = measurement('distance', [[0, 0, 0], [1, 0, 0]]);
     const b = { ...measurement('angle', [[1, 0, 0], [0, 0, 0], [0, 1, 0]]), id: 'm2' };
     const lines = measurementsToCsv([a, b]).split('\n');
@@ -418,7 +418,7 @@ describe('measurementToText', () => {
 });
 
 describe('CSV coordinate precision', () => {
-  it('keeps millimetre precision on UTM-scale coordinates', () => {
+  it('keeps millimeter precision on UTM-scale coordinates', () => {
     // formatLength drops to 2 decimals above 100, which would print a UTM
     // easting a digit coarser than the inspect bubble reports for the very
     // same point. Vertex coordinates go through formatCoord instead.

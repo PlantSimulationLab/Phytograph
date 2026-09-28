@@ -21,7 +21,7 @@ const DEG = Math.PI / 180;
 
 // Radius factor: the shell radius is this times the scanner's real-world height
 // (then times the user's marker-size multiplier), so it reads as a halo around the
-// instrument rather than the full (tens-of-metres) scan reach.
+// instrument rather than the full (tens-of-meters) scan reach.
 const RADIUS_FACTOR = 5;
 
 // A scanner-local point at (zenith from +Z, azimuth = Helios phi), radius R.

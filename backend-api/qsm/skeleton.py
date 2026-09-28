@@ -108,7 +108,7 @@ class SkeletonGraph:
         """True when `parent` is one rooted tree: exactly one root, no cycles,
         and every node reachable from that root.
 
-        Vectorised pointer doubling, O(K log depth), not the obvious
+        Vectorized pointer doubling, O(K log depth), not the obvious
         walk-every-node-to-root. That walk is O(K x depth) with a Python `set`
         and an `int()` box per step, and a QSM skeleton is chain-like by
         construction (a trunk spine), so depth scales with K: measured 56.8s on

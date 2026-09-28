@@ -65,18 +65,18 @@ describe('parseXYZ', () => {
     expect(data.pointCount).toBe(2);
   });
 
-  it('parses CSV with a header row and min-max-normalises intensity', async () => {
+  it('parses CSV with a header row and min-max-normalizes intensity', async () => {
     const file = textFile('x,y,z,intensity\n0,0,0,0.5\n1,1,1,0.8\n', 'cloud.csv');
     const data = await parseXYZ(file);
     expect(data.pointCount).toBe(2);
     expect(Array.from(data.positions.slice(0, 3))).toEqual([0, 0, 0]);
-    // The parser min-max normalises intensities to [0, 1]:
+    // The parser min-max normalizes intensities to [0, 1]:
     // min=0.5, max=0.8 → values become (0, 1).
     expect(data.intensities?.[0]).toBeCloseTo(0);
     expect(data.intensities?.[1]).toBeCloseTo(1);
   });
 
-  it('detects RGB columns and normalises 0-255 to 0-1', async () => {
+  it('detects RGB columns and normalizes 0-255 to 0-1', async () => {
     const file = textFile('x y z r g b\n0 0 0 255 0 0\n1 1 1 0 255 0\n', 'cloud.txt');
     const data = await parseXYZ(file);
     expect(data.colors).toBeDefined();
@@ -940,7 +940,7 @@ describe('parsePointCloud (auto-detect)', () => {
   // PTX is numeric ASCII, so the XYZ fallback used to ACCEPT this file and
   // produce a silently wrong cloud: the 4x4 transform rows became four junk
   // points at the origin and the `x y z intensity r g b` data row read its
-  // colour from (intensity, r, g). It is now genuinely supported, and because
+  // color from (intensity, r, g). It is now genuinely supported, and because
   // the raster + scanner pose only mean anything to the backend converter it is
   // octree-only (like E57) rather than parsed here.
   const PTX_SAMPLE = [
@@ -1143,7 +1143,7 @@ describe('parsePointCloudFromPath', () => {
   });
 
   it('records the unit provenance the backend echoes back', async () => {
-    // Provenance, not a second scaling: positions are already metres. The UI
+    // Provenance, not a second scaling: positions are already meters. The UI
     // needs it to explain why a scan's coordinates differ from its file.
     vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse({
       source_units: 'ftUS', source_unit_scale: 0.30480060960121924,
@@ -1153,7 +1153,7 @@ describe('parsePointCloudFromPath', () => {
     expect(data.octree?.sourceUnitScale).toBeCloseTo(0.3048006096, 9);
   });
 
-  it('ignores an unrecognised unit from the backend rather than storing it', async () => {
+  it('ignores an unrecognized unit from the backend rather than storing it', async () => {
     // A slug the renderer does not know is a version mismatch, not data. Storing
     // it would put an unrenderable value in the UI; null is honest.
     vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse({
@@ -1165,7 +1165,7 @@ describe('parsePointCloudFromPath', () => {
 
   it('forwards the wizard column plan, carrying a skipped column as role "skip"', async () => {
     // The wizard's Import checkbox becomes role 'skip' on the ASCII path. It has
-    // to survive serialisation, or the untick is silently ignored and the field
+    // to survive serialization, or the untick is silently ignored and the field
     // still lands in the octree.
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
     await parsePointCloudFromPath('/p/a.xyz', null, {
@@ -1244,14 +1244,14 @@ describe('parsePointCloudFromPath', () => {
 });
 
 describe('format predicates and lists', () => {
-  it('isMeshFile recognises obj and stl, rejects others', () => {
+  it('isMeshFile recognizes obj and stl, rejects others', () => {
     expect(isMeshFile('foo.obj')).toBe(true);
     expect(isMeshFile('foo.OBJ')).toBe(true);
     expect(isMeshFile('foo.stl')).toBe(true);
     expect(isMeshFile('foo.xyz')).toBe(false);
   });
 
-  it('isSkeletonFile recognises only json', () => {
+  it('isSkeletonFile recognizes only json', () => {
     expect(isSkeletonFile('sk.json')).toBe(true);
     expect(isSkeletonFile('sk.JSON')).toBe(true);
     expect(isSkeletonFile('sk.obj')).toBe(false);

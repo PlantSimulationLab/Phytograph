@@ -74,8 +74,8 @@ def test_column_plan_emits_origin_sentinels_not_extras():
     assert extras == []
 
 
-def test_origin_role_via_extra_slug_also_recognised():
-    """An 'extra' column whose slug is an ox/oy/oz alias is canonicalised to an
+def test_origin_role_via_extra_slug_also_recognized():
+    """An 'extra' column whose slug is an ox/oy/oz alias is canonicalized to an
     origin sentinel too (mirrors the multi-return / grid handling)."""
     cols = [
         ColumnPlanEntry(index=0, role='x', slug=None, label=None, categorical=False),
@@ -95,7 +95,7 @@ def test_origin_role_via_extra_slug_also_recognised():
     ("XOrigin", "origin_x"), ("YOrigin", "origin_y"), ("ZOrigin", "origin_z"),
     ("BeamOriginX", "origin_x"), ("BeamOriginZ", "origin_z"),
 ])
-def test_role_from_header_name_recognises_origin_aliases(header, expected):
+def test_role_from_header_name_recognizes_origin_aliases(header, expected):
     assert main._role_from_header_name(header) == expected
 
 

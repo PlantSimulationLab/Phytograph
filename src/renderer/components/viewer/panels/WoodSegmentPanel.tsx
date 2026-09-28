@@ -6,13 +6,13 @@ import { MlModelControls } from './MlModelControls';
 import { type WoodSegMethod } from '../../../utils/backendApi';
 
 // Output mode for wood/leaf segmentation:
-//  - 'label': keep all points, write the wood_class column, colour by it.
+//  - 'label': keep all points, write the wood_class column, color by it.
 //  - 'split': also emit separate wood-only and leaf-only child clouds.
 //  - 'remove': drop the wood points, leaving a leaf-only cloud (wood removal).
 export type WoodSegmentMode = 'label' | 'split' | 'remove';
 
 // When >1 scan is selected: 'aggregate' segments them TOGETHER (denser local
-// neighbourhoods — for multi-view scans of one tree, must be pre-aligned), then
+// neighborhoods — for multi-view scans of one tree, must be pre-aligned), then
 // scatters the labels back to each scan; 'per-scan' segments each independently.
 export type WoodMultiMode = 'aggregate' | 'per-scan';
 
@@ -111,7 +111,7 @@ export function WoodSegmentPanel({
           <InfoHint
             data-testid="wood-method-help"
             label="Method"
-            text="Which classifier separates wood from leaf. Machine learning (the default) runs a network trained on hand-labelled real trees and Helios synthetic scans; it is the most accurate and has no tuning knobs. Branch-segment fits cylinders to whole branch segments (the best of the geometric methods, needs the ground removed); Connectivity traces branches back to the trunk to recover thin twigs (also needs ground removed); Geometric judges each point from its local shape alone — use it when the cloud can't be cleanly ground-removed or is partial/disconnected."
+            text="Which classifier separates wood from leaf. Machine learning (the default) runs a network trained on hand-labeled real trees and Helios synthetic scans; it is the most accurate and has no tuning knobs. Branch-segment fits cylinders to whole branch segments (the best of the geometric methods, needs the ground removed); Connectivity traces branches back to the trunk to recover thin twigs (also needs ground removed); Geometric judges each point from its local shape alone — use it when the cloud can't be cleanly ground-removed or is partial/disconnected."
           />
         </label>
         <select
@@ -218,14 +218,14 @@ export function WoodSegmentPanel({
             />
           </div>
 
-          {/* Neighbourhood scale (k_max) — larger = smoother / slower. */}
+          {/* Neighborhood scale (k_max) — larger = smoother / slower. */}
           <div className="mb-3">
             <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-              Neighbourhood size
+              Neighborhood size
               <InfoHint
                 data-testid="wood-kmax-help"
-                label="Neighbourhood size"
-                text="How many neighbouring points define each point's local geometry. Larger is smoother but slower; the default suits typical terrestrial-LiDAR densities. Increase it for noisy or sparse clouds, decrease it to preserve fine detail."
+                label="Neighborhood size"
+                text="How many neighboring points define each point's local geometry. Larger is smoother but slower; the default suits typical terrestrial-LiDAR densities. Increase it for noisy or sparse clouds, decrease it to preserve fine detail."
               />
             </label>
             <DebouncedNumberInput
@@ -247,7 +247,7 @@ export function WoodSegmentPanel({
               <InfoHint
                 data-testid="wood-reg-iters-help"
                 label="Smoothing"
-                text="How aggressively isolated misclassifications are cleaned up by a majority vote over each point's neighbours. Higher values remove more speckle but can erode thin structures; 0 disables it entirely."
+                text="How aggressively isolated misclassifications are cleaned up by a majority vote over each point's neighbors. Higher values remove more speckle but can erode thin structures; 0 disables it entirely."
               />
             </label>
             <DebouncedNumberInput
@@ -293,7 +293,7 @@ export function WoodSegmentPanel({
           don't apply — show a note instead of the dropdown. */}
       {selectedCount > 1 && multiMode === 'aggregate' ? (
         <div className="mb-3 text-[10px] text-neutral-500">
-          Each scan is labelled in place with its wood/leaf classification.
+          Each scan is labeled in place with its wood/leaf classification.
         </div>
       ) : (
         <div className="mb-3">
@@ -302,7 +302,7 @@ export function WoodSegmentPanel({
             <InfoHint
               data-testid="wood-mode-help"
               label="Output"
-              text="What to produce. Label in place keeps every point and adds a Wood Class attribute, recoloured by it. Split additionally emits separate … (wood) and … (leaf) clouds. Remove wood drops the wood points, leaving a leaf-only cloud (classic wood removal). Label and Split never delete the original."
+              text="What to produce. Label in place keeps every point and adds a Wood Class attribute, recolored by it. Split additionally emits separate … (wood) and … (leaf) clouds. Remove wood drops the wood points, leaving a leaf-only cloud (classic wood removal). Label and Split never delete the original."
             />
           </label>
           <select

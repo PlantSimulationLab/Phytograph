@@ -70,7 +70,7 @@ test('erase masks instantly (count drops with no rebuild), then bake applies', a
   }, maxPx ?? '150');
 
   const box = (await page.locator('canvas').first().boundingBox())!;
-  // Guarded: a toast or panel over the centre eats the stamp, and the failure
+  // Guarded: a toast or panel over the center eats the stamp, and the failure
   // then surfaces as a zero stamp-count. See helpers/canvasClick.ts.
   await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
   await expect
@@ -147,7 +147,7 @@ test('undo last deletion restores the masked points', async () => {
   }, maxPx ?? '150');
 
   const box = (await page.locator('canvas').first().boundingBox())!;
-  // Guarded: a toast or panel over the centre eats the stamp, and the failure
+  // Guarded: a toast or panel over the center eats the stamp, and the failure
   // then surfaces as a zero stamp-count. See helpers/canvasClick.ts.
   await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
   await expect

@@ -3,7 +3,7 @@
  *
  * The real rxp_shim.cpp subclasses scanlib::pointcloud to reach the no-return
  * shots an .rxp does not store as points. On Windows that class exists only
- * inside a 49 MB static archive RIEGL's licence forbids us redistributing, so
+ * inside a 49 MB static archive RIEGL's license forbids us redistributing, so
  * the shim is compiled on the user's machine from their own SDK — and CI
  * without that SDK cannot build it at all.
  *

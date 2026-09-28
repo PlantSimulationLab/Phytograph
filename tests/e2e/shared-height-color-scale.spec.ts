@@ -9,7 +9,7 @@ const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 // Two clouds with deliberately DIFFERENT Z extents — that difference is the
 // whole subject. tiny.xyz is a 1.5 m cylinder; ground_plants.xyz tops out at
 // ~0.80 m. Under per-cloud scales the top of the short cloud and the top of the
-// tall one were both painted the gradient's max colour despite being 0.7 m
+// tall one were both painted the gradient's max color despite being 0.7 m
 // apart in the world.
 const TALL = join(FIXTURES, 'tiny.xyz');           // z 0.000 .. 1.500
 const SHORT = join(FIXTURES, 'ground_plants.xyz'); // z 0.000 .. 0.798
@@ -17,22 +17,22 @@ const SHORT = join(FIXTURES, 'ground_plants.xyz'); // z 0.000 .. 0.798
 // The domains below are OUTLIER-RESISTANT (1st-99th percentile), not raw
 // bounding boxes — a colorbar stretched to a raw extent is stretched to its
 // single most extreme point, so one noise return above the canopy costs the
-// whole scene its colour resolution. tiny.xyz is an evenly-spaced cylinder
+// whole scene its color resolution. tiny.xyz is an evenly-spaced cylinder
 // whose percentiles land exactly on its extent, so TALL_MAX is unchanged;
 // ground_plants.xyz has a thin top tail, so its robust max (0.7670) sits below
 // its raw 0.7981. See robustColorRange.ts.
 const TALL_MAX = 1.5;
 const SHORT_MAX = 0.767;
 
-// One consistent Z-height colour scale across every visible scan.
+// One consistent Z-height color scale across every visible scan.
 //
 // Each cloud used to derive its own height domain from its own bounding box, so
-// a scene with several scans got one independent colour scale — and one separate
+// a scene with several scans got one independent color scale — and one separate
 // colorbar — per scan. Two failures rode on that, and this file asserts both:
 //
-//   1. Colour stopped meaning anything scene-wide. A point at z=0.8 sat at the
+//   1. Color stopped meaning anything scene-wide. A point at z=0.8 sat at the
 //      very top of the short cloud's ramp and only halfway up the tall one's,
-//      so identical heights were painted different colours in the same viewport.
+//      so identical heights were painted different colors in the same viewport.
 //   2. The legend fragmented. `buildLegendEntries` keys an entry's identity on
 //      its domain, so N scans with N domains could not fold and the viewer drew
 //      N colorbars printing N different number pairs for one variable.
@@ -58,12 +58,12 @@ function rowByName(page: Page, name: string) {
   return page.locator(`[data-testid="scan-row"][data-scan-name="${name}"]`);
 }
 
-// Import both clouds and put the whole scene on Z-height colouring, through the
+// Import both clouds and put the whole scene on Z-height coloring, through the
 // real Display panel.
 //
 // The deselect matters: with scans selected, the mode picker performs a SCOPED
 // edit (per-cloud overrides). With nothing selected it moves the scene default
-// and clears overrides, which is the "colour everything by height" gesture a
+// and clears overrides, which is the "color everything by height" gesture a
 // user makes — and the one that used to produce a colorbar per scan.
 async function importBoth(app: ElectronApplication, page: Page) {
   await importFiles(app, page, 'import-point-cloud', [TALL, SHORT]);
@@ -75,7 +75,7 @@ async function importBoth(app: ElectronApplication, page: Page) {
   await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
   await expect(page.locator('[data-testid="scan-row"][data-selected="true"]')).toHaveCount(0);
 
-  // The default colour mode is 'per-scan', which maps no variable and raises no
+  // The default color mode is 'per-scan', which maps no variable and raises no
   // colorbar at all — so the mode has to be chosen before there is anything to
   // assert on.
   await page.getByRole('button', { name: 'Display' }).click();
@@ -88,7 +88,7 @@ async function importBoth(app: ElectronApplication, page: Page) {
 // per-family test id LegendStack still emits for a cloud's continuous entry
 // (meshes and LAD grids use 'mesh-colorbar' / 'lad-colorbar'), so this counts
 // exactly the thing that used to multiply per scan. Height is the default
-// colour mode, so importing is enough to raise it.
+// color mode, so importing is enough to raise it.
 function heightColorbars(page: Page) {
   return page.locator('[data-testid="colorbar"]');
 }
@@ -189,7 +189,7 @@ test('hiding the tall scan re-tightens the shared scale, and showing it widens b
   await expect(tall).toHaveAttribute('data-visible', 'false');
 
   // The scale now describes only what is on screen — a hidden outlier must not
-  // permanently squash the colours of the cloud the user is looking at.
+  // permanently squash the colors of the cloud the user is looking at.
   await expect.poll(
     async () => (await colorbarDomains(page))[0]?.max,
     { timeout: 10_000 },

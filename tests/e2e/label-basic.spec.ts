@@ -13,7 +13,7 @@ import { fixturePoints, pointsDrawnIn } from './helpers/pointColors';
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
 
-// Manual point labelling, end to end against the live backend.
+// Manual point labeling, end to end against the live backend.
 //
 // Fixture: tiny.xyz — cylinder at origin, r=0.3 h=1.5, 60 points.
 //
@@ -26,7 +26,7 @@ const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz'
 //      move between classes, they do not merely grow).
 //   3. Undo restores the previous counts — the delta rollback is exact.
 //   4. Commit rebuilds the octree and clears the dirty flag, and the labels
-//      survive as a colourable scalar attribute.
+//      survive as a colorable scalar attribute.
 //   5. The From-class gate makes a non-matching repaint a genuine no-op.
 //
 // Shared session: one app + backend for the file; File → New between tests.
@@ -89,7 +89,7 @@ async function paintWholeViewport(page: LaunchedApp['page']) {
   await page.keyboard.press('Enter');
 }
 
-/** Parse the panel's serialised per-class counts. */
+/** Parse the panel's serialized per-class counts. */
 async function counts(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
   const raw = await panel.getAttribute('data-label-counts');
   return JSON.parse(raw ?? '{}') as Record<string, number>;
@@ -98,11 +98,11 @@ async function counts(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
 /**
  * Close the label panel (which bakes its labels into the display octree) and
  * wait for the rebuilt octree to take over, checking at every sample that the
- * painted points are still DRAWN in `colour`: between the close and the swap
+ * painted points are still DRAWN in `color`: between the close and the swap
  * the only thing drawing them is the overlay, and a gap there reads as the
  * work being lost. Returns the samples taken.
  */
-async function closeAndAwaitBake(page: LaunchedApp['page'], colour: string) {
+async function closeAndAwaitBake(page: LaunchedApp['page'], color: string) {
   const panel = page.getByTestId('label-panel');
   const pts = fixturePoints(TINY);
   // The rebuilt octree has a new cache id. Read per cloud, from its row: ids
@@ -116,7 +116,7 @@ async function closeAndAwaitBake(page: LaunchedApp['page'], colour: string) {
   const deadline = Date.now() + 90_000;
   for (;;) {
     const landed = (await row.getAttribute('data-octree-cache-id')) !== before;
-    const drawn = await pointsDrawnIn(page, pts, colour, 40, '[data-testid="scalar-overlay"]');
+    const drawn = await pointsDrawnIn(page, pts, color, 40, '[data-testid="scalar-overlay"]');
     const pill = await page.getByTestId('octree-refresh-running').count() > 0;
     samples.push({ matched: drawn.matched, landed, pill });
     expect(drawn.matched, `labels vanished at sample ${samples.length}`).toBeGreaterThan(30);
@@ -127,12 +127,12 @@ async function closeAndAwaitBake(page: LaunchedApp['page'], colour: string) {
   return samples;
 }
 
-/** The colour the panel shows for class `value`. */
-async function classColour(page: LaunchedApp['page'], value: number | string) {
+/** The color the panel shows for class `value`. */
+async function classColor(page: LaunchedApp['page'], value: number | string) {
   return (await page.getByTestId(`label-class-${value}`).getAttribute('data-color'))!;
 }
 
-test('a cloud with no classification of its own still opens on the hand-labelling column', async () => {
+test('a cloud with no classification of its own still opens on the hand-labeling column', async () => {
   // The no-regression guard for the column picker. `manual_class` does not
   // exist on a freshly imported cloud — the backend creates it on the first
   // stroke — so it has to be offered anyway. Dropping that made the picker
@@ -169,12 +169,12 @@ test('painting a lasso labels the enclosed points with the active class', async 
 
   // Every one of the 60 points is inside a full-viewport lasso, so the active
   // class must hold all of them — not "some", and not zero.
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 10_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 10_000 });
   const c = await counts(panel);
   expect(c[String(active)]).toBe(60);
 });
 
-test('painted points recolour IMMEDIATELY, without waiting for a commit', async () => {
+test('painted points recolor IMMEDIATELY, without waiting for a commit', async () => {
   // The property the whole client-side overlay exists for. Asserting the panel
   // counts is NOT enough: those come straight from the backend response and are
   // fully green even when the overlay is never wired to the renderer at all —
@@ -225,7 +225,7 @@ test('the preview appears without waiting for the backend', async () => {
   ).toBeGreaterThan(0);
   const previewMs = Date.now() - t0;
 
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   const countsMs = Date.now() - t0;
 
   // The preview must never LAG the backend-derived counts.
@@ -233,17 +233,17 @@ test('the preview appears without waiting for the backend', async () => {
   expect(previewMs).toBeLessThan(3_000);
 });
 
-test('labels display even when the cloud was coloured by RGB', async () => {
+test('labels display even when the cloud was colored by RGB', async () => {
   // The gap the first preview test missed. `__labelOverlay.painted` counts the
-  // CPU buffer, which is filled correctly in EVERY colour mode — but the shader
-  // only SAMPLES that slot under scalar/INTENSITY_GRADIENT. On a cloud coloured
+  // CPU buffer, which is filled correctly in EVERY color mode — but the shader
+  // only SAMPLES that slot under scalar/INTENSITY_GRADIENT. On a cloud colored
   // by RGB (any real scan) the labels were computed, uploaded, and then not
-  // drawn: counts moved, viewport never changed. tiny.xyz has no colour, so the
+  // drawn: counts moved, viewport never changed. tiny.xyz has no color, so the
   // original test sat in a mode that happened to work.
   const { page, panel } = await openLabelTool();
 
   // Force the cloud into a mode that does NOT read the intensity slot, the way
-  // a real coloured scan arrives.
+  // a real colored scan arrives.
   await page.evaluate(() => (window as any).__setCloudColorMode?.('rgb'));
 
   await paintWholeViewport(page);
@@ -266,13 +266,13 @@ test('labels display even when the cloud was coloured by RGB', async () => {
       const modes = Object.values(all) as Array<
         { colorMode?: string; scalarField?: string | null }
       >;
-      // Exactly one cloud is labelled, so the labelled render mode is the one
+      // Exactly one cloud is labeled, so the labeled render mode is the one
       // reporting the manual_class field.
       // Report the LABEL-mode cloud if one exists, else the cloud that is
       // actually mounted — the fallback must show the wrong state rather than
       // hide it, or the sabotage check below would pass on a missing entry.
-      const labelled = modes.find((m) => m.scalarField === 'manual_class');
-      const entry = labelled ?? modes[modes.length - 1];
+      const labeled = modes.find((m) => m.scalarField === 'manual_class');
+      const entry = labeled ?? modes[modes.length - 1];
       return entry
         ? { colorMode: entry.colorMode ?? null, scalarField: entry.scalarField ?? null }
         : null;
@@ -310,7 +310,7 @@ test('undo removes the preview immediately too', async () => {
 test('switching the active class repaints — counts move rather than accumulate', async () => {
   const { page, panel } = await openLabelTool();
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   const first = Number(await panel.getAttribute('data-active-class'));
 
   // Pick a different class from the list and repaint the same region.
@@ -342,7 +342,7 @@ test('switching the active class repaints — counts move rather than accumulate
   const c = await counts(panel);
   expect(c[String(second)]).toBe(60);
   expect(c[String(first)] ?? 0).toBe(0);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60');
+  await expect(panel).toHaveAttribute('data-labeled-count', '60');
 });
 
 test('undo rolls the labels back exactly', async () => {
@@ -350,14 +350,14 @@ test('undo rolls the labels back exactly', async () => {
   const first = Number(await panel.getAttribute('data-active-class'));
 
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 
   await page.getByTestId('label-undo').click();
   await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 15_000 });
 
-  // Back to nothing labelled — the reverse-applied delta restored every prior
+  // Back to nothing labeled — the reverse-applied delta restored every prior
   // value, not merely "some".
-  await expect(panel).toHaveAttribute('data-labelled-count', '0');
+  await expect(panel).toHaveAttribute('data-labeled-count', '0');
   const c = await counts(panel);
   expect(c[String(first)] ?? 0).toBe(0);
 });
@@ -366,7 +366,7 @@ test('the From-class gate makes a non-matching repaint a no-op', async () => {
   const { page, panel } = await openLabelTool();
   const first = Number(await panel.getAttribute('data-active-class'));
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 
   // Gate on Unclassified (0): after the first stroke nothing is class 0 any
   // more, so repainting must change nothing.
@@ -382,7 +382,7 @@ test('the From-class gate makes a non-matching repaint a no-op', async () => {
   // Wait for the second stroke's RESPONSE before comparing. pending-strokes
   // rises optimistically, so reading counts here raced the reply — and this
   // test asserts counts did NOT change, which a not-yet-arrived reply would
-  // satisfy for the wrong reason. Poll until the labelled total is stable at
+  // satisfy for the wrong reason. Poll until the labeled total is stable at
   // the full cloud, then compare.
   await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
     { timeout: 15_000 }).toBe(60);
@@ -399,18 +399,18 @@ test('closing the panel bakes the labels, and they never leave the screen', asyn
   // thing drawing it is the overlay.
   const { page, panel } = await openLabelTool();
   const active = await panel.getAttribute('data-active-class');
-  const colour = await classColour(page, active!);
+  const color = await classColor(page, active!);
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 
-  const samples = await closeAndAwaitBake(page, colour);
+  const samples = await closeAndAwaitBake(page, color);
   // Nothing on screen asked the user to wait: the rebuild is the app's business.
   expect(samples.filter((x) => x.pill).length, 'a progress pill appeared').toBe(0);
 
   // Reopening finds nothing pending (it is baked) and the labels as real data.
   await page.getByTestId('tool-label').click();
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toHaveAttribute('data-point-count', '60');
 });
@@ -421,7 +421,7 @@ test('you can reopen and keep painting while a bake is still running', async () 
   const { page, panel } = await openLabelTool();
   const first = Number(await panel.getAttribute('data-active-class'));
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await panel.getByRole('button', { name: 'Close' }).click();
   await expect(panel).toHaveCount(0);
 
@@ -434,7 +434,7 @@ test('you can reopen and keep painting while a bake is still running', async () 
   await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
     { timeout: 15_000 }).toBe(60);
 
-  await closeAndAwaitBake(page, await classColour(page, second));
+  await closeAndAwaitBake(page, await classColor(page, second));
 
   // Both bakes landed, and the second one won.
   await page.getByTestId('tool-label').click();
@@ -534,7 +534,7 @@ test('unexported labels are flagged in the panel and before File > New, until ex
   const { page, panel } = await openLabelTool();
   await expect(page.getByTestId('label-unexported')).toHaveCount(0);
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await expect(page.getByTestId('label-unexported')).toBeVisible();
   expect(await fileNewLabelWarning()).toContain('1 point cloud has hand labels');
 
@@ -564,10 +564,10 @@ for (const how of ['panel button', 'Cmd+Z'] as const) {
     const { page, panel } = await openLabelTool();
     const first = Number(await panel.getAttribute('data-active-class'));
     await paintWholeViewport(page);
-    await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+    await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 
     // Closing the panel bakes, and a bake is an undo boundary.
-    await closeAndAwaitBake(page, await classColour(page, first));
+    await closeAndAwaitBake(page, await classColor(page, first));
     await page.getByTestId('tool-label').click();
     await expect(panel).toBeVisible();
 
@@ -631,7 +631,7 @@ test('pending strokes belong to their cloud, not to the tool', async () => {
   await expect(panel).toBeVisible();
 
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
   const overlay = (id: string) => page.evaluate(
     (cid) => (window as any).__labelOverlayByCloud?.[cid]?.painted ?? 0, id);
@@ -641,7 +641,7 @@ test('pending strokes belong to their cloud, not to the tool', async () => {
   await expect(rowB).toHaveAttribute('data-selected', 'true');
   await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 10_000 });
   await expect(page.getByTestId('label-undo')).toBeDisabled();
-  await expect(panel).toHaveAttribute('data-labelled-count', '0', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '0', { timeout: 15_000 });
   // B paints nothing of A's; A's paint stays on screen (it is in A's session).
   await page.waitForTimeout(500);
   expect(await overlay(idB)).toBe(0);
@@ -651,13 +651,13 @@ test('pending strokes belong to their cloud, not to the tool', async () => {
   await expect(rowA).toHaveAttribute('data-selected', 'true');
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 10_000 });
   await expect(page.getByTestId('label-undo')).toBeEnabled();
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 });
 
 const painted = (page: LaunchedApp['page']) => page.evaluate(
   () => (window as any).__labelOverlay?.painted ?? 0);
 
-test('the panel Undo undoes the LAST stroke even after a stroke that labelled nothing', async () => {
+test('the panel Undo undoes the LAST stroke even after a stroke that labeled nothing', async () => {
   // The panel Undo undid by COUNT (keep = strokes - 1), but the backend only
   // records strokes that changed something. After a From-gated stroke that
   // matched nothing, "keep 1" kept the real stroke and the Undo did nothing.
@@ -674,11 +674,11 @@ test('the panel Undo undoes the LAST stroke even after a stroke that labelled no
   // Clear the gate and paint for real.
   await page.getByTestId(`label-from-${first}`).click();
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(60);
 
   await page.getByTestId('label-undo').click();
-  await expect(panel).toHaveAttribute('data-labelled-count', '0', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '0', { timeout: 15_000 });
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
   // The overlay agrees with the backend.
   await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(0);
@@ -691,7 +691,7 @@ test('Cmd+Z and Cmd+Shift+Z undo and redo a label stroke on the backend', async 
   const { page, panel } = await openLabelTool();
   const first = Number(await panel.getAttribute('data-active-class'));
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   const second = await otherClass(page, first);
   await page.getByTestId(`label-class-${second}`).click();
   await paintWholeViewport(page);
@@ -704,7 +704,7 @@ test('Cmd+Z and Cmd+Shift+Z undo and redo a label stroke on the backend', async 
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
 
   await page.keyboard.press('ControlOrMeta+z');
-  await expect(panel).toHaveAttribute('data-labelled-count', '0', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '0', { timeout: 15_000 });
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');
   await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(0);
 
@@ -786,7 +786,7 @@ test('a pause in painting bakes the column on its own', async () => {
     await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
     await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 30_000 });
     await expect(page.getByTestId('label-undo')).toBeDisabled();
-    await expect(panel).toHaveAttribute('data-labelled-count', '60');
+    await expect(panel).toHaveAttribute('data-labeled-count', '60');
   } finally {
     await page.evaluate(() => { delete (window as any).__labelIdleBakeMs; });
   }
@@ -810,7 +810,7 @@ test('the eye hides a class, and a hidden class is never repainted', async () =>
   const { page, panel } = await openLabelTool();
   const first = Number(await panel.getAttribute('data-active-class'));
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 
   await page.getByTestId(`label-visible-${first}`).click();
   await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(0);
@@ -838,7 +838,7 @@ test('Alt-click isolates a class, and again shows every class', async () => {
   const first = Number(await panel.getAttribute('data-active-class'));
   const second = await otherClass(page, first);
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(60);
 
   // Isolate the class nobody has: nothing draws.
@@ -855,12 +855,12 @@ test('Alt-click isolates a class, and again shows every class', async () => {
   await expect(page.getByTestId('label-class-0')).toHaveAttribute('data-visible', 'true');
 });
 
-test('a locked class is never repainted, and Protect locks every labelled class', async () => {
+test('a locked class is never repainted, and Protect locks every labeled class', async () => {
   const { page, panel } = await openLabelTool();
   const first = Number(await panel.getAttribute('data-active-class'));
   const second = await otherClass(page, first);
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
 
   // Lock the painted class: a stroke of another class over everything is a no-op.
   await page.getByTestId(`label-lock-${first}`).click();
@@ -874,7 +874,7 @@ test('a locked class is never repainted, and Protect locks every labelled class'
   // Locked is not hidden: the class still draws.
   await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(60);
 
-  // Protect is on exactly while every labelled class is locked...
+  // Protect is on exactly while every labeled class is locked...
   await page.getByTestId(`label-lock-${first}`).click();
   await page.getByTestId('label-protect').click();
   await expect(page.getByTestId('label-protect')).toHaveAttribute('data-active', 'true');
@@ -893,8 +893,8 @@ test('a locked class is never repainted, and Protect locks every labelled class'
     { timeout: 15_000 }).toBe(60);
 });
 
-test('the finder steps the camera through the places unlabelled points gather', async () => {
-  // Largest first, N forward and Shift+N back, showing only unlabelled points,
+test('the finder steps the camera through the places unlabeled points gather', async () => {
+  // Largest first, N forward and Shift+N back, showing only unlabeled points,
   // and it says so once there is nothing left to label.
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', join(repoRoot, 'tests', 'e2e', 'fixtures', 'two-blobs.xyz'));
@@ -907,11 +907,11 @@ test('the finder steps the camera through the places unlabelled points gather', 
   const status = page.getByTestId('label-finder-status');
   const target = () => page.evaluate(() => (window as any).__getCameraState().target as number[]);
 
-  await page.getByTestId('label-find-unlabelled').click();
+  await page.getByTestId('label-find-unlabeled').click();
   await expect(status).toHaveAttribute('data-index', '0', { timeout: 15_000 });
   await expect(status).toHaveAttribute('data-places', '2');
   await expect(status).toContainText('40 of 60');
-  // Only the unlabelled points are shown while finding.
+  // Only the unlabeled points are shown while finding.
   await expect(page.getByTestId('label-class-0')).toHaveAttribute('data-visible', 'true');
   const active = await panel.getAttribute('data-active-class');
   await expect(page.getByTestId(`label-class-${active}`)).toHaveAttribute('data-visible', 'false');
@@ -934,10 +934,10 @@ test('the finder steps the camera through the places unlabelled points gather', 
   });
   await page.waitForTimeout(500);
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await page.keyboard.press('n');
   await expect(status).toHaveAttribute('data-places', '0', { timeout: 15_000 });
-  await expect(status).toContainText('No unlabelled points left');
+  await expect(status).toContainText('No unlabeled points left');
 });
 
 test('number keys pick the numbered class rows', async () => {
@@ -991,22 +991,22 @@ async function dragRect(page: LaunchedApp['page'], frac = 1) {
 test('the rectangle paints what it encloses, at every depth', async () => {
   const { page, panel } = await openLabelTool();
   await page.getByTestId('label-tool-rect').click();
-  // The cylinder is centred, so the left half of the view holds about half of it.
+  // The cylinder is centered, so the left half of the view holds about half of it.
   await dragRect(page, 0.5);
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
-  await expect.poll(async () => Number(await panel.getAttribute('data-labelled-count')),
+  await expect.poll(async () => Number(await panel.getAttribute('data-labeled-count')),
     { timeout: 15_000 }).toBeGreaterThan(0);
-  const half = Number(await panel.getAttribute('data-labelled-count'));
+  const half = Number(await panel.getAttribute('data-labeled-count'));
   expect(half).toBeLessThan(60);
   // The tool stays armed: a second, full rectangle takes the rest.
   await dragRect(page, 1);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
   await expect(panel).toHaveAttribute('data-pending-strokes', '2');
 });
 
 test('R picks the rectangle, not a Rotate of a mesh selected alongside the cloud', async () => {
   // R is also the transform shortcut, and it rotates a selected mesh (or scan
-  // position). With a mesh selected together with the labelled cloud, pressing
+  // position). With a mesh selected together with the labeled cloud, pressing
   // R to pick the rectangle started rotating the mesh.
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', TINY);
@@ -1069,8 +1069,8 @@ test('Pick labels the whole piece under a click, and undo/redo replays it', asyn
   expect(target).not.toBeNull();
   await page.mouse.click(target!.x, target!.y);
 
-  const labelled = async () => Number(await panel.getAttribute('data-labelled-count'));
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(40);
+  const labeled = async () => Number(await panel.getAttribute('data-labeled-count'));
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(40);
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
   // The automatic size it used is filled in, ready to adjust.
   await expect.poll(async () => Number(await page.getByTestId('label-pick-size').inputValue()))
@@ -1086,7 +1086,7 @@ test('Pick labels the whole piece under a click, and undo/redo replays it', asyn
 
   // The stroke carries the piece itself, so undo and redo replay it exactly.
   await page.keyboard.press('ControlOrMeta+z');
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(0);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(0);
   await page.keyboard.press('ControlOrMeta+Shift+z');
-  await expect.poll(labelled, { timeout: 20_000 }).toBe(40);
+  await expect.poll(labeled, { timeout: 20_000 }).toBe(40);
 });

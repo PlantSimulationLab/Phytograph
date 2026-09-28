@@ -286,7 +286,7 @@ export function QSMPopup({
             <div className="text-[9px] text-neutral-500 mt-1">
               How evenly two branches must match in thickness before a shoot is
               treated as ENDING at that fork. Lower ends the trunk more readily
-              (headed / open-centre trees); higher traces it through more forks
+              (headed / open-center trees); higher traces it through more forks
               (central leader).
             </div>
           </div>

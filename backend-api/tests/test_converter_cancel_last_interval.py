@@ -5,9 +5,9 @@ check cancel; sleep(poll)`. That checks the cancel flag only while the child is
 still alive: a cancel set during the final 200 ms interval — after the last
 check, before the child exits 0 — fell out of the loop as a normal return, and
 `_build_octree_from_las` then INSTALLED the finished octree of an import the
-user had cancelled. The renderer had already dropped the scan (it saw the
+user had canceled. The renderer had already dropped the scan (it saw the
 cancel), so nothing was visibly wrong; only the cache grew. The E2E spec
-import-cancel.spec.ts ("cancelling an import stops the backend work and adds no
+import-cancel.spec.ts ("canceling an import stops the backend work and adds no
 scan") diffs the cache directory and caught it as a one-in-N flake: it clicks
 Cancel as soon as the `.staging` dir appears, and on a fast machine a 1 M-point
 conversion is short enough for the cancel to land in that last interval.
@@ -61,13 +61,13 @@ def test_cancel_during_the_last_poll_interval_still_cancels(tmp_path, monkeypatc
 
     monkeypatch.setattr(main.time, "sleep", sleep_then_cancel)
 
-    with pytest.raises(main.ScanCancelled):
+    with pytest.raises(main.ScanCanceled):
         main._run_potree_converter(las, out_dir, cancel_event=cancel_event, poll=0.2)
 
     assert slept["n"] >= 1, "the loop never polled — the shim exited before the first check, so this run proved nothing"
 
 
-def test_a_converter_that_finishes_uncancelled_still_returns_normally(tmp_path, monkeypatch):
+def test_a_converter_that_finishes_uncanceled_still_returns_normally(tmp_path, monkeypatch):
     """The post-loop check must not turn an ordinary clean exit into a cancel."""
     if os.name == "nt":
         pytest.skip("POSIX shim")

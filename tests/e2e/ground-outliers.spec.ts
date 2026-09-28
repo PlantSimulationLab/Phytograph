@@ -9,7 +9,7 @@ import { resetToFreshScene } from './helpers/resetApp';
 //
 // The scene origin, the ground grid and the ground-plane pick target all used
 // `bounds.min.z`, which is defined by a SINGLE point — so one bad low return
-// (multipath, a bird, a scanner artefact) sank the whole ground reference by
+// (multipath, a bird, a scanner artifact) sank the whole ground reference by
 // however far that point happened to be. Real scans carry a few of these.
 //
 // The fixture is a 3 m canopy over a flat ground slab at z≈0, plus 3 points
@@ -82,7 +82,7 @@ test('the camera looks at the real ground, so the scene is not framed around the
   const targetZWorld = state.target[2] + state.displayOffset[2];
 
   // The look-at sits within the REAL content, not down among the noise. Framing
-  // aims at the content's centre (not at ground level — zoom-to-cursor, rather
+  // aims at the content's center (not at ground level — zoom-to-cursor, rather
   // than a look-at pinned to the origin, is what makes the scene reachable), so
   // the bar is that it is above the noise and inside the cloud's real Z range.
   // Had framing used the raw minimum it would sit ~12 m below the terrain,

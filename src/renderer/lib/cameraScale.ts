@@ -1,7 +1,7 @@
 // Camera zoom limits derived from the scene's ROBUST extent.
 //
 // Why not the raw AABB: a LiDAR scene routinely carries a handful of far
-// outliers — a stray return a kilometre out, a mis-registered scan, a scanner
+// outliers — a stray return a kilometer out, a mis-registered scan, a scanner
 // marker parked far from the data. The raw bounding box is set by exactly those
 // points, so limits scaled from it are wrong for the 99.9% of the scene the user
 // is actually looking at: `maxDistance` lands inside the real content and
@@ -116,7 +116,7 @@ export function zoomLimits(bounds: SceneScaleInput): ZoomLimits {
 
 /**
  * Limit a dolly step so the camera stops short of the surface it is flying at
- * instead of tunnelling through it.
+ * instead of tunneling through it.
  *
  * `distanceToSurface` is the distance from the camera to the geometry under the
  * cursor along the view ray; `step` is the requested forward movement (positive

@@ -167,7 +167,7 @@ test('erase brush: Clear Strokes discards the preview without erasing', async ()
   const box = await canvas.boundingBox();
   if (!box) throw new Error('viewer canvas has no bounding box');
 
-  // Click the centre of the viewport (where the cylinder projects) to stamp.
+  // Click the center of the viewport (where the cylinder projects) to stamp.
   await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
 
   await expect
