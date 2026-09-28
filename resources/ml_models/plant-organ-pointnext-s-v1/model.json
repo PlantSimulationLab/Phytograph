@@ -1,0 +1,137 @@
+{
+  "format": "phytograph-ml-model",
+  "schema_version": 1,
+  "id": "plant-organ-pointnext-s-v1",
+  "name": "Plant organs (PointNeXt-S v1)",
+  "description": "Soil, stem and leaf for single herbaceous plants, potted or in a row, plus one instance per leaflet. Trained on Helios synthetic scans of eight dicot species (90 %) and hand-labelled tomato (Pheno4D), soybean (Demeter) and sugar beet (Sugar4D) (10 %). Works on scans with about 3 mm spacing or finer.",
+  "task": "plant_organ",
+  "arch": "pointnext",
+  "hparams": {
+    "in_channels": 3,
+    "num_classes": 3,
+    "radii": [
+      0.007071067811865476,
+      0.014142135623730952,
+      0.028284271247461905,
+      0.05656854249492381,
+      0.11313708498984762
+    ],
+    "variant": "S",
+    "offset": true
+  },
+  "hierarchy": {
+    "voxel": 0.002,
+    "levels": 5,
+    "k": 16,
+    "radius_factor": 2.5,
+    "stride": 4,
+    "clamp_factor": 4.0
+  },
+  "inputs": {
+    "channels": [
+      "dxyz"
+    ]
+  },
+  "crop": {
+    "max_points": 24000,
+    "inner_fraction": 0.7
+  },
+  "classes": [
+    {
+      "value": 1,
+      "name": "Soil",
+      "color": "#8a6a4a"
+    },
+    {
+      "value": 2,
+      "name": "Stem",
+      "color": "#c9a227"
+    },
+    {
+      "value": 3,
+      "name": "Leaf",
+      "color": "#3f9b3a"
+    }
+  ],
+  "output_slug": "plant_organ",
+  "training": {
+    "config": "organ_S_joint_r10_s1",
+    "task": "plant_organ",
+    "steps": 40000,
+    "train_groups": [
+      {
+        "name": "tomato",
+        "weight": 0.035,
+        "datasets": [
+          "pheno4d_tomato"
+        ],
+        "splits": [
+          "train"
+        ]
+      },
+      {
+        "name": "soybean",
+        "weight": 0.035,
+        "datasets": [
+          "demeter_soybean"
+        ],
+        "splits": [
+          "train"
+        ]
+      },
+      {
+        "name": "beet",
+        "weight": 0.03,
+        "datasets": [
+          "sugar4d"
+        ],
+        "splits": [
+          "train"
+        ]
+      },
+      {
+        "name": "potted",
+        "weight": 0.54,
+        "datasets": [
+          "synth_herb_potted_v4"
+        ],
+        "splits": [
+          "train"
+        ]
+      },
+      {
+        "name": "field",
+        "weight": 0.36,
+        "datasets": [
+          "synth_herb_field_v4"
+        ],
+        "splits": [
+          "train"
+        ]
+      }
+    ],
+    "commit": "0f48406f5092fcafe41216115b7b2f13ae759f2e"
+  },
+  "metrics": {
+    "val_mean_item_miou": 0.8822878661898846,
+    "val_pooled": {
+      "n": 690898,
+      "oa": 0.9757706636869697,
+      "miou": 0.9187325296485039,
+      "iou_soil": 0.9939528703527944,
+      "f1_soil": 0.996967265507065,
+      "recall_soil": 0.9969537072295055,
+      "precision_soil": 0.9969808241534067,
+      "iou_stem": 0.7955573029290348,
+      "f1_stem": 0.886139697832275,
+      "recall_stem": 0.8615794025680261,
+      "precision_stem": 0.9121413176689346,
+      "iou_leaf": 0.9666874156636824,
+      "f1_leaf": 0.9830615765011768,
+      "recall_leaf": 0.9874348968057028,
+      "precision_leaf": 0.978726823996667
+    },
+    "step": 40000,
+    "val_mean_item_inst_f1": 0.8768488436450472
+  }
+}

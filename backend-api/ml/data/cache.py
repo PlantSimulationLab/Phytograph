@@ -14,7 +14,9 @@ One item directory holds:
   base voxel, so training still has a choice of representative per voxel) and
   sorted by cell.
 - ``sem.npy``: (N,) uint8 unified semantic codes (``readers.SEM``).
-- ``organ.npy`` and ``reflectance.npy``, when the source has them.
+- ``organ.npy``, ``inst.npy`` (int32 organ instance id, -1 = none),
+  ``age.npy`` (float32 leaf age in days, -1 = none) and ``reflectance.npy``,
+  when the source has them.
 - ``cells.npy`` / ``starts.npy``: the sorted occupied cell keys and each
   cell's first row (``starts`` has one extra entry, N).
 - ``meta.json``: provenance, split, point counts per class, the cell size.
@@ -75,6 +77,10 @@ def write_item(cloud: Cloud, out_dir: str | Path, meta: dict,
         np.save(out / "organ.npy", cloud.organ[sel][order])
     if cloud.reflectance is not None:
         np.save(out / "reflectance.npy", cloud.reflectance[sel][order].astype(np.float32))
+    if cloud.inst is not None:
+        np.save(out / "inst.npy", cloud.inst[sel][order].astype(np.int32))
+    if cloud.age is not None:
+        np.save(out / "age.npy", cloud.age[sel][order].astype(np.float32))
     np.save(out / "cells.npy", cells)
     np.save(out / "starts.npy", starts)
 
@@ -86,6 +92,8 @@ def write_item(cloud: Cloud, out_dir: str | Path, meta: dict,
         "extent": (hi - lo).tolist(), "counts": counts,
         "has_organ": cloud.organ is not None,
         "has_reflectance": cloud.reflectance is not None,
+        "has_inst": cloud.inst is not None,
+        "n_instances": int(len(np.unique(cloud.inst[cloud.inst >= 0]))) if cloud.inst is not None else 0,
         "source_meta": cloud.meta,
     })
     (out / "meta.json").write_text(json.dumps(full, indent=2) + "\n")
@@ -132,8 +140,35 @@ class CachedItem:
     def reflectance(self):
         return self._arr("reflectance")
 
+    @property
+    def inst(self):
+        return self._arr("inst")
+
     def __len__(self):
         return int(self.meta["n_points"])
+
+    def instance_centroids(self) -> np.ndarray:
+        """(max_id + 1, 3) centroid of each instance id, item frame (cached)."""
+        return self._instance_stats()[0]
+
+    def instance_radii(self) -> np.ndarray:
+        """(max_id + 1,) RMS distance of each instance's points to its centroid."""
+        return self._instance_stats()[1]
+
+    def _instance_stats(self):
+        if "_centroids" not in self._class_rows:
+            inst = np.asarray(self.inst)
+            has = inst >= 0
+            n = int(inst.max()) + 1 if has.any() else 0
+            xyz = np.asarray(self.xyz, np.float64)[has]
+            ids = inst[has]
+            cnt = np.maximum(np.bincount(ids, minlength=n).astype(np.float64), 1)
+            c = np.stack([np.bincount(ids, weights=xyz[:, j], minlength=n) for j in range(3)], axis=1)
+            c /= cnt[:, None]
+            d2 = ((xyz - c[ids]) ** 2).sum(axis=1)
+            r = np.sqrt(np.bincount(ids, weights=d2, minlength=n) / cnt)
+            self._class_rows["_centroids"] = (c, r)
+        return self._class_rows["_centroids"]
 
     def rows_of(self, codes: tuple[int, ...]) -> np.ndarray:
         """Row indices whose semantic code is in ``codes`` (cached)."""

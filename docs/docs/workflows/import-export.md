@@ -125,7 +125,8 @@ dropdowns in; you correct anything that's wrong before importing:
   **Label** column holds class ids (tree id, segment, classification) and
   colors as discrete classes with a legend. Phytograph's own class columns —
   `tree_instance`, `wood_class`, `ground_class`, `noise_class`,
-  `manual_class`, `las_classification` — arrive as **Label** already, so a
+  `plant_organ`, `leaflet_id`, `manual_class`, `las_classification` — arrive
+  as **Label** already, so a
   file this app exported re-imports colored the way it left. For any other
   column the wizard flags values that look like class labels with a one-click
   *"use Label?"* suggestion. That flag reads only the values (small

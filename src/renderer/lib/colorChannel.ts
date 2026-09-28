@@ -19,7 +19,7 @@ import { ColormapName, RGB } from './colormaps';
 import {
   CategoricalScheme,
   categoricalSchemeForRange,
-  TREE_INSTANCE_ATTRIBUTE,
+  isInstanceIdAttribute,
 } from './classification';
 
 // The pseudocolor mapping owned by a single object (cloud / mesh / LAD grid).
@@ -181,7 +181,7 @@ function schemeAndKind(
     || channel.mode === 'rgb' || channel.mode === 'per-scan') {
     return { kind: 'none', scheme: null };
   }
-  // Tree instances are arbitrary nominal ids, often 100+ of them: a gradient is
+  // Tree and leaflet instances are arbitrary nominal ids, often 100+ of them: a gradient is
   // meaningless and the class list would fill the viewport, so the legend is
   // dropped while the points stay coloured.
   //
@@ -191,7 +191,7 @@ function schemeAndKind(
   // and it is the only thing that can carry those names. The caller also gates
   // on `LEGEND_MAX_CLASSES`, so the viewport-filling case this guard exists for
   // is unaffected either way.
-  if (channel.field === TREE_INSTANCE_ATTRIBUTE) return { kind: 'none', scheme: null };
+  if (isInstanceIdAttribute(channel.field)) return { kind: 'none', scheme: null };
   if (channel.field) {
     const range: [number, number] | null = dataRange
       ? [dataRange.min, dataRange.max]

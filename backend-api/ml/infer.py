@@ -14,6 +14,10 @@ k nearest voxels of a seed point. The cloud is covered crop by crop:
 4. Take the argmax per voxel and scatter it back to every input point through
    the inverse map.
 
+A model with an offset head (organ instances) has its per-point centroid
+offsets averaged the same way. They are metric vectors in the cloud's frame,
+so votes from different crops agree wherever the network does.
+
 Every voxel is at the inner part of at least one crop, so none is predicted
 only from a crop's edge. Crops are the same shape training sampled: a kNN ball
 around a real point, centred on it. :func:`crop_features` is shared with the
@@ -76,8 +80,10 @@ def to_torch(batch: dict, device) -> dict:
             else:
                 out[key] = [None if v is None else torch.from_numpy(v.astype(np.int64)).to(device)
                             for v in val]
-        elif key in ("feat", "weight"):
+        elif key in ("feat", "weight", "offset", "log_radius"):
             out[key] = torch.from_numpy(val.astype(np.float32)).to(device)
+        elif key in ("allowed", "has_offset"):
+            out[key] = torch.from_numpy(val.astype(bool)).to(device)
         elif key == "label":
             out[key] = torch.from_numpy(val.astype(np.int64)).to(device)
         else:
@@ -96,12 +102,16 @@ def predict(
     cancel=None,
     return_probs: bool = False,
     threads: int | None = None,
+    return_offsets: bool = False,
 ):
     """Classify every point of ``xyz`` (N, 3).
 
     Returns ``values``, an (N,) int32 array of class values (``pkg.classes[i]
     ["value"]``, never output indices). With ``return_probs`` it returns
-    ``(values, probs)``, where ``probs`` is (N, C) float32.
+    ``(values, probs)``, where ``probs`` is (N, C) float32. With
+    ``return_offsets`` (a model with an offset head) the per-point centroid
+    offsets, (N, 3) float32 metres, and instance radii, (N,) float32 metres,
+    are appended to whatever is returned.
 
     ``progress(fraction)`` is called after each batch, and ``cancel()`` is
     polled before each batch (raising :class:`Cancelled`).
@@ -112,9 +122,21 @@ def predict(
     n = len(xyz)
     n_cls = len(pkg.classes)
     values_of = np.array([c["value"] for c in pkg.classes], dtype=np.int32)
+    has_offset = getattr(model, "offset_head", None) is not None
+    if return_offsets and not has_offset:
+        raise ValueError(f"model {pkg.id!r} has no offset head")
+
+    def pack(values, probs, offsets):
+        out = [values]
+        if return_probs:
+            out.append(probs)
+        if return_offsets:
+            out.extend(offsets)
+        return out[0] if len(out) == 1 else tuple(out)
+
     if n == 0:
-        empty = np.empty(0, np.int32)
-        return (empty, np.empty((0, n_cls), np.float32)) if return_probs else empty
+        return pack(np.empty(0, np.int32), np.empty((0, n_cls), np.float32),
+                    (np.empty((0, 3), np.float32), np.empty(0, np.float32)))
 
     # Centre in float64 before narrowing: georeferenced clouds (UTM) would
     # lose millimetres in float32 otherwise.
@@ -132,6 +154,7 @@ def predict(
     tree = cKDTree(vox)
     k_crop = int(min(pkg.crop_max_points, m))
     acc = np.zeros((m, n_cls), dtype=np.float32)
+    acc_off = np.zeros((m, 4), dtype=np.float32) if has_offset else None
     wsum = np.zeros(m, dtype=np.float32)
     claimed = np.zeros(m, dtype=bool)
     # A fixed shuffled order makes seeds spread over the cloud rather than
@@ -173,13 +196,20 @@ def predict(
                     break
                 built = list(pool.map(build_one, seeds))
                 batch = to_torch(H.collate([b[2] for b in built]), device)
-                probs = torch.softmax(model(batch).float(), dim=-1).cpu().numpy()
+                out = model(batch)
+                offs = None
+                if has_offset:
+                    out, offs, logr = out
+                    offs = torch.cat([offs.float(), logr.float()[:, None]], dim=1).cpu().numpy()
+                probs = torch.softmax(out.float(), dim=-1).cpu().numpy()
                 off = 0
                 for idx, d, _ in built:
                     k = len(idx)
                     dmax = max(float(d[-1]), 1e-6)
                     w = np.clip(1.0 - d / dmax, 0.05, 1.0).astype(np.float32)
                     acc[idx] += probs[off:off + k] * w[:, None]
+                    if offs is not None:
+                        acc_off[idx] += offs[off:off + k] * w[:, None]
                     wsum[idx] += w
                     off += k
                 done = int(claimed.sum())
@@ -190,6 +220,12 @@ def predict(
 
     vox_probs = acc / np.maximum(wsum, 1e-12)[:, None]
     values = values_of[vox_probs.argmax(axis=1)][inverse]
-    if return_probs:
-        return values, vox_probs[inverse]
-    return values
+    offsets = None
+    if return_offsets:
+        # A voxel's offset points from the voxel's representative; the other
+        # points in the voxel are at most a voxel away, which is the
+        # clustering's own resolution.
+        o = (acc_off / np.maximum(wsum, 1e-12)[:, None])[inverse]
+        # Log radii are averaged in log space (a geometric mean over crops).
+        offsets = (o[:, :3], np.exp(o[:, 3]).astype(np.float32))
+    return pack(values, vox_probs[inverse] if return_probs else None, offsets)

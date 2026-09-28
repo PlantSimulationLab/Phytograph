@@ -18,10 +18,19 @@ Positions enter the network in metric units, relative to each group's centre
 and divided by that level's radius. They are never rescaled per crop: a twig's
 diameter is itself the signal, so a 1 cm branch must look different from a
 10 cm one.
+
+With ``offset=True`` a second head regresses, per point, the metric vector to
+its organ instance's centroid (PointGroup-style centroid voting, Jiang et al.,
+CVPR 2020) and the log of that instance's RMS radius. The radius sets the
+clustering scale per point (``ml.instances``): organs here span a 5 mm
+cotyledon to a 30 cm beet leaf, and no single vote bandwidth separates both.
+``forward`` then returns ``(logits, offsets, log_radius)``; without it, just
+the logits, so existing packages load and run unchanged.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -89,6 +98,8 @@ class PointNeXtSeg(nn.Module):
         width: int | None = None,
         blocks: tuple[int, ...] | None = None,
         dropout: float = 0.5,
+        offset: bool = False,
+        offset_scale: float = 0.05,
     ):
         super().__init__()
         cfg = VARIANTS[variant]
@@ -117,11 +128,17 @@ class PointNeXtSeg(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(widths[0], num_classes),
         )
+        # The offset head predicts in units of ``offset_scale`` metres, so its
+        # outputs start near the size of an organ rather than 20x smaller.
+        self.offset_scale = float(offset_scale)
+        self.offset_head = nn.Sequential(_mlp([widths[0], widths[0]]), nn.Linear(widths[0], 4)) if offset else None
 
     def forward(self, batch: dict) -> torch.Tensor:
         """``batch`` is a collated hierarchy (see ``ml.hierarchy.collate``)
         whose arrays are torch tensors on the model's device, plus ``feat``:
-        (n0, in_channels). Returns (n0, num_classes) logits."""
+        (n0, in_channels). Returns (n0, num_classes) logits, and with the
+        offset head also (n0, 3) offsets in metres and (n0,) log radii
+        (log metres)."""
         pos, local, down = batch["pos"], batch["local"], batch["down"]
         x = self.stem(batch["feat"])
         skips = [x]
@@ -134,4 +151,7 @@ class PointNeXtSeg(nn.Module):
             idx, w = batch["up_idx"][i], batch["up_w"][i]
             interp = (_grouped(x, idx) * w[..., None]).sum(dim=1)
             x = self.up[j](torch.cat([interp, skips[i - 1]], dim=-1))
-        return self.head(x)
+        if self.offset_head is None:
+            return self.head(x)
+        o = self.offset_head(x)
+        return self.head(x), o[:, :3] * self.offset_scale, o[:, 3] + float(np.log(self.offset_scale))

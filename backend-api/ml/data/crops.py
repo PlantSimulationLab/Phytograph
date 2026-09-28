@@ -21,6 +21,20 @@ than trusted fully. Synthetic labels are exact and keep weight 1.
 A task maps unified semantic codes to network output indices through its
 class map, and every unmapped code is ignored (label -1). The cache is
 therefore shared by every task.
+
+**Partial labels.** A code may instead map to a SET of output classes, when
+the source labels a region without drawing the line the task needs (Sugar4D's
+leaf is blade and petiole undivided). Each crop carries ``allowed``, an
+(n, C) mask, and the loss maximises the probability of the set. A singleton
+set is ordinary cross-entropy, so ``label`` (the index, or -1 for anything
+that is not a single class) stays the scoring truth.
+
+**Instances.** When the task names ``instance_codes`` and the item has an
+``inst`` array, each such point also carries ``offset``: the metric vector to
+its instance's centroid over the WHOLE item, not the crop, rotated and scaled
+with the crop, and ``log_radius``, the log of the instance's RMS radius. A centroid vote is crop-independent, which is what lets
+sliding-crop inference average it (``ml.infer``) where an embedding could not
+be compared across crops.
 """
 
 from __future__ import annotations
@@ -76,12 +90,29 @@ class TaskMap:
     it. Built from a task config's ``class_map``."""
     sem_to_index: dict[int, int]
     num_classes: int
+    sem_to_allowed: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    instance_codes: tuple[int, ...] = ()
 
     def lut(self) -> np.ndarray:
+        """Code -> output index for single-class codes, else IGNORE. This is
+        the truth every score is computed against."""
         t = np.full(256, IGNORE, np.int64)
         for code, idx in self.sem_to_index.items():
             t[code] = idx
         return t
+
+    def allowed_lut(self) -> np.ndarray:
+        """(256, C) bool: the classes each code is consistent with. A row of
+        all False is an ignored code."""
+        t = np.zeros((256, self.num_classes), bool)
+        for code, idx in self.sem_to_index.items():
+            t[code, idx] = True
+        for code, idxs in self.sem_to_allowed.items():
+            t[code, list(idxs)] = True
+        return t
+
+    def trains(self, code: int) -> bool:
+        return code in self.sem_to_index or code in self.sem_to_allowed
 
 
 def _rotation(rng: np.random.Generator, aug: AugConfig) -> np.ndarray:
@@ -109,6 +140,8 @@ class CropSampler:
         w = np.array([s.weight for s in sources], dtype=np.float64)
         self.p = w / w.sum()
         self.lut = task.lut()
+        self.allowed_lut = task.allowed_lut()
+        self.inst_codes = np.array(task.instance_codes, np.int64)
         self.spec = spec
         self.channels = channels
         self.crop = crop or CropConfig()
@@ -132,7 +165,7 @@ class CropSampler:
         if rng.random() < cfg.minority_seed_prob:
             rows = it.rows_of(tuple(cfg.minority_codes))
         if rows is None or len(rows) == 0:
-            labelled = [c for c in range(255) if self.lut[c] != IGNORE]
+            labelled = [c for c in range(255) if self.allowed_lut[c].any()]
             rows = it.rows_of(tuple(labelled))
         if len(rows) == 0:
             return None
@@ -151,6 +184,18 @@ class CropSampler:
             return None
         pts = np.asarray(it.xyz[ball], dtype=np.float64) - centre
         sem = np.asarray(it.sem[ball])
+        # Offset to the instance centroid (item frame), zero and unused where
+        # there is no instance. Carried through every thinning below.
+        off = None
+        if len(self.inst_codes) and it.inst is not None:
+            inst = np.asarray(it.inst[ball])
+            has = (inst >= 0) & np.isin(sem, self.inst_codes)
+            off = np.zeros((len(ball), 5), np.float64)
+            if has.any():
+                cents, radii = it.instance_centroids(), it.instance_radii()
+                off[has, :3] = cents[inst[has]] - (pts[has] + centre)
+                off[has, 3] = 1.0
+                off[has, 4] = np.log(np.maximum(radii[inst[has]], 1e-4))
         refl = None
         if "reflectance" in self.channels:
             if it.reflectance is None:
@@ -159,7 +204,11 @@ class CropSampler:
 
         if self.augment:
             a = self.aug
-            pts = pts @ _rotation(rng, a).T * rng.uniform(*a.scale)
+            rot, scale = _rotation(rng, a), rng.uniform(*a.scale)
+            pts = pts @ rot.T * scale
+            if off is not None:
+                off[:, :3] = off[:, :3] @ rot.T * scale
+                off[:, 4] += np.log(scale)
             if rng.random() < a.scanner_dropout_prob:
                 ang = rng.uniform(0, 2 * np.pi)
                 dist = rng.uniform(*a.scanner_distance)
@@ -170,6 +219,7 @@ class CropSampler:
                 keep[np.argmin(np.linalg.norm(pts, axis=1))] = True
                 pts, sem = pts[keep], sem[keep]
                 refl = None if refl is None else refl[keep]
+                off = None if off is None else off[keep]
             if a.jitter > 0:
                 pts = pts + np.clip(rng.normal(0, a.jitter, pts.shape), -2.5 * a.jitter, 2.5 * a.jitter)
             voxel = self.spec.voxel
@@ -180,6 +230,7 @@ class CropSampler:
             keep, _ = grid_sample(pts, self.spec.voxel)
         pts, sem = pts[keep], sem[keep]
         refl = None if refl is None else refl[keep]
+        off = None if off is None else off[keep]
 
         # k nearest to the seed, re-centred on the nearest surviving point.
         tree = cKDTree(pts)
@@ -189,17 +240,22 @@ class CropSampler:
         pts = pts[idx] - pts[idx[0]]
         sem = sem[idx]
         refl = None if refl is None else refl[idx]
+        off = None if off is None else off[idx]
 
         label = self.lut[sem]
-        if (label != IGNORE).sum() < 16:
+        allowed = self.allowed_lut[sem]
+        if allowed.any(axis=1).sum() < 16:
             return None
         weight = np.ones(len(pts), np.float32)
         if src.noisy and cfg.boundary_weight < 1.0:
             nb_tree = cKDTree(pts)
             d, nb = nb_tree.query(pts, k=min(9, len(pts)), distance_upper_bound=cfg.boundary_radius)
             valid = nb < len(pts)
-            nb_lab = np.where(valid, label[np.minimum(nb, len(pts) - 1)], label[:, None])
-            boundary = (nb_lab != label[:, None]).any(axis=1)
+            # On the source codes, not the task's classes, so a partial code's
+            # edge counts as a boundary too.
+            code = sem.astype(np.int64)
+            nb_lab = np.where(valid, code[np.minimum(nb, len(pts) - 1)], code[:, None])
+            boundary = (nb_lab != code[:, None]).any(axis=1)
             weight[boundary] = cfg.boundary_weight
 
         pts32 = pts.astype(np.float32)
@@ -207,4 +263,14 @@ class CropSampler:
         item["feat"] = crop_features(pts32, refl, self.channels)
         item["label"] = label
         item["weight"] = weight
+        if len(self.inst_codes):
+            # Present (zeros) even for items without instances, so a batch can
+            # always be collated.
+            o = off if off is not None else np.zeros((len(pts), 5))
+            item["allowed"] = allowed
+            item["offset"] = o[:, :3].astype(np.float32)
+            item["has_offset"] = o[:, 3] > 0
+            item["log_radius"] = o[:, 4].astype(np.float32)
+        elif self.allowed_lut.sum(axis=1).max() > 1:
+            item["allowed"] = allowed
         return item

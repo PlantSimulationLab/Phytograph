@@ -1,0 +1,151 @@
+import { Clover, Loader2, X } from 'lucide-react';
+import { InfoHint } from '../../InfoHint';
+import { MlModelControls } from './MlModelControls';
+import { type OrganUnits } from '../../../utils/backendApi';
+
+// What the result is coloured by once the columns are written. Both columns are
+// always written; this only picks the colour mode the cloud is left in.
+export type OrganColourBy = 'organ' | 'leaflet';
+
+// Presentational tool panel for ML plant-organ segmentation (soil / stem / leaf
+// plus one id per leaflet). State and the `onSegment` handler live in
+// PointCloudViewer; the parent gates on `showOrganSegmentPanel && selectedIds.size === 1`.
+interface OrganSegmentPanelProps {
+  units: OrganUnits;
+  colourBy: OrganColourBy;
+  modelId: string | null;
+  inProgress: boolean;
+  error: string | null;
+  onClose: () => void;
+  onUnitsChange: (u: OrganUnits) => void;
+  onColourByChange: (c: OrganColourBy) => void;
+  onModelIdChange: (id: string | null) => void;
+  onSegment: () => void;
+  onCancel: () => void;
+}
+
+export function OrganSegmentPanel({
+  units,
+  colourBy,
+  modelId,
+  inProgress,
+  error,
+  onClose,
+  onUnitsChange,
+  onColourByChange,
+  onModelIdChange,
+  onSegment,
+  onCancel,
+}: OrganSegmentPanelProps) {
+  return (
+    <div data-testid="organ-segment-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
+          <Clover className="w-3 h-3" />
+          Plant Organs
+        </div>
+        <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
+          <X className="w-3 h-3 text-neutral-400" />
+        </button>
+      </div>
+
+      <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
+        Labels a single herbaceous plant (potted or in a row) as soil, stem and
+        leaf, and numbers each leaflet. Petioles count as stem. Leave the soil
+        or pot in; it is one of the classes. Needs about 3 mm point spacing or
+        finer.
+      </div>
+
+      <div className="mb-3">
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Units
+          <InfoHint
+            data-testid="organ-units-help"
+            label="Units"
+            text="What the cloud's coordinates are in. The model works in metres, and an XYZ file does not say which unit it was written in. Auto reads it from the cloud's size: anything more than 30 units across is taken as millimetres, anything smaller as metres. The result says which it used; if that is wrong, pick the units here and run again."
+          />
+        </label>
+        <select
+          data-testid="organ-units"
+          value={units}
+          onChange={(e) => onUnitsChange(e.target.value as OrganUnits)}
+          disabled={inProgress}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+        >
+          <option value="auto">Auto (from the cloud's size)</option>
+          <option value="m">Metres</option>
+          <option value="cm">Centimetres</option>
+          <option value="mm">Millimetres</option>
+        </select>
+      </div>
+
+      <div className="mb-3">
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Colour result by
+          <InfoHint
+            data-testid="organ-colour-help"
+            label="Colour result by"
+            text="Both are written to the cloud as attributes (Plant organ and Leaflet), so you can switch between them later in the colour menu. Leaflets are numbered by height, lowest first; soil and stem points are leaflet 0."
+          />
+        </label>
+        <select
+          data-testid="organ-colour-by"
+          value={colourBy}
+          onChange={(e) => onColourByChange(e.target.value as OrganColourBy)}
+          disabled={inProgress}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+        >
+          <option value="organ">Organ (soil / stem / leaf)</option>
+          <option value="leaflet">Leaflet</option>
+        </select>
+      </div>
+
+      <MlModelControls
+        task="plant_organ"
+        testIdPrefix="organ"
+        noModelText="No plant-organ model is installed."
+        modelId={modelId}
+        onModelIdChange={onModelIdChange}
+        disabled={inProgress}
+      />
+
+      {error && (
+        <div className="mt-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-3">
+        {inProgress ? (
+          <div className="flex gap-2">
+            <button
+              data-testid="organ-segment-run-button"
+              disabled
+              className="flex-1 px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-neutral-600 text-neutral-400 cursor-not-allowed"
+            >
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Segmenting…
+            </button>
+            <button
+              data-testid="organ-segment-cancel-button"
+              onClick={onCancel}
+              className="px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-1 bg-red-600 hover:bg-red-500 text-white"
+            >
+              <X className="w-3 h-3" />
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            data-testid="organ-segment-run-button"
+            onClick={onSegment}
+            className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+          >
+            <Clover className="w-3 h-3" />
+            Segment Organs
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

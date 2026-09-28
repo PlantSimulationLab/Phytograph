@@ -19,6 +19,12 @@ import {
   unregisterContinuousSlug,
   LAS_CLASSIFICATION_ATTRIBUTE,
   ASPRS_CLASS_LIST,
+  LEAFLET_ID_ATTRIBUTE,
+  PLANT_ORGAN_ATTRIBUTE,
+  TREE_INSTANCE_ATTRIBUTE,
+  isDynamicCategoricalAttribute,
+  isInstanceIdAttribute,
+  treeInstanceColor,
 } from './classification';
 
 describe('categoricalSchemeFor', () => {
@@ -414,5 +420,42 @@ describe('las_classification (ASPRS standard classes)', () => {
     // registered scheme must win so the real names survive.
     const scheme = categoricalSchemeForRange(LAS_CLASSIFICATION_ATTRIBUTE, [2, 5]);
     expect(scheme?.classes.find((c) => c.value === 5)?.label).toBe('High Vegetation');
+  });
+});
+
+describe('plant organ scheme (ML organ tool)', () => {
+  it('registers soil / stem / leaf at the values the backend writes', () => {
+    const scheme = categoricalSchemeFor(PLANT_ORGAN_ATTRIBUTE);
+    expect(scheme?.classes.map((c) => [c.value, c.label])).toEqual([[1, 'Soil'], [2, 'Stem'], [3, 'Leaf']]);
+    expect(isCategoricalAttribute('Plant_Organ')).toBe(true);
+    // Not the Helios synthetic-scan `organ` field: different codes, different scheme.
+    expect(categoricalSchemeFor('organ')?.classes.length).toBe(7);
+  });
+
+  it('gives the three organs three distinct colours', () => {
+    const scheme = categoricalSchemeFor(PLANT_ORGAN_ATTRIBUTE)!;
+    expect(new Set([1, 2, 3].map((v) => rgbToHex(colorForClassValue(scheme, v)))).size).toBe(3);
+  });
+});
+
+describe('leaflet_id (ML organ tool)', () => {
+  it('is a data-generated instance field, like tree_instance', () => {
+    expect(isDynamicCategoricalAttribute(LEAFLET_ID_ATTRIBUTE)).toBe(true);
+    expect(isInstanceIdAttribute(LEAFLET_ID_ATTRIBUTE)).toBe(true);
+    expect(isInstanceIdAttribute(TREE_INSTANCE_ATTRIBUTE)).toBe(true);
+    expect(isInstanceIdAttribute(PLANT_ORGAN_ATTRIBUTE)).toBe(false);
+    expect(hasRegisteredScheme(LEAFLET_ID_ATTRIBUTE)).toBe(false);
+  });
+
+  it('builds 0..N from the range, with 0 as "Not a leaflet"', () => {
+    const scheme = categoricalSchemeForRange(LEAFLET_ID_ATTRIBUTE, [0, 3])!;
+    expect(scheme.classes.map((c) => c.label)).toEqual(['Not a leaflet', 'Leaflet 1', 'Leaflet 2', 'Leaflet 3']);
+    expect(scheme.classes[2].color).toEqual(treeInstanceColor(2));
+  });
+
+  it('lists exactly the surviving ids when they are known (a filtered cloud)', () => {
+    const scheme = categoricalSchemeForRange(LEAFLET_ID_ATTRIBUTE, [0, 40], [7, 2, 7, 40])!;
+    expect(scheme.classes.map((c) => c.value)).toEqual([2, 7, 40]);
+    expect(scheme.classes[0].label).toBe('Leaflet 2');
   });
 });

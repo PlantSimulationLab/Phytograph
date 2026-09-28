@@ -250,7 +250,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.92.0"
+BACKEND_VERSION = "0.93.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -570,8 +570,8 @@ def device_info():
 
 # ==================== ML MODELS ====================
 # Trained point-classification models (backend-api/ml/). Torch is only ever
-# imported inside a seg worker (`_run_killable` tools "wood", "ml_device",
-# "ml_import"), never in this server process: importing it costs ~0.5 GB of RSS
+# imported inside a seg worker (`_run_killable` tools "wood", "organs",
+# "ml_device", "ml_import"), never in this server process: importing it costs ~0.5 GB of RSS
 # for the life of the backend, and most sessions never touch ML.
 
 _ML_DEVICE_CACHE: "Optional[dict]" = None
@@ -600,8 +600,9 @@ def ml_models(task: Optional[str] = None):
         if task and pkg.task != task:
             continue
         models.append({**pkg.summary(), "origin": origin,
-                       "is_default": pkg.id == registry.DEFAULT_WOOD_MODEL})
-    return {"models": models, "default_wood_model": registry.DEFAULT_WOOD_MODEL}
+                       "is_default": pkg.id == registry.DEFAULT_MODELS.get(pkg.task)})
+    return {"models": models, "default_wood_model": registry.DEFAULT_WOOD_MODEL,
+            "default_models": registry.DEFAULT_MODELS}
 
 
 class MlModelImportRequest(BaseModel):
@@ -7714,6 +7715,102 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Wood/leaf segmentation failed: {str(e)}")
 
+
+
+# ==================== PLANT ORGANS (ML) ====================
+# Two per-point columns from a `plant_organ` model (backend-api/ml/organs.py):
+# `plant_organ` 1=soil, 2=stem (petioles, rachises, petiolules), 3=leaf; and
+# `leaflet_id` 0=not a leaflet, 1..N = one leaflet each, numbered by height
+# (lowest first, the order PlantCloudFit reads as age). For single herbaceous
+# plants, potted or in a row. Mirrors the wood endpoints: inline `points` or a
+# `source`, full resolution, labels aligned 1:1 with the resolved point order.
+PLANT_ORGAN_SLUG = "plant_organ"
+PLANT_ORGAN_LABEL = "Plant organ"
+LEAFLET_ID_SLUG = "leaflet_id"
+LEAFLET_ID_LABEL = "Leaflet"
+
+
+class OrganSegmentationRequest(BaseModel):
+    """Plant organs and leaflets from a trained model.
+
+    `units` is what the cloud's coordinates are in ("m", "cm", "mm"), or
+    "auto" to read it from the cloud's size (more than 30 units across is
+    millimetres). The model works in metres; nothing in an XYZ file says which
+    unit it was written in. `model_id` None = the bundled default."""
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    units: Literal["auto", "m", "cm", "mm"] = "auto"
+    model_id: Optional[str] = None
+
+
+class OrganSegmentationResponse(BaseModel):
+    success: bool
+    organ: List[int] = []           # 1=soil, 2=stem, 3=leaf
+    leaflet: List[int] = []         # 0=none, 1..N
+    num_points: int = 0
+    num_soil: int = 0
+    num_stem: int = 0
+    num_leaf: int = 0
+    num_leaflets: int = 0
+    units: Optional[str] = None     # the units the cloud was read in
+    model_id: Optional[str] = None
+    warnings: List[str] = []
+    error: Optional[str] = None
+
+
+def _require_organ_model(model_id: Optional[str]) -> None:
+    """A missing or wrong-task model is the user's to fix: a readable 400 before
+    a worker is spawned, as `_require_wood_ml_model` does for wood."""
+    from ml import registry
+    from ml.package import PackageError
+    try:
+        registry.find(model_id, task="plant_organ")
+    except PackageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _organ_counts(organ: np.ndarray, leaflet: np.ndarray, meta: dict) -> dict:
+    return {
+        "num_soil": int((organ == 1).sum()), "num_stem": int((organ == 2).sum()),
+        "num_leaf": int((organ == 3).sum()), "num_leaflets": int(meta.get("num_leaflets", 0)),
+        "units": meta.get("units"), "model_id": meta.get("model_id"),
+        "warnings": list(meta.get("warnings", [])),
+    }
+
+
+@app.post("/api/segment/organs", response_model=OrganSegmentationResponse)
+async def segment_organs_points(request: OrganSegmentationRequest, http_request: Request):
+    """Label every point soil / stem / leaf and number the leaflets. Returns
+    per-point arrays aligned to input order; persisting onto an octree-backed
+    cloud is `/api/cloud/session/{session_id}/segment_organs`. Callers send HIT
+    points only (a sky/miss point ~1 km out would be read as a giant plant)."""
+    if request.source is not None:
+        src = request.source.model_copy(update={"max_points": None})
+        points, _, _ = await run_in_threadpool(_read_points_from_source, src)
+        points = np.asarray(points, dtype=np.float64)
+    elif request.points is not None:
+        points = np.asarray(request.points, dtype=np.float64).reshape(-1, 3)
+    else:
+        raise HTTPException(status_code=400, detail="Provide `points` or `source`.")
+    if len(points) < 10:
+        return OrganSegmentationResponse(success=False, num_points=len(points),
+                                         error="Need at least 10 points for organ segmentation.")
+    _require_organ_model(request.model_id)
+    try:
+        out, meta = await _run_killable(
+            "organs", points, {"units": request.units, "model_id": request.model_id},
+            http_request=http_request)
+    except ClientDisconnected:
+        return OrganSegmentationResponse(success=False, num_points=len(points),
+                                         error="Organ segmentation was cancelled.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Organ segmentation failed: {e}")
+    organ, leaflet = out[:, 0], out[:, 1]
+    return OrganSegmentationResponse(
+        success=True, organ=organ.tolist(), leaflet=leaflet.tolist(), num_points=len(points),
+        **_organ_counts(organ, leaflet, meta))
 
 # ==================== TREE INSTANCE SEGMENTATION (TreeIso) ====================
 # `tree_instance` is the per-point scalar field this writes: 0 = unassigned,
@@ -16257,7 +16354,11 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             is_miss = r["is_miss"]  # (m,) u8, 1==miss
             has_misses = bool(record_misses and is_miss.size and np.any(is_miss != 0))
             session = None
-            if r["points"].shape[0] > 0:
+            # PHYTOGRAPH_E2E_SCAN_WITHOUT_SESSION=1 takes the fallback below on
+            # purpose: it is the one way the app still produces an in-memory
+            # (non-octree) cloud, and the only way an E2E test can drive the
+            # tools' in-memory paths (tests/e2e/organ-segment-in-memory.spec.ts).
+            if r["points"].shape[0] > 0 and os.environ.get("PHYTOGRAPH_E2E_SCAN_WITHOUT_SESSION") != "1":
                 try:
                     session = _create_lidar_scan_session(r, request.retained_standard_fields)
                 except Exception:
@@ -25808,7 +25909,7 @@ async def _run_killable(
     origins: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
 ):
-    """Run one segmentation compute (`tool` ∈ ground|wood|trees|denoise|skeleton|normals)
+    """Run one segmentation compute (`tool` ∈ ground|wood|organs|trees|denoise|skeleton|normals)
     in a KILLABLE child process and return its result.
 
     Returns, by tool:
@@ -25817,6 +25918,7 @@ async def _run_killable(
       - wood        → (np.ndarray labels, dict {"warnings": [...]})
       - denoise     → (np.ndarray labels, dict {"flagged": int, "params_used": {...}, ...})
       - normals     → ((N, 5) float32 values, dict {"k": int, "tiled": bool, ...})
+      - organs      → ((N, 2) int32 [plant_organ, leaflet_id], dict {"units": ..., ...})
       - skeleton    → dict (the SkeletonResponse fields)
 
     The child is polled off the event loop; if `http_request` disconnects (the
@@ -25938,7 +26040,7 @@ async def _run_killable_admitted(
             return labels, feats
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
-        if tool in ("ground", "denoise", "normals"):
+        if tool in ("ground", "denoise", "normals", "organs"):
             return labels, (result_dict or {})
         return labels
 
@@ -29828,6 +29930,7 @@ def _class_field_slugs() -> "set[str]":
     return {
         TREE_INSTANCE_SLUG, MANUAL_CLASS_SLUG, WOOD_CLASS_SLUG,
         GROUND_CLASS_SLUG, denoise.NOISE_CLASS_SLUG, "las_classification",
+        PLANT_ORGAN_SLUG, LEAFLET_ID_SLUG,
     }
 
 
@@ -37976,6 +38079,21 @@ def _session_reflectance_scalar(sess, scalar_slug, keep):
     return None
 
 
+def _raise_if_session_edited_locked(sess: "CloudSession", deleted0: np.ndarray, tool: str) -> None:
+    """409 when the session's points changed since `deleted0` was taken.
+
+    The ML/geometry tools snapshot the hit survivors, release the lock for the
+    seconds-to-minutes the worker runs, then scatter the result back over the
+    survivors. An erase, filter or undo in between changes that set: the result
+    then no longer lines up (a shape error, or, when the count happens to
+    match, labels silently written onto the wrong points). Caller holds the
+    lock."""
+    if not np.array_equal(sess.deleted, deleted0):
+        raise HTTPException(
+            status_code=409,
+            detail=f"The cloud was edited while {tool} ran; run it again.")
+
+
 @app.post("/api/cloud/session/{session_id}/segment_wood")
 async def session_segment_wood(session_id: str, request: SessionWoodSegmentRequest,
                                http_request: Request):
@@ -38030,6 +38148,66 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
+
+class SessionOrganSegmentRequest(BaseModel):
+    """Organ segmentation on the session's in-RAM points; appends `plant_organ`
+    and `leaflet_id` columns and rebuilds the octree."""
+    units: Literal["auto", "m", "cm", "mm"] = "auto"
+    model_id: Optional[str] = None
+
+
+def _organ_snapshot(sess: "CloudSession"):
+    """(hit points, hit mask, deleted mask) under the lock: one copy of the hit
+    survivors (`_session_hit_positions_locked`), plus the deletion state the
+    result will be scattered against."""
+    with _cloud_session_lock:
+        hit = _session_survivor_hit_mask(sess)
+        return _session_hit_positions_locked(sess, hit), hit, sess.deleted.copy()
+
+
+def _organ_write_columns(sess: "CloudSession", deleted0: np.ndarray, hit: np.ndarray,
+                         out: np.ndarray) -> None:
+    """Scatter the hit-subset result over the survivors and append both columns.
+    Refuses (409, `_raise_if_session_edited_locked`) if the cloud's points were
+    edited while the model ran."""
+    organ = np.zeros(len(hit), dtype=np.int64)
+    leaflet = np.zeros(len(hit), dtype=np.int64)
+    organ[hit] = out[:, 0]
+    leaflet[hit] = out[:, 1]
+    with _cloud_session_lock:
+        _raise_if_session_edited_locked(sess, deleted0, "organ segmentation")
+        _session_add_extra_column(sess, PLANT_ORGAN_SLUG, PLANT_ORGAN_LABEL, organ)
+        _session_add_extra_column(sess, LEAFLET_ID_SLUG, LEAFLET_ID_LABEL, leaflet)
+
+
+@app.post("/api/cloud/session/{session_id}/segment_organs")
+async def session_segment_organs(session_id: str, request: SessionOrganSegmentRequest,
+                                 http_request: Request):
+    """Plant organs on the in-RAM survivors → append `plant_organ` and
+    `leaflet_id` → rebuild the octree from the arrays. No source file read.
+
+    Computed on HIT survivors only: a miss (~1 km out) would inflate the cloud's
+    size, which is what `units="auto"` reads, and drag the sliding crops across
+    empty space. Misses get 0 in both columns. The worker is killable, and the
+    columns are written only after it returns, so a cancel leaves the session
+    as it was. The snapshot and the write run off the event loop (each is a
+    full-length gather)."""
+    sess = _get_cloud_session(session_id)
+    pts, hit, deleted0 = await run_in_threadpool(_organ_snapshot, sess)
+    if len(pts) < 10:
+        raise HTTPException(status_code=400, detail="Need at least 10 points for organ segmentation.")
+    _require_organ_model(request.model_id)
+    try:
+        out, meta = await _run_killable(
+            "organs", pts, {"units": request.units, "model_id": request.model_id},
+            http_request=http_request)
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Organ segmentation was cancelled.")
+    await run_in_threadpool(_organ_write_columns, sess, deleted0, hit, out)
+    cache_key, cache_dir, octree_meta = await run_in_threadpool(_session_rebuild, sess)
+    return {"session_id": session_id, "point_count": int(len(pts)),
+            **_organ_counts(out[:, 0], out[:, 1], meta),
+            "cache_id": cache_key, "cache_dir": str(cache_dir), **octree_meta}
 
 class SessionTreeSegmentRequest(TreeSegmentationRequest):
     """Run TreeIso on the session's in-RAM points and append a `tree_instance`
@@ -38363,7 +38541,7 @@ def _reserved_scalar_slugs() -> "set[str]":
     reserved = {
         _MISS_SLUG, TREE_INSTANCE_SLUG, MANUAL_CLASS_SLUG, WOOD_CLASS_SLUG,
         GROUND_CLASS_SLUG, HEIGHT_ABOVE_GROUND_SLUG,
-        denoise.NOISE_CLASS_SLUG,
+        denoise.NOISE_CLASS_SLUG, PLANT_ORGAN_SLUG, LEAFLET_ID_SLUG,
         # Read by name by `_export_session_to_las`, which promotes the first
         # class column it finds into the standard LAS `classification` byte.
         "las_classification",

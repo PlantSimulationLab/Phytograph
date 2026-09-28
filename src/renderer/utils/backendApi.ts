@@ -1447,6 +1447,50 @@ export async function segmentWood(
   return postSegment<WoodSegmentationResponse>('/api/segment/wood', request, signal);
 }
 
+// ==================== PLANT ORGAN SEGMENTATION API ====================
+
+/**
+ * Plant organs from the bundled ML model (backend-api/ml/organs.py): per point
+ * `organ` 1=soil, 2=stem, 3=leaf, and `leaflet` 0=not a leaflet, 1..N one id
+ * per leaflet, numbered by height (lowest first). Send HIT points only.
+ * `units` is what the coordinates are in; 'auto' reads it from the cloud's size
+ * (more than 30 units across = millimetres) and the response says which.
+ */
+export type OrganUnits = 'auto' | 'm' | 'cm' | 'mm';
+
+export interface OrganSegmentationRequest {
+  points?: number[][];
+  source?: BackendPointSource;
+  units?: OrganUnits;
+  model_id?: string;
+}
+
+export interface OrganSegmentationCounts {
+  num_soil: number;
+  num_stem: number;
+  num_leaf: number;
+  num_leaflets: number;
+  units: 'm' | 'cm' | 'mm' | null;
+  model_id: string | null;
+  // e.g. the cloud is not plant-sized in the units it was read in.
+  warnings: string[];
+}
+
+export interface OrganSegmentationResponse extends OrganSegmentationCounts {
+  success: boolean;
+  organ: number[];
+  leaflet: number[];
+  num_points: number;
+  error?: string;
+}
+
+export async function segmentOrgans(
+  request: OrganSegmentationRequest,
+  signal?: AbortSignal,
+): Promise<OrganSegmentationResponse> {
+  return postSegment<OrganSegmentationResponse>('/api/segment/organs', request, signal, 600000);
+}
+
 // ==================== TREE INSTANCE SEGMENTATION API ====================
 
 /**
@@ -5280,6 +5324,17 @@ export async function sessionSegmentWood(
   signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult & { octree_deferred?: boolean }> {
   return postSegment<CloudSessionBakeResult & { octree_deferred?: boolean }>(`/api/cloud/session/${sessionId}/segment_wood`, params, signal, 600000);
+}
+
+/** Plant organs on the session's in-RAM HIT points: appends `plant_organ` and
+ * `leaflet_id` columns and rebuilds the octree from the arrays (no file read). */
+export async function sessionSegmentOrgans(
+  sessionId: string,
+  params: { units?: OrganUnits; model_id?: string },
+  signal?: AbortSignal,
+): Promise<CloudSessionBakeResult & OrganSegmentationCounts> {
+  return postSegment<CloudSessionBakeResult & OrganSegmentationCounts>(
+    `/api/cloud/session/${sessionId}/segment_organs`, params, signal, 600000);
 }
 
 /** Estimate per-point normals on the session's in-RAM points, append the

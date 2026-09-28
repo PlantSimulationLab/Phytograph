@@ -19,5 +19,7 @@ cd "$REPO/backend-api"
 export PYTHONPATH="$REPO/backend-api"
 export OMP_NUM_THREADS=1
 # Each worker parses one file; more than ~12 saturates NFS reads.
-venv/bin/python -u research/ml/preprocess.py --out "$ML_ROOT/cache" \
-    --workers $(( SLURM_CPUS_PER_TASK < 12 ? SLURM_CPUS_PER_TASK : 12 ))
+# Extra arguments pass through, e.g. the herbaceous organ corpus:
+#   CACHE=$ML_ROOT/cache_organ sbatch research/ml/jobs/preprocess.sbatch --corpus organ
+venv/bin/python -u research/ml/preprocess.py --out "${CACHE:-$ML_ROOT/cache}" \
+    --workers $(( SLURM_CPUS_PER_TASK < 12 ? SLURM_CPUS_PER_TASK : 12 )) "$@"

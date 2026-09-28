@@ -196,6 +196,42 @@ export function buildTreeInstanceSchemeFromValues(values: readonly number[]): Ca
   };
 }
 
+// Leaflet instances from the ML organ tool (`leaflet_id`): 0 = not in a leaflet
+// (soil, stem), 1..N = one leaflet each, numbered by height, lowest first.
+// Generated from the data exactly like tree_instance, with the same palette,
+// because it is the same kind of field: arbitrary nominal ids, often 100+.
+// Mirrors LEAFLET_ID_SLUG in backend-api/main.py.
+export const LEAFLET_ID_ATTRIBUTE = 'leaflet_id';
+
+function leafletLabel(id: number): string {
+  return id === 0 ? 'Not a leaflet' : `Leaflet ${id}`;
+}
+
+export function buildLeafletScheme(maxId: number): CategoricalScheme {
+  const top = Math.max(0, Math.round(maxId));
+  const classes: ClassDef[] = [];
+  for (let i = 0; i <= top; i++) {
+    classes.push({ value: i, label: leafletLabel(i), color: treeInstanceColor(i) });
+  }
+  return { attribute: LEAFLET_ID_ATTRIBUTE, classes };
+}
+
+export function buildLeafletSchemeFromValues(values: readonly number[]): CategoricalScheme {
+  const ids = Array.from(new Set(values.map((v) => Math.round(v)))).sort((a, b) => a - b);
+  return {
+    attribute: LEAFLET_ID_ATTRIBUTE,
+    classes: ids.map((i) => ({ value: i, label: leafletLabel(i), color: treeInstanceColor(i) })),
+  };
+}
+
+// Fields whose values are instance ids (one per tree, one per leaflet): nominal,
+// unbounded, and usually too many for a legend.
+export function isInstanceIdAttribute(attribute: string | undefined | null): boolean {
+  if (!attribute) return false;
+  const key = attribute.toLowerCase();
+  return key === TREE_INSTANCE_ATTRIBUTE || key === LEAFLET_ID_ATTRIBUTE;
+}
+
 // Build a generic categorical scheme spanning the integer values in [min,max],
 // for a field the user marked categorical in the import wizard. Reuses the
 // tree-instance golden-angle palette so successive classes stay distinct, with
@@ -286,6 +322,25 @@ const ORGAN_SCHEME: CategoricalScheme = {
   classes: ORGAN_SCHEME_CLASSES,
 };
 
+// Plant organs from the ML organ tool (backend-api/ml/organs.py writes
+// `plant_organ`): 1 = soil, 2 = stem (petioles, rachises and petiolules
+// included), 3 = leaf. Distinct from `organ` above, which is the fine organ a
+// Helios synthetic scan tags each hit with. Colours are the model package's own
+// (ml/tasks.py `plant_organ`), so the legend matches what the package declares.
+// Mirrors PLANT_ORGAN_SLUG in backend-api/main.py.
+export const PLANT_ORGAN_ATTRIBUTE = 'plant_organ';
+
+export const PLANT_ORGAN_SCHEME_CLASSES: ClassDef[] = [
+  { value: 1, label: 'Soil', color: [0.54, 0.42, 0.29] },
+  { value: 2, label: 'Stem', color: [0.79, 0.64, 0.15] },
+  { value: 3, label: 'Leaf', color: [0.25, 0.61, 0.23] },
+];
+
+const PLANT_ORGAN_SCHEME: CategoricalScheme = {
+  attribute: PLANT_ORGAN_ATTRIBUTE,
+  classes: PLANT_ORGAN_SCHEME_CLASSES,
+};
+
 // A LAS file's own `classification` byte, carried in by the importer under the
 // `las_` prefix (the bare name would collide with a reserved LAS dimension and
 // crash laspy on export — see main.py's _LAS_STD_DIMS note).
@@ -338,6 +393,7 @@ const SCHEMES: Record<string, CategoricalScheme> = {
   [NOISE_CLASS_ATTRIBUTE]: NOISE_SCHEME,
   [MISS_ATTRIBUTE]: MISS_SCHEME,
   [ORGAN_ATTRIBUTE]: ORGAN_SCHEME,
+  [PLANT_ORGAN_ATTRIBUTE]: PLANT_ORGAN_SCHEME,
   [LAS_CLASSIFICATION_ATTRIBUTE]: LAS_CLASSIFICATION_SCHEME,
 };
 
@@ -400,14 +456,15 @@ export function unregisterContinuousSlug(slug: string | undefined | null): void 
 }
 
 // True for attributes whose categorical scheme is generated from the data range
-// rather than registered with a fixed class list: the built-in tree_instance,
+// rather than registered with a fixed class list: the built-in tree_instance and
+// leaflet_id,
 // plus any slug a user marked categorical in the import wizard. Callers build
 // the scheme from the attribute's observed [min,max] via categoricalSchemeForRange.
 export function isDynamicCategoricalAttribute(attribute: string | undefined | null): boolean {
   if (!attribute) return false;
   const key = attribute.toLowerCase();
   if (FORCE_CONTINUOUS.has(key)) return false;
-  return key === TREE_INSTANCE_ATTRIBUTE || DYNAMIC_CATEGORICAL.has(key);
+  return isInstanceIdAttribute(key) || DYNAMIC_CATEGORICAL.has(key);
 }
 
 // Resolve a categorical scheme for an attribute, generating it from `range`
@@ -444,6 +501,10 @@ export function categoricalSchemeForRange(
     if (haveObserved) return buildTreeInstanceSchemeFromValues(observed!);
     const maxId = range ? range[1] : 0;
     return buildTreeInstanceScheme(maxId);
+  }
+  if (key === LEAFLET_ID_ATTRIBUTE) {
+    if (haveObserved) return buildLeafletSchemeFromValues(observed!);
+    return buildLeafletScheme(range ? range[1] : 0);
   }
   const registered = categoricalSchemeFor(attribute);
   if (registered) return registered;

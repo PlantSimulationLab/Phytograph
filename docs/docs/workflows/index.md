@@ -67,6 +67,7 @@ by the four stages of a typical processing pipeline.
 - :phytograph-segment-ground: **[Segment ground points](segment-ground.md)** — classify and remove the ground with the Cloth Simulation Filter.
 
 - :phytograph-segment-wood: **[Separate leaf and wood](segment-wood.md)** — split a scan into woody and foliage points by local geometry.
+- :material-clover: **[Segment plant organs](segment-organs.md)** — label a herbaceous plant soil / stem / leaf and number its leaflets.
 
 - :phytograph-segment-trees: **[Segment individual trees](segment-trees.md)** — separate a multi-tree cloud into per-tree instances.
 

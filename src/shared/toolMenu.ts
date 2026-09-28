@@ -58,6 +58,7 @@ export const TOOLS_MENU: ToolMenuSection[] = [
       { id: 'cloud-label', label: 'Label Points' },
       { id: 'cloud-ground-segment', label: 'Segment Ground' },
       { id: 'cloud-wood-segment', label: 'Segment Wood / Leaf' },
+      { id: 'cloud-organ-segment', label: 'Segment Plant Organs' },
       { id: 'cloud-segment-trees', label: 'Segment Trees' },
     ],
   },
