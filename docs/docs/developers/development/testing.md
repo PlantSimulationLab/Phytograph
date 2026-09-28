@@ -4,12 +4,20 @@ Three layers, three frameworks:
 
 | Layer | Framework | Location | Command |
 |---|---|---|---|
-| Backend unit | pytest | `backend-api/tests/` | `pytest` (in venv) or `npm run test:backend` |
+| Backend unit | pytest | `backend-api/tests/` | `npm run test:backend` |
 | Frontend unit | Vitest | colocated `*.test.ts(x)` | `npm run test:unit` |
 | End-to-end | Playwright + `_electron` | `tests/e2e/` | `npm run test:e2e` |
 
 E2E prerequisites: `npm run build && npm run build:backend` must succeed
 first — the tests drive the real packaged app.
+
+Run the backend suite through `npm run test:backend` rather than a bare
+`pytest`. The runner puts the PyTorch tests (`tests/test_ml_*.py`) in their
+own pytest process, because on macOS PyTorch and the Helios native library
+each bring their own OpenMP runtime, and the two can't share a process: a
+single pytest run hangs at the first PyTorch test. Name any new test file
+that uses PyTorch `test_ml_*.py` so the runner isolates it. To run specific
+files, pass their paths (`npm run test:backend -- tests/test_lad.py`).
 
 ## Testing code that needs a proprietary library
 
