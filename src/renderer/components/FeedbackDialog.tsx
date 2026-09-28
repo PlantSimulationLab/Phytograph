@@ -117,7 +117,7 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
       className="fixed inset-0 z-50 flex items-center justify-center"
       onKeyDown={(e) => e.stopPropagation()}
     >
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
       <div
         data-testid="feedback-dialog"

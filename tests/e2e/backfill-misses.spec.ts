@@ -82,9 +82,13 @@ test('Backfill Misses recovers sky points and unblocks LAD', async () => {
 
     // Reopen reflects the CURRENT panel selection (regression guard: the modal
     // must re-seed from the live selection on every open, not carry over a prior
-    // session's). Close via the backdrop (the modal swallows Escape), confirm the
-    // scan is still selected in the panel, reopen, and check it's checked again.
+    // session's). A backdrop click must NOT close it (a stray click would throw
+    // away every setting typed in); close via the X button (the modal swallows
+    // Escape), confirm the scan is still selected in the panel, reopen, and check
+    // it's checked again.
     await page.mouse.click(5, 5);
+    await expect(backfillPopup).toBeVisible();
+    await page.getByTestId('backfill-close').click();
     await expect(backfillPopup).not.toBeVisible();
     await expect(scanRows.nth(0)).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-backfill-misses').click();

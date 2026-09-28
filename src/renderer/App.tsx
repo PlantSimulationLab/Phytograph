@@ -2433,7 +2433,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           (the same as a relaunch). Unrecoverable, so confirm first. */}
       {newConfirmOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setNewConfirmOpen(false)} />
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
           <div
             data-testid="new-confirm-dialog"
             className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-sm mx-4 p-6"

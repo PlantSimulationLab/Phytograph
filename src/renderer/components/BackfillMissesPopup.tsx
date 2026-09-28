@@ -160,7 +160,7 @@ export function BackfillMissesPopup({
       className="fixed inset-0 z-50 flex items-center justify-center"
       onKeyDown={(e) => e.stopPropagation()}
     >
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
       <div data-testid="backfill-popup" className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-2xl mx-4 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 bg-neutral-800/90">
@@ -168,7 +168,7 @@ export function BackfillMissesPopup({
             <CloudFog className="w-4 h-4 text-neutral-400" />
             <h2 className="text-sm font-semibold text-white">Backfill Misses</h2>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
+          <button data-testid="backfill-close" onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
             <X className="w-4 h-4 text-neutral-400" />
           </button>
         </div>

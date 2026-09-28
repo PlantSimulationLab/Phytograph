@@ -191,10 +191,7 @@ export function RieglProjectDialog({
     // a drop, so both can be on screen at once. At equal z-index the
     // later-rendered overlay won, hiding the dialog behind a blur.
     <div className="fixed inset-0 z-[60] flex items-center justify-center">
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={() => onResolve(null)}
-      />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
       <div
         data-testid="riegl-project-dialog"
         className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col overflow-hidden"

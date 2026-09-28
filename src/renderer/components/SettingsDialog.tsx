@@ -29,7 +29,7 @@ interface SettingsDialogProps {
 // real settings. These are genuinely global (not per-cloud) defaults; per-session
 // overrides still live in the viewer's Display panel.
 //
-// Opened from the app/File menu (⌘,/Ctrl+,). Closes on X, backdrop click, or Esc.
+// Opened from the app/File menu (⌘,/Ctrl+,). Closes on X or Esc — never on a backdrop click (see modalBackdrop.test.ts).
 export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -228,7 +228,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={close} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
       <div
         data-testid="settings-dialog"

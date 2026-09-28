@@ -28319,10 +28319,7 @@ export default function PointCloudViewer({
       {/* Overwrite / duplicate / cancel prompt when a scan already has point data (#3) */}
       {scanOverwriteConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setScanOverwriteConfirm(null)}
-          />
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
           <div className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 overflow-hidden">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-neutral-700">
               <Radio className="w-5 h-5 text-neutral-400" />

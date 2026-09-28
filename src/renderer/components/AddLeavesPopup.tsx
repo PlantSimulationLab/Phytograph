@@ -153,7 +153,7 @@ export function AddLeavesPopup({ isOpen, onClose, qsm, onAddLeaves }: AddLeavesP
       className="fixed inset-0 z-50 flex items-center justify-center"
       onKeyDown={(e) => e.stopPropagation()}
     >
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
       <div data-testid="add-leaves-popup" className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 bg-neutral-800/90">

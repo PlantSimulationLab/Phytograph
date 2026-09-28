@@ -44,7 +44,7 @@ export function SceneTypeMismatchDialog({ mismatch, onCancel, onChoose }: Props)
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onCancel} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
       <div
         data-testid="scene-mismatch-dialog"
         className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 overflow-hidden"
