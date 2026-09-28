@@ -10,7 +10,7 @@ before importing uvicorn so the frozen PyInstaller binary can re-enter as a
 worker. NOT imported by the FastAPI server — it only runs in the child.
 
 Protocol (all files live in `workdir`):
-  IN   request.json     {"tool": "ground|wood|trees|denoise|skeleton|poisson|normals|ml_device|ml_import", "params": {...}}
+  IN   request.json     {"tool": "ground|wood|organs|trees|denoise|skeleton|poisson|normals|ml_device|ml_import", "params": {...}}
        input.npy        (N, 3) float64 points
        reflectance.npy  optional (N,) float64           (wood only)
        seeds.npy        optional (S, 3) float64          (trees only)
@@ -19,6 +19,7 @@ Protocol (all files live in `workdir`):
        origins.npy      optional (N, 3) float64          (normals only; per-point
                                                           beam origins)
   OUT  output.npy       (N,) int labels                  (ground/wood/trees/denoise)
+                        (N, 2) int32 [plant_organ, leaflet_id] (organs)
                         (N, 5) float32                   (normals)
        result.json      skeleton's structured result dict (skeleton only);
                         the device probe (ml_device); the installed model's
@@ -124,6 +125,19 @@ def run(workdir: str) -> int:
                     result = {"success": False, "error": str(e)}
             with open(os.path.join(workdir, "result.json"), "w") as f:
                 json.dump(result, f, default=_json_default)
+            return 0
+
+        if tool == "organs":
+            # Plant organs + leaflets from a trained model (ml/organs.py). Here
+            # so torch never enters the server process, and so Cancel can kill
+            # it. Needs nothing from main, so it skips that import (and libhelios).
+            from ml.organs import label_plant
+            organ, leaflet, meta = label_plant(
+                points, model_id=params.get("model_id"), units=params.get("units", "auto"))
+            np.save(os.path.join(workdir, "output.npy"),
+                    np.column_stack([organ, leaflet]).astype(np.int32))
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(meta, f, default=_json_default)
             return 0
 
         # Import the compute functions lazily, AFTER args are staged, so a

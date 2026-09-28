@@ -716,7 +716,10 @@ def test_class_field_name_matching_is_tolerant_of_spelling():
     swept up with them."""
     for name in ("tree_instance", "Tree Instance", "TREE_INSTANCE",
                  "scalar_wood_class", "ground_class", "noise_class",
-                 "manual_class", "las_classification"):
+                 "manual_class", "las_classification",
+                 # The organ tool's columns, so an exported result re-imports
+                 # as Label and keeps its Soil/Stem/Leaf colouring.
+                 "plant_organ", "Plant Organ", "leaflet_id", "scalar_leaflet_id"):
         assert main._is_class_field_name(name), name
     for name in ("height_above_ground", "reflectance", "curvature",
                  "intensity", "col_4", "", None):

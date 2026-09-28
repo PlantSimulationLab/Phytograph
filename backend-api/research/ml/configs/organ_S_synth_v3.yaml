@@ -1,0 +1,23 @@
+name: organ_S_synth_v3
+description: "Plant organ PointNeXt-S trained on v3 synthetic (small-triangle fix, soil mounds, young-leaf partial labels) herbaceous scans only (noise spread + morphology jitter) (checkpoint chosen on REAL val)."
+task: plant_organ
+cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache_organ
+out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs
+model: {variant: S}
+# Herbaceous organs are millimetre-scale (a tomato petiolule is ~1 mm across),
+# so the base voxel is 2 mm where trees use 1 cm. Level radii run 7 mm - 11 cm.
+hierarchy: {voxel: 0.002, levels: 5, k: 16}
+channels: [dxyz]
+crop: {max_points: 24000, fetch_radius: 0.15, fetch_radius_max: 1.0, boundary_radius: 0.004,
+       minority_seed_prob: 0.3}
+aug: {scale: [0.85, 1.2], jitter: 0.0005, scanner_distance: [0.5, 4.0], coarse_grid: [1.2, 3.0]}
+train:
+  - {name: potted, weight: 0.6, datasets: [synth_herb_potted_v3], splits: [train]}
+  - {name: field, weight: 0.4, datasets: [synth_herb_field_v3], splits: [train]}
+val: {splits: [val], max_points_per_item: 400000}
+optim: {steps: 50000, batch: 8, lr: 0.002, weight_decay: 0.05, warmup: 1000, label_smoothing: 0.1,
+        offset_weight: 0.25, size_weight: 0.5}
+eval_every: 2500
+checkpoint_every: 500
+workers: 14
+seed: 0

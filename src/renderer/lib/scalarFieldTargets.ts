@@ -190,7 +190,7 @@ export function intersectScalarFields(
 }
 
 /** Class-column slugs whose ids are per-cloud, so pooling them mixes identities. */
-const PER_CLOUD_CLASS_SLUGS: readonly string[] = ['tree_instance'];
+const PER_CLOUD_CLASS_SLUGS: readonly string[] = ['tree_instance', 'leaflet_id'];
 
 /** Above this many distinct values, an integer column reads as a measurement. */
 const CLASS_LIKE_MAX_SPAN = 64;

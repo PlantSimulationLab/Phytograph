@@ -125,6 +125,7 @@ nav:
       - 2. Segmentation:
           - Segment ground points: workflows/segment-ground.md
           - Separate leaf and wood: workflows/segment-wood.md
+          - Segment plant organs: workflows/segment-organs.md
           - Segment individual trees: workflows/segment-trees.md
           - Label points by hand: workflows/label-points.md
       - 3. Reconstruction & analysis:

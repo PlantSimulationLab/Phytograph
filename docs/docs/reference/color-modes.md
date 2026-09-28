@@ -183,6 +183,15 @@ The **`tree_instance`** attribute produced by
 each tree's colour is generated on the fly (a perceptually-spaced hue rotation)
 and the legend lists Tree 1, Tree 2, …, with unassigned points in grey.
 
+The **Plant organ** attribute produced by
+[Segment plant organs](../workflows/segment-organs.md) (1 = soil, 2 = stem,
+3 = leaf) is categorical with a fixed legend: soil brown, stem gold, leaf
+green. Its companion **Leaflet** attribute (`0` = not a leaflet, `1..N` = one
+number per leaflet, lowest first) is generated on the fly like `tree_instance`:
+every leaflet gets its own colour, and soil and stem are grey. Like
+`tree_instance`, it draws no legend, because a plant can have more than a
+hundred leaflets.
+
 The **Organ Type** attribute carried by a
 [synthetic scan](../workflows/simulate-scan.md) of a generated plant (when
 **organ type** is checked under **Retained per-hit fields**) is categorical too:

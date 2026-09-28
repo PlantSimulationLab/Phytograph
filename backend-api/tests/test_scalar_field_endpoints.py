@@ -224,6 +224,10 @@ def test_expression_error_carries_a_column_offset(client, sess):
     # Reserved because `_export_session_to_las` promotes the first class column
     # it finds into the standard LAS `classification` byte, by name.
     ("las_classification", 400),
+    # The organ tool's class columns: a formula writing them would silently
+    # replace the model's labels.
+    ("plant_organ", 400),
+    ("leaflet_id", 400),
     ("intensity_col", 400),    # already exists
     ("time", 400),             # canonical import alias
     ("elevation", 400),        # canonical import alias for z

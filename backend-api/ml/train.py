@@ -17,6 +17,11 @@ groups of training sources, the model size and the optimiser. See
 Validation runs whole items through :func:`ml.infer.predict`, the exact path
 the app uses. The score that selects the checkpoint is therefore the score of
 what ships.
+
+A task with ``instance_codes`` (``plant_organ``) trains the offset head too.
+Its loss is the partial-label negative log-likelihood of each point's allowed
+class set plus a Huber loss on the centroid offsets, and its checkpoint score
+averages the mean item mIoU with the mean item instance F1 (``ml.instances``).
 """
 
 from __future__ import annotations
@@ -61,7 +66,7 @@ def _select(items: dict, sel: dict) -> list:
     return out
 
 
-def build_sources(items: dict, groups: list[dict], task_lut) -> list[Source]:
+def build_sources(items: dict, groups: list[dict], allowed_lut) -> list[Source]:
     """Each group gets its ``weight`` share of crops, split among its items by
     the square root of their labelled point count. Square root rather than
     linear, so one 17 M-point scene cannot drown fifty small trees."""
@@ -73,7 +78,7 @@ def build_sources(items: dict, groups: list[dict], task_lut) -> list[Source]:
         sizes = []
         for it in members:
             c = it.meta["counts"]
-            labelled = sum(v for k, v in c.items() if task_lut[SEM[k]] >= 0)
+            labelled = sum(v for k, v in c.items() if allowed_lut[SEM[k]].any())
             sizes.append(max(labelled, 1))
         w = np.sqrt(np.array(sizes, dtype=np.float64))
         w = w / w.sum() * float(g.get("weight", 1.0))
@@ -92,7 +97,9 @@ def make_package(cfg: dict, spec: HierarchySpec) -> ModelPackage:
         "radii": [spec.level_radius(i) for i in range(spec.levels)],
         "variant": variant,
     }
-    for k in ("width", "blocks", "dropout"):
+    if task.get("instance_codes"):
+        hp["offset"] = True
+    for k in ("width", "blocks", "dropout", "offset_scale"):
         if k in cfg.get("model", {}):
             hp[k] = cfg["model"][k]
     crop = cfg.get("crop", {})
@@ -108,8 +115,16 @@ def make_package(cfg: dict, spec: HierarchySpec) -> ModelPackage:
 
 
 def evaluate(model, pkg: ModelPackage, items: list, lut: np.ndarray, device: str,
-             max_points: int | None = None) -> dict:
-    """Score whole cached items. Returns per-item scores plus pooled totals."""
+             max_points: int | None = None, cluster_kw: dict | None = None) -> dict:
+    """Score whole cached items. Returns per-item scores plus pooled totals.
+    For an offset model, items with instances are also clustered and scored
+    (``inst_f1``, ``inst_mcov``, ``inst_count_error``)."""
+    from .instances import cluster, match
+
+    task = TASKS[pkg.task]
+    inst_codes = np.array(task.get("instance_codes", ()), np.int64)
+    inst_value = pkg.classes[task["instance_class"]]["value"] if len(inst_codes) else None
+    with_offsets = bool(pkg.hparams.get("offset"))
     names = [c["name"] for c in pkg.classes]
     n = len(names)
     index_of = np.full(256, -1, np.int64)
@@ -119,25 +134,63 @@ def evaluate(model, pkg: ModelPackage, items: list, lut: np.ndarray, device: str
     pooled = np.zeros((n, n), np.int64)
     for it in items:
         xyz = np.asarray(it.xyz, dtype=np.float64)
-        truth = lut[np.asarray(it.sem)]
+        sem = np.asarray(it.sem)
+        tinst = None
+        if len(inst_codes) and it.inst is not None:
+            tinst = np.where(np.isin(sem, inst_codes), np.asarray(it.inst), -1)
+        ign_codes = task.get("instance_ignore_codes", ())
         if max_points and len(xyz) > max_points:
             # A contiguous spatial block, not a random subset: a random subset
             # would change the point density the model sees.
             centre = xyz[np.argmin(np.abs(xyz[:, 2] - np.median(xyz[:, 2])))]
             keep = np.argsort(((xyz - centre) ** 2).sum(axis=1))[:max_points]
-            xyz, truth = xyz[keep], truth[keep]
+            xyz, sem = xyz[keep], sem[keep]
+            tinst = None if tinst is None else tinst[keep]
+        truth = lut[sem]
         t0 = time.time()
-        values = predict(model, pkg, xyz, device=device, batch_crops=16)
+        if with_offsets:
+            values, offsets, radii = predict(model, pkg, xyz, device=device, batch_crops=16,
+                                             return_offsets=True)
+        else:
+            values = predict(model, pkg, xyz, device=device, batch_crops=16)
         pred = index_of[values]
         cm = confusion(truth, pred, n)
         pooled += cm
         s = scores(cm, names)
+        if with_offsets and tinst is not None and (tinst >= 0).any():
+            pinst = cluster(xyz, offsets, radii, values == inst_value, **(cluster_kw or {}))
+            m = match(tinst, pinst, ignore=np.isin(sem, ign_codes))
+            s.update({"inst_f1": m["f1"], "inst_mcov": m["mcov"], "inst_count_error": m["count_error"],
+                      "inst_n_true": m["n_true"], "inst_n_pred": m["n_pred"]})
         s["seconds"] = round(time.time() - t0, 1)
         per_item[f"{it.meta['dataset']}/{it.meta['name']}"] = s
     out = {"items": per_item, "pooled": scores(pooled, names)}
     mious = [s["miou"] for s in per_item.values() if not math.isnan(s["miou"])]
     out["mean_item_miou"] = float(np.mean(mious)) if mious else float("nan")
+    f1s = [s["inst_f1"] for s in per_item.values() if not math.isnan(s.get("inst_f1", math.nan))]
+    out["mean_item_inst_f1"] = float(np.mean(f1s)) if f1s else float("nan")
+    # The checkpoint score: mIoU alone, or its mean with the instance F1.
+    out["score"] = out["mean_item_miou"] if not f1s else 0.5 * (out["mean_item_miou"] + out["mean_item_inst_f1"])
     return out
+
+
+def partial_nll(logits, allowed, label_smoothing: float = 0.0):
+    """Per-point loss of an allowed class SET: -log sum_{c in S} p_c, mixed
+    with the uniform smoothing term exactly as ``CrossEntropyLoss`` does, so a
+    singleton set reproduces label-smoothed cross-entropy. Rows with no
+    allowed class return 0 (the caller weights them out)."""
+    import torch
+
+    logp = torch.log_softmax(logits, dim=-1)
+    any_ = allowed.any(dim=-1)
+    # An all-False row would be logsumexp(-inf...) = -inf, whose gradient is
+    # NaN even where torch.where discards it, so such rows allow everything.
+    masked = logp.masked_fill(~(allowed | ~any_[:, None]), float("-inf"))
+    nll = -torch.logsumexp(masked, dim=-1)
+    nll = torch.where(any_, nll, torch.zeros_like(nll))
+    if label_smoothing:
+        nll = (1 - label_smoothing) * nll - label_smoothing * logp.mean(dim=-1)
+    return nll
 
 
 def _git_commit() -> str | None:
@@ -179,7 +232,7 @@ def train(cfg: dict, steps_override: int | None = None) -> Path:
     tmap = task_map(cfg["task"])
     lut = tmap.lut()
     items = open_cache(cfg["cache"])
-    sources = build_sources(items, cfg["train"], lut)
+    sources = build_sources(items, cfg["train"], tmap.allowed_lut())
     val_cfg = cfg.get("val", {})
     val_items = _select(items, val_cfg)[: int(val_cfg.get("max_items", 1_000_000))]
     crop_cfg = CropConfig(max_points=pkg.crop_max_points,
@@ -228,13 +281,23 @@ def train(cfg: dict, steps_override: int | None = None) -> Path:
 
     ls = float(opt_cfg.get("label_smoothing", 0.1))
     ce = torch.nn.CrossEntropyLoss(ignore_index=-1, reduction="none", label_smoothing=ls)
+    offset_weight = float(opt_cfg.get("offset_weight", 0.25))
+    # Offset errors are measured relative to the instance's radius, since that
+    # is the scale the clustering separates instances at (``ml.instances``):
+    # 3 mm is a miss on a 5 mm cotyledon and nothing on a beet leaf. The Huber
+    # knee is at ``offset_delta`` radii, and the loss is in units of it, so it
+    # is the same order as the classification loss rather than 50x smaller
+    # (the first version measured it in metres and learned offsets 1/3 of the
+    # true length).
+    offset_delta = float(opt_cfg.get("offset_delta", 0.2))
+    size_weight = float(opt_cfg.get("size_weight", 0.5))       # log-radius L1, relative to the offset loss
     amp = device == "cuda"
     log = open(out / "log.jsonl", "a")
     eval_every = int(cfg.get("eval_every", 2000))
     ck_every = int(cfg.get("checkpoint_every", 500))
     log_every = int(cfg.get("log_every", 50))
     it = iter(loader)
-    t_log, loss_acc, n_acc, wait_acc = time.time(), 0.0, 0, 0.0
+    t_log, loss_acc, n_acc, wait_acc, off_acc = time.time(), 0.0, 0, 0.0, 0.0
     model.train()
     for step in range(start, steps):
         t_wait = time.time()
@@ -243,38 +306,63 @@ def train(cfg: dict, steps_override: int | None = None) -> Path:
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            logits = model(b)
-        loss_pt = ce(logits.float(), b["label"])
-        w = b["weight"] * (b["label"] >= 0)
+            out_m = model(b)
+        offs = None
+        if isinstance(out_m, tuple):
+            out_m, offs, logr = out_m
+        logits = out_m.float()
+        if "allowed" in b:
+            loss_pt = partial_nll(logits, b["allowed"], ls)
+            w = b["weight"] * b["allowed"].any(dim=1)
+        else:
+            loss_pt = ce(logits, b["label"])
+            w = b["weight"] * (b["label"] >= 0)
         loss = (loss_pt * w).sum() / w.sum().clamp_min(1.0)
+        off_loss = None
+        if offs is not None:
+            m = b["has_offset"]
+            if m.any():
+                scale = torch.exp(b["log_radius"][m]).clamp_min(0.002)[:, None] * offset_delta
+                err = torch.nn.functional.huber_loss(offs.float()[m] / scale, b["offset"][m] / scale,
+                                                     reduction="none", delta=1.0).sum(dim=1)
+                off_loss = err.mean()
+                size_loss = (logr.float()[m] - b["log_radius"][m]).abs().mean()
+                loss = loss + offset_weight * (off_loss + size_weight * size_loss)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         opt.step()
         loss_acc += loss.detach().item()
+        off_acc += off_loss.detach().item() if off_loss is not None else 0.0
         n_acc += 1
 
         if (step + 1) % log_every == 0:
             dt = time.time() - t_log
             rec = {"step": step + 1, "loss": loss_acc / n_acc, "lr": lr_at(step),
                    "s_per_step": dt / n_acc, "data_wait_frac": wait_acc / dt}
+            if off_acc:
+                rec["offset_loss"] = off_acc / n_acc
             print(json.dumps(rec), flush=True)
             log.write(json.dumps(rec) + "\n"); log.flush()
-            t_log, loss_acc, n_acc, wait_acc = time.time(), 0.0, 0, 0.0
+            t_log, loss_acc, n_acc, wait_acc, off_acc = time.time(), 0.0, 0, 0.0, 0.0
 
         final = step + 1 == steps
         if val_items and ((step + 1) % eval_every == 0 or final):
             model.eval()
             ev = evaluate(model, pkg, val_items, lut, device,
-                          max_points=val_cfg.get("max_points_per_item"))
+                          max_points=val_cfg.get("max_points_per_item"), cluster_kw=cfg.get("cluster"))
             model.train()
-            score = ev["mean_item_miou"]
-            rec = {"step": step + 1, "val_mean_item_miou": score, "val_pooled": ev["pooled"]}
+            score = ev["score"]
+            rec = {"step": step + 1, "val_score": score, "val_mean_item_miou": ev["mean_item_miou"],
+                   "val_mean_item_inst_f1": ev["mean_item_inst_f1"], "val_pooled": ev["pooled"]}
             print(json.dumps(rec), flush=True)
             log.write(json.dumps({**rec, "val_items": ev["items"]}) + "\n"); log.flush()
             if score > best:
                 best = score
-                pkg.metrics = {"val_mean_item_miou": score, "val_pooled": ev["pooled"], "step": step + 1}
+                pkg.metrics = {"val_mean_item_miou": ev["mean_item_miou"], "val_pooled": ev["pooled"],
+                               "step": step + 1}
+                if not math.isnan(ev["mean_item_inst_f1"]):
+                    pkg.metrics["val_mean_item_inst_f1"] = ev["mean_item_inst_f1"]
                 pkg.training = {"config": cfg["name"], "task": cfg["task"], "steps": step + 1,
                                 "train_groups": cfg["train"], "commit": _git_commit()}
                 save(pkg, model.state_dict(), out / "package")

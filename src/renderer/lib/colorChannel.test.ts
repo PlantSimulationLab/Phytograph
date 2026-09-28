@@ -14,7 +14,7 @@ import {
   sharedDomainKey,
   LEGEND_EXPAND_LIMIT,
 } from './colorChannel';
-import { GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from './classification';
+import { GROUND_CLASS_ATTRIBUTE, LEAFLET_ID_ATTRIBUTE, PLANT_ORGAN_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from './classification';
 
 // Build a descriptor with sensible defaults so each test only states what it
 // is actually exercising.
@@ -95,6 +95,13 @@ describe('legendKindFor', () => {
     expect(
       legendKindFor({ mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE }, { min: 0, max: 120 }),
     ).toBe('none');
+  });
+
+  it('suppresses the legend for leaflet_id too, but keeps the organ legend', () => {
+    expect(
+      legendKindFor({ mode: 'scalar', field: LEAFLET_ID_ATTRIBUTE }, { min: 0, max: 112 }),
+    ).toBe('none');
+    expect(legendKindFor({ mode: 'scalar', field: PLANT_ORGAN_ATTRIBUTE }, { min: 1, max: 3 })).toBe('categorical');
   });
 });
 

@@ -30,7 +30,10 @@ from pathlib import Path
 
 from .package import ModelPackage, PackageError, load_meta
 
-DEFAULT_WOOD_MODEL = "wood-leaf-pointnext-s-v1"
+DEFAULT_WOOD_MODEL = "wood-leaf-pointnext-s-v2"
+DEFAULT_ORGAN_MODEL = "plant-organ-pointnext-s-v1"
+# The model a tool runs when the caller names none, per task.
+DEFAULT_MODELS = {"wood_leaf": DEFAULT_WOOD_MODEL, "plant_organ": DEFAULT_ORGAN_MODEL}
 
 
 def bundled_roots() -> list[Path]:
@@ -84,11 +87,11 @@ def list_models() -> list[tuple[ModelPackage, str]]:
 
 def find(model_id: str | None, task: str | None = None) -> ModelPackage:
     """The package for ``model_id``. With None, the default model for ``task``
-    (currently only wood_leaf has one)."""
+    (``DEFAULT_MODELS``; no task means wood_leaf, the first tool that had one)."""
     if not model_id:
-        if task not in (None, "wood_leaf"):
+        model_id = DEFAULT_MODELS.get(task or "wood_leaf")
+        if model_id is None:
             raise PackageError(f"no default model for task {task!r}")
-        model_id = DEFAULT_WOOD_MODEL
     for pkg, _ in list_models():
         if pkg.id == model_id:
             if task and pkg.task != task:

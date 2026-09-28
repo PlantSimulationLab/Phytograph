@@ -8,9 +8,9 @@ import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner 
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -204,7 +204,7 @@ import {
   type ChannelDescriptor,
   type LegendEntry,
 } from '../lib/colorChannel';
-import { categoricalSchemeForCloud, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE, NORMAL_ATTRIBUTES, CURVATURE_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForCloud, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, PLANT_ORGAN_ATTRIBUTE, LEAFLET_ID_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE, NORMAL_ATTRIBUTES, CURVATURE_ATTRIBUTE } from '../lib/classification';
 import { robustScalarRange } from '../lib/robustColorRange';
 import { buildNoiseParams, formatFlaggedSummary, formatMultiScanSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
@@ -297,6 +297,7 @@ import { renameSlugInOctreeRef, dropSlugFromOctreeRef } from '../lib/scalarField
 import type { PickerItem } from './ObjectPicker';
 import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
+import { OrganSegmentPanel, type OrganColourBy } from './viewer/panels/OrganSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
@@ -1290,6 +1291,13 @@ export default function PointCloudViewer({
     }
     demPanelWasOpen.current = showDEMPanel;
   }, [showDEMPanel, clouds, selectedIds]);
+  // Plant-organ segmentation state (ML: soil / stem / leaf + leaflet ids).
+  const [showOrganSegmentPanel, setShowOrganSegmentPanel] = useState(false);
+  const [organSegmentInProgress, setOrganSegmentInProgress] = useState(false);
+  const [organSegmentError, setOrganSegmentError] = useState<string | null>(null);
+  const [organUnits, setOrganUnits] = useState<OrganUnits>('auto');
+  const [organColourBy, setOrganColourBy] = useState<OrganColourBy>('organ');
+  const [organModelId, setOrganModelId] = useState<string | null>(null);
   // Wood/leaf segmentation state (geometric, non-ML).
   const [showWoodSegmentPanel, setShowWoodSegmentPanel] = useState(false);
   const [woodSegmentInProgress, setWoodSegmentInProgress] = useState(false);
@@ -2131,6 +2139,7 @@ export default function PointCloudViewer({
   const bakeAbortRef = useRef<AbortController | null>(null);
   const bakeRunIdRef = useRef<string | null>(null);
   const woodSegmentAbortRef = useRef<AbortController | null>(null);
+  const organSegmentAbortRef = useRef<AbortController | null>(null);
   // Wood/leaf progress for the StatusPill. Covers BOTH slow stretches the panel
   // spinner can't describe: which scan a multi-scan run is on, and the per-child
   // octree builds of a "split into wood + leaf clouds" run. Mirrors
@@ -3225,6 +3234,7 @@ export default function PointCloudViewer({
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
     if (except !== 'dem') setShowDEMPanel(false);
     if (except !== 'wood-segment') setShowWoodSegmentPanel(false);
+    if (except !== 'organ-segment') setShowOrganSegmentPanel(false);
     if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
     if (except !== 'skeleton') setShowSkeletonPanel(false);
     if (except !== 'qsm') setShowQSMPopup(false);
@@ -9892,6 +9902,7 @@ export default function PointCloudViewer({
         } },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: WoodLeafIcon, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
+      { id: 'cloud-organ-segment', name: 'Segment Plant Organs', keywords: ['organ', 'organs', 'leaflet', 'leaflets', 'stem', 'petiole', 'soil', 'pot', 'herbaceous', 'plantcloudfit', 'classify', 'classification', 'instance'], action: () => { closeAllToolPanels('organ-segment'); setShowOrganSegmentPanel(!showOrganSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Clover, testId: 'tool-organ-segment', isActive: () => showOrganSegmentPanel },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
       // ── Reconstruction & analysis ───────────────────────────────────
@@ -9956,7 +9967,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
       // Label Points' isActive and blockedReason read these.
       showLabelPanel, clouds]);
 
@@ -15291,6 +15302,79 @@ export default function PointCloudViewer({
   // invokes the current-woodMode version.
   segmentOneWoodCloudRef.current = segmentOneWoodCloud;
 
+  // Plant organs (ML, backend-api/ml/organs.py). Writes TWO columns and colours
+  // by the one the panel picks: `plant_organ` (1 soil, 2 stem, 3 leaf) and
+  // `leaflet_id` (0 = not a leaflet, 1..N numbered by height). One cloud at a
+  // time: the model is for a single plant or pot, so there is no together-mode.
+  // Session (octree) clouds run on the in-RAM HIT points and append both columns
+  // (no file re-read); flat clouds send `ps.hits` and scatter both results back
+  // to full length (misses = 0 in both).
+  const handleOrganSegment = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+    const params = { units: organUnits, ...(organModelId ? { model_id: organModelId } : {}) };
+    const field = organColourBy === 'leaflet' ? LEAFLET_ID_ATTRIBUTE : PLANT_ORGAN_ATTRIBUTE;
+    setOrganSegmentInProgress(true);
+    setOrganSegmentError(null);
+    const abort = new AbortController();
+    organSegmentAbortRef.current = abort;
+    try {
+      const ps = await buildPointSource(cloud);
+      let counts: OrganSegmentationCounts;
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sessionId) {
+          throw new Error('Octree cloud is missing its editable session.');
+        }
+        const meta = await sessionSegmentOrgans(octreeInfo.sessionId, params, abort.signal);
+        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? id));
+        counts = meta;
+      } else {
+        const d = ps.data;
+        const { points, hitIndices } = ps.hits;
+        const response = await segmentOrgans({ points, ...params }, abort.signal);
+        if (!response.success) {
+          throw new Error(response.error || 'Organ segmentation failed');
+        }
+        const organ = scatterToFullLength(response.organ, hitIndices, d.pointCount);
+        const leaflet = scatterToFullLength(response.leaflet, hitIndices, d.pointCount);
+        onUpdateCloud(id, {
+          ...d,
+          scalarFields: {
+            ...(d.scalarFields ?? {}),
+            [PLANT_ORGAN_ATTRIBUTE]: { values: organ, min: 1, max: 3 },
+            [LEAFLET_ID_ATTRIBUTE]: { values: leaflet, min: 0, max: Math.max(1, response.num_leaflets) },
+          },
+        });
+        counts = response;
+      }
+      setCloudColorMode(id, { mode: 'scalar', field });
+      setShowOrganSegmentPanel(false);
+      const unitName = { m: 'metres', cm: 'centimetres', mm: 'millimetres' }[counts.units ?? 'm'];
+      showToast({
+        type: 'success',
+        title: 'Plant Organ Segmentation Complete',
+        message: `${counts.num_leaflets.toLocaleString()} leaflets; ${counts.num_soil.toLocaleString()} soil, `
+          + `${counts.num_stem.toLocaleString()} stem, ${counts.num_leaf.toLocaleString()} leaf points. `
+          + `Read the cloud in ${unitName}.`,
+      });
+      if (counts.warnings && counts.warnings.length > 0) {
+        showToast({ type: 'info', title: 'Plant Organ Segmentation', message: counts.warnings.join(' ') });
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      console.error('Organ segmentation error:', error);
+      const message = describeBackendError(error, 'Organ segmentation').message;
+      setOrganSegmentError(message);
+      showToast({ type: 'error', title: 'Plant Organ Segmentation Failed', message });
+    } finally {
+      setOrganSegmentInProgress(false);
+      organSegmentAbortRef.current = null;
+    }
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits, organModelId, organColourBy]);
+
   // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
   // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
   // handleGroundSegment: session (octree) clouds run TreeIso on the in-RAM array
@@ -20587,6 +20671,12 @@ export default function PointCloudViewer({
     groundSplitRunIdRef.current = null;
     setGroundSegmentInProgress(false);
     setGroundSplitProgress(null);
+  }, []);
+
+  const cancelOrganSegment = useCallback(() => {
+    organSegmentAbortRef.current?.abort();
+    organSegmentAbortRef.current = null;
+    setOrganSegmentInProgress(false);
   }, []);
 
   const cancelWoodSegment = useCallback(() => {
@@ -26654,6 +26744,23 @@ export default function PointCloudViewer({
           onUseReflectanceChange={setWoodUseReflectance}
           onSegment={handleWoodSegment}
           onCancel={cancelWoodSegment}
+        />
+      )}
+
+      {/* Plant Organ Segmentation Panel (ML) */}
+      {showOrganSegmentPanel && selectedIds.size === 1 && (
+        <OrganSegmentPanel
+          units={organUnits}
+          colourBy={organColourBy}
+          modelId={organModelId}
+          inProgress={organSegmentInProgress}
+          error={organSegmentError}
+          onClose={() => setShowOrganSegmentPanel(false)}
+          onUnitsChange={setOrganUnits}
+          onColourByChange={setOrganColourBy}
+          onModelIdChange={setOrganModelId}
+          onSegment={handleOrganSegment}
+          onCancel={cancelOrganSegment}
         />
       )}
 

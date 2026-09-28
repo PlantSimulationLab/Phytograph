@@ -1,15 +1,9 @@
-import { useEffect, useState } from 'react';
-import { Cpu, Loader2, X, Zap } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
 import { WoodLeafIcon } from '../../icons/WoodLeafIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
-import {
-  getMlDevice,
-  listMlModels,
-  type MlDeviceInfo,
-  type MlModelSummary,
-  type WoodSegMethod,
-} from '../../../utils/backendApi';
+import { MlModelControls } from './MlModelControls';
+import { type WoodSegMethod } from '../../../utils/backendApi';
 
 // Output mode for wood/leaf segmentation:
 //  - 'label': keep all points, write the wood_class column, colour by it.
@@ -31,110 +25,6 @@ export type WoodMultiMode = 'aggregate' | 'per-scan';
 //    Needs the ground removed.
 //  - 'geometric': the original point-wise classifier (local shape only).
 export type WoodMethod = WoodSegMethod;
-
-// The installed models and the ML device cannot change under a running
-// backend (an import adds a model, but only through a flow that reloads this),
-// so fetch once per session and share across panel openings.
-type MlState = { models: MlModelSummary[]; device: MlDeviceInfo | null };
-let mlCache: MlState | null = null;
-let mlInflight: Promise<MlState> | null = null;
-
-function loadMl(): Promise<MlState> {
-  if (mlCache) return Promise.resolve(mlCache);
-  if (!mlInflight) {
-    mlInflight = Promise.all([
-      listMlModels('wood_leaf'),
-      // The device probe spawns a worker that imports torch (a few seconds, once);
-      // a failure only hides the pill, it never blocks running the model.
-      getMlDevice().catch(() => null),
-    ])
-      .then(([models, device]) => {
-        mlCache = { models, device };
-        return mlCache;
-      })
-      .finally(() => { mlInflight = null; });
-  }
-  return mlInflight;
-}
-
-/** Exposed for tests: drop the session cache. */
-export function __resetWoodMlCache() {
-  mlCache = null;
-  mlInflight = null;
-}
-
-function MlModelControls({
-  modelId,
-  onModelIdChange,
-  disabled,
-}: {
-  modelId: string | null;
-  onModelIdChange: (id: string | null) => void;
-  disabled: boolean;
-}) {
-  const [ml, setMl] = useState<MlState | null>(mlCache);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (ml) return;
-    let cancelled = false;
-    loadMl()
-      .then((r) => { if (!cancelled) setMl(r); })
-      .catch((e) => { if (!cancelled) setError(String(e?.message ?? e)); });
-    return () => { cancelled = true; };
-  }, [ml]);
-
-  if (error) {
-    return <div className="text-[9px] text-red-300 mt-1">Could not list models: {error}</div>;
-  }
-  if (!ml) {
-    return <div className="text-[9px] text-neutral-500 mt-1">Loading models…</div>;
-  }
-  const { models, device } = ml;
-  const selected = models.find((m) => m.id === modelId) ?? models.find((m) => m.is_default) ?? models[0];
-  const accel = device && device.device !== 'cpu';
-  return (
-    <div className="mt-2" data-testid="wood-ml-controls">
-      {models.length > 1 && (
-        <select
-          data-testid="wood-ml-model"
-          value={selected?.id ?? ''}
-          onChange={(e) => onModelIdChange(e.target.value)}
-          disabled={disabled}
-          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 mb-1"
-        >
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}{m.origin === 'user' ? ' (imported)' : ''}
-            </option>
-          ))}
-        </select>
-      )}
-      {models.length === 0 && (
-        <div className="text-[9px] text-red-300">No wood/leaf model is installed.</div>
-      )}
-      {device && (
-        <span
-          data-testid="wood-ml-device"
-          data-device={device.device}
-          title={device.deviceName ?? device.reason ?? ''}
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
-            accel
-              ? 'bg-green-500/15 text-green-300 border-green-500/30'
-              : 'bg-neutral-700/60 text-neutral-300 border-neutral-600/50'
-          }`}
-        >
-          {accel ? <Zap className="w-3 h-3" /> : <Cpu className="w-3 h-3" />}
-          {accel ? 'GPU' : 'CPU'}
-        </span>
-      )}
-      {device && !accel && (
-        <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
-          No usable GPU, so this runs on the CPU: about a minute per 2 million points.
-        </div>
-      )}
-    </div>
-  );
-}
 
 // Presentational tool panel for wood/leaf segmentation. The `onSegment` handler
 // and all state live in PointCloudViewer; the parent gates rendering on
@@ -246,7 +136,14 @@ export function WoodSegmentPanel({
             : 'Classifies each point from its local 3-D shape only.'}
         </div>
         {method === 'ml' && (
-          <MlModelControls modelId={modelId} onModelIdChange={onModelIdChange} disabled={inProgress} />
+          <MlModelControls
+            task="wood_leaf"
+            testIdPrefix="wood"
+            noModelText="No wood/leaf model is installed."
+            modelId={modelId}
+            onModelIdChange={onModelIdChange}
+            disabled={inProgress}
+          />
         )}
       </div>
 

@@ -53,6 +53,20 @@ describe('buildPointSource is the miss-exclusion chokepoint', () => {
 });
 
 describe('no compute path serializes raw positions', () => {
+  it('organ segmentation sends hits and scatters both columns back to full length', async () => {
+    const src = await viewerSource();
+    const start = src.indexOf('const handleOrganSegment = useCallback');
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf('}, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits', start);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    // A miss ~1 km out would make units="auto" read the plant as millimetres.
+    expect(block).toMatch(/const \{ points, hitIndices \} = ps\.hits;/);
+    expect(block).not.toContain('ps.data.positions');
+    // Results are indexed against the hit subset: both columns must be scattered.
+    expect(block.match(/scatterToFullLength\(response\.(organ|leaflet), hitIndices/g) ?? []).toHaveLength(2);
+  });
+
   it('cloud-to-mesh distance and mesh ICP send hit points', async () => {
     const src = await viewerSource();
     // These two were the P0: misses inflated the robust diagonal 2,192x
