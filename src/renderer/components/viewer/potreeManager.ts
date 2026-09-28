@@ -2,6 +2,7 @@ import { Potree } from 'potree-core';
 import type { PointCloudOctree } from 'potree-core';
 import type * as THREE from 'three';
 import type { PotreeRequestManager } from '../../lib/pointCloudTypes';
+import { isMaskedGeometry } from './renderers/octreeCropMask';
 
 // =====================================================================
 // Octree streaming (0.3.0+)
@@ -166,16 +167,25 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
     // before its geometry has arrived — so a freshly loaded octree would report
     // points it has not drawn yet and hide exactly the gap this exists to catch.
     let drawnPoints = 0;
+    // The same, after the per-point visibility mask (filter / crop / delete
+    // preview): what survives it. `drawnPoints` cannot see a mask dropping off
+    // an octree that still holds the points, which is a flash of exactly what
+    // the user just removed. (GPU clip boxes are not counted here.)
+    let shownPoints = 0;
     for (const e of _frameEntries.values()) {
       const o = e.octree as any;
       if (o.disposed || !o.parent || !o.visible) continue;
       for (const node of o.visibleNodes ?? []) {
-        drawnPoints += node?.numPoints ?? node?.geometryNode?.numPoints ?? 0;
+        const n = node?.numPoints ?? node?.geometryNode?.numPoints ?? 0;
+        drawnPoints += n;
+        const geom = node?.sceneNode?.geometry;
+        shownPoints += isMaskedGeometry(geom) ? geom.index.count : n;
       }
     }
     const lru = (manager as any).lru;
     g.__potreeFrameStats = {
       drawnPoints,
+      shownPoints,
       frame: ((g.__potreeFrameStats?.frame ?? 0) as number) + 1,
       clouds: active.length,
       visibleNodes,

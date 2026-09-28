@@ -347,6 +347,103 @@ test('filters every selected scan, not just the first', async () => {
   }).toPass({ timeout: 60_000 });
 });
 
+type FrameStats = { shownPoints?: number; drawnPoints?: number };
+
+/** Points on screen after the per-point mask, as of the last rendered frame. */
+function shownPoints(page: LaunchedApp['page']) {
+  return page.evaluate(
+    () => (window as unknown as { __potreeFrameStats?: FrameStats }).__potreeFrameStats?.shownPoints ?? -1,
+  );
+}
+
+test('a committed filter never flashes the removed points back while the display rebuilds', async () => {
+  // THE BUG THIS PINS: a filter commit deletes the points on the backend at
+  // once and hides them on the drawn octree with a mask; a background rebuild
+  // then swaps in an octree without them. The mask was retired the moment the
+  // rebuild LANDED, but the new octree stages off-scene for a few frames first,
+  // so the OLD octree (still holding every point) was drawn unmasked meanwhile:
+  // each cloud flashed filtered -> unfiltered -> filtered, one after another as
+  // the queue worked through the selection. Sampled in-page every frame, since
+  // the window is a handful of frames.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b"]');
+  await expect(rowA).toBeVisible({ timeout: 20_000 });
+  // Select both, whatever the imports' auto-selection left: ctrl-click toggles,
+  // so only click a row that is not already selected.
+  await expect(async () => {
+    for (const row of [rowA, rowB]) {
+      if ((await row.getAttribute('data-selected')) !== 'true') {
+        await row.click({ modifiers: ['ControlOrMeta'] });
+      }
+    }
+    await expect(rowA).toHaveAttribute('data-selected', 'true', { timeout: 2_000 });
+    await expect(rowB).toHaveAttribute('data-selected', 'true', { timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
+  // Frame both explicitly: this measures what is on screen, and whatever view
+  // the previous test left can put one of them outside the frustum.
+  await page.getByTestId('zoom-to-selection').click();
+  // Both whole clouds on screen before anything is filtered.
+  await expect.poll(() => shownPoints(page), { timeout: 30_000 }).toBe(100);
+
+  await page.getByTestId('tool-filter').click();
+  const fieldSelect = page.getByTestId('filter-field-select');
+  await expect(fieldSelect).toBeVisible();
+  await fieldSelect.selectOption('scalar:Deviation');
+  await page.getByTestId('filter-min-input').fill('0');
+  await page.getByTestId('filter-max-input').fill('2');
+  // The preview has settled on the filtered result: 36 + 24.
+  await expect.poll(() => shownPoints(page), { timeout: 30_000 }).toBe(60);
+
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __shownSampler?: { max: number; frames: number; over: number[]; stop: boolean };
+      __potreeFrameStats?: FrameStats;
+    };
+    const s = { max: -1, frames: 0, over: [] as number[], stop: false };
+    w.__shownSampler = s;
+    const tick = () => {
+      if (s.stop) return;
+      const n = w.__potreeFrameStats?.shownPoints;
+      if (typeof n === 'number') {
+        s.frames++;
+        s.max = Math.max(s.max, n);
+        if (n > 60 && s.over.length < 20) s.over.push(n);
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  await page.getByTestId('filter-remove').click();
+
+  await expect(async () => {
+    const a = parseInt((await rowA.getAttribute('data-point-count')) ?? '0', 10);
+    const b = parseInt((await rowB.getAttribute('data-point-count')) ?? '0', 10);
+    expect({ a, b }).toEqual({ a: 36, b: 24 });
+  }).toPass({ timeout: 60_000 });
+  // Both rebuilds have landed...
+  await expect(page.getByTestId('octree-refresh-running')).toHaveCount(0, { timeout: 120_000 });
+  // ...and been handed over: a replacement stages for at most 2 s before it is
+  // attached (OctreePointCloud), so sample past that before stopping.
+  await page.waitForTimeout(3_000);
+  const result = await page.evaluate(() => {
+    const s = (window as unknown as { __shownSampler: { max: number; frames: number; over: number[]; stop: boolean } }).__shownSampler;
+    s.stop = true;
+    return { max: s.max, frames: s.frames, over: s.over };
+  });
+  expect(result.frames).toBeGreaterThan(30);
+  // Never more than the 60 surviving points on screen, in any frame.
+  expect(result, JSON.stringify(result)).toMatchObject({ max: 60, over: [] });
+  // And the rebuilt octrees are what is drawing them, with no mask left over.
+  await expect.poll(() => page.evaluate(
+    () => (window as unknown as { __potreeFrameStats?: FrameStats }).__potreeFrameStats?.drawnPoints ?? -1,
+  ), { timeout: 30_000 }).toBe(60);
+});
+
 test('segments every selected scan, keeping both halves of each', async () => {
   const { app, page } = session;
   await importFiles(app, page, 'import-point-cloud', FIXTURE);

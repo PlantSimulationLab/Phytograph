@@ -149,7 +149,7 @@ export function composeTileWorldMatrix(
   return out.multiplyMatrices(octree.matrixWorld, sceneNode.matrix);
 }
 
-function isMaskedGeometry(geometry: any): boolean {
+export function isMaskedGeometry(geometry: any): boolean {
   return !!geometry?.index?.[CROP_MASK_FLAG];
 }
 

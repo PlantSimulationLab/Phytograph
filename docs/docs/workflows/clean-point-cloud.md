@@ -521,7 +521,8 @@ cloud instead.
     the fields **every** selected scan has — so a criterion you set can never
     quietly apply to only some of them. The criteria you enter for the first
     scan are reused for the rest; a scan the criteria wouldn't change is
-    skipped rather than needlessly rebuilt.
+    skipped rather than needlessly rebuilt. The live preview draws on every
+    selected scan the commit will filter, not just the first.
 
 !!! info "Live preview"
     The viewport previews the filter **as you type**, for small (in-memory)

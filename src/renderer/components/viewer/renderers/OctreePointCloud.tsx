@@ -138,6 +138,13 @@ export interface OctreePointCloudProps {
    */
   committedFilters?: CloudFilters | null;
   /**
+   * A committed filter the edit state has already retired because the rebuilt
+   * octree without its points has LANDED, but which that octree is not yet
+   * drawn: it stages off-scene while this one, still holding the points, stays
+   * on screen. ANDed in like `committedFilters` until the handover attaches.
+   */
+  handoverFilters?: CloudFilters | null;
+  /**
    * Live manual-labeling preview, read through a REF.
    *
    * A label change cannot be shown the way a deletion can: deletions are a GPU
@@ -405,6 +412,7 @@ export function OctreePointCloud({
   cropMask = null,
   filters = null,
   committedFilters = null,
+  handoverFilters = null,
   translation,
   rotation,
   pivot,
@@ -1244,9 +1252,12 @@ export function OctreePointCloud({
   const liveFilterSpec = useMemo(
     () => mergeOctreeFilterSpecs(
       resolveOctreeFilterSpec(filters, octree),
-      resolveOctreeFilterSpec(committedFilters, octree),
+      mergeOctreeFilterSpecs(
+        resolveOctreeFilterSpec(committedFilters, octree),
+        resolveOctreeFilterSpec(handoverFilters, octree),
+      ),
     ),
-    [filters, committedFilters, octree],
+    [filters, committedFilters, handoverFilters, octree],
   );
   const [filterSpec, setFilterSpec] = useState(EMPTY_FILTER_SPEC);
   useEffect(() => {

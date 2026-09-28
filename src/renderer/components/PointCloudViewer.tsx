@@ -2849,8 +2849,59 @@ export default function PointCloudViewer({
     }>>(() => new Map());
   // The cache id each cloud is DRAWING, as reported by onOctreeDrawn.
   const drawnCacheIdRef = useRef(new Map<string, string>());
+  /**
+   * Display-only masks for deletions a rebuilt octree has absorbed but which is
+   * not ON SCREEN yet — the same gap `releaseOnCacheId` covers for labels.
+   *
+   * When a rebuild lands, the edit state retires its committed filter and the
+   * delete regions it folded in at once (the bookkeeping must move with the
+   * point count), but the new octree stages off-scene while the OLD one — which
+   * still holds those points — stays drawn. Unmasked, it flashed the filtered or
+   * cropped points back for the length of the handover, one cloud after another
+   * as the rebuild queue worked through a multi-scan filter. The retired masks
+   * keep hiding them here until the octree with `releaseOnCacheId` is attached.
+   * Both are idempotent on the rebuilt octree, so the one frame they overlap it
+   * changes nothing.
+   */
+  const [handoverMasks, setHandoverMasks] = useState<Map<string, {
+    releaseOnCacheId: string;
+    deletes: PendingDeleteRegion[];
+    filters?: CloudFilters;
+  }>>(() => new Map());
+  const beginMaskHandover = useCallback((
+    cloudId: string, cacheId: string, deletes: PendingDeleteRegion[], filters?: CloudFilters,
+  ) => {
+    setHandoverMasks((prev) => {
+      // Already drawing it (an unchanged cache id swaps nothing), or nothing to
+      // hide: no hold, and drop any earlier one this octree supersedes.
+      if (drawnCacheIdRef.current.get(cloudId) === cacheId
+          || (deletes.length === 0 && !filters)) {
+        if (!prev.has(cloudId)) return prev;
+        const next = new Map(prev);
+        next.delete(cloudId);
+        return next;
+      }
+      // A second rebuild landing before the first was drawn: the drawn octree
+      // predates both, so keep hiding what either retired.
+      const earlier = prev.get(cloudId);
+      const next = new Map(prev);
+      next.set(cloudId, {
+        releaseOnCacheId: cacheId,
+        deletes: earlier ? [...earlier.deletes, ...deletes] : deletes,
+        filters: filters ?? earlier?.filters,
+      });
+      return next;
+    });
+  }, []);
   const handleOctreeDrawn = useCallback((cloudId: string, cacheId: string) => {
     drawnCacheIdRef.current.set(cloudId, cacheId);
+    setHandoverMasks((prev) => {
+      const hold = prev.get(cloudId);
+      if (!hold || hold.releaseOnCacheId !== cacheId) return prev;
+      const next = new Map(prev);
+      next.delete(cloudId);
+      return next;
+    });
     setLabelCommitHolds((prev) => {
       const hold = prev.get(cloudId);
       if (!hold || hold.releaseOnCacheId !== cacheId) return prev;
@@ -3711,22 +3762,27 @@ export default function PointCloudViewer({
   // mat4[30], an oversized uniform upload is INVALID_VALUE, and WebGL drops the
   // WHOLE array — so past 30 boxes NOTHING was clipped and every deleted point
   // drew again, over a backend that had already deleted them.
+  //
+  // A handover's retired regions (see `handoverMasks`) are drawn with the
+  // committed stack: to the octree still on screen they are just as pending.
+  const drawnDeletesFor = useCallback((cloudId: string): PendingDeleteRegion[] => {
+    const pending = getEditState(cloudId).pendingDeletes ?? [];
+    const retired = handoverMasks.get(cloudId)?.deletes;
+    return retired && retired.length > 0 ? [...retired, ...pending] : pending;
+  }, [getEditState, handoverMasks]);
   const deleteSplitFor = useCallback((cloudId: string, reserve = 0) => {
-    const regions = getEditState(cloudId).pendingDeletes ?? [];
-    return splitDeletesByClipBudget(regions, Math.max(0, MAX_CLIP_BOXES - reserve));
-  }, [getEditState]);
+    return splitDeletesByClipBudget(drawnDeletesFor(cloudId), Math.max(0, MAX_CLIP_BOXES - reserve));
+  }, [drawnDeletesFor]);
 
   const cropMaskRulesFor = useCallback((
     cloudId: string,
     live: CropMaskRule | null,
     overflow: readonly PendingDeleteRegion[] = [],
   ): CropMaskRule[] => {
-    const committed = pendingDeletesToCropMaskRules(
-      getEditState(cloudId).pendingDeletes ?? [], overflow,
-    );
+    const committed = pendingDeletesToCropMaskRules(drawnDeletesFor(cloudId), overflow);
     if (live) committed.push(live);
     return committed;
-  }, [getEditState]);
+  }, [drawnDeletesFor]);
 
   // Apply the active crop region to every selected scan. Multi-scan crop
   // produces N cropped scans — one per input — preserving per-scan
@@ -4207,6 +4263,16 @@ export default function PointCloudViewer({
     // commit that queued it has since written the palette binding onto the
     // octree metadata. Building from the stale capture would drop it.
     const current = cloudsRef.current.find(c => c.id === cloudId)?.data.octree ?? octreeInfo;
+    // What the edit-state update below retires, kept drawn on the OLD octree
+    // until this one replaces it on screen (see `handoverMasks`). Read from the
+    // ref, not inside the updater: an updater must stay free of side effects.
+    {
+      const cur = editStatesRef.current.get(cloudId);
+      const stack = cur?.pendingDeletes ?? [];
+      const keep = baked.deleted_history_len ?? 0;
+      const retired = keep > 0 ? stack.slice(0, Math.max(0, stack.length - keep)) : stack;
+      beginMaskHandover(cloudId, baked.cache_id, retired, cur?.committedFilters);
+    }
     onUpdateCloud(cloudId, buildSessionOctreeData(
       baked, current, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
     ));
@@ -4261,7 +4327,7 @@ export default function PointCloudViewer({
       });
       return next;
     });
-  }, [onUpdateCloud, buildSessionOctreeData, setEditStates, setCloudColorMode, showToast]);
+  }, [onUpdateCloud, buildSessionOctreeData, setEditStates, setCloudColorMode, showToast, beginMaskHandover]);
   octreeRefreshRunnerRef.current = refreshCloudOctree;
 
   /**
@@ -7101,6 +7167,12 @@ export default function PointCloudViewer({
           classPalettes: octreeInfo.classPalettes,
         },
       );
+      // The old octree stays drawn while this one stages, so keep hiding the
+      // stack it is about to drop until the swap (see `handoverMasks`).
+      beginMaskHandover(
+        cloud.id, baked.cache_id,
+        editStatesRef.current.get(cloud.id)?.pendingDeletes ?? [],
+      );
       onUpdateCloud(cloud.id, newData);
       // Clear the pending-delete stack + history for this cloud now that the
       // deletions are baked into the octree.
@@ -7129,7 +7201,7 @@ export default function PointCloudViewer({
       bakeAbortRef.current = null;
       bakeRunIdRef.current = null;
     }
-  }, [clouds, onUpdateCloud, bakingCloudId]);
+  }, [clouds, onUpdateCloud, bakingCloudId, beginMaskHandover]);
 
   const cancelBake = useCallback(() => {
     // Kill the PotreeConverter child first; aborting the fetch alone would only
@@ -7752,6 +7824,18 @@ export default function PointCloudViewer({
     }
     return out;
   }, [selectedIds, anyFilterNarrows, defaultFiltersFor, filterFieldsFor, fieldNarrowsFor]);
+
+  // What the live preview draws on each cloud: exactly what the commit buttons
+  // would apply to it. The panel only ever writes the PRIMARY cloud's entry in
+  // `cloudFilters`, so drawing that map alone previewed the primary and left
+  // every sibling unfiltered until the commit, which then filtered them all.
+  // `cloudFilters` and `clouds` are deps because resolveFilterTargets reads them
+  // through refs, which are assigned earlier in this same render.
+  const filterPreviewByCloud = useMemo(() => {
+    if (!showFilterPanel) return null;
+    return new Map(resolveFilterTargets().map(t => [t.cloud.id, t.filters] as const));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFilterPanel, resolveFilterTargets, cloudFilters, clouds]);
 
   // Apply filter permanently - removes filtered out points from the point cloud
   const handleApplyFilterPermanently = useCallback(async (confirmed = false) => {
@@ -22405,17 +22489,21 @@ export default function PointCloudViewer({
                       isSelected && editMode === 'erase' ? erasePreviewBoxes.length : 0,
                     ).cpu,
                   )}
-                  // Live filter preview. Passed for EVERY cloud that has
-                  // filters, not just the panel's primary: the commit buttons
-                  // act on the whole selection (see resolveFilterTargets), so
-                  // previewing only the primary would show a different set from
-                  // the one Filter/Segment are about to act on.
-                  filters={cloudFilters.get(cloud.id)}
+                  // Live filter preview. Passed for EVERY selected cloud the
+                  // commit would filter, not just the panel's primary: the
+                  // commit buttons act on the whole selection (see
+                  // resolveFilterTargets / filterPreviewByCloud), so previewing
+                  // only the primary would show a different set from the one
+                  // Filter/Segment are about to act on.
+                  filters={filterPreviewByCloud?.get(cloud.id) ?? cloudFilters.get(cloud.id)}
                   // After a commit the same predicate rides in the edit state
                   // until the background rebuild swaps in an octree that no
                   // longer holds the excluded points; a live preview opened
                   // meanwhile is ANDed with it inside the renderer.
                   committedFilters={getEditState(cloud.id).committedFilters ?? null}
+                  // ...and past it, until the rebuilt octree is actually drawn
+                  // (see `handoverMasks`).
+                  handoverFilters={handoverMasks.get(cloud.id)?.filters ?? null}
                   // Live labeling preview — only for the cloud being labeled.
                   // Live labeling preview. Per CLOUD, not "the cloud the panel
                   // is open on": a committed-but-unbaked hold keeps painting
