@@ -1,7 +1,9 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
+import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
-import type { Measurement, MeasureVertex } from '../../../lib/measure';
+import { vertexMarkerRadius, type Measurement, type MeasureVertex } from '../../../lib/measure';
+import { worldPerPixel } from '../../../lib/pointPick';
 
 // The in-scene half of the measurement tool: vertex markers and the lines
 // between them.
@@ -39,7 +41,8 @@ const PENDING_COLOR = '#fbbf24';     // amber, matching the panel's armed state
 const MARKER_EXTENT_FRAC = 0.012;
 // Floor and ceiling in world units, for the degenerate cases: a zero-length
 // measurement (two clicks on one point) would otherwise get a zero-size marker,
-// and a single very long segment an absurd one.
+// and a single very long segment an absurd one. The world floor alone is not
+// enough to SEE a marker — VertexMarker also holds a minimum on-screen size.
 const MARKER_MIN = 0.004;
 const MARKER_MAX = 0.6;
 
@@ -73,6 +76,53 @@ function pairedPositions(
     out[k++] = b[0] - offset.x; out[k++] = b[1] - offset.y; out[k++] = b[2] - offset.z;
   }
   return out;
+}
+
+const _markerPos = new THREE.Vector3();
+
+// One vertex marker: a unit sphere scaled every frame to the larger of its
+// extent-derived radius and a minimum on-screen size (see vertexMarkerRadius),
+// so the first click of a measurement is visible at any zoom. Scaled in
+// useFrame rather than re-rendered, since the camera moves without React.
+function VertexMarker({
+  position,
+  extentRadius,
+  color,
+}: {
+  position: [number, number, number];
+  extentRadius: number;
+  color: string;
+}) {
+  const ref = useRef<THREE.Mesh>(null);
+  useFrame(({ camera, size }) => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    mesh.getWorldPosition(_markerPos);
+    const persp = camera as THREE.PerspectiveCamera;
+    const ortho = camera as THREE.OrthographicCamera;
+    const wpp = worldPerPixel(
+      persp.isPerspectiveCamera
+        ? { isPerspectiveCamera: true, fov: persp.fov }
+        : { top: ortho.top, bottom: ortho.bottom, zoom: ortho.zoom },
+      size.height,
+      camera.position.distanceTo(_markerPos),
+    );
+    mesh.scale.setScalar(vertexMarkerRadius(extentRadius, wpp));
+  });
+  return (
+    <mesh
+      ref={ref}
+      position={position}
+      renderOrder={RENDER_ORDER}
+      // Markers must never be raycast targets: the picker resolves the next
+      // vertex against the cloud, and a marker sitting exactly on a picked
+      // point would otherwise shadow it.
+      raycast={() => null}
+    >
+      <sphereGeometry args={[1, 12, 12]} />
+      <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.95} />
+    </mesh>
+  );
 }
 
 function MeasureGeometry({
@@ -111,18 +161,12 @@ function MeasureGeometry({
   return (
     <>
       {vertices.map((v, i) => (
-        <mesh
+        <VertexMarker
           key={i}
           position={[v.local[0] - ox, v.local[1] - oy, v.local[2] - oz]}
-          renderOrder={RENDER_ORDER}
-          // Markers must never be raycast targets: the picker resolves the next
-          // vertex against the cloud, and a marker sitting exactly on a picked
-          // point would otherwise shadow it.
-          raycast={() => null}
-        >
-          <sphereGeometry args={[radius, 12, 12]} />
-          <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.95} />
-        </mesh>
+          extentRadius={radius}
+          color={color}
+        />
       ))}
       {geometry && (
         <lineSegments geometry={geometry} renderOrder={RENDER_ORDER} raycast={() => null}>

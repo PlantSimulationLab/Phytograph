@@ -215,6 +215,8 @@ measurement is always between things you actually scanned.
 
 While you are placing a measurement:
 
+- Each vertex you place — starting with the first click — appears as an amber
+  dot, joined to the next by a line, so you can see where every click landed.
 - ++backspace++ removes the last vertex you placed.
 - ++escape++ abandons the measurement in progress but leaves the tool armed;
   press it again to disarm.

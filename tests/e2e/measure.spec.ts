@@ -232,6 +232,64 @@ test.describe('measurement tool', () => {
     expect(await valueOf(measureLabels().first())).toBe('90.0°');
   });
 
+  /**
+   * Area, in CSS px², of pixels within 8 px of `world` drawn in the pending
+   * marker's amber, read from a real screenshot of the canvas.
+   */
+  async function amberAreaAt(world: [number, number, number]): Promise<number> {
+    const canvas = session.page.locator('canvas').first();
+    const box = (await canvas.boundingBox())!;
+    const png = await canvas.screenshot();
+    return session.page.evaluate(async ({ src, box, world }) => {
+      const img = new Image();
+      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = src; });
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      const sx = c.width / box.width; const sy = c.height / box.height;
+      const p = (window as any).__worldToScreen(world);
+      const cx = (p.x - box.x) * sx; const cy = (p.y - box.y) * sy;
+      const R = 8 * sx;
+      let n = 0;
+      for (let y = Math.floor(cy - R); y <= Math.ceil(cy + R); y++) {
+        for (let x = Math.floor(cx - R); x <= Math.ceil(cx + R); x++) {
+          if (x < 0 || y < 0 || x >= c.width || y >= c.height) continue;
+          if (Math.hypot(x - cx, y - cy) > R) continue;
+          const i = (y * c.width + x) * 4;
+          // Warm yellow, not the literal hex: R3F's default tone mapping draws
+          // #fbbf24 as ~(214, 186, 80). The fixture's points are blue and the
+          // background and grid are gray, so nothing else here passes.
+          const r = d[i]; const g = d[i + 1]; const b = d[i + 2];
+          if (r > 150 && g > 130 && b < 130 && r - b > 80) n++;
+        }
+      }
+      return n / (sx * sy);
+    }, { src: `data:image/png;base64,${png.toString('base64')}`, box, world });
+  }
+
+  test('the FIRST click of a measurement shows a marker where it landed', async () => {
+    // A lone vertex has zero extent, so the extent-sized marker fell to its
+    // few-millimeter world floor and drew under a pixel: the first click of
+    // every distance/path/angle gave no sign of where it had been placed. The
+    // marker now holds a minimum on-screen radius (lib/measure.ts
+    // MARKER_MIN_SCREEN_PX = 4 px ⇒ ~50 px² of disk).
+    await importScalars();
+    await armIn('distance');
+
+    const first: [number, number, number] = [0.2, 0.0, 0.15];
+    await clickWorld(first);
+    await expect(panel()).toHaveAttribute('data-pending-count', '1', { timeout: 10_000 });
+    // Let the marker's per-frame sizing run before the screenshot.
+    await session.page.evaluate(
+      () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+    );
+
+    const area = await amberAreaAt(first);
+    expect(area, `amber marker area at the first vertex: ${area.toFixed(1)} px²`).toBeGreaterThanOrEqual(20);
+  });
+
   test('Escape drops the measurement in progress before it disarms the tool', async () => {
     await importScalars();
     await armIn('distance');

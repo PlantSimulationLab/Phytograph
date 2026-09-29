@@ -53,6 +53,22 @@ export interface Measurement {
   hasShift: boolean;
 }
 
+// Smallest on-screen radius a vertex marker may shrink to, in CSS pixels.
+//
+// Markers are otherwise sized from the measurement's own extent, which is
+// right once there are two vertices and meaningless before: a lone first click
+// has zero extent, fell to the few-millimeter world floor, and on a scan viewed
+// from tens of meters drew under a pixel — so the first click of every
+// distance/path/angle gave no sign of where it had landed.
+export const MARKER_MIN_SCREEN_PX = 4;
+
+// World radius to draw a vertex marker at: its extent-derived size, but never
+// smaller than MARKER_MIN_SCREEN_PX at the marker's current depth.
+// `worldPerPixel` is world units per CSS pixel at that depth.
+export function vertexMarkerRadius(extentRadius: number, worldPerPixel: number): number {
+  return Math.max(extentRadius, MARKER_MIN_SCREEN_PX * worldPerPixel);
+}
+
 // How many vertices each kind needs before it can be committed. A polyline is
 // open-ended, so it has a minimum rather than an exact count and is closed by
 // the user (Enter / double-click) instead of by arity.

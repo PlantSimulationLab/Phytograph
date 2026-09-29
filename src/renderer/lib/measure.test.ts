@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  vertexMarkerRadius,
+  MARKER_MIN_SCREEN_PX,
   deltas,
   distance,
   segmentLengths,
@@ -459,5 +461,17 @@ describe('world vs local for cross-cloud measurement', () => {
       { world: [1, 0, 0], local: [1, 0, 0], cloudId: 'b' },
     ];
     expect(totalLength(cross)).toBeCloseTo(544999, 6);
+  });
+});
+
+describe('vertexMarkerRadius', () => {
+  it('holds a lone first vertex (zero extent) at the minimum screen size', () => {
+    // 0.05 m per pixel ≈ a scan viewed from ~40 m: the old 4 mm world floor
+    // was a tenth of a pixel there.
+    expect(vertexMarkerRadius(0.004, 0.05)).toBeCloseTo(MARKER_MIN_SCREEN_PX * 0.05, 12);
+  });
+
+  it('keeps the extent-derived size when that is already larger on screen', () => {
+    expect(vertexMarkerRadius(0.5, 0.01)).toBe(0.5);
   });
 });
