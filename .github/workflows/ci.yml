@@ -406,8 +406,8 @@ jobs:
   # backend on its own free port.
   #
   # To change the shard count, edit the matrix list ONLY: `strategy.job-total`
-  # resolves to the number of matrix jobs, so --shard's denominator follows
-  # automatically and can't drift out of sync with the list.
+  # resolves to the number of matrix jobs, so the shard script's denominator
+  # follows automatically and can't drift out of sync with the list.
   #
   # fail-fast is OFF, deliberately. Canceling the sibling shards on the first
   # red one would save a few free runner-minutes and cost you the thing that
@@ -454,6 +454,14 @@ jobs:
         # costs human time. If more shards are ever wanted, move the compute-heavy
         # specs into the `heavy` project (workers: 1) FIRST, so a finer split
         # cannot pair them with each other.
+        #
+        # Since then the split itself is by measured DURATION, not count
+        # (scripts/e2e-shard.mjs, longest file first into the lightest shard).
+        # That deals the most expensive files out one per shard, the opposite of
+        # the alphabetical clustering above, and evened 24/19/46/37 summed
+        # test-minutes to ~32 each. Refresh tests/e2e/shard-timings.json from a
+        # green run (scripts/e2e-shard-timings.mjs <run-id>) when the printed
+        # plan drifts from what the shards actually take.
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
@@ -529,11 +537,16 @@ jobs:
       # Args after `--` are appended to the `test:e2e` script, whose last command
       # is `playwright test` — so they reach Playwright, and `check:backend`
       # still runs first.
+      #
+      # The shard's files come from scripts/e2e-shard.mjs, which balances on
+      # measured duration (tests/e2e/shard-timings.json), not Playwright's
+      # --shard (file COUNT, alphabetical). It prints the whole plan to the log.
+      # A failing script fails this step: an empty file list would otherwise run
+      # the entire project.
       - name: E2E tests (Playwright + Electron)
-        run: >
-          xvfb-run -a -s "-screen 0 1920x1080x24"
-          npm run test:e2e -- --project=main
-          --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        run: |
+          FILES=$(node scripts/e2e-shard.mjs ${{ matrix.shard }} ${{ strategy.job-total }})
+          xvfb-run -a -s "-screen 0 1920x1080x24" npm run test:e2e -- --project=main $FILES
 
       - name: Upload Playwright report on failure
         if: failure()
