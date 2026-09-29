@@ -19,14 +19,16 @@ point clouds, meshes, skeletons, and procedural plant models.
 - :material-cube-scan: **Import LiDAR scans**
 
     Drag and drop `.las`, `.laz`, `.e57`, `.ptx`, `.ply`, `.pcd`, or ASCII
-    (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) point clouds into a 3D viewer
-    that handles tens of millions of points. RIEGL `.riproject` and `.PROJ`
-    scanner projects import directly.
+    (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`, `.ascii`) point clouds into a 3D
+    viewer that handles tens of millions of points. RIEGL `.riproject` and
+    `.PROJ` scanner projects import directly, and an SBET trajectory places a
+    moving-platform scan. Save the whole scene as a `.phyto` project.
 
 - :material-broom: **Clean and prepare**
 
-    Transform, crop, erase, filter, resample, and cross-section a cloud —
-    then backfill the sky/miss rays that leaf area density depends on.
+    Transform, crop, erase, filter, resample, and cross-section a cloud,
+    compute normals and new scalar fields — then backfill the sky/miss rays
+    that leaf area density depends on.
 
 - :material-compare: **Register and compare**
 
@@ -37,8 +39,10 @@ point clouds, meshes, skeletons, and procedural plant models.
 - :material-layers: **Segment scans**
 
     Classify ground with a cloth simulation filter, separate wood from
-    leaf, and split a plot into individual trees — then carry the labels
-    through the rest of the pipeline.
+    leaf with a machine-learning model, split a terrestrial or airborne plot
+    into individual trees, and label a herbaceous plant's soil, stem, and
+    individual leaflets — then carry the labels through the rest of the
+    pipeline.
 
 - :material-brush: **Label points by hand**
 
@@ -64,11 +68,18 @@ point clouds, meshes, skeletons, and procedural plant models.
     woody volume, trunk diameter, and per-rank metrics. Add leaves by
     phyllotaxis and match a measured leaf-angle distribution.
 
+- :material-clipboard-list: **Run a tree inventory**
+
+    Turn a segmented plot into a tree list — stem position, DBH, stem
+    curve, height, crown base, and crown size — summarize the stand
+    (stems/ha, basal area, QMD, Lorey's height, canopy cover, biomass), and
+    build a QSM for every tree in one run.
+
 - :material-grid: **Measure canopy structure**
 
     Invert overlapping scans into a voxel grid of leaf area density
-    (m²/m³), and fit crown shapes (ellipsoid, prism, cone, alpha shape)
-    for height and volume.
+    (m²/m³) with its vertical profile and LAI, and fit crown shapes
+    (ellipsoid, prism, cone, alpha shape) for height and volume.
 
 - :material-terrain: **Model the terrain**
 
@@ -83,8 +94,9 @@ point clouds, meshes, skeletons, and procedural plant models.
 
 - :material-radar: **Simulate a scan**
 
-    Place virtual scanners around a plant and synthesize the point cloud
-    they would produce, with full control over beam geometry.
+    Place virtual scanners (static or moving-platform) around a plant and
+    synthesize the point cloud they would produce, with full control over
+    beam geometry.
 
 </div>
 

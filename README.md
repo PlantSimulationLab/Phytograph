@@ -60,18 +60,21 @@ and installs in place — no need to return here to re-download.
 ## What it does
 
 - **Import LiDAR scans** — drag and drop `.las`, `.laz`, `.e57`, `.ptx`, `.ply`,
-  `.pcd`, or ASCII (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) point clouds into a
-  3D viewer that handles tens of millions of points. RIEGL `.riproject` and
-  `.PROJ` scanner projects import directly.
+  `.pcd`, or ASCII (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`, `.ascii`) point
+  clouds into a 3D viewer that handles tens of millions of points. RIEGL
+  `.riproject` and `.PROJ` scanner projects import directly, and an SBET
+  trajectory places a moving-platform scan. Save the whole scene as a `.phyto`
+  project.
 - **Clean and prepare** — transform, crop, erase, filter, resample, and
-  cross-section a cloud, then backfill the sky/miss rays that leaf area density
-  depends on.
+  cross-section a cloud, compute normals and new scalar fields, then backfill
+  the sky/miss rays that leaf area density depends on.
 - **Register and compare** — auto-register rotated scans, refine with ICP, and
   stitch overlaps into one cloud, with cloud-to-mesh distance statistics (mean,
   median, percentiles, and coverage at fractions of the bounding-box diagonal).
 - **Segment scans** — classify ground with a cloth simulation filter, separate
-  wood from leaf, and split a plot into individual trees, then carry the labels
-  through the rest of the pipeline.
+  wood from leaf with a machine-learning model, split a terrestrial or airborne
+  plot into individual trees, and label a herbaceous plant's soil, stem, and
+  individual leaflets — then carry the labels through the rest of the pipeline.
 - **Label points by hand** — paint your own classes with a lasso or brush to
   correct a classifier or build ground truth, with per-class counts and undo.
 - **Measure leaf angles** — triangulate a leaf-on scan into leaf surfaces and
@@ -84,9 +87,13 @@ and installs in place — no need to return here to re-download.
   radii, segment continuous shoots, and classify them by shoot rank, with woody
   volume, trunk diameter, and per-rank metrics. Add leaves by phyllotaxis and
   match a measured leaf-angle distribution.
+- **Run a tree inventory** — turn a segmented plot into a tree list of stem
+  position, DBH, stem curve, height, crown base, and crown size, summarize the
+  stand (stems/ha, basal area, QMD, Lorey's height, canopy cover, biomass), and
+  build a QSM for every tree in one run.
 - **Measure canopy structure** — invert overlapping scans into a voxel grid of
-  leaf area density (m²/m³), and fit crown shapes (ellipsoid, prism, cone,
-  alpha shape) for height and volume.
+  leaf area density (m²/m³) with its vertical profile and LAI, and fit crown
+  shapes (ellipsoid, prism, cone, alpha shape) for height and volume.
 - **Model the terrain** — grid classified ground returns into a bare-earth
   DEM/DTM, with hillshade, slope, and aspect layers, plus the top-of-canopy DSM
   and the canopy height model that comes from subtracting them.
