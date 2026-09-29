@@ -20935,6 +20935,7 @@ export default function PointCloudViewer({
         plantAge: response.age,
         plantPosition,
         plantSeed: seed,
+        plantLeafInclination: payload.request.leaf_inclination,
         plantSessionId: sessionId, // Session ID for consistent age stepping (canopies have none)
         regenerationKey: 0, // Counter for forcing React remount on age change
         heliosXml: response.helios_xml,
@@ -21140,6 +21141,7 @@ export default function PointCloudViewer({
         position_x: mesh.plantPosition?.x ?? 0,
         position_y: mesh.plantPosition?.y ?? 0,
         position_z: mesh.plantPosition?.z ?? 0,
+        leaf_inclination: mesh.plantLeafInclination,
       });
 
       if (!sessionResponse.success || !sessionResponse.session_id) {
@@ -21152,6 +21154,7 @@ export default function PointCloudViewer({
           position_y: mesh.plantPosition?.y ?? 0,
           position_z: mesh.plantPosition?.z ?? 0,
           random_seed: mesh.plantSeed,
+          leaf_inclination: mesh.plantLeafInclination,
         });
 
         if (!response.success) {
@@ -21253,6 +21256,7 @@ export default function PointCloudViewer({
         position_y: mesh.plantPosition?.y ?? 0,
         position_z: mesh.plantPosition?.z ?? 0,
         random_seed: mesh.plantSeed,
+        leaf_inclination: mesh.plantLeafInclination,
       });
 
       if (!sessionResponse.success || !sessionResponse.session_id) {
@@ -21529,6 +21533,7 @@ export default function PointCloudViewer({
         position_y: mesh.plantPosition?.y ?? 0,
         position_z: mesh.plantPosition?.z ?? 0,
         random_seed: mesh.plantSeed,
+        leaf_inclination: mesh.plantLeafInclination,
       });
 
       if (!sessionResponse.success || !sessionResponse.session_id) {

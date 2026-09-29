@@ -1,7 +1,23 @@
 import { useState, useEffect } from 'react';
 import { X, Sprout, ChevronDown, Loader2 } from 'lucide-react';
-import { getAvailablePlantModels, PlantGenerationRequest, PlantCanopyRequest } from '../utils/backendApi';
+import { getAvailablePlantModels, PlantGenerationRequest, PlantCanopyRequest, type LeafInclinationSpec } from '../utils/backendApi';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { DE_WIT_BETA, DE_WIT_MODELS, deWitLabel, type DeWitModel } from '../lib/leafAngleDistribution';
+
+// How the generated plants' leaf inclinations are chosen: the model's own
+// procedural angles, a named de Wit distribution (its Goel & Strebel Beta fit),
+// or a Beta (mu, nu) typed in. Anything but 'model' steers every leaf toward the
+// distribution as it emerges (backend `leaf_inclination`).
+export type LeafAngleMode = 'model' | DeWitModel | 'custom';
+
+export function leafInclinationFor(
+  mode: LeafAngleMode, custom: LeafInclinationSpec,
+): LeafInclinationSpec | undefined {
+  if (mode === 'model') return undefined;
+  if (mode === 'custom') return custom;
+  const { mu, nu } = DE_WIT_BETA[mode];
+  return { beta_mu: mu, beta_nu: nu };
+}
 
 // A single plant or a regularly spaced canopy. The viewer branches on `mode`.
 export type PlantGenerationPayload =
@@ -51,6 +67,11 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
   const [countY, setCountY] = useState(3);
   const [germinationRate, setGerminationRate] = useState(1.0);
 
+  // Leaf inclination distribution (Advanced).
+  const [leafAngleMode, setLeafAngleMode] = useState<LeafAngleMode>('model');
+  const [customBeta, setCustomBeta] = useState<LeafInclinationSpec>({ beta_mu: 1.0, beta_nu: 1.0 });
+  const leafInclination = leafInclinationFor(leafAngleMode, customBeta);
+
   // Load available models when popup opens
   useEffect(() => {
     if (isOpen && availableModels.length === 0) {
@@ -89,6 +110,7 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
         germination_rate: germinationRate,
       };
       if (seed !== undefined) request.random_seed = seed;
+      if (leafInclination) request.leaf_inclination = leafInclination;
       onGenerate({ mode: 'canopy', request });
       return;
     }
@@ -101,6 +123,7 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
       position_z: positionZ,
     };
     if (seed !== undefined) request.random_seed = seed;
+    if (leafInclination) request.leaf_inclination = leafInclination;
     onGenerate({ mode: 'single', request });
   };
 
@@ -402,6 +425,61 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
                   )}
                   <p className="text-xs text-neutral-500 mt-1">
                     Set a seed for reproducible plant generation
+                  </p>
+                </div>
+
+                {/* Leaf inclination distribution */}
+                <div>
+                  <label className="block text-sm font-medium text-neutral-300 mb-1.5">
+                    Leaf angles
+                  </label>
+                  <select
+                    data-testid="plant-leaf-angles"
+                    value={leafAngleMode}
+                    onChange={(e) => setLeafAngleMode(e.target.value as LeafAngleMode)}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
+                    disabled={isGenerating}
+                  >
+                    <option value="model">Model default</option>
+                    {DE_WIT_MODELS.map((m) => (
+                      <option key={m} value={m}>{deWitLabel(m)}</option>
+                    ))}
+                    <option value="custom">Custom (Beta)</option>
+                  </select>
+                  {leafAngleMode === 'custom' && (
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                      <label className="text-xs text-neutral-400">
+                        μ (toward horizontal)
+                        <DebouncedNumberInput
+                          data-testid="plant-leaf-beta-mu"
+                          value={customBeta.beta_mu}
+                          onCommit={(v) => setCustomBeta((b) => ({ ...b, beta_mu: v }))}
+                          min={0.01}
+                          step={0.1}
+                          debounceMs={0}
+                          className="w-full mt-1 px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
+                          disabled={isGenerating}
+                        />
+                      </label>
+                      <label className="text-xs text-neutral-400">
+                        ν (toward vertical)
+                        <DebouncedNumberInput
+                          data-testid="plant-leaf-beta-nu"
+                          value={customBeta.beta_nu}
+                          onCommit={(v) => setCustomBeta((b) => ({ ...b, beta_nu: v }))}
+                          min={0.01}
+                          step={0.1}
+                          debounceMs={0}
+                          className="w-full mt-1 px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
+                          disabled={isGenerating}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <p className="text-xs text-neutral-500 mt-1" data-testid="plant-leaf-angles-hint">
+                    {leafInclination
+                      ? `Leaves are steered toward this distribution as they grow (mean inclination ${(90 * leafInclination.beta_nu / (leafInclination.beta_mu + leafInclination.beta_nu)).toFixed(0)}° from horizontal).`
+                      : "The plant model's own leaf angles."}
                   </p>
                 </div>
 

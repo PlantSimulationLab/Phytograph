@@ -645,6 +645,11 @@ export interface MeshEntry {
   plantAge?: number;
   plantPosition?: { x: number; y: number; z: number };  // Position for regeneration
   plantSeed?: number;  // Random seed for reproducible regeneration
+  // Beta leaf-inclination distribution the plant was steered toward (backend
+  // LeafInclinationSpec). Sent again on every rebuild -- age scrub, growth
+  // animation, GIF -- or the rebuilt plant would silently revert to the model's
+  // own leaf angles. Absent = the model's own.
+  plantLeafInclination?: { beta_mu: number; beta_nu: number };
   plantSessionId?: string;  // Session ID for stateful time-stepping (keeps plant consistent across ages)
   regenerationKey?: number;  // Counter that increments on each regeneration to force React remount
   heliosXml?: string;  // Plant structure XML for Helios simulation export

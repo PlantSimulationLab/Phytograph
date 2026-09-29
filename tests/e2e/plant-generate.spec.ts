@@ -200,3 +200,88 @@ test('generates a 2x2 canopy as a single merged mesh', async () => {
   expect(trianglesStr).not.toBeNull();
   expect(parseInt(trianglesStr!, 10)).toBeGreaterThan(400);
 });
+
+/** Open the Cmd+K palette and return the row for one command id. Cmd+K is a
+ *  TOGGLE, so press exactly one modifier combo; retry the other for Linux CI. */
+async function paletteRow(page: typeof session.page, search: string, commandId: string) {
+  const input = page.getByPlaceholder('Search commands...');
+  await page.keyboard.press('Meta+k');
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.keyboard.press('Control+k');
+  }
+  await expect(input).toBeVisible();
+  await input.fill(search);
+  return page.locator(`[data-testid="command-palette-item"][data-command-id="${commandId}"]`);
+}
+
+/** Open the Leaf angles plot for the (only) plant mesh and read the fitted mean
+ *  inclination, degrees from horizontal, over the plant's LEAF triangles. */
+async function plantMeanLeafInclination(page: typeof session.page): Promise<number> {
+  const meshRow = page.getByTestId('mesh-row').first();
+  if (!(await page.getByTestId('mesh-leaf-angles').isVisible().catch(() => false))) {
+    await meshRow.getByTestId('mesh-color-expand').click();
+  }
+  await page.getByTestId('mesh-leaf-angles').click();
+  const popup = page.getByTestId('leaf-angle-popup');
+  await expect(popup).toBeVisible();
+  // A plant has no voxel grid, so the table holds one whole-mesh row.
+  const row = popup.getByTestId('beta-fit-row');
+  await expect(row).toHaveCount(1);
+  // Columns: cell | nu | mu | mean theta | R^2 | G(theta) | de Wit.
+  const meanCell = row.locator('td').nth(3);
+  await expect(meanCell).not.toHaveText('—');
+  const mean = parseFloat(await meanCell.innerText());
+  await popup.getByTestId('leaf-angle-close').click();
+  await expect(popup).toHaveCount(0);
+  return mean;
+}
+
+// The Advanced "Leaf angles" option steers every leaf toward a named de Wit
+// distribution as it emerges (pyhelios setPlantModelLeafInclinationDistribution).
+// Measured from the plant's own leaf triangles in the app's Leaf angles plot: a
+// 20-day bean averages ~50 deg on its own and ~30 deg steered planophile (target
+// 26.8 deg). Stepping the age BACK rebuilds the plant from scratch through a new
+// backend session, so the setting must ride along on the mesh -- the second
+// reading fails if the rebuild silently reverts to the model's own angles.
+test('steers a plant toward a chosen leaf angle distribution, and keeps it on rebuild', async () => {
+  test.setTimeout(240_000);
+  const { page } = session;
+
+  await page.getByTestId('tool-plant-generate').click();
+  await expect(page.getByTestId('plant-generation-popup')).toBeVisible();
+  const species = page.getByTestId('plant-species-select');
+  await expect(species.locator('option')).not.toHaveCount(0);
+  await species.selectOption('bean');
+  await page.getByTestId('plant-age-input').fill('20');
+
+  await page.getByText('Advanced Options').click();
+  const leafAngles = page.getByTestId('plant-leaf-angles');
+  await expect(leafAngles).toHaveValue('model');
+  await leafAngles.selectOption('planophile');
+  // Goel & Strebel planophile Beta: mean 90 * 1.172 / (2.770 + 1.172) = 26.8 deg.
+  await expect(page.getByTestId('plant-leaf-angles-hint')).toContainText('27°');
+  await page.getByTestId('plant-generate-button').click();
+
+  const meshRow = page.getByTestId('mesh-row').first();
+  await expect(meshRow).toBeVisible({ timeout: 120_000 });
+  await expect(meshRow).toHaveAttribute('data-mesh-name', /20d/);
+
+  const steered = await plantMeanLeafInclination(page);
+  expect(steered).toBeLessThan(38);
+  expect(steered).toBeGreaterThan(20);
+
+  // Rebuild one day younger through the Plant Growth panel.
+  // A new plant arrives selected; clicking a selected row toggles it off.
+  if ((await meshRow.getAttribute('data-selected')) !== 'true') await meshRow.click();
+  await expect(meshRow).toHaveAttribute('data-selected', 'true');
+  const growth = await paletteRow(page, 'Plant Growth', 'plant-growth');
+  await growth.click();
+  const panel = page.getByTestId('plant-growth-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId('plant-growth-age')).toHaveText('20 days');
+  await panel.getByTestId('plant-age-minus-1').click();
+  await expect(panel.getByTestId('plant-growth-age')).toHaveText('19 days', { timeout: 120_000 });
+
+  const rebuilt = await plantMeanLeafInclination(page);
+  expect(rebuilt).toBeLessThan(38);
+});

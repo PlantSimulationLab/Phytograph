@@ -14,6 +14,8 @@ import {
   meshCellIds,
   triangleCountByCell,
   DE_WIT_MODELS,
+  DE_WIT_BETA,
+  isLeafTriangle,
 } from './leafAngleDistribution';
 
 // ---------------------------------------------------------------------------
@@ -550,5 +552,66 @@ describe('computeCellDistributions (single pass)', () => {
     expect(d.inclPdf.totalArea).toBe(0);
     expect(d.inclPdf.density.every(v => v === 0)).toBe(true);
     expect(d.gtheta).toBeNull();
+  });
+});
+
+describe('DE_WIT_BETA presets', () => {
+  // Each preset must describe the de Wit curve it is named after: same mean and
+  // spread of inclination. Sampled through `betaCurve(nu, mu)`, so this also pins
+  // that the table's (mu, nu) are in the order the rest of the app reads them --
+  // swapping them turns planophile into erectophile and fails here.
+  const bins = Array.from({ length: 900 }, (_, i) => (i + 0.5) * 0.1);
+  const moments = (density: number[]) => {
+    const w = density.reduce((a, b) => a + b, 0);
+    const mean = density.reduce((a, d, i) => a + d * bins[i], 0) / w;
+    const sd = Math.sqrt(density.reduce((a, d, i) => a + d * (bins[i] - mean) ** 2, 0) / w);
+    return { mean, sd };
+  };
+
+  for (const model of DE_WIT_MODELS) {
+    it(`${model} matches its de Wit curve`, () => {
+      const { mu, nu } = DE_WIT_BETA[model];
+      const beta = moments(betaCurve(nu, mu, bins));
+      const dewit = moments(deWitCurve(model, bins));
+      expect(Math.abs(beta.mean - dewit.mean)).toBeLessThan(1.0);
+      expect(Math.abs(beta.sd - dewit.sd)).toBeLessThan(1.5);
+      // Helios's stated mean for its (mu, nu): 90 * nu / (mu + nu).
+      expect(beta.mean).toBeCloseTo(90 * nu / (mu + nu), 0);
+    });
+  }
+});
+
+describe('plant meshes count only their leaves', () => {
+  // A horizontal leaf (organ 1) beside a vertical internode face (organ 3, a
+  // stem) of equal area. A plant's leaf angle distribution is its leaves': the
+  // stem face must not pull half the area to 90 deg.
+  const plant = () => {
+    const m = meshFromTris([triFromNormal(0, 0, 1), triFromNormal(90, 0, 1)]);
+    m.triangleOrganCodes = Uint8Array.from([1, 3]);
+    return m;
+  };
+
+  it('isLeafTriangle reads the organ code, and passes everything without one', () => {
+    const m = plant();
+    expect([isLeafTriangle(m, 0), isLeafTriangle(m, 1)]).toEqual([true, false]);
+    const bare = meshFromTris([triFromNormal(0, 0, 1), triFromNormal(90, 0, 1)]);
+    expect([isLeafTriangle(bare, 0), isLeafTriangle(bare, 1)]).toEqual([true, true]);
+  });
+
+  it('inclination PDF, G(theta) and the per-cell pass all skip the stem', () => {
+    const m = plant();
+    const pdf = computeInclinationPdf(m, { binCount: 9 });
+    expect(pdf.totalArea).toBeCloseTo(1, 6);
+    expect(pdf.density[0] * pdf.binWidth).toBeCloseTo(1, 6);   // all in 0-10 deg
+    // Nadir G of a horizontal leaf is 1; the stem face would halve it.
+    expect(computeGTheta(m)).toBeCloseTo(1, 6);
+    const cell = computeCellDistributions(m, [-1], 9, 36).get(-1)!;
+    expect(cell.gtheta).toBeCloseTo(1, 6);
+  });
+
+  it('a mesh without organ codes still counts every triangle', () => {
+    const bare = meshFromTris([triFromNormal(0, 0, 1), triFromNormal(90, 0, 1)]);
+    expect(computeInclinationPdf(bare, { binCount: 9 }).totalArea).toBeCloseTo(2, 6);
+    expect(computeGTheta(bare)).toBeCloseTo(0.5, 6);
   });
 });

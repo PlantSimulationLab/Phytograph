@@ -27,6 +27,19 @@
 import type { MeshData } from './pointCloudTypes';
 import { triangleGeometry, triangleGeometryInto, outwardRefForMesh } from './pointCloudHelpers';
 
+// Helios organ code of a leaf blade (ORGAN_SCHEME_CLASSES in ./classification).
+const ORGAN_LEAF = 1;
+
+// Whether triangle `t` is part of a LEAF. A generated plant mesh carries a Helios
+// organ code per triangle, and its leaf angle distribution is its leaves': stems,
+// petioles and fruit are surfaces too, but an internode's side faces all read
+// near 90 deg and would drag every plant toward erectophile. A mesh without organ
+// codes (every triangulation) has no such split, so every triangle counts.
+export function isLeafTriangle(data: MeshData, t: number): boolean {
+  const codes = data.triangleOrganCodes;
+  return !codes || codes.length !== data.triangleCount || codes[t] === ORGAN_LEAF;
+}
+
 // ---------------------------------------------------------------------------
 // Empirical histograms (area-weighted)
 // ---------------------------------------------------------------------------
@@ -56,6 +69,7 @@ function forEachTriangle(
   const refFor = outwardRefForMesh(data);
   for (let t = 0; t < triangleCount; t++) {
     if (cellId !== undefined && triangleCellIds && triangleCellIds[t] !== cellId) continue;
+    if (!isLeafTriangle(data, t)) continue;
     const g = triangleGeometry(vertices, indices, t, refFor ? refFor(t) : null);
     const angle = pick(g);
     if (Number.isFinite(angle) && g.area > 0) visit(angle, g.area);
@@ -145,6 +159,7 @@ export function computeGTheta(data: MeshData, cellId?: number): number | null {
   let totalArea = 0;
   for (let t = 0; t < triangleCount; t++) {
     if (cellId !== undefined && triangleCellIds && triangleCellIds[t] !== cellId) continue;
+    if (!isLeafTriangle(data, t)) continue;
 
     const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
     const ax = vertices[i0 * 3], ay = vertices[i0 * 3 + 1], az = vertices[i0 * 3 + 2];
@@ -247,6 +262,7 @@ export function computeCellDistributions(
       acc = accs.get(triangleCellIds[t]);  // undefined ⇒ sentinel/other cell ⇒ skip
     }
     if (!acc) continue;
+    if (!isLeafTriangle(data, t)) continue;
 
     triangleGeometryInto(vertices, indices, t, refFor ? refFor(t) : null, g);
     if (!(g.area > 0)) continue;
@@ -412,6 +428,22 @@ export function fitDeWit(hist: Histogram): DeWitFit | null {
 
   return { best: scores[0].model, scores };
 }
+
+// Goel & Strebel (1984) Beta fits to the six de Wit distributions, in Helios's
+// (mu, nu) convention: nu pulls toward vertical, mu toward horizontal, mean
+// inclination 90 * nu / (mu + nu) deg -- the same convention as `betaCurve(nu,
+// mu)` and the LAD G(theta) override. These are the presets a generated plant
+// can be steered toward (PlantGenerationPopup -> `leaf_inclination`), so a
+// synthetic canopy's leaf angles follow a named distribution rather than
+// whatever the procedural model produces.
+export const DE_WIT_BETA: Record<DeWitModel, { mu: number; nu: number }> = {
+  planophile:   { mu: 2.770, nu: 1.172 },
+  erectophile:  { mu: 1.172, nu: 2.770 },
+  plagiophile:  { mu: 3.326, nu: 3.326 },
+  extremophile: { mu: 0.433, nu: 0.433 },
+  spherical:    { mu: 1.101, nu: 1.930 },
+  uniform:      { mu: 1.000, nu: 1.000 },
+};
 
 // Human-readable label for a de Wit model (Title Case).
 export function deWitLabel(model: DeWitModel): string {

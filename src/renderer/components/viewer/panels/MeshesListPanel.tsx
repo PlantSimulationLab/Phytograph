@@ -586,11 +586,19 @@ export function MeshesListPanel({
           const canColorByTriangle = mesh.method !== 'crown'
             && (isTriangulated(mesh) || mesh.method === 'dem');
           const canSetOpacity = supportsOpacity(mesh);
+          // Leaf-angle distribution — any triangulated SURFACE mesh (Helios or
+          // the Open3D methods), or a generated plant, whose per-triangle organ
+          // codes let the plot count its leaves alone (see isLeafTriangle). Not
+          // meaningful for a DEM (terrain, not foliage) or a fitted crown (an
+          // analytic solid, not a leaf surface).
+          const canPlotLeafAngles = !!mesh.isPlant
+            || (isTriangulated(mesh) && mesh.method !== 'dem' && mesh.method !== 'crown');
           // Provenance is worth surfacing even when the source cloud is gone
           // (which flips isTriangulated off), so expandability includes it.
           // Grids and planes expand to show their geometry (center/size/…); a
           // crown expands to show its metrics block.
-          const canExpand = canColorByTriangle || canSetOpacity || !!mesh.triangulationParams
+          const canExpand = canColorByTriangle || canSetOpacity || canPlotLeafAngles
+            || !!mesh.triangulationParams
             || !!mesh.gridSubdivisions || !!mesh.isPlane || !!mesh.crownMetrics;
           const isExpanded = expandedMeshIds.has(mesh.id);
           const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
@@ -1011,13 +1019,11 @@ export function MeshesListPanel({
                     />
                   </div>
                 )}
-                {/* Leaf-angle distribution — any triangulated SURFACE mesh (Helios
-                    or the Open3D methods). The plot is pure triangle geometry; it
-                    reads per-voxel cells when the mesh carries a grid, else falls
-                    back to a single whole-mesh distribution. Not meaningful for a
-                    DEM (terrain, not foliage) or a fitted crown (an analytic solid,
-                    not a leaf surface), so it's hidden for those. */}
-                {isTriangulated(mesh) && mesh.method !== 'dem' && mesh.method !== 'crown' && (
+                {/* Leaf-angle distribution (see canPlotLeafAngles). The plot is
+                    pure triangle geometry; it reads per-voxel cells when the mesh
+                    carries a grid, else falls back to a single whole-mesh
+                    distribution. */}
+                {canPlotLeafAngles && (
                   <button
                     data-testid="mesh-leaf-angles"
                     onClick={(e) => { e.stopPropagation(); onOpenLeafAngles(mesh.id); }}

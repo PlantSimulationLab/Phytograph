@@ -229,6 +229,7 @@ Request (`PlantCanopyRequest`):
 | `count_x/y` | int | `3` | Plants in X / Y (must be > 0) |
 | `germination_rate` | float | `1.0` | Probability (0–1) each position is filled |
 | `random_seed` | int? | `null` | Optional seed for reproducibility |
+| `leaf_inclination` | `{beta_mu, beta_nu}`? | `null` | Steer leaf inclination toward this Beta distribution (Helios convention, mean 90·ν/(μ+ν) deg), set on the library model before the build via `setPlantModelLeafInclinationDistribution`. Also accepted by `/api/plant/generate`, `/api/plant/generate/stream` and `/api/plant/session/create` |
 
 The response echoes back `plant_count` (plants actually built after
 germination), `count_x`, `count_y`, `spacing_x`, and `spacing_y`. Invalid

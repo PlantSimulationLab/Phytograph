@@ -20217,6 +20217,34 @@ async def extract_stem_skeleton(request: SkeletonRequest, http_request: Request)
 # ==================== PLANT MODEL GENERATION API ====================
 # Uses pyhelios3d PlantArchitecture to generate procedural plant models
 
+class LeafInclinationSpec(BaseModel):
+    """A Beta leaf-inclination distribution the generated plants are steered
+    toward as they grow (helios-core v1.3.88+,
+    `setPlantModelLeafInclinationDistribution`). Helios's parameterization, the
+    same one the LAD G(theta) override uses: `beta_nu` pulls toward vertical,
+    `beta_mu` toward horizontal, and the mean inclination is
+    90 * nu / (mu + nu) degrees. Absent = the model's own leaf angles."""
+    beta_mu: float = Field(gt=0)
+    beta_nu: float = Field(gt=0)
+
+
+def _apply_leaf_inclination(plantarch, plant_type: str,
+                            spec: "Optional[LeafInclinationSpec]") -> None:
+    """Steer every plant built from `plant_type` afterwards toward `spec`.
+
+    Set on the MODEL, not on a built plant, because the steering acts as each
+    leaf emerges: a plant built straight to its age has grown every leaf it has
+    by the time a per-plant call could reach it. It then keeps tracking through
+    advanceTime, and writePlantStructureXML records it, so a morph or reload of
+    the plant goes on steering toward it. Called after loadPlantModelFromLibrary
+    and before the build; each request owns its PlantArchitecture, so the
+    setting cannot leak into another request's plants."""
+    if spec is None:
+        return
+    plantarch.setPlantModelLeafInclinationDistribution(
+        plant_type, float(spec.beta_mu), float(spec.beta_nu))
+
+
 class PlantGenerationRequest(BaseModel):
     """Request for generating a plant model"""
     plant_type: str = "bean"  # Plant model name from library
@@ -20227,6 +20255,8 @@ class PlantGenerationRequest(BaseModel):
     position_z: float = 0.0
     # Advanced parameters (optional)
     random_seed: Optional[int] = None  # Random seed for reproducibility
+    # Steer leaf inclination toward a Beta distribution (see LeafInclinationSpec).
+    leaf_inclination: Optional[LeafInclinationSpec] = None
 
 
 class PlantCanopyRequest(BaseModel):
@@ -20247,6 +20277,8 @@ class PlantCanopyRequest(BaseModel):
     germination_rate: float = 1.0
     # Advanced parameters (optional)
     random_seed: Optional[int] = None  # Random seed for reproducibility
+    # Steer leaf inclination toward a Beta distribution (see LeafInclinationSpec).
+    leaf_inclination: Optional[LeafInclinationSpec] = None
 
 
 class PlantStreamRequest(BaseModel):
@@ -20273,6 +20305,8 @@ class PlantStreamRequest(BaseModel):
     count_x: int = 3
     count_y: int = 3
     germination_rate: float = 1.0
+    # Steer leaf inclination toward a Beta distribution (see LeafInclinationSpec).
+    leaf_inclination: Optional[LeafInclinationSpec] = None
 
 
 class PlantMaterial(BaseModel):
@@ -20357,6 +20391,8 @@ class PlantSessionCreateRequest(BaseModel):
     position_y: float = 0.0
     position_z: float = 0.0
     random_seed: Optional[int] = None
+    # Steer leaf inclination toward a Beta distribution (see LeafInclinationSpec).
+    leaf_inclination: Optional[LeafInclinationSpec] = None
 
 
 class PlantSessionCreateResponse(BaseModel):
@@ -21470,6 +21506,7 @@ def create_plant_session(request: PlantSessionCreateRequest):
 
         # Load and build plant
         plantarch.loadPlantModelFromLibrary(request.plant_type)
+        _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
         # Reproducibility comes from the Context RNG, NOT a build parameter:
         # no plant model reads a 'random_seed' build parameter, and since
@@ -22103,6 +22140,7 @@ def generate_plant_model(request: PlantGenerationRequest):
 
                 # Load plant model
                 plantarch.loadPlantModelFromLibrary(request.plant_type)
+                _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
                 # Reproducibility comes from the Context RNG, NOT a build
                 # parameter: no plant model reads a 'random_seed' build
@@ -22568,6 +22606,7 @@ def generate_plant_canopy(request: PlantCanopyRequest):
                     )
 
                 plantarch.loadPlantModelFromLibrary(request.plant_type)
+                _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
                 # Seed the Context RNG, not a build parameter — see the note in
                 # /api/plant/generate.
@@ -22720,6 +22759,7 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                 return
 
             plantarch.loadPlantModelFromLibrary(request.plant_type)
+            _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
             # Seed the Context RNG, not a build parameter — see the note in
             # /api/plant/generate.

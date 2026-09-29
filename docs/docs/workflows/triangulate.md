@@ -373,7 +373,10 @@ method](#helios-method) above. Expand a mesh's row to reach the tool:
   normals directly, area-weighted, so it works on any triangulated surface. A
   mesh built with a voxel grid splits the distribution per cell; a mesh with no
   grid (every cloud mesh, and an auto-grid Helios mesh) shows a single **Whole
-  mesh** distribution. See
+  mesh** distribution. The tool also opens on a
+  [generated plant](generate-plant.md), where it counts only the leaf blades:
+  a stem's sides are near-vertical surfaces and would otherwise pull every
+  plant toward erectophile. See
   [Estimate leaf area density](estimate-leaf-area-density.md) for the related
   per-voxel inversion.
 

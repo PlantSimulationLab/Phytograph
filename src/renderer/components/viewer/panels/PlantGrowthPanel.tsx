@@ -88,7 +88,7 @@ export function PlantGrowthPanel({
   };
 
   return (
-    <div className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
+    <div data-testid="plant-growth-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">
           <ClockPlus className="w-3 h-3 text-neutral-400" />
@@ -105,7 +105,7 @@ export function PlantGrowthPanel({
       <div className="space-y-3">
         {/* Current Age Display */}
         <div className="text-[10px] text-neutral-400">
-          Current Age: <span className="text-white font-medium">{currentAge.toFixed(0)} days</span>
+          Current Age: <span data-testid="plant-growth-age" className="text-white font-medium">{currentAge.toFixed(0)} days</span>
         </div>
 
         {/* Quick Increment Buttons */}
@@ -113,6 +113,7 @@ export function PlantGrowthPanel({
           <div className="text-[9px] text-neutral-500 mb-1">Quick Adjust</div>
           <div className="flex gap-1">
             <button
+              data-testid="plant-age-minus-1"
               onClick={() => onAdvanceAge(-1)}
               disabled={isAdvancingAge || currentAge <= 0}
               className="flex-1 px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"

@@ -2168,6 +2168,15 @@ export async function extractSkeleton(
 // ==================== PLANT MODEL GENERATION API ====================
 // Uses pyhelios3d PlantArchitecture to generate procedural plant models
 
+/** A Beta leaf-inclination distribution generated plants are steered toward as
+ * they grow (backend LeafInclinationSpec). Helios's convention: `beta_nu` pulls
+ * toward vertical, `beta_mu` toward horizontal, mean inclination
+ * 90 * nu / (mu + nu) deg. See DE_WIT_BETA for the named presets. */
+export interface LeafInclinationSpec {
+  beta_mu: number;
+  beta_nu: number;
+}
+
 export interface PlantGenerationRequest {
   plant_type: string;  // Plant model name from library (e.g., 'bean', 'maize', 'tomato')
   age: number;  // Age in days
@@ -2176,6 +2185,8 @@ export interface PlantGenerationRequest {
   position_z?: number;
   // Advanced parameters (optional)
   random_seed?: number;  // Random seed for reproducibility
+  // Steer leaf inclination toward a Beta distribution; absent = the model's own.
+  leaf_inclination?: LeafInclinationSpec;
 }
 
 export interface PlantCanopyRequest {
@@ -2191,6 +2202,8 @@ export interface PlantCanopyRequest {
   germination_rate?: number;  // Probability (0-1) each grid position is filled
   // Advanced parameters (optional)
   random_seed?: number;  // Random seed for reproducibility
+  // Steer leaf inclination toward a Beta distribution; absent = the model's own.
+  leaf_inclination?: LeafInclinationSpec;
 }
 
 export interface PlantMaterial {
@@ -2432,6 +2445,7 @@ export interface PlantSessionCreateRequest {
   position_y?: number;
   position_z?: number;
   random_seed?: number;
+  leaf_inclination?: LeafInclinationSpec;
 }
 
 export interface PlantSessionCreateResponse {

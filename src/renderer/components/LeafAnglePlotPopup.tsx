@@ -370,7 +370,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
               <Download className="w-3.5 h-3.5" />
               Distributions CSV
             </button>
-            <button onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
+            <button data-testid="leaf-angle-close" onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
               <X className="w-4 h-4 text-neutral-400" />
             </button>
           </div>

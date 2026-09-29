@@ -40,7 +40,23 @@ background.
    is sent** and each run produces a different plant. Tick it and enter a seed
    to pin the result so the same species/age/seed regenerates identically.
 
-7. Click **Generate Plant**.
+7. **Advanced Options → Leaf angles** — **Model default** keeps the species'
+   own procedural leaf angles. Pick a de Wit distribution (**Planophile**,
+   **Erectophile**, **Plagiophile**, **Extremophile**, **Spherical**,
+   **Uniform**) or **Custom (Beta)** to steer every leaf toward that
+   inclination distribution as it emerges. The hint underneath gives the
+   target's mean inclination. The named ones are Goel & Strebel's Beta fits
+   to de Wit's curves. **Custom** takes the Beta **μ** (pulls toward
+   horizontal) and **ν** (pulls toward vertical) directly, in the same
+   convention as the G(θ) override in
+   [Leaf area density](estimate-leaf-area-density.md). The mean is
+   90° · ν / (μ + ν). The plant keeps the setting when you change its age or
+   animate its growth. Use it to build a synthetic canopy with a **known** leaf
+   angle distribution, for example as ground truth for G(θ) or for the
+   leaf-angle plot. To check a plant, expand its row in **Meshes** and open
+   **Leaf angles…**; for a plant it counts only the leaves.
+
+8. Click **Generate Plant**.
 
 Generation takes anywhere from a couple of seconds (young vegetable) to
 a minute (mature tree). While it runs, the popup stays open and shows a
