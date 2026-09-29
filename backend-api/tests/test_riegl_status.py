@@ -1812,3 +1812,97 @@ def test_status_recovers_docker_on_bare_launchd_path(monkeypatch, client, tmp_pa
     assert b["docker_exe"] == str(fake)
     # And it ran the resolved absolute path, not the bare "docker".
     assert seen["argv"][0] == str(fake)
+
+
+# ---------------------------------------------------------------------------
+# A rebuilt image must read back as current under a GUI launch's bare PATH
+# ---------------------------------------------------------------------------
+# _riegl_image_stamp's `docker image inspect` was the one docker call not routed
+# through _docker_argv. A packaged app launched from Finder/the Dock inherits
+# launchd's PATH, so the bare "docker" raised before docker was ever asked: the
+# stamp read as None on every probe and EVERY image read as stale, forever. The
+# self-heal and the Settings button each rebuilt a correctly stamped image and
+# then reported it out of date again — "your next import updates it" on a loop.
+
+
+# Captured at import, before conftest's autouse fixture replaces it with "always
+# current" -- which is also why no test ever ran the real probe, and how a bare
+# docker call inside it shipped unnoticed.
+_REAL_RIEGL_IMAGE_STAMP = main._riegl_image_stamp
+
+
+def test_stamp_is_read_through_the_resolved_docker_on_bare_path(monkeypatch, tmp_path):
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    _bare_launchd_path(monkeypatch)
+    monkeypatch.setattr(main, "_DOCKER_FALLBACK_PATHS", (str(fake),))
+
+    stamp = "a" * 64
+
+    def _fake_spawn(argv, **k):
+        # Mirror the real _spawn_run: a bare name that which() cannot see is a
+        # missing executable, not a docker that answered.
+        if argv[0] == "docker":
+            raise FileNotFoundError("docker")
+        if argv[1:3] == ["images", "-q"]:
+            return main._SpawnResult(0, "14b40411e3bd\n", "")
+        if argv[1:3] == ["image", "inspect"]:
+            return main._SpawnResult(0, stamp + "\n", "")
+        raise AssertionError(f"unexpected docker call {argv}")
+
+    monkeypatch.setattr(main, "_spawn_run", _fake_spawn)
+
+    assert _REAL_RIEGL_IMAGE_STAMP() == stamp
+
+
+def test_every_docker_argv_in_main_goes_through_docker_argv():
+    """Source-level chokepoint: no ["docker", ...] literal may bypass the resolver.
+
+    Behavioural tests only cover the call sites someone thought to test; this
+    is what would have caught the one that was missed.
+    """
+    import ast
+
+    src = Path(main.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    bare = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.List)
+            and node.elts
+            and isinstance(node.elts[0], ast.Constant)
+            and node.elts[0].value == "docker"
+        ):
+            parent = parents.get(node)
+            wrapped = (
+                isinstance(parent, ast.Call)
+                and isinstance(parent.func, ast.Name)
+                and parent.func.id == "_docker_argv"
+            )
+            if not wrapped:
+                bare.append(node.lineno)
+
+    assert not bare, f"docker argv not wrapped in _docker_argv at main.py lines {bare}"
+
+
+def test_a_rebuild_that_still_reads_stale_says_so(monkeypatch, tmp_path):
+    """If the stamp still mismatches after a successful build, rebuilding again
+    cannot help — the error must say that, not promise the next import will."""
+    rivlib, builds = _healable(monkeypatch, tmp_path)
+    # The build "succeeds" but the stamp never reads back (the shipped bug).
+    monkeypatch.setattr(main, "_run_docker_build", lambda c, **k: builds.append(c))
+    monkeypatch.setattr(main, "_riegl_image_stamp", lambda: None)
+
+    with pytest.raises(HTTPException) as exc:
+        main._resolve_riegl_runtime(rivlib)
+
+    assert len(builds) == 1
+    assert exc.value.status_code == 503
+    assert "Rebuilding again will not help" in exc.value.detail
+    assert "next .rxp import updates it" not in exc.value.detail

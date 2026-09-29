@@ -1351,12 +1351,17 @@ def _riegl_image_stamp() -> "str | None":
     except Exception:
         pass
 
+    # Through _docker_argv like every other docker call. This one alone ran the
+    # bare name, and under a GUI launch's launchd PATH that raises before docker
+    # is ever asked — so the stamp read as None on EVERY probe, every image read
+    # as stale forever, and both the self-heal and the Settings button rebuilt a
+    # correctly stamped image and then reported it out of date again.
     try:
         r = _spawn_run(
-            [
+            _docker_argv([
                 "docker", "image", "inspect", image_id, "--format",
                 '{{index .Config.Labels "org.phytograph.reader-stamp"}}',
-            ],
+            ]),
             timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
     except Exception:
@@ -1844,6 +1849,9 @@ def riegl_image_build(request: RieglImageBuildRequest, http_request: Request):
         # null fraction as a pulsing label rather than an empty bar.
         progress(None, "Building RIEGL reader image…")
         _run_docker_build(context, cancel_event=cancel_event)
+        # A build that exits 0 is not proof the image now reads as current;
+        # report a stamp that still mismatches instead of a silent "built".
+        _raise_if_still_stale(_riegl_status(request.rivlib_path))
         progress(1.0, "Image built.")
         return json.dumps({"ok": True, "image": RIEGL_IMAGE}).encode("utf-8")
 
@@ -2539,7 +2547,31 @@ def _rebuild_stale_riegl_image(rivlib_override: "str | None" = None) -> dict:
                 ),
             ) from exc
 
-        return _riegl_status(rivlib_override)
+        status = _riegl_status(rivlib_override)
+        _raise_if_still_stale(status)
+        return status
+
+
+def _raise_if_still_stale(status: dict) -> None:
+    """Fail loudly when a build that just SUCCEEDED still reads as stale.
+
+    That can only mean the stamp is not being read back (or not written), which
+    a rebuild cannot fix -- yet the stale reason promises the next import will.
+    Left alone it loops: every import rebuilds, re-reads stale, and fails with a
+    message saying the next one will work. Say what actually happened instead.
+    """
+    if not status.get("image_stale"):
+        return
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "The RIEGL reader image was rebuilt, but Phytograph still cannot "
+            "confirm it matches this version (image stamp "
+            f"{status.get('image_stamp')!r}, expected "
+            f"{status.get('expected_stamp')!r}). Rebuilding again will not "
+            "help -- please report this."
+        ),
+    )
 
 
 def _resolve_riegl_runtime(rivlib_override: "str | None" = None) -> dict:
