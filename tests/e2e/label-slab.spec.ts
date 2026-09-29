@@ -691,10 +691,16 @@ test('the line tool paints above or below a line drawn across the section', asyn
   await expect(page.getByTestId('crop-polygon-overlay')).toBeVisible();
 
   const drawLine = async (z: number) => {
-    // Two clicks on the left half of the plane; past its ends the line holds
-    // its height, so it still spans the whole section.
-    for (const x of [-0.9, -0.1]) {
+    // Two clicks on one half of the plane; past its ends the line holds its
+    // height, so it still spans the whole section. The x > 0 half: in this
+    // view it lands left of the label panel, while x = -0.9 sat within 2 px of
+    // the panel's edge — and on CI's slightly shorter viewport, under it, where
+    // the panel swallowed the click and left a one-vertex line Enter can't close.
+    const panelBox = (await label.boundingBox())!;
+    for (const x of [0.9, 0.1]) {
       const p = await page.evaluate((w) => (window as any).__worldToScreen(w), [x, 8, z]);
+      expect(p.x, `click at x=${p.x} is under the label panel (left edge ${panelBox.x})`)
+        .toBeLessThan(panelBox.x - 20);
       await page.mouse.click(p.x, p.y);
     }
     await page.keyboard.press('Enter');
