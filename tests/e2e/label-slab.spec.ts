@@ -667,11 +667,22 @@ test('the line tool paints above or below a line drawn across the section', asyn
   await expect(label).toHaveCount(0);
 
   await page.getByTestId('tool-cross-section').click();
-  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  const section = page.getByTestId('cross-section-panel');
+  await expect(section).toBeVisible();
   await setSlab(page, 8, 1);
-  // Step there and back: a step re-frames the locked view face-on.
-  await page.keyboard.press('.');
+  // Step there and back: a step re-frames the locked view face-on. y = 8 is
+  // the cloud's LAST step, so `.` first was a no-op and `,` left the section
+  // one step short; and unwaited keys raced the slab on a slow renderer (CI,
+  // or 20x CPU throttling locally), where the view ended up on the far side of
+  // the section and every screen point came out mirrored. Go back one and
+  // return, waiting for the slab and for each step to land.
+  await expect(section).toHaveAttribute('data-has-slab', 'true');
+  const index = async () => Number((await section.getAttribute('data-coverage'))!.split('/')[0]);
+  const i0 = await index();
   await page.keyboard.press(',');
+  await expect.poll(index).toBe(i0 - 1);
+  await page.keyboard.press('.');
+  await expect.poll(index).toBe(i0);
 
   await page.getByTestId('tool-label').click();
   await expect(label).toBeVisible();

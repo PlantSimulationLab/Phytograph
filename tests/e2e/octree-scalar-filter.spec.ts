@@ -500,7 +500,13 @@ test('a committed filter never flashes the removed points back while the display
     s.stop = true;
     return { max: s.max, frames: s.frames, over: s.over };
   });
-  expect(result.frames).toBeGreaterThan(30);
+  // The sampler ran across the handover. It shares requestAnimationFrame with
+  // the renderer, so it sees every frame actually drawn — but how many that is
+  // depends on the machine: ~300 here on a Mac, while the hidden windows on the
+  // Linux and Windows CI runners draw about one frame a second (5 in total).
+  // A handful of frames over the >3 s sampled proves the sampler was live; a
+  // count tuned to a GPU desktop only proved the machine was fast.
+  expect(result.frames).toBeGreaterThanOrEqual(3);
   // Never more than the 60 surviving points on screen, in any frame.
   expect(result, JSON.stringify(result)).toMatchObject({ max: 60, over: [] });
   // And the rebuilt octrees are what is drawing them, with no mask left over.
