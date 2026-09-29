@@ -268,6 +268,47 @@ test.describe('point picker', () => {
     expect(coords[1]).toBe('0.000');
   });
 
+  test('with several clouds, a click takes the FOREGROUND cloud, not the last-imported one', async () => {
+    // potree's multi-cloud pick clears the pick window once, then renders each
+    // cloud with its own renderer.render() — which, under three's default
+    // autoClear, cleared the window again before every cloud. Only the LAST
+    // cloud on the ray survived the readback, so with many co-registered scans
+    // foreground points were unpickable and clicks landed on whatever the last
+    // scan saw behind them (lib/octreeMultiPick.ts).
+    //
+    // The same two planes as depth-layers.xyz, split into two clouds and
+    // imported near-first, so the far plane is the one potree renders last.
+    for (const [file, count] of [['depth-near', '25'], ['depth-far', '1681']] as const) {
+      await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, `${file}.xyz`));
+      await completeImportWizard(session.page);
+      const row = session.page.locator(`[data-testid="scan-row"][data-scan-name="${file}"]`);
+      await expect(row).toBeVisible({ timeout: 20_000 });
+      await expect(row).toHaveAttribute('data-point-count', count);
+    }
+
+    // An explicit front view on both planes. Neither framing hook will do:
+    // __orientToAxis keeps the current target and distance (framed on the far
+    // plane by its import), and the content fit treats the 25-point near plane
+    // as outliers beside 1681 far points — both leave the near plane behind
+    // the camera. Settle the post-import auto-frame first so it can't override.
+    await waitForCameraSettled();
+    await session.page.evaluate(() => (window as any).__setCameraPose?.([0, -6, 0], [0, 4, 0], [0, 0, 1]));
+    await armPicker();
+
+    // Dead-on a near-plane point: nothing about aim is in question, only which
+    // cloud the pick pass lets through.
+    const px = await worldToScreenPx([0.0, 0.0, 0.0]);
+    await clickViewport(px.x, px.y);
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    const coords = await worldCoordsOf(labels().first());
+    // Y is depth: 0 is the near cloud, 8 the far one — that is the assertion.
+    // X/Z only confirm it is the clicked dot (to the octree's 1 mm grid).
+    expect(coords[1]).toBe('0.000');
+    expect(Number(coords[0])).toBeCloseTo(0, 2);
+    expect(Number(coords[2])).toBeCloseTo(0, 2);
+  });
+
   test('reports true intensity while a scalar color mode is active', async () => {
     // Coloring by a scalar ALIASES that scalar's buffer into each tile's
     // `intensity` attribute (that's how the potree gradient shader reaches it).

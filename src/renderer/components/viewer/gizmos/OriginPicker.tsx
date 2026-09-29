@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Potree, type PointCloudOctree } from 'potree-core';
+import type { PointCloudOctree } from 'potree-core';
+import { pickAcrossOctrees } from '../../../lib/octreeMultiPick';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octreePickSplat';
 
@@ -47,7 +48,7 @@ export function OriginPicker({
     // Surface snap first: pick against the octrees along the event ray.
     if (octrees.length > 0) {
       try {
-        const hit = Potree.pick(octrees, gl, camera, e.ray, {
+        const hit = pickAcrossOctrees(octrees, gl, camera, e.ray, {
           pickWindowSize: OCTREE_PICK_WINDOW_PX,
           pickOutsideClipRegion: true,
           // Without this a point is only pickable where its 1-px splat covered

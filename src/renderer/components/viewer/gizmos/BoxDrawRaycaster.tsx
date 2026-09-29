@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Potree, type PointCloudOctree } from 'potree-core';
+import type { PointCloudOctree } from 'potree-core';
+import { pickAcrossOctrees } from '../../../lib/octreeMultiPick';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octreePickSplat';
 
@@ -36,7 +37,7 @@ export function BoxDrawRaycaster({
   onMove,
 }: {
   groundZ: number;
-  // Live octrees to surface-pick against. `Potree.pick` returns the nearest
+  // Live octrees to surface-pick against. `pickAcrossOctrees` returns the nearest
   // hit across all of them, so no distance comparison is needed here.
   // Omitted or empty ⇒ ground-plane only, which is what the cross-section
   // centerline wants: picking mid-canopy there put the line meters from the
@@ -68,7 +69,7 @@ export function BoxDrawRaycaster({
   const surfacePoint = (ray: THREE.Ray): { x: number; y: number } | null => {
     if (!octrees || octrees.length === 0) return null;
     try {
-      const hit = Potree.pick(octrees, gl, camera, ray, {
+      const hit = pickAcrossOctrees(octrees, gl, camera, ray, {
         pickWindowSize: OCTREE_PICK_WINDOW_PX,
         // Without this, a point is only pickable where its 1-px splat happened
         // to cover a pixel — density rather than aim would decide whether the

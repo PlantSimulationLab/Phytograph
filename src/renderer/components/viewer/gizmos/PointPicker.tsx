@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Potree, type PointCloudOctree } from 'potree-core';
+import type { PointCloudOctree } from 'potree-core';
+import { pickAcrossOctrees } from '../../../lib/octreeMultiPick';
 import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octreePickSplat';
 import { MISS_ATTRIBUTE } from '../../../lib/classification';
 import { denormalizeWideAttributes } from '../../../lib/octreeWideAttributes';
@@ -119,15 +120,20 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
     // Refreshed once per pick in doPick, before anything reads it.
     const viewDir = new THREE.Vector3();
 
-    // One GPU pick at one ray. Occlusion within the probe is potree's job and
-    // it does it correctly (the pick pass depth-tests against a cleared depth
-    // buffer); choosing BETWEEN probes is the caller's, in pickOctrees.
+    // One GPU pick at one ray. Occlusion within the probe — across every
+    // cloud — is the pick pass's depth test (pickAcrossOctrees keeps it from
+    // being cleared between clouds); choosing BETWEEN probes is the caller's,
+    // in pickOctrees.
     const probeOctrees = (ray: THREE.Ray): PointPickHit | null => {
       const entries = octreesRef.current;
       if (entries.length === 0) return null;
       let hit: Record<string, unknown> | null = null;
       try {
-        hit = Potree.pick(
+        // Through the shared helper, never raw `Potree.pick`: the raw call
+        // drops every cloud but the last one on the ray (see
+        // lib/octreeMultiPick.ts), which with many scans made foreground
+        // points unpickable.
+        hit = pickAcrossOctrees(
           entries.map((e) => e.octree),
           gl,
           camera,

@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Potree, type PointCloudOctree } from 'potree-core';
+import type { PointCloudOctree } from 'potree-core';
+import { pickAcrossOctrees } from '../../../lib/octreeMultiPick';
 import { isSceneOverlay } from '../../../lib/sceneOverlay';
 
 // Depth probe for zoom-to-cursor: what is the nearest geometry under this pixel?
@@ -87,9 +88,10 @@ export function DepthProbe({
 
       // Octree clouds via potree-core's GPU pick.
       //
-      // The STATIC `Potree.pick(octrees, …)` across all clouds at once, not the
-      // per-instance `octree.pick(…)` in a loop — the same call PointPicker
-      // makes. The per-instance form measurably fails to return hits here
+      // One pick across all clouds at once (lib/octreeMultiPick, which wraps
+      // the STATIC `Potree.pick` so every cloud — not just the last — takes
+      // part), not the per-instance `octree.pick(…)` in a loop — the same call
+      // PointPicker makes. The per-instance form measurably fails to return hits here
       // (0 hits in 30 wheel notches on a sparse cloud), which silently reduced
       // zoom-to-cursor to a plain on-axis dolly on every point cloud.
       //
@@ -100,7 +102,7 @@ export function DepthProbe({
       const octs = octreesRef.current;
       if (octs.length > 0) {
         try {
-          const hit = Potree.pick(octs, gl, camera, raycaster.ray, {
+          const hit = pickAcrossOctrees(octs, gl, camera, raycaster.ray, {
             pickWindowSize: OCTREE_PICK_WINDOW_PX,
             pickOutsideClipRegion: true,
           }) as { position?: { x: number; y: number; z: number } } | null;
