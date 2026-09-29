@@ -24,10 +24,13 @@ into one branch. Set the change any of these ways — all update the viewport
   rotation) in the panel.
 - Drag the gizmo's **arrows** to translate along an axis, or its colored
   **rings** to rotate about an axis.
-- Use the Blender-style shortcut for translation: press <kbd>T</kbd>,
-  optionally lock an axis with <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd>,
-  type a distance, then click (or <kbd>Enter</kbd>) to set it. See
-  [Keyboard shortcuts](../reference/shortcuts.md).
+- Use the Blender-style shortcuts: press <kbd>T</kbd> to translate or
+  <kbd>R</kbd> to rotate, optionally lock an axis with <kbd>X</kbd> /
+  <kbd>Y</kbd> / <kbd>Z</kbd>, type a distance (or angle in degrees), then
+  click (or <kbd>Enter</kbd>) to set it. With a cloud selected, either key
+  also opens the Transform tool if it isn't open yet. Unlike the gizmo, the
+  gesture works from wherever the cursor is, so it's handy when the scene
+  origin is off screen. See [Keyboard shortcuts](../reference/shortcuts.md).
 
 Rotation turns the cloud about the **scene origin** (see below). There is
 always one: until you place it yourself it sits at the center of the loaded

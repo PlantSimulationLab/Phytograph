@@ -2987,6 +2987,8 @@ export default function PointCloudViewer({
     originalMeshRot?: Map<string, { x: number; y: number; z: number }>;
     originalSkeletonPos?: Map<string, { x: number; y: number; z: number }>;
     originalCloudTranslations?: Map<string, { x: number; y: number; z: number }>;
+    // Draft rotation (degrees) of each cloud at gesture start, for `r` on a cloud.
+    originalCloudRotations?: Map<string, { x: number; y: number; z: number }>;
     // Numeric input buffer (Blender-style). When parseable, overrides mouse-driven value.
     numericBuffer: string;
   }
@@ -8362,7 +8364,13 @@ export default function PointCloudViewer({
       // accidentally trigger a multi-GB filter pass by hitting Enter
       // after typing a coordinate. In other edit modes (translate,
       // erase…) Enter still exits the mode.
-      if (e.key === 'Enter' && editMode !== 'none') {
+      // A t/r/s gesture owns Enter/Escape (commit / cancel THAT gesture).
+      // Letting them through here would also close the Transform tool — which
+      // discards the whole draft — and the re-render that close triggers
+      // unsubscribes the gesture's own listener before it runs, leaving the
+      // gesture stuck on screen.
+      const gestureActive = !!transformModalRef.current;
+      if (e.key === 'Enter' && editMode !== 'none' && !gestureActive) {
         // 'label' shares the polygon lasso, so Enter must close it there too.
         if (editMode === 'crop' || editMode === 'label') {
           // Not while typing: Enter in a panel field (a class name, a crop
@@ -8384,7 +8392,7 @@ export default function PointCloudViewer({
         }
       }
       // Escape: cancel polygon-in-progress, or exit edit mode.
-      if (e.key === 'Escape' && editMode !== 'none') {
+      if (e.key === 'Escape' && editMode !== 'none' && !gestureActive) {
         e.preventDefault();
         if ((editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
           // Vertices down → discard them but stay ARMED, so a mis-traced lasso
@@ -18058,9 +18066,18 @@ export default function PointCloudViewer({
           if (!cloud) continue;
           const state = editStates.get(id);
           const tr = state?.translation ?? { x: 0, y: 0, z: 0 };
-          cx += cloud.data.bounds.center.x + tr.x;
-          cy += cloud.data.bounds.center.y + tr.y;
-          cz += cloud.data.bounds.center.z + tr.z;
+          // The PERCENTILE box's center, not the raw one: a scan's far strays
+          // put the raw center hundreds of meters off the points (possibly
+          // behind the camera), and the t gesture measures the drag against a
+          // line through this point — so it moved the cloud the wrong way, by
+          // the wrong amount. See robustBounds in pointCloudTypes.ts.
+          const rb = cloud.data.robustBounds;
+          const center = rb
+            ? { x: (rb.min[0] + rb.max[0]) / 2, y: (rb.min[1] + rb.max[1]) / 2, z: (rb.min[2] + rb.max[2]) / 2 }
+            : cloud.data.bounds.center;
+          cx += center.x + tr.x;
+          cy += center.y + tr.y;
+          cz += center.z + tr.z;
           n++;
         }
         if (n === 0) return null;
@@ -18229,6 +18246,30 @@ export default function PointCloudViewer({
           const drafts = prev.drafts.map((d, i) =>
             i === idx ? { ...d, rollDeg: roll, pitchDeg: pitch, yawDeg: yaw } : d);
           return { ...prev, drafts };
+        });
+        return;
+      }
+      if (modal.target === 'cloud') {
+        if (!modal.cloudIds || !modal.originalCloudRotations) return;
+        // Writes the cloud's DRAFT rotation — the panel's Rotation fields, turned
+        // about the scene origin like the gizmo rings — never a bake. Free
+        // defaults to Z, matching meshes.
+        setEditStates(prev => {
+          const next = new Map(prev);
+          for (const id of modal.cloudIds!) {
+            const orig = modal.originalCloudRotations!.get(id);
+            const state = next.get(id);
+            if (!orig || !state) continue;
+            const rot = { ...orig };
+            if (modal.axis === 'x') rot.x = orig.x + angleDeg;
+            else if (modal.axis === 'y') rot.y = orig.y + angleDeg;
+            else if (modal.axis === 'z' || modal.axis === 'free') rot.z = orig.z + angleDeg;
+            else if (modal.axis === 'yz') { rot.y = orig.y + angleDeg; rot.z = orig.z + angleDeg; }
+            else if (modal.axis === 'xz') { rot.x = orig.x + angleDeg; rot.z = orig.z + angleDeg; }
+            else if (modal.axis === 'xy') { rot.x = orig.x + angleDeg; rot.y = orig.y + angleDeg; }
+            next.set(id, { ...state, rotation: rot });
+          }
+          return next;
         });
         return;
       }
@@ -18496,14 +18537,19 @@ export default function PointCloudViewer({
             return next;
           });
         }
-      } else if (modal.target === 'cloud' && modal.cloudIds && modal.originalCloudTranslations) {
+      } else if (modal.target === 'cloud' && modal.cloudIds) {
         setEditStates(prev => {
           const next = new Map(prev);
           for (const id of modal.cloudIds!) {
-            const orig = modal.originalCloudTranslations!.get(id);
-            if (!orig) continue;
             const state = next.get(id);
-            if (state) next.set(id, { ...state, translation: orig });
+            if (!state) continue;
+            const t = modal.originalCloudTranslations?.get(id);
+            const r = modal.originalCloudRotations?.get(id);
+            next.set(id, {
+              ...state,
+              ...(t ? { translation: t } : {}),
+              ...(r ? { rotation: r } : {}),
+            });
           }
           return next;
         });
@@ -18517,8 +18563,8 @@ export default function PointCloudViewer({
     const commitModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
-      const isCloudTranslate = modal.target === 'cloud' && modal.op === 'translate' && modal.cloudIds;
-      // A cloud translate via the Blender-style T-modal does NOT bake on Enter.
+      const isCloudDraft = modal.target === 'cloud' && modal.cloudIds;
+      // A cloud translate/rotate via the Blender-style modal does NOT bake on Enter.
       // It only updates the pending DRAFT (already written into editStates by
       // applyTranslate), exactly like dragging the gizmo or typing in the panel.
       // The Translate panel's OK button is the single commit point, so all three
@@ -18531,7 +18577,7 @@ export default function PointCloudViewer({
       // can represent, and handleUpdateScanParams dispatches the non-undoable
       // replaceCollection. Same gap pose edits already have. Explicit rather
       // than relying on commitHistoryEntry's no-pending early return.
-      if (isCloudTranslate || modal.target === 'scan') {
+      if (isCloudDraft || modal.target === 'scan') {
         pendingHistoryRef.current = null;  // drop the BEFORE from startModal
       } else {
         commitHistoryEntry();
@@ -18553,6 +18599,22 @@ export default function PointCloudViewer({
       // originals, never pivot). So store the pivot in DISPLAY space.
       const off = displayOffsetRef.current;
       const pivot = { x: worldPivot.x - off.x, y: worldPivot.y - off.y, z: worldPivot.z - off.z };
+      // Translate only uses the pivot to turn the cursor's travel into world
+      // units, by intersecting view rays with a line/plane through it. With the
+      // pivot BEHIND the camera that intersection lands on the far side and the
+      // object moves opposite to the mouse. Pull such a pivot onto the view
+      // axis in front of the camera, keeping its distance so the scale holds.
+      if (op === 'translate') {
+        const cam = mainCameraRef.current;
+        const camDir = new THREE.Vector3();
+        cam.getWorldDirection(camDir);
+        const rel = new THREE.Vector3(pivot.x, pivot.y, pivot.z).sub(cam.position);
+        const near = (cam as THREE.PerspectiveCamera).near ?? 0.01;
+        if (rel.dot(camDir) <= near * 2) {
+          const p = cam.position.clone().addScaledVector(camDir, Math.max(rel.length(), near * 10));
+          pivot.x = p.x; pivot.y = p.y; pivot.z = p.z;
+        }
+      }
 
       let state: TransformModalState | null = null;
       const scanTarget = scanTransformTarget();
@@ -18637,24 +18699,34 @@ export default function PointCloudViewer({
           originalScanParams: scan.params,
           numericBuffer: '',
         };
-      } else if (op === 'translate' && selectedIds.size > 0) {
+      } else if (op !== 'scale' && selectedIds.size > 0) {
         const originals = new Map<string, { x: number; y: number; z: number }>();
+        const originalRots = new Map<string, { x: number; y: number; z: number }>();
         const ids: string[] = [];
         for (const id of selectedIds) {
+          if (!clouds.some(c => c.id === id)) continue;
           const s = editStates.get(id);
           originals.set(id, { ...(s?.translation ?? { x: 0, y: 0, z: 0 }) });
+          originalRots.set(id, { ...(s?.rotation ?? { x: 0, y: 0, z: 0 }) });
           ids.push(id);
         }
+        if (ids.length === 0) return;
         // History only captures one entry at a time (existing limitation)
-        if (ids[0]) startHistoryEntry('cloud', ids[0]);
+        startHistoryEntry('cloud', ids[0]);
+        // A cloud rotates about the SCENE ORIGIN (the rings' pivot, and what the
+        // bake uses), so the cursor's sweep must be measured around that point
+        // on screen, not around the cloud's center.
+        const o = sceneOriginRef.current;
         state = {
           op,
           axis: 'free',
           startScreen: { x: lastMouse.x, y: lastMouse.y },
-          pivot,
+          pivot: op === 'rotate' ? { x: o[0] - off.x, y: o[1] - off.y, z: o[2] - off.z } : pivot,
           target: 'cloud',
           cloudIds: ids,
-          originalCloudTranslations: originals,
+          ...(op === 'rotate'
+            ? { originalCloudRotations: originalRots }
+            : { originalCloudTranslations: originals }),
           numericBuffer: '',
         };
       }
@@ -18676,23 +18748,34 @@ export default function PointCloudViewer({
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         // The label tool owns these keys while its panel is open (labelKeyRef).
         if (labelPanelOpenRef.current && /^[0-9bgrxpk]$/.test(k)) return;
-        // For a CLOUD, the Blender-style translate gesture only runs while the
-        // Translate tool (and its panel) is open, so the panel's OK/Cancel is
-        // always the commit surface — pressing `t` can't create an orphaned
-        // draft with nowhere to apply it. Mesh/skeleton transforms (s/r, and t
-        // on a selected mesh/skeleton) are unaffected: they still commit their
-        // own render-only transform directly and don't use the panel.
+        // For a CLOUD, the t/r gesture always runs with the Transform tool (and
+        // its panel) open, so the panel's OK/Cancel is the commit surface —
+        // a keypress can't create an orphaned draft with nowhere to apply it.
+        // Pressing t/r with the tool closed therefore OPENS it first (exactly
+        // what the toolbar button does), then starts the gesture. Mesh/skeleton
+        // transforms are unaffected: they commit their own render-only
+        // transform directly and don't use the panel.
         //
-        // A selected SCAN POSITION is the exception carved out here: with the
-        // Transform tool closed, `t` moves the scanner's origin (a direct
-        // params write with its own commit, no panel involved), so this guard
-        // must not swallow the key. With the tool OPEN, editMode === 'translate'
-        // already falsifies the guard and the cloud keeps the gesture.
-        const cloudTranslateBlocked =
-          k === 't' && editMode !== 'translate' &&
+        // A selected SCAN POSITION keeps precedence while the tool is closed:
+        // `t`/`r` then move/tilt the scanner (a direct params write with its
+        // own commit, no panel involved). With the tool OPEN, editMode ===
+        // 'translate' and the cloud keeps the gesture.
+        const cloudGesture =
+          (k === 't' || k === 'r') && editMode !== 'translate' &&
           selectedIds.size > 0 && selectedMeshes.length === 0 && selectedSkeletons.length === 0 &&
+          trajectoryEditorRef.current?.selectedIndex == null &&
           !scanTransformTarget();
-        if (cloudTranslateBlocked) return;
+        if (cloudGesture) {
+          // Another edit tool (crop, erase, ...) owns the viewport: leave it be.
+          if (editMode !== 'none') return;
+          if (!clouds.some(c => selectedIds.has(c.id))) return;
+          e.preventDefault();
+          setShowResizePanel(false);
+          closeAllToolPanels('editMode');
+          setEditMode('translate');
+          startModal(k === 't' ? 'translate' : 'rotate');
+          return;
+        }
         if (k === 't') { e.preventDefault(); startModal('translate'); }
         else if (k === 's') { e.preventDefault(); startModal('scale'); }
         else if (k === 'r') { e.preventDefault(); startModal('rotate'); }
@@ -18790,6 +18873,7 @@ export default function PointCloudViewer({
     editMode,
     startHistoryEntry,
     commitHistoryEntry,
+    closeAllToolPanels,
     // Scan-position transforms. The scan list itself is read through
     // scansWithParamsRef, NOT listed here — a gesture rewrites params on every
     // mouse move, so depending on it would re-subscribe all four listeners per

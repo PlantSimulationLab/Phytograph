@@ -156,15 +156,15 @@ and **[Measure distances and angles](../workflows/viewer-navigation.md#measure-d
 ## Transform gestures (Blender-style)
 
 These fire on the current selection with **no tool open** — just make sure
-focus isn't in a text field. The one exception is <kbd>T</kbd> on a *point
-cloud*, which is ignored unless the Transform tool is already open (the panel
-is what commits the move):
+focus isn't in a text field. On a *point cloud*, <kbd>T</kbd> and <kbd>R</kbd>
+also open the Transform tool if it isn't open yet, because its panel is what
+applies the change:
 
 | Shortcut | Action |
 |---|---|
 | <kbd>T</kbd> | Translate |
 | <kbd>S</kbd> | Scale (meshes only) |
-| <kbd>R</kbd> | Rotate (meshes and scan positions) |
+| <kbd>R</kbd> | Rotate (point clouds, meshes and scan positions) |
 | <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to axis |
 | <kbd>Shift</kbd> + <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to the perpendicular plane |
 | Press the same axis again | Return to free movement |
@@ -175,9 +175,9 @@ is what commits the move):
 
 The <kbd>T</kbd> translate gesture works on point clouds, skeletons, scan
 positions, and meshes. <kbd>S</kbd> scales selected meshes only.
-<kbd>R</kbd> rotates selected meshes or a scan position. To **rotate a point
-cloud**, use the Transform panel's Rotation fields or its rotation rings
-(see below).
+<kbd>R</kbd> rotates selected point clouds, meshes, or a scan position. A
+point cloud rotates about the **scene origin**, the same pivot as the
+Transform tool's rotation rings; with no axis locked it turns about Z.
 
 All three gestures apply to **every** selected mesh (or skeleton), not just
 one — select several from the Meshes panel (<kbd>Ctrl</kbd>/<kbd>Cmd</kbd>-click,
@@ -191,9 +191,10 @@ clicking rather than pressing <kbd>Enter</kbd>. So you can translate, then
 rotate, then scale the same group straight through, without re-picking the
 objects in between. Click empty space when you are done to deselect.
 
-For a **point cloud**, this gesture only sets the pending position in the
-Transform panel — it does not apply the move. Click **OK** in the panel to
-apply it (or **Cancel** to discard). See
+For a **point cloud**, the gesture only sets the pending position or rotation
+in the Transform panel (opening it if needed) — it does not apply the change.
+Repeat <kbd>T</kbd> / <kbd>R</kbd> as often as you like, then click **OK** in
+the panel to apply everything (or **Cancel** to discard). See
 [Clean a point cloud → Transform](../workflows/clean-point-cloud.md#transform-translate-and-rotate).
 
 ### Scan positions
@@ -217,9 +218,9 @@ dialog's **Scanner heading** field.
 
 Two cases where the gesture deliberately stands aside:
 
-- **While the Transform tool is open on a point cloud**, <kbd>T</kbd> keeps its
-  usual meaning of moving the selected cloud's points. Close the tool to
-  move the scanner instead.
+- **While the Transform tool is open on a point cloud**, <kbd>T</kbd> and
+  <kbd>R</kbd> keep their usual meaning of moving the selected cloud's points.
+  Close the tool to move the scanner instead.
 - **Moving-platform scans** (those carrying a trajectory) take their
   position and attitude from their per-pose path, which is why the dialog
   shows their origin read-only and hides the tilt fields. Edit individual

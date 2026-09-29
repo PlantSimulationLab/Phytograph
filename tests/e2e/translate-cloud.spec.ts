@@ -16,6 +16,9 @@ const SCAN_XML = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-scan.xml');
 // A 30 m cube spanning (10,10,10)..(40,40,40) — a cloud whose extent dwarfs the
 // detail you'd zoom into. Used by the constant-screen-size gizmo test.
 const LARGE_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'large-extent.xyz');
+// A 6 m plot with a one-sided halo of far strays that puts the RAW bounding-box
+// center ~960 m off the points — the shape of a real terrestrial scan.
+const HALO_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'outlier-halo.xyz');
 
 // Translate tool on an octree-backed cloud. The tool is a DRAFT editor with an
 // explicit OK/Cancel flow (the pop-up the user drives):
@@ -674,6 +677,136 @@ test.describe('translate cloud', () => {
   // A typed rotation is a DRAFT: the viewport rotates live but geometry is not
   // baked until OK. Cancel must revert it (net offset back to baseline, world
   // position unchanged) exactly like a translation draft.
+  // Run a Blender-style gesture (t / r) from the keyboard: key, axis lock, typed
+  // value, then a viewport click to set it. Unlike tModalTranslate this does NOT
+  // assume the Transform tool is open — opening it is part of what's tested.
+  async function keyGesture(key: 't' | 'r', axis: 'x' | 'y' | 'z', value: string) {
+    const { page } = session;
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    await page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      document.body.focus();
+    });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.keyboard.press(key);
+    const hud = page.getByTestId('transform-hud');
+    await expect(hud).toHaveAttribute('data-transform-op', key === 't' ? 'translate' : 'rotate');
+    await page.keyboard.press(axis);
+    await expect(hud).toHaveAttribute('data-transform-axis', axis);
+    for (const ch of value) await page.keyboard.press(ch);
+    await expect(hud).toContainText(value);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(hud).toHaveCount(0);
+  }
+
+  // The cloud t/r shortcuts work like the mesh ones: with the Transform tool
+  // CLOSED, pressing the key starts the gesture — and opens the tool, because its
+  // panel is the only place a cloud transform is applied. Asserted on the live
+  // octree object, not just the panel fields.
+  test('t with the Transform tool closed opens it and drives the cloud draft', async () => {
+    const { page } = session;
+    await importTiny();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
+
+    await keyGesture('t', 'x', '2');
+    await expect(page.getByTestId('translate-panel')).toBeVisible();
+    await expect(page.getByTestId('translate-input-x')).toHaveValue('2.000');
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'true');
+    await expect.poll(async () => (await readEntryWhenReady()).net.x).toBeCloseTo(2, 3);
+
+    // Still a draft: Cancel puts the cloud back.
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
+    await expect.poll(async () => (await readEntryWhenReady()).net.x).toBeCloseTo(0, 3);
+  });
+
+  test('r rotates a cloud about the scene origin, and Esc undoes only that gesture', async () => {
+    const { page } = session;
+    await importTiny();
+    // An origin OFF the cloud's center, so a rotation about the wrong point
+    // (e.g. the cloud's own center) lands the cloud somewhere else.
+    await setSceneOrigin('1', '0', '0');
+    const before = await readEntryWhenReady();
+
+    await keyGesture('r', 'z', '90');
+    await expect(page.getByTestId('translate-panel')).toBeVisible();
+    await expect(page.getByTestId('rotation-input-z')).toHaveValue('90.0');
+
+    // The rendered octree turned 90° about +Z: column-major, so m[0] = cos, m[1] = sin.
+    const readMatrix = async () => (await readEntryWhenReady() as any).matrix as number[];
+    await expect.poll(async () => (await readMatrix())[1]).toBeCloseTo(1, 4);
+    expect((await readMatrix())[0]).toBeCloseTo(0, 4);
+    // ...about (1,0,0), not the cloud's center: the octree's base point b (its
+    // object position before the turn, WORLD = position + displayOffset) must
+    // land at R·(b − c) + c with c = (1,0,0) and R = +90° about Z.
+    const m = await readMatrix();
+    const bx = before.world.x, by = before.world.y;
+    const off = (before as any).displayOffset as { x: number; y: number };
+    expect(m[12] + off.x).toBeCloseTo(-by + 1, 3);
+    expect(m[13] + off.y).toBeCloseTo(bx - 1, 3);
+
+    // A second gesture cancelled with Esc restores ITS starting value (90), not 0.
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur(); document.body.focus(); });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.keyboard.press('r');
+    await page.keyboard.press('z');
+    for (const ch of '45') await page.keyboard.press(ch);
+    await expect(page.getByTestId('rotation-input-z')).toHaveValue('135.0');
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('transform-hud')).toHaveCount(0);
+    await expect(page.getByTestId('rotation-input-z')).toHaveValue('90.0');
+
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
+  });
+
+  // The t gesture must move the cloud WITH the cursor. It measures the drag
+  // against a pivot line through the cloud, and that pivot used to be the RAW
+  // bounding-box center — which on a real scan with a one-sided halo of far
+  // strays (outlier-halo.xyz: ~960 m off the 6 m plot) is nowhere near the
+  // points, and can be behind the camera, where the ray/line math flips sign:
+  // the cloud slid opposite to the mouse, on one scan and not another.
+  test('t + axis moves a cloud with far strays the same way as the cursor', async () => {
+    const { app, page } = session;
+    await importFiles(app, page, 'import-auto', HALO_FIXTURE);
+    await completeImportWizard(page);
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="outlier-halo"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute('data-selected', 'true');
+    await page.waitForFunction(
+      () => (window as any).__getCameraState?.()?.framedContent === true,
+      { timeout: 20_000 },
+    );
+
+    // Screen direction of +X AT THE CONTENT, and its pixels per meter.
+    const C: [number, number, number] = [3, 3, 1.5];
+    const c = await worldToScreen(C);
+    const tip = await worldToScreen([C[0] + 1, C[1], C[2]]);
+    const pxPerM = Math.hypot(tip.x - c.x, tip.y - c.y);
+    expect(pxPerM, '+X is edge-on from the default view; the drag would prove nothing').toBeGreaterThan(10);
+    const u = { x: (tip.x - c.x) / pxPerM, y: (tip.y - c.y) / pxPerM };
+
+    await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur(); document.body.focus(); });
+    await page.mouse.move(c.x, c.y);
+    await page.keyboard.press('t');
+    await expect(page.getByTestId('transform-hud')).toHaveAttribute('data-transform-op', 'translate');
+    await page.keyboard.press('x');
+    await expect(page.getByTestId('transform-hud')).toHaveAttribute('data-transform-axis', 'x');
+    const DRAG_PX = 60;
+    await page.mouse.move(c.x + u.x * DRAG_PX, c.y + u.y * DRAG_PX, { steps: 6 });
+
+    // Same direction as the cursor, and about as far as the cursor went at the
+    // content's depth (a far pivot scales the move by its distance instead).
+    const moved = parseFloat(await page.getByTestId('translate-input-x').inputValue());
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeCloseTo(DRAG_PX / pxPerM, 0);
+
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('transform-hud')).toHaveCount(0);
+    await page.getByTestId('translate-cancel').click();
+  });
+
   test('Cancel discards a pending rotation (nothing baked)', async () => {
     await importTiny();
     const before = await readEntryWhenReady();
