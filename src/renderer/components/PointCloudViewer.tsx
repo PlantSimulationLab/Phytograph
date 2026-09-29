@@ -7837,6 +7837,39 @@ export default function PointCloudViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showFilterPanel, resolveFilterTargets, cloudFilters, clouds]);
 
+  // Re-seed the Min/Max inputs whenever the panel opens or its PRIMARY cloud
+  // changes. The pending strings and the chosen field are panel state, not
+  // per-cloud state, so without this a panel reopened on another scan kept the
+  // previous scan's narrowed range in its inputs while the second scan's own
+  // filter sat at full extent — the inputs said "filter" and the commit buttons
+  // (which read the cloud's criteria, not the inputs) stayed hidden. Only
+  // re-picking the field in the dropdown used to re-seed them.
+  const filterPrimaryId = showFilterPanel ? (filterTargetClouds[0]?.id ?? null) : null;
+  useEffect(() => {
+    if (!filterPrimaryId || !selectedFilterField) return;
+    const cloud = cloudsRef.current.find(c => c.id === filterPrimaryId);
+    if (!cloud) return;
+    const field = filterFieldsFor(cloud).find(f => f.value === selectedFilterField);
+    if (!field) {
+      // The new primary does not carry this field at all.
+      setSelectedFilterField(null);
+      return;
+    }
+    const filters = cloudFiltersRef.current.get(cloud.id);
+    const committed = !filters ? undefined
+      : selectedFilterField === 'x' ? filters.x
+      : selectedFilterField === 'y' ? filters.y
+      : selectedFilterField === 'z' ? filters.z
+      : selectedFilterField === 'intensity' ? filters.intensity
+      : filters.scalarFields[selectedFilterField.substring(7)];
+    const range = committed ?? field.bounds;
+    setPendingFilterMin(seedFilterInput(range.min, !!field.integer));
+    setPendingFilterMax(seedFilterInput(range.max, !!field.integer));
+    // Keyed on the primary alone: re-running on every field or filter edit
+    // would overwrite the user's half-typed input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterPrimaryId]);
+
   // Apply filter permanently - removes filtered out points from the point cloud
   const handleApplyFilterPermanently = useCallback(async (confirmed = false) => {
     // Re-entry guard. The octree rebuild takes long enough that the button reads

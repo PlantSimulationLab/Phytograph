@@ -347,6 +347,70 @@ test('filters every selected scan, not just the first', async () => {
   }).toPass({ timeout: 60_000 });
 });
 
+test('reopening the panel on another scan shows that scan\'s range, not the last one filtered', async () => {
+  // Regression (v0.91.0): Min/Max were panel state seeded only when the field
+  // was picked in the dropdown. Filter scan A, reopen the panel with scan B
+  // selected, and the inputs still held A's narrowed range while B's own
+  // criteria sat at full extent — so the commit buttons stayed hidden until
+  // the user re-picked the field.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
+  await completeImportWizard(page);
+
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b"]');
+  await expect(rowA).toBeVisible({ timeout: 20_000 });
+  await expect(rowB).toBeVisible({ timeout: 20_000 });
+
+  // Select A alone and filter it on X (A spans X 0..1; B spans 10..19.75).
+  await rowA.click();
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(rowB).toHaveAttribute('data-selected', 'false');
+
+  await page.getByTestId('tool-filter').click();
+  const fieldSelect = page.getByTestId('filter-field-select');
+  await fieldSelect.selectOption('x');
+  await page.getByTestId('filter-min-input').fill('0');
+  await page.getByTestId('filter-max-input').fill('0.5');
+  await page.getByTestId('filter-remove').click();
+  await expect(async () => {
+    const a = parseInt((await rowA.getAttribute('data-point-count')) ?? '0', 10);
+    expect(a).toBeGreaterThan(0);
+    expect(a).toBeLessThan(60);
+  }).toPass({ timeout: 60_000 });
+
+  // Close the panel, select B alone, reopen.
+  await page.getByTestId('tool-filter').click();
+  await expect(fieldSelect).toBeHidden();
+  await rowB.click();
+  await expect(rowB).toHaveAttribute('data-selected', 'true');
+  await expect(rowA).toHaveAttribute('data-selected', 'false');
+  await page.getByTestId('tool-filter').click();
+  await expect(fieldSelect).toHaveValue('x');
+
+  // The inputs are B's full X extent, not A's committed 0..0.5.
+  const minInput = page.getByTestId('filter-min-input');
+  const maxInput = page.getByTestId('filter-max-input');
+  await expect(async () => {
+    const min = parseFloat(await minInput.inputValue());
+    const max = parseFloat(await maxInput.inputValue());
+    expect(min).toBeCloseTo(10, 2);
+    expect(max).toBeCloseTo(19.75, 2);
+  }).toPass({ timeout: 5_000 });
+
+  // And narrowing B from here offers the commit without re-picking the field.
+  await minInput.fill('15');
+  await expect(page.getByTestId('filter-remove')).toBeVisible();
+  await page.getByTestId('filter-remove').click();
+  await expect(async () => {
+    const b = parseInt((await rowB.getAttribute('data-point-count')) ?? '0', 10);
+    expect(b).toBeGreaterThan(0);
+    expect(b).toBeLessThan(40);
+  }).toPass({ timeout: 60_000 });
+});
+
 type FrameStats = { shownPoints?: number; drawnPoints?: number };
 
 /** Points on screen after the per-point mask, as of the last rendered frame. */
