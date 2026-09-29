@@ -365,7 +365,9 @@ test('reopening the panel on another scan shows that scan\'s range, not the last
   await expect(rowB).toBeVisible({ timeout: 20_000 });
 
   // Select A alone and filter it on X (A spans X 0..1; B spans 10..19.75).
-  await rowA.click();
+  // Whichever import finishes LAST is left selected, and the two race, so A may
+  // already be the selection — and a plain click on a selected row deselects it.
+  if ((await rowA.getAttribute('data-selected')) !== 'true') await rowA.click();
   await expect(rowA).toHaveAttribute('data-selected', 'true');
   await expect(rowB).toHaveAttribute('data-selected', 'false');
 
@@ -381,8 +383,7 @@ test('reopening the panel on another scan shows that scan\'s range, not the last
     expect(a).toBeLessThan(60);
   }).toPass({ timeout: 60_000 });
 
-  // Close the panel, select B alone, reopen.
-  await page.getByTestId('tool-filter').click();
+  // A committed filter closes the panel on its own; select B alone, reopen.
   await expect(fieldSelect).toBeHidden();
   await rowB.click();
   await expect(rowB).toHaveAttribute('data-selected', 'true');

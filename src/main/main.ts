@@ -273,7 +273,8 @@ function createWindow(): void {
   // The column's content tracks the tool count, so THIS NUMBER MOVES WHENEVER
   // A TOOL IS ADDED — it was 800 for the 24 tools of the original fix, then
   // 703px of cards for 26 (Label Points, Cross-section), and Compute Normals +
-  // Scalar Fields took it to 29 tools and 739px measured. window-resize.spec.ts
+  // Scalar Fields took it to 29 tools and 739px measured; Segment Plant Organs
+  // and Tree Inventory then took it to 775px. window-resize.spec.ts
   // asserts the invariant, so it fails loudly rather than silently cropping —
   // and it did: both tools shipped without this number moving with them.
   //
@@ -296,10 +297,10 @@ function createWindow(): void {
   // still gets its stable 1200x800 and the pixel-coordinate specs are
   // unaffected. Only an explicit resize clamps to minHeight — which is exactly
   // what window-resize.spec.ts exercises.
-  // The CONTENT the column needs: 739px of cards + 49 top bar + 16 pad + 64
+  // The CONTENT the column needs: 775px of cards + 49 top bar + 16 pad + 64
   // bottom reserve. The frame is added after the window exists and can be
   // measured (see below) — it cannot be known before construction.
-  const MIN_CONTENT_HEIGHT = 739 + 49 + 16 + 64;
+  const MIN_CONTENT_HEIGHT = 775 + 49 + 16 + 64;
   const workAreaHeight = screen.getPrimaryDisplay().workAreaSize.height;
   const minHeight = Math.min(MIN_CONTENT_HEIGHT + 28, workAreaHeight);
 

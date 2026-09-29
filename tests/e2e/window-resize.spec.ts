@@ -134,6 +134,10 @@ async function layout(launched: LaunchedApp) {
     const col = document.querySelector('[data-testid="left-toolbar-column"]');
     if (!col) throw new Error('left toolbar column not found');
     const colRect = col.getBoundingClientRect();
+    // Where the card stack ends (the lowest child), not the column box, which
+    // is anchored to the viewport bottom and so always reaches it.
+    let cardsBottom = colRect.top;
+    for (const child of col.children) cardsBottom = Math.max(cardsBottom, child.getBoundingClientRect().bottom);
     // Screen-pixel positions of the gizmo's vertical axis heads (top + bottom
     // extent of the gizmo cluster) via the E2E hook GizmoPicker installs.
     const headPos = (dir: [number, number, number]) =>
@@ -145,6 +149,7 @@ async function layout(launched: LaunchedApp) {
       canvas: { w: r.width, h: r.height, bottom: r.bottom, right: r.right },
       column: {
         rect: { top: colRect.top, right: colRect.right, bottom: colRect.bottom },
+        cardsBottom,
         clientHeight: col.clientHeight,
         scrollHeight: col.scrollHeight,
       },
@@ -165,10 +170,26 @@ test('window resize: canvas shrinks with the window, min height fits the toolbar
     const grown = await layout(launched);
     expect(grown.canvas.w).toBeGreaterThan(1500);
     expect(grown.canvas.h).toBeGreaterThan(850);
-    // Tall window: the under-column lane exists, so the gizmo sits below the
-    // column's cards in the palette lane (left-aligned, x ≈ 90).
+    // Tall window: the gizmo is clear of the column's cards — either in the
+    // under-column lane (x ≈ 90, below the lowest card) or, once the toolbar has
+    // grown past what 1000px leaves room for, slid right of the column. Which
+    // one depends on the tool count (32 tools no longer fit a lane at 1000px,
+    // and the Windows platform job's 1080px desktop can't grow the window
+    // enough to force one), so assert the property, not the branch: never
+    // behind a card, where the card's pointer-events swallow its clicks.
     expect(grown.gizmoHeads.up).not.toBeNull();
-    expect(grown.gizmoHeads.up!.x).toBeLessThan(grown.column.rect.right);
+    expect(grown.gizmoHeads.down).not.toBeNull();
+    const GIZMO_HEAD_RADIUS = 15;
+    for (const head of [grown.gizmoHeads.up!, grown.gizmoHeads.down!]) {
+      const belowCards = head.y - GIZMO_HEAD_RADIUS > grown.column.cardsBottom;
+      const rightOfColumn = head.x - GIZMO_HEAD_RADIUS > grown.column.rect.right;
+      expect(
+        belowCards || rightOfColumn,
+        `gizmo head at (${head.x}, ${head.y}) overlaps the toolbar cards ` +
+        `(right=${grown.column.rect.right}, cardsBottom=${grown.column.cardsBottom})`,
+      ).toBe(true);
+      expect(head.y).toBeLessThan(grown.viewport.h);
+    }
 
     // Ask for far below the minimum — the window must clamp to minHeight.
     await setWindowSize(launched, 950, 620);
