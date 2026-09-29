@@ -22,7 +22,7 @@ interface PlantGenerationPopupProps {
 
 // Known plant categories for better organization
 const PLANT_CATEGORIES: Record<string, string[]> = {
-  'Trees': ['almond', 'apple', 'apple_fruitingwall', 'easternredbud', 'olive', 'pistachio', 'walnut'],
+  'Trees': ['almond', 'almond_aldrich', 'almond_independence', 'almond_wood_colony', 'apple', 'apple_fruitingwall', 'easternredbud', 'olive', 'pistachio', 'walnut'],
   'Vines': ['bougainvillea', 'grapevine_VSP', 'grapevine_Wye', 'grapevine_GDC', 'grapevine_geneva_double_curtain', 'grapevine_vertical_shoot_positioned', 'grapevine_sprawl', 'grapevine_unilateral_cordon'],
   'Cereals': ['maize', 'rice', 'sorghum', 'wheat'],
   'Vegetables': ['asparagus', 'bean', 'butterlettuce', 'capsicum', 'cherrytomato', 'cowpea', 'soybean', 'strawberry', 'sugarbeet', 'tomato'],

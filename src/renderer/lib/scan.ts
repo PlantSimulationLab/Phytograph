@@ -247,18 +247,48 @@ export function missColumnsAvailable(scan: WithData): boolean {
 // (it's more robust to sparse grids; the backend drops the grid columns then),
 // matching `_do_backfill_misses` in main.py. `preferred` is null when neither
 // signal is present (the scan can't be backfilled).
+//
+// `hasRaster` is the third route (helios-core v1.3.89+): a STATIC raster scan
+// whose parameters declare its angular raster can have each return placed on
+// that raster by its direction, with neither column. It is the last resort --
+// only as good as the declared parameters, which Helios checks the returns
+// against -- so `preferred` names it only when neither column is present. It is
+// also where a static scan with ROUNDED timestamps ends up (the backend drops
+// them), which the renderer cannot see: it still reports 'timestamp' then.
 export interface MissReconSources {
   hasTimestamp: boolean;
   hasGrid: boolean;
-  preferred: 'timestamp' | 'grid' | null;
+  hasRaster: boolean;
+  preferred: 'timestamp' | 'grid' | 'raster' | null;
 }
 
-export function missReconSources(scan: WithData): MissReconSources {
+// Whether a scan's parameters declare the angular raster of a STATIC raster
+// scanner -- what `gapfillMisses` places returns on by direction. A moving
+// platform (trajectory) or a spinning-multibeam / Risley-prism pattern has no
+// such raster, so the direction route does not exist for it.
+export function hasDeclaredRaster(scan: { params?: ScanParameters }): boolean {
+  const p = scan.params;
+  return p != null && p.trajectory == null && (p.pattern ?? 'raster') === 'raster'
+    && p.zenithPoints > 0 && p.azimuthPoints > 0;
+}
+
+export function missReconSources(
+  scan: WithData & { params?: ScanParameters },
+): MissReconSources {
   const slugs = columnSlugs(scan);
   const hasTimestamp = slugs.has(MISS_RECON_TIMESTAMP);
   const hasGrid = MISS_RECON_GRID.every((s) => slugs.has(s));
-  const preferred = hasTimestamp ? 'timestamp' : hasGrid ? 'grid' : null;
-  return { hasTimestamp, hasGrid, preferred };
+  const hasRaster = hasDeclaredRaster(scan);
+  const preferred = hasTimestamp ? 'timestamp' : hasGrid ? 'grid' : hasRaster ? 'raster' : null;
+  return { hasTimestamp, hasGrid, hasRaster, preferred };
+}
+
+// Whether the backend has ANY route to reconstruct this scan's misses: either
+// column, or the declared raster of a static scan.
+export function missesReconstructable(
+  scan: WithData & { params?: ScanParameters },
+): boolean {
+  return missReconSources(scan).preferred != null;
 }
 
 // The per-pulse columns that make a cloud multi-return. All three are required:
@@ -295,9 +325,11 @@ export function missingMultiReturnColumns(scan: WithData): string[] {
 }
 
 // A scan is eligible for Backfill Misses when it has data, does NOT already carry
-// misses (octree.hasMisses), and carries the columns to reconstruct them. Scans
-// that already have misses (E57 / structured PLY) are skipped; scans with neither
-// timestamp nor grid can't be recovered (re-import a miss-retaining format).
+// misses (octree.hasMisses), and has a route to reconstruct them: a timestamp, a
+// row/column grid, or (a static raster scan) the angular raster its parameters
+// declare -- see `missReconSources`. Scans that already have misses (E57 /
+// structured PLY) are skipped; scans with none of the three can't be recovered
+// (re-import a miss-retaining format, or set the scan's parameters).
 //
 // A KNOWN SCANNER ORIGIN IS ALSO REQUIRED, and it is not a display detail. The
 // backend derives every hit's ray direction as `cart2sphere(xyz - origin)`
@@ -317,7 +349,7 @@ export function isBackfillEligible(
   return (
     scan.data != null &&
     scan.data.octree?.hasMisses !== true &&
-    missColumnsAvailable(scan) &&
+    missesReconstructable(scan) &&
     scanHasKnownOrigin(scan)
   );
 }

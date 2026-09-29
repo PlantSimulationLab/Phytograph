@@ -7291,6 +7291,13 @@ export default function PointCloudViewer({
               theta_max: p.zenithMaxDeg,
               phi_min: p.azimuthMinDeg,
               phi_max: p.azimuthMaxDeg,
+              // The head's tilt and heading: read only when a static scan with
+              // neither a usable timestamp nor row/column indices is placed on
+              // this raster by direction (the other paths fit the head's axis
+              // from the returns), which takes each return back through them.
+              tilt_roll_deg: p.tiltRollDeg,
+              tilt_pitch_deg: p.tiltPitchDeg,
+              azimuth_offset_deg: p.azimuthOffsetDeg,
               // Beam optics are deliberately NOT sent. Verified in helios-core:
               // gapfillMisses / _timestamp / _rowcolumn never read exitDiameter or
               // beamDivergence — reconstructed miss directions come purely from the

@@ -17,19 +17,36 @@ can see it and reuse it.
 
 - A scan has **no sky/miss points** (the "Show misses" toggle is absent
   in the Scans panel), **and**
-- it carries a per-return **`timestamp`** column and/or scan-grid
-  **`row`/`column`** indices to rebuild the miss directions from, **and**
+- it has something to rebuild the miss directions from: a per-return
+  **`timestamp`** column, scan-grid **`row`/`column`** indices, or — for a
+  static (tripod) raster scan with neither — **scan parameters** that
+  declare its angular raster, **and**
 - it has a **known scanner position**.
 
-If a scan already retains misses, there's nothing to do. If it has
-neither a timestamp nor a row/column grid, misses **can't** be recovered —
-re-import the scan in a format that keeps them (E57 / structured PLY).
+The dialog's **Reconstructs from** column shows which of the three each scan
+will use: the timestamp first, then the row/column grid, then the **raster**.
+On the raster route each return is placed on the scan's declared grid by its
+direction from the scanner, so the scan parameters (zenith and azimuth ranges,
+point counts, tilt and heading) must be the scanner's. Phytograph checks the
+returns against the declared raster before trusting it. A wrong step, extent,
+tilt or heading fails with a message naming what doesn't match, instead of
+producing misplaced misses.
 
-Without row/column indices, the timestamps have to resolve individual pulses.
-If the GPS time was rounded on export (for example stored as a 32-bit float),
-many pulses share one time and the rebuilt scan pattern can be wrong. The
-import and Backfill Misses both warn about this. Re-export with 64-bit GPS
-time for a trustworthy result.
+If a scan already retains misses, there's nothing to do. If it has no
+timestamp, no row/column grid and no scan parameters, misses **can't** be
+recovered. Set the scan's parameters, or re-import the scan in a format that
+keeps misses (E57 / structured PLY). A **moving-platform** scan always needs
+per-pulse timestamps: its misses are fired from wherever the platform was at
+each pulse's time.
+
+Timestamps only help if they tell pulses apart. If the GPS time was rounded on
+export (for example stored as a 32-bit float), several pulses share one time,
+and a scan pattern rebuilt from them would be wrong. For a static scan,
+Backfill Misses then **ignores the timestamps**. It uses the row/column grid if
+the scan has one, and otherwise places the returns on the declared raster. It
+tells you it did this. A moving-platform scan with rounded timestamps can't be
+backfilled. In every case, re-exporting with 64-bit GPS time gives the exact
+result.
 
 !!! warning "The scanner position is required, not optional"
 

@@ -3,11 +3,11 @@ import * as THREE from 'three';
 import {
   duplicateScanName, derivedScanName, hasData, hasParams, scanDisplayName,
   columnSlugs, missColumnsAvailable, detectedReturnMode, missingMultiReturnColumns, isBackfillEligible, scanHasKnownOrigin, scanOriginOf,
-  meanScanOrigin, missReconSources, type Scan,
+  meanScanOrigin, missReconSources, hasDeclaredRaster, missesReconstructable, type Scan,
   composeRegistration, invertRigid4x4, multiply4x4, registeredScans, referenceScanIds,
   allocateScanColor, createScanColorAllocator,
 } from './scan';
-import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
+import { DEFAULT_SCAN_PARAMETERS, type ScanParameters } from './scanParameters';
 import type { PointCloudData, OctreeRef, ScalarField } from './pointCloudTypes';
 
 function makeData(fileName?: string): PointCloudData {
@@ -175,32 +175,79 @@ describe('missColumnsAvailable', () => {
 describe('missReconSources', () => {
   it('reports timestamp only, preferred = timestamp', () => {
     expect(missReconSources(makeScanWithColumns(['timestamp']))).toEqual({
-      hasTimestamp: true, hasGrid: false, preferred: 'timestamp',
+      hasTimestamp: true, hasGrid: false, hasRaster: false, preferred: 'timestamp',
     });
   });
 
   it('reports grid only, preferred = grid', () => {
     expect(missReconSources(makeScanWithColumns(['row_index', 'column_index']))).toEqual({
-      hasTimestamp: false, hasGrid: true, preferred: 'grid',
+      hasTimestamp: false, hasGrid: true, hasRaster: false, preferred: 'grid',
     });
   });
 
   it('reports both, but PREFERS timestamp (matches backend path choice)', () => {
     expect(missReconSources(makeScanWithColumns(['timestamp', 'row_index', 'column_index']))).toEqual({
-      hasTimestamp: true, hasGrid: true, preferred: 'timestamp',
+      hasTimestamp: true, hasGrid: true, hasRaster: false, preferred: 'timestamp',
     });
   });
 
   it('one grid index alone is not a usable grid', () => {
     expect(missReconSources(makeScanWithColumns(['row_index']))).toEqual({
-      hasTimestamp: false, hasGrid: false, preferred: null,
+      hasTimestamp: false, hasGrid: false, hasRaster: false, preferred: null,
     });
   });
 
   it('reports no sources for a plain cloud (preferred null)', () => {
     expect(missReconSources(makeScanWithColumns(['intensity']))).toEqual({
-      hasTimestamp: false, hasGrid: false, preferred: null,
+      hasTimestamp: false, hasGrid: false, hasRaster: false, preferred: null,
     });
+  });
+});
+
+describe('the declared-raster route (static scan, no timestamp / grid)', () => {
+  const withParams = (params: Partial<ScanParameters> = {}): Scan => ({
+    ...makeScanWithColumns(['intensity']),
+    params: { ...DEFAULT_SCAN_PARAMETERS, ...params },
+  });
+
+  it('a static raster scan with parameters is placed by direction', () => {
+    const s = withParams();
+    expect(hasDeclaredRaster(s)).toBe(true);
+    expect(missReconSources(s)).toEqual({
+      hasTimestamp: false, hasGrid: false, hasRaster: true, preferred: 'raster',
+    });
+    // Parameters also give the scanner position, so the scan is eligible.
+    expect(isBackfillEligible(s)).toBe(true);
+  });
+
+  it('is never preferred over a column the scan carries', () => {
+    const s: Scan = {
+      ...makeScanWithColumns(['timestamp', 'row_index', 'column_index']),
+      params: DEFAULT_SCAN_PARAMETERS,
+    };
+    expect(missReconSources(s).preferred).toBe('timestamp');
+    const g: Scan = {
+      ...makeScanWithColumns(['row_index', 'column_index']),
+      params: DEFAULT_SCAN_PARAMETERS,
+    };
+    expect(missReconSources(g).preferred).toBe('grid');
+  });
+
+  it('does not exist for a moving platform or a non-raster pattern', () => {
+    const moving = withParams({ trajectory: { t: [0, 1] } as never });
+    expect(hasDeclaredRaster(moving)).toBe(false);
+    expect(isBackfillEligible(moving)).toBe(false);
+    expect(hasDeclaredRaster(withParams({ pattern: 'spinning_multibeam' }))).toBe(false);
+    expect(hasDeclaredRaster(withParams({ pattern: 'risley_prism' }))).toBe(false);
+  });
+
+  it('needs a non-empty raster', () => {
+    expect(hasDeclaredRaster(withParams({ zenithPoints: 0 }))).toBe(false);
+  });
+
+  it('without parameters a plain cloud has no route', () => {
+    expect(missesReconstructable(makeScanWithColumns(['intensity'], { withOrigin: true }))).toBe(false);
+    expect(isBackfillEligible(makeScanWithColumns(['intensity'], { withOrigin: true }))).toBe(false);
   });
 });
 

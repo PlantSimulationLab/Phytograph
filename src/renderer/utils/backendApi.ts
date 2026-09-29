@@ -4487,6 +4487,11 @@ export interface BackfillMissesRaster {
   theta_max?: number;
   phi_min?: number;
   phi_max?: number;
+  // Static head tilt / heading (degrees). Used only when the returns are placed
+  // on this raster by direction (no usable timestamp, no row/column indices).
+  tilt_roll_deg?: number;
+  tilt_pitch_deg?: number;
+  azimuth_offset_deg?: number;
   beam_exit_diameter?: number;  // meters (multi-return only)
   beam_divergence?: number;     // milliradians (multi-return only)
 }
@@ -4502,8 +4507,10 @@ export interface BackfillMissesRaster {
  * count and assumes a full 0–180°/0–360° sweep, which mismatches the real
  * scanner and fabricates misses outside the scan pattern. `trajectory` (the
  * backend `PoseStream` wire shape, built via poseStreamToWire()) marks a
- * moving-platform scan. Eligible only when the scan carries a per-pulse timestamp
- * and/or scan-grid row/column indices; the backend 400s otherwise.
+ * moving-platform scan. Eligible when the scan carries a per-pulse timestamp
+ * and/or scan-grid row/column indices, or -- a static raster scan -- `raster`
+ * declares its angular grid (returns are then placed on it by direction); the
+ * backend 400s otherwise.
  *
  * The backend streams PHP1 progress markers ahead of the JSON tail (the build +
  * gapfill is slow for a dense scan), so this takes an optional `onProgress`

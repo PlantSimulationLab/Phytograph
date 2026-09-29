@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, CloudFog } from 'lucide-react';
 import type { Scan } from '../lib/scan';
 import { hasData, isBackfillEligible, scanHasKnownOrigin, missReconSources,
-         missColumnsAvailable } from '../lib/scan';
+         missesReconstructable } from '../lib/scan';
 import { SelectAllHeader } from './SelectAllHeader';
 
 interface BackfillMissesPopupProps {
@@ -20,16 +20,17 @@ interface BackfillMissesPopupProps {
 }
 
 // A small chip naming an ancillary signal a scan carries for miss reconstruction
-// (timestamp / row-col). `used` highlights the one the backend will actually use
-// (timestamp is preferred when both are present); the other reads muted.
-function SourceBadge({ label, used }: { label: string; used: boolean }) {
+// (timestamp / row-col / the declared raster). `used` highlights the one the
+// backend will actually use (timestamp, then row/col, then raster); the others
+// read muted.
+function SourceBadge({ label, used, title }: { label: string; used: boolean; title?: string }) {
   return (
     <span
       data-testid={`backfill-source-${label.replace('/', '')}`}
       data-used={used}
-      title={used
+      title={title ?? (used
         ? `Misses will be reconstructed from the ${label} column${label === 'row/col' ? 's' : ''}`
-        : `${label} is available but the timestamp path is used instead`}
+        : `${label} is available but the timestamp path is used instead`)}
       className={`px-1.5 py-0.5 rounded text-[9px] font-medium border ${
         used
           ? 'bg-green-500/15 border-green-500/40 text-green-300'
@@ -125,11 +126,11 @@ export function BackfillMissesPopup({
   // otherwise, since the columns it needs are visibly present.
   const noOrigin = selectedDataScans.filter(
     s => s.data?.octree?.hasMisses !== true
-      && missColumnsAvailable(s)
+      && missesReconstructable(s)
       && !scanHasKnownOrigin(s),
   ).length;
   const unrecoverable = selectedDataScans.filter(
-    s => s.data?.octree?.hasMisses !== true && !missColumnsAvailable(s),
+    s => s.data?.octree?.hasMisses !== true && !missesReconstructable(s),
   ).length;
 
   const totalPoints = useMemo(
@@ -179,8 +180,11 @@ export function BackfillMissesPopup({
             density can use them. The <span className="text-green-300">Reconstructs from</span>{' '}
             column shows the ancillary data each scan carries — a per-pulse
             <span className="text-neutral-300"> timestamp</span> and/or scan-grid
-            <span className="text-neutral-300"> row/column</span> indices; the
-            highlighted one is what's used (timestamp is preferred).
+            <span className="text-neutral-300"> row/column</span> indices, or for a
+            static scan with neither, the angular
+            <span className="text-neutral-300"> raster</span> its scan parameters
+            declare (each return is placed on it by direction); the highlighted one
+            is what's used (timestamp first, then row/column, then raster).
           </p>
 
           {/* Select controls + count */}
@@ -196,8 +200,9 @@ export function BackfillMissesPopup({
           {eligible.length === 0 ? (
             <div className="p-4 text-center text-xs text-neutral-500" data-testid="backfill-none-eligible">
               No selected scan can be backfilled. Eligible scans have point data, no
-              sky/miss points yet, and a per-pulse timestamp or row/column grid to
-              recover them from.
+              sky/miss points yet, and a per-pulse timestamp, a row/column grid, or
+              (a static scan) scan parameters declaring its angular raster to recover
+              them from.
             </div>
           ) : (
             <div className="border border-neutral-700 rounded-lg overflow-hidden">
@@ -240,6 +245,13 @@ export function BackfillMissesPopup({
                       <div className="flex items-center gap-1 flex-shrink-0">
                         {sources.hasTimestamp && <SourceBadge label="timestamp" used={sources.preferred === 'timestamp'} />}
                         {sources.hasGrid && <SourceBadge label="row/col" used={sources.preferred === 'grid'} />}
+                        {sources.preferred === 'raster' && (
+                          <SourceBadge
+                            label="raster"
+                            used
+                            title="No timestamp or row/column indices: each return is placed on the scan's declared angular raster by its direction, so the scan parameters must match the scanner"
+                          />
+                        )}
                       </div>
                     </div>
                   );
@@ -263,8 +275,9 @@ export function BackfillMissesPopup({
               )}
               {unrecoverable > 0 && (
                 <div>
-                  {unrecoverable} selected scan(s) can't recover misses (no timestamp or
-                  row/column grid). Re-import a miss-retaining format (E57 / structured PLY).
+                  {unrecoverable} selected scan(s) can't recover misses (no timestamp,
+                  row/column grid or scan parameters). Set the scan's parameters, or
+                  re-import a miss-retaining format (E57 / structured PLY).
                 </div>
               )}
             </div>

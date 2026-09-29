@@ -11413,9 +11413,9 @@ def _pulse_audit_warnings(audit: Optional[dict], label: str, *,
             consequence = (
                 "For a static scan, leaf area density will treat each return as its "
                 "own pulse rather than grouping returns by timestamp, and Backfill "
-                "Misses, which "
-                "reconstructs the scan pattern from the timestamps, may place misses "
-                "wrongly.")
+                "Misses will place misses without them (through row/column indices, "
+                "or by direction on the scan's declared angular raster). A "
+                "moving-platform scan still needs them, so its results are unreliable.")
         elif stripped:
             consequence = (
                 "The timestamps were not used to group returns into pulses: each "
@@ -11431,6 +11431,36 @@ def _pulse_audit_warnings(audit: Optional[dict], label: str, *,
             "floats) and no longer identify individual pulses. " + consequence
             + " Re-export with full-precision (64-bit) GPS time for exact results.")
     return out
+
+
+# The phrase every helios-core (v1.3.89+) refusal of unusable pulse timestamps
+# shares: gapfillMisses() when it would build a pulse clock from them, and the
+# leaf-area inversion when it groups returns into beams by them. Helios decides
+# it from DIRECTION (returns sharing a timestamp that point different ways cannot
+# be one pulse), which catches rounding `_audit_pulse_columns` cannot see -- that
+# audit judges by group size against target_count, so a single-return scan
+# rounded into groups of a few pulses passes it.
+_HELIOS_PULSE_TIMESTAMP_ERROR = "do not identify its pulses"
+
+
+def _is_pulse_timestamp_error(exc: BaseException) -> bool:
+    return _HELIOS_PULSE_TIMESTAMP_ERROR in str(exc)
+
+
+def _drop_pulse_columns(cloud) -> None:
+    """Remove `timestamp` and `target_index` from every hit of a PyHelios cloud,
+    the remedy helios-core names for timestamps that do not identify pulses: with
+    no timestamp each return is inverted as its own pulse (and a static scan is
+    gap-filled by direction on its declared raster), and target_index must go too
+    or the other returns of its pulse would be counted a second time as removed
+    from it. Static scans only -- a moving scan's platform pose is known only from
+    its clock. A column the cloud does not carry is simply skipped."""
+    for label in ("timestamp", "target_index"):
+        try:
+            cloud.deleteHitData(label)
+        except Exception as exc:  # noqa: BLE001 - absent column: nothing to drop
+            if "no hit data column exists" not in str(exc):
+                print(f"[helios] deleteHitData({label!r}) failed: {exc}", flush=True)
 
 
 def _resolve_lad_wood_column(column_getter, wood_split, miss=None):
@@ -13560,7 +13590,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 if block_limit < lattice_n[0] * lattice_n[1] * lattice_n[2]:
                     blocks = _lad_lattice_blocks(*lattice_n, block_limit)
 
-        with Context() as ctx:
+        def _invert(ctx):
             if blocks is None:
                 if gtheta_arg is None:
                     cloud.calculateLeafArea(ctx, min_hits, element_width)
@@ -13577,6 +13607,30 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     else:
                         cloud.calculateLeafAreaBlock(ctx, list(ijk_lo), list(ijk_hi),
                                                      min_hits, element_width, Gtheta=gtheta_arg)
+
+        with Context() as ctx:
+            try:
+                _invert(ctx)
+            except Exception as exc:
+                # Helios refuses timestamps that group several pulses into one
+                # beam (see _HELIOS_PULSE_TIMESTAMP_ERROR); `_lad_labels_vals`
+                # already strips the rounding its audit can see, so this is the
+                # rest. A static scan has an exact fallback -- invert each return
+                # as its own pulse, as the stripped path does -- so take it
+                # rather than fail. A moving scan cannot: its beam origins are
+                # joined by those timestamps, so the refusal stands.
+                if any_moving or not _is_pulse_timestamp_error(exc):
+                    raise
+                _drop_pulse_columns(cloud)
+                warnings.append(
+                    "The scan's timestamps do not identify individual pulses: returns "
+                    "sharing a timestamp point in different directions, so the GPS "
+                    "times were rounded on export (e.g. stored as 32-bit floats). "
+                    "They were not used to group returns into pulses: each return "
+                    "was inverted as its own pulse. Re-export with full-precision "
+                    "(64-bit) GPS time and the scanner's original return numbers for "
+                    "exact results.")
+                _invert(ctx)
 
         # What the inversion recovered from target_count (see
         # LiDARcloud::inferHiddenReturns). Beyond-grid returns are the expected
@@ -35481,6 +35535,14 @@ class BackfillMissesRequest(BaseModel):
     phi_max: Optional[float] = None
     beam_exit_diameter: Optional[float] = None   # meters
     beam_divergence: Optional[float] = None       # milliradians
+    # The static head's residual tilt and heading, in degrees. Read only when a
+    # scan with neither usable timestamps nor row/column indices is placed on
+    # its declared raster by direction (helios-core v1.3.89+), which takes each
+    # return's direction back through them; the timestamp and row/column paths
+    # fit the head's axis from the returns and ignore them.
+    tilt_roll_deg: float = 0.0
+    tilt_pitch_deg: float = 0.0
+    azimuth_offset_deg: float = 0.0
     trajectory: Optional[PoseStream] = None
 
 
@@ -36409,6 +36471,15 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
                 "scan_origin": list(origin), "already_had_misses": False,
                 "error": f"PyHelios unavailable: {exc}"}
 
+    # A static scan whose returns carry neither a usable pulse clock nor raster
+    # indices is placed on its DECLARED raster by each return's direction
+    # (helios-core v1.3.89+). That needs the scanner's real raster: a point-count
+    # estimate is not one, and Helios refuses returns that do not sit on the
+    # raster it is given. The endpoint only lets such a scan through with one.
+    raster_declared = bool(request.n_theta and request.n_phi)
+    by_direction = (not moving and not flags["has_timestamp"]
+                    and not flags["has_grid"])
+
     _report(0.05, "Reading scan")
     cloud = LiDARCloud()
     cloud.disableMessages()
@@ -36420,31 +36491,77 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         phi_range=(math.radians(phi_min), math.radians(phi_max)),
         exit_diameter=(request.beam_exit_diameter or 0.0),
         beam_divergence=((request.beam_divergence or 0.0) / 1000.0),
+        scan_tilt_roll=math.radians(request.tilt_roll_deg or 0.0),
+        scan_tilt_pitch=math.radians(request.tilt_pitch_deg or 0.0),
+        scan_azimuth_offset=math.radians(request.azimuth_offset_deg or 0.0),
     )
     if n_pts > 0:
         _report(0.15, f"Building cloud ({n_pts:,} points)")
         cloud.reserveHitPoints(int(n_pts))
         _add_hits_bulk(cloud, sid, xyz, dirs, cloud_labels, cloud_vals)
 
+    def _gapfill_error(exc) -> dict:
+        # Helios raises (HeliosRuntimeError) when it can't reconstruct the scan
+        # grid — e.g. a sparse row/column raster ("too few populated scan rows"),
+        # returns that do not lie on the declared raster, or timestamps too
+        # degenerate to group. Return a clean, actionable error in the JSON tail
+        # rather than breaking the stream with a raw 500. Helios's own message
+        # names the cause and the fix, so it leads; the generic advice follows.
+        msg = str(exc).split("ERROR (")[-1].rstrip(") ") or str(exc)
+        if _is_pulse_timestamp_error(exc):
+            # Helios's own remedy text is API advice (deleteHitData); say it in
+            # the app's terms. Reached by a moving scan, or a static one with no
+            # declared raster to place its returns on instead.
+            msg = ("its timestamps do not identify individual pulses: returns "
+                   "sharing a timestamp point in different directions, so the GPS "
+                   "times were rounded on export (e.g. stored as 32-bit floats)")
+            advice = ("Re-export with full-precision (64-bit) GPS time"
+                      + ("." if moving else
+                         ", or set the scan's parameters (zenith/azimuth ranges and "
+                         "point counts) so its returns can be placed by direction "
+                         "instead."))
+        elif by_direction or placed_by_direction:
+            advice = ("Its returns were placed on the scan's declared angular raster "
+                      "by direction, so the scan parameters (zenith/azimuth ranges, "
+                      "point counts, tilt and heading) must match the scanner's. "
+                      "Correct them in Scan Parameters, or re-import a format that "
+                      "retains misses (E57 / structured PLY).")
+        else:
+            advice = ("The scan grid is too sparse or irregular to gap-fill. If it "
+                      "carries a timestamp, ensure each return keeps it; otherwise "
+                      "re-import a format that retains misses (E57 / structured PLY).")
+        return {"backfilled": 0, "miss_count": 0, "has_misses": False,
+                "scan_origin": list(origin), "already_had_misses": False,
+                "error": f"Could not reconstruct sky/miss points for this scan: {msg}. {advice}"}
+
     # The gapfill itself is one opaque C++ call — report an INDETERMINATE stage
     # (None fraction → pulsing bar, like LAD's ray-trace step) so the UI shows
     # activity while it runs.
     _report(None, "Reconstructing misses")
+    placed_by_direction = False
     try:
         synth_xyz, count, synth_grid, synth_ts = _run_gapfill_extract(cloud)
     except Exception as exc:
-        # Helios raises (HeliosRuntimeError) when it can't reconstruct the scan
-        # grid — e.g. a sparse row/column raster ("too few populated scan rows"),
-        # or returns/timestamps too degenerate to group. Return a clean, actionable
-        # error in the JSON tail rather than breaking the stream with a raw 500.
-        msg = str(exc).split("ERROR (")[-1].rstrip(") ") or str(exc)
-        return {"backfilled": 0, "miss_count": 0, "has_misses": False,
-                "scan_origin": list(origin), "already_had_misses": False,
-                "error": ("Could not reconstruct sky/miss points for this scan: "
-                          f"{msg}. The scan grid is too sparse or irregular to "
-                          "gap-fill. If it carries a timestamp, ensure each return "
-                          "keeps it; otherwise re-import a format that retains "
-                          "misses (E57 / structured PLY).")}
+        # Timestamps Helios finds do not identify pulses (returns sharing one
+        # point different ways) -- rounding `_audit_pulse_columns` could not see,
+        # or the endpoint would already have stripped them. A static scan has a
+        # route that does not need them: drop them and place the returns on the
+        # declared raster (or through their row/column indices, when the scan
+        # has those). Helios checks the returns against the raster before
+        # trusting it, so a wrong raster still fails loudly below.
+        if (moving or not _is_pulse_timestamp_error(exc)
+                or not (flags["has_grid"] or raster_declared)):
+            return _gapfill_error(exc)
+        _drop_pulse_columns(cloud)
+        placed_by_direction = not flags["has_grid"]
+        stripped_by_helios = True
+        try:
+            synth_xyz, count, synth_grid, synth_ts = _run_gapfill_extract(cloud)
+        except Exception as exc2:
+            return _gapfill_error(exc2)
+    else:
+        stripped_by_helios = False
+    placed_by_direction = placed_by_direction or by_direction
 
     _report(0.9, "Storing misses")
     # Reconstruct per-beam directions for the synthesized misses so LAD's beam
@@ -36506,11 +36623,40 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "already_had_misses": False,
         "miss_octree_cache_id": miss_cache_id,
         "restored_deleted_hits": int(n_restored),
-        # Rounded timestamps are the only raster clue gap-fill has here, so it
-        # uses them anyway; say so rather than let the misses read as exact.
-        "warnings": _pulse_audit_warnings(
-            flags.get("pulse_audit"), "This scan", at_import=True),
+        "warnings": _backfill_warnings(
+            flags, stripped_by_helios=stripped_by_helios,
+            placed_by_direction=placed_by_direction),
     }
+
+
+def _backfill_warnings(flags: dict, *, stripped_by_helios: bool,
+                       placed_by_direction: bool) -> List[str]:
+    """What a Backfill Misses run should tell the user about HOW it placed the
+    misses. A static scan's rounded timestamps are no longer used at all (they
+    are dropped, by our audit or by Helios's), so the import-time wording --
+    which says gap-fill may misplace misses from them -- would describe a
+    reconstruction that did not happen; a moving scan still reconstructs from
+    them and keeps that wording."""
+    audit = flags.get("pulse_audit")
+    stripped = bool(flags.get("timestamps_stripped")) or stripped_by_helios
+    if stripped and audit:
+        audit = {**audit, "timestamps_rounded": False}
+    out = _pulse_audit_warnings(audit, "This scan", at_import=True)
+    if stripped:
+        out.append(
+            "This scan's timestamps do not identify individual pulses (rounded on "
+            "export, e.g. stored as 32-bit floats), so they were not used: "
+            + ("each return was placed on the scan's declared angular raster by its "
+               "direction instead. " if placed_by_direction else
+               "the misses were placed through the scan's row/column indices instead. ")
+            + "Re-export with full-precision (64-bit) GPS time for exact results.")
+    elif placed_by_direction:
+        out.append(
+            "This scan carries neither per-pulse timestamps nor row/column indices, "
+            "so each return was placed on the scan's declared angular raster by its "
+            "direction. The misses are only as accurate as the scan parameters "
+            "(zenith/azimuth ranges, point counts, tilt and heading).")
+    return out
 
 
 @app.post("/api/cloud/session/{session_id}/backfill-misses")
@@ -36560,8 +36706,16 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
                     if _deleted is not None and _deleted.shape[0] == len(sess.positions)
                     else None)
         n_restored = int(_restore.sum()) if _restore is not None else 0
+        # A static scan's rounded timestamps are dropped rather than used: a
+        # pulse clock built from them is the rounding step, and helios-core
+        # refuses them. The returns are then placed through their row/column
+        # indices, or by direction on the declared raster. A moving scan keeps
+        # them -- its beam origins are joined by time, and nothing replaces that.
         xyz, dirs, labels, vals, flags = _session_to_lad_arrays(
-            sess, origin, include_backfilled=False, restore_mask=_restore)
+            sess, origin, include_backfilled=False, restore_mask=_restore,
+            strip_rounded_timestamps=(
+                request.trajectory is None
+                and getattr(sess, "beam_origins", None) is None))
 
     # Already carries real misses (E57 / structured PLY): nothing to recover. A
     # trivial no-op — return a plain JSON response (no streaming needed).
@@ -36574,18 +36728,35 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
             "already_had_misses": True,
         })
 
-    # Eligibility: gapfillMisses() reconstructs miss directions from EITHER a
-    # per-hit timestamp OR the native scan-grid row/column indices. With neither,
-    # there's no way to recover them — 400 with an actionable message instead of
-    # letting Helios raise.
+    # Eligibility: gapfillMisses() reconstructs miss directions from a per-hit
+    # timestamp, the native scan-grid row/column indices, or -- for a STATIC
+    # raster scan with neither (helios-core v1.3.89+) -- each return's direction
+    # on the scan's declared raster. That last route needs the raster to be the
+    # scanner's, which a point-count estimate is not, so it requires one to be
+    # supplied. A moving scan has no such route: its platform pose is known only
+    # from the clock. 400 with an actionable message instead of letting Helios
+    # raise.
     if not (flags["has_timestamp"] or flags["has_grid"]):
-        raise HTTPException(
-            status_code=400,
-            detail=("This scan has no sky/miss points and no way to reconstruct "
-                    "them: it carries neither a per-pulse timestamp nor scan-grid "
-                    "row/column indices. Re-import a scan that retains misses "
-                    "(E57 / structured PLY) or one of those columns."),
-        )
+        if request.trajectory is not None or getattr(sess, "beam_origins", None) is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=("This moving-platform scan has no sky/miss points and no way "
+                        "to reconstruct them: its misses are fired from the platform "
+                        "pose at each pulse's time, and it carries no usable per-pulse "
+                        "timestamp. Re-import a scan that retains misses or "
+                        "full-precision (64-bit) per-pulse timestamps."),
+            )
+        if not (request.n_theta and request.n_phi):
+            raise HTTPException(
+                status_code=400,
+                detail=("This scan has no sky/miss points and no usable per-pulse "
+                        "timestamp or scan-grid row/column indices, so its misses can "
+                        "only be placed by each return's direction on the scanner's "
+                        "angular raster -- and the scan has no parameters giving that "
+                        "raster. Set the scan's parameters (zenith/azimuth ranges and "
+                        "point counts), or re-import a scan that retains misses "
+                        "(E57 / structured PLY)."),
+            )
 
     # A known scanner position is as REQUIRED as the columns, and for the same
     # reason: the reconstruction is geometric. `_directions_from_origin` derives

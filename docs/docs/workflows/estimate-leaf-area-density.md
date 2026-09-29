@@ -37,9 +37,12 @@ surface.
   GPS time as a 32-bit float (common with CloudCompare scalar fields) rounds it
   to tens of microseconds, coarser than a terrestrial scanner's pulse clock, so
   many pulses end up sharing one time. Phytograph checks this at import and
-  warns. For a static scan, LAD then inverts each return as its own pulse,
-  and Backfill Misses may place misses wrongly, because it rebuilds the scan
-  pattern from those same timestamps. The import also checks for returns of
+  warns, and the LAD inversion re-checks it by beam direction (returns that
+  share a time but point different ways can't be one pulse). For a static
+  scan, LAD then inverts each return as its own pulse, and Backfill Misses
+  places the misses without the timestamps: from the row/column grid, or by
+  direction on the scan's declared raster. A moving-platform scan can't do
+  without them, so its LAD stops with an error. The import also checks for returns of
   one pulse that share a return number (an export that rewrote
   `return_number`), and drops that column when it finds them. Re-export with
   64-bit GPS time and the scanner's own return numbers for exact results.

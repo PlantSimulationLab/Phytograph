@@ -470,10 +470,13 @@ def test_plain_xyz_is_rejected(stub_pyhelios):
     sess = _make_session(_TS_POSITIONS, {}, [])
     _register(sess)
 
+    # No timestamp, no grid and no declared raster: nothing to place the misses
+    # by. (With a raster, a static scan is placed by direction -- see
+    # test_backfill_by_direction.py.)
     with pytest.raises(main.HTTPException) as exc:
         _call(sess.session_id, origin=[0, 0, 5])
     assert exc.value.status_code == 400
-    assert "reconstruct" in str(exc.value.detail).lower()
+    assert "scan's parameters" in str(exc.value.detail)
 
 
 def test_orphaned_session_404(stub_pyhelios):
