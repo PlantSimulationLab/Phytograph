@@ -105,11 +105,15 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     await expect(runButton).toBeEnabled({ timeout: 30_000 });
 
     // Prove a new op can start and complete after the cancel: run again and let it
-    // finish, asserting a real DEM surface mesh appears (concrete output).
+    // finish, asserting a real DEM surface mesh appears (concrete output). Count
+    // rather than expect exactly one: when the first run beat the Cancel click
+    // it already added a DEM of the same name, so the new one is the extra row.
+    const demRows = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
+    const before = await demRows.count();
+    expect(before).toBeLessThanOrEqual(1);
     await runButton.click();
-    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
-    await expect(demRow).toBeVisible({ timeout: 60_000 });
-    expect(parseInt((await demRow.getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
+    await expect(demRows).toHaveCount(before + 1, { timeout: 60_000 });
+    expect(parseInt((await demRows.last().getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
   } finally {
     await close();
   }

@@ -320,7 +320,15 @@ function createWindow(): void {
     // delivery (the renderer never receives the synthetic events), so the
     // app.setActivationPolicy('accessory') call above is doing the
     // heavy lifting for focus-stealing prevention instead.
-    show: !isE2E,
+    // Except on the Linux CI runner, where a never-shown window gets ~1 frame
+    // a second: every Playwright click waited ~2 s for frames. Showing it on
+    // the (virtual, unseen) xvfb display cut the E2E suite's summed test time
+    // from 134 to 96 min. Disabling backgroundThrottling instead changed
+    // nothing (143 vs 142 min) — it is compositing, not throttling. NOT on
+    // Windows: a shown window on its service-session desktop failed 18 of 85
+    // platform specs (backend never ready, clicks timing out). macOS windows
+    // were never throttled, and a local run must not pop windows on screen.
+    show: !isE2E || (!!process.env.CI && process.platform === 'linux'),
     skipTaskbar: isE2E,
     webPreferences: {
       preload: join(__dirname, '../dist-preload/preload.mjs'),

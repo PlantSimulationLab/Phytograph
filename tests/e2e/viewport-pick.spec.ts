@@ -380,7 +380,21 @@ test.describe('viewport picking', () => {
 
     await expect(selectedRows()).toHaveCount(0);
 
-    // Scan 0's marker sits at its world origin (-2, 0, 0.5).
+    // Scan 0's marker sits at its world origin (-2, 0, 0.5). Aim the camera at
+    // it rather than relying on the post-import framing: that framing fits the
+    // ~0.5 m point data, so the markers, meters away, land at the canvas edges —
+    // two outside the frustum and two near panels. Scan 0's cleared the left
+    // toolbar by 44 px on a Mac and sat under it on the Linux runner. Straight
+    // on from ~0.9 m puts it at the canvas center, clear of every panel. (This
+    // scene has no display offset: the framed target IS the world center.)
+    await page.evaluate(() => (window as any).__setCameraPose([-1.4, -0.6, 0.9], [-2, 0, 0.5], [0, 0, 1]));
+    await expect
+      .poll(async () => {
+        const p = await page.evaluate(() => (window as any).__worldToScreen([-2, 0, 0.5]));
+        const c = await page.locator('canvas').boundingBox();
+        return !!p && !!c && Math.abs(p.x - (c.x + c.width / 2)) < 5 && Math.abs(p.y - (c.y + c.height / 2)) < 5;
+      }, { timeout: 10_000 })
+      .toBe(true);
     const pt = await worldToScreenPx([-2, 0, 0.5]);
     await clickViewport(pt.x, pt.y);
 
