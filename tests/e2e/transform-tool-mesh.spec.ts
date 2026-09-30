@@ -59,11 +59,16 @@ test('Transform is available with nothing selected and moves a mesh checked in i
     const moveX = page.getByTestId('translate-input-x');
     await moveX.fill('4');
     await moveX.press('Enter');
-    // A draft: the mesh's stored transform is untouched until OK.
+    // A draft: the mesh's stored transform is untouched until Apply.
     await expect(meshRow).toHaveAttribute('data-mesh-position', before.map(v => v.toFixed(2)).join(','));
 
+    await expect(page.getByTestId('translate-ok')).toHaveText('Apply');
+    // Apply commits and leaves the tool open (fields back to zero); then close.
     await page.getByTestId('translate-ok').click();
-    await expect(panel).toBeHidden({ timeout: 20_000 });
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'false', { timeout: 20_000 });
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-applying', 'false');
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
     await expect.poll(async () => {
       const attr = await meshRow.getAttribute('data-mesh-position');
       return attr ? Number(attr.split(',')[0]) : NaN;

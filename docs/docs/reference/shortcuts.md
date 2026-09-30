@@ -198,7 +198,7 @@ objects in between. Click empty space when you are done to deselect.
 For a **point cloud** (and for anything while the Transform tool is open), the
 gesture only sets the pending move, rotation or scale in the Transform panel
 (opening it if needed) — it does not apply the change. Repeat <kbd>T</kbd> /
-<kbd>R</kbd> / <kbd>S</kbd> as often as you like, then click **OK** in the
+<kbd>R</kbd> / <kbd>S</kbd> as often as you like, then click **Apply** in the
 panel to apply everything (or **Cancel** to discard). See
 [Clean a point cloud → Transform](../workflows/clean-point-cloud.md#transform-move-rotate-and-scale).
 
@@ -233,7 +233,7 @@ Two cases where the gesture deliberately stands aside:
   the selected pose.
 
 The move applies as soon as you confirm it — there is no separate panel
-**OK** step the way there is for a point cloud. <kbd>Esc</kbd> cancels and
+**Apply** step the way there is for a point cloud. <kbd>Esc</kbd> cancels and
 puts the scanner back. Note that a scan transform is **not** covered by
 Undo.
 

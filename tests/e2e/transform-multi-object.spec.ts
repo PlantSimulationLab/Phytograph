@@ -84,8 +84,12 @@ test.describe('Transform tool: clouds and meshes together', () => {
   }
 
   async function ok() {
+    // Apply commits and leaves the tool open (fields back to zero); then close.
     await session.page.getByTestId('translate-ok').click();
-    await expect(session.page.getByTestId('translate-panel')).toBeHidden({ timeout: 60_000 });
+    await expect(session.page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'false', { timeout: 60_000 });
+    await expect(session.page.getByTestId('translate-panel')).toHaveAttribute('data-applying', 'false');
+    await session.page.getByTestId('translate-cancel').click();
+    await expect(session.page.getByTestId('translate-panel')).toBeHidden();
   }
 
   // Net draft translation of the cloud's live octree object (what is DRAWN).
@@ -149,6 +153,56 @@ test.describe('Transform tool: clouds and meshes together', () => {
     await expect(cube).toHaveAttribute('data-mesh-rotation', '0.0,0.0,0.0');
     await expect(cube).toHaveAttribute('data-mesh-scale', '1.00,1.00,1.00');
     expect(await bounds(cloud)).toEqual(cloudAfter);
+  });
+
+  test('Apply keeps the tool open: move a cloud, then a mesh, by different amounts', async () => {
+    const { page } = session;
+    const cube = await importCube();
+    const cloud = await importCloud(CLOUD, 'sparse');
+    await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+    await page.getByTestId('meshes-deselect-all').click();
+    const b0 = await bounds(cloud);
+    const p0 = await vec(cube, 'data-mesh-position');
+
+    await openTool();
+    const rows = page.getByTestId('transform-target-row');
+    // Clouds are listed first, then meshes.
+    const cloudRow = rows.nth(0);
+    const meshRow = rows.nth(1);
+
+    // 1) The cloud, +2 in X.
+    await cloudRow.click();
+    await field('translate-input-x', '2');
+    const panel = page.getByTestId('translate-panel');
+    await page.getByTestId('translate-ok').click();
+    await expect(panel).toHaveAttribute('data-dirty', 'false', { timeout: 60_000 });
+    await expect(panel).toHaveAttribute('data-applying', 'false');
+    // Still open, fields back to zero, the cloud still checked.
+    await expect(panel).toBeVisible();
+    await expect(page.getByTestId('translate-input-x')).toHaveValue('0.000');
+    await expect(cloudRow).toHaveAttribute('data-checked', 'true');
+    await expect(page.getByTestId('translate-cancel')).toHaveText('Close');
+
+    // 2) Swap to the mesh, +3 in Y.
+    await cloudRow.click();
+    await meshRow.click();
+    await expect(cloudRow).toHaveAttribute('data-checked', 'false');
+    await field('translate-input-y', '3');
+    await expect(page.getByTestId('translate-cancel')).toHaveText('Cancel');
+    await page.getByTestId('translate-ok').click();
+    await expect(panel).toHaveAttribute('data-dirty', 'false', { timeout: 60_000 });
+    await expect(meshRow).toHaveAttribute('data-checked', 'true');
+
+    await page.getByTestId('translate-cancel').click();
+    await expect(panel).toBeHidden();
+
+    // Each moved by its own amount, and only that.
+    const b1 = await bounds(cloud);
+    for (let i = 0; i < 6; i++) expect(b1[i]).toBeCloseTo(b0[i] + (i % 3 === 0 ? 2 : 0), 2);
+    const p1 = await vec(cube, 'data-mesh-position');
+    expect(p1[0]).toBeCloseTo(p0[0], 2);
+    expect(p1[1]).toBeCloseTo(p0[1] + 3, 2);
+    expect(p1[2]).toBeCloseTo(p0[2], 2);
   });
 
   test('the checked set, not the pane selection, is what moves', async () => {

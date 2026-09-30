@@ -56,9 +56,15 @@ interface TransformationPanelProps {
   onReset: () => void;
   /** Reset the draft ROTATION to zero (still not baked). */
   onResetRotation: () => void;
-  /** Commit: bake the pending transform. The parent flips `isApplying` and
-   *  closes on completion. */
-  onApply: () => void;
+  /** Commit: bake the pending transform. The parent flips `isApplying`; it
+   *  either closes the panel on completion or (with `keepOpenOnApply`) resets
+   *  the fields and leaves it open. May resolve to false when nothing applied. */
+  onApply: () => void | Promise<boolean>;
+  /** The Transformation tool stays open after Apply, so several objects can be
+   *  moved by different amounts in turn. The commit button then reads "Apply",
+   *  the left button "Close" when nothing is pending, and the X-close confirm's
+   *  Apply closes after applying. */
+  keepOpenOnApply?: boolean;
   /** Discard: revert to baseline and close. */
   onCancel: () => void;
   /** Target picker (Transformation tool). Omitted for the skeleton panel. */
@@ -87,7 +93,7 @@ export function TransformationPanel({
   position, rotation, showRotation, objectName, isDirty, isApplying,
   onCoordChange, onRotationChange, onReset, onResetRotation, onApply, onCancel,
   picker, scale, scaleLocked = true, onScaleLockedChange, onScaleChange, onResetScale,
-  pivotLabel, warnings, okBlockedReason,
+  pivotLabel, warnings, okBlockedReason, keepOpenOnApply = false,
 }: TransformationPanelProps) {
   // With a picker the numbers are a DELTA applied to many objects, so say so.
   const relative = !!picker;
@@ -308,9 +314,10 @@ export function TransformationPanel({
           onClick={onCancel}
           disabled={isApplying}
           data-testid="translate-cancel"
+          title={keepOpenOnApply && isDirty ? 'Discard the unapplied changes and close' : undefined}
           className="flex-1 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-xs disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          Cancel
+          {keepOpenOnApply && !isDirty ? 'Close' : 'Cancel'}
         </button>
         <button
           onClick={onApply}
@@ -325,7 +332,7 @@ export function TransformationPanel({
               Applying…
             </>
           ) : (
-            'OK'
+            keepOpenOnApply ? 'Apply' : 'OK'
           )}
         </button>
       </div>
@@ -341,7 +348,14 @@ export function TransformationPanel({
           </p>
           <div className="flex flex-col gap-2">
             <button
-              onClick={() => { setConfirmClose(false); onApply(); }}
+              onClick={() => {
+                setConfirmClose(false);
+                // The tool stays open after Apply; closing was asked for here,
+                // so close once the apply has landed.
+                void Promise.resolve(onApply()).then((ok) => {
+                  if (keepOpenOnApply && ok !== false) onCancel();
+                });
+              }}
               disabled={!!okBlockedReason}
               data-testid="translate-confirm-apply"
               className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium"

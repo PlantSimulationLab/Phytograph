@@ -216,11 +216,15 @@ test.describe('translate cloud', () => {
     await expect(page.getByTestId('scene-origin-panel')).toBeHidden();
   }
 
-  // Click OK and wait for the bake to finish (panel closes).
+  // Click Apply, wait for the bake to finish, then close the (still open) tool.
   async function clickOK() {
     const { page } = session;
+    // Apply commits and leaves the tool open (fields back to zero); then close.
     await page.getByTestId('translate-ok').click();
-    await expect(page.getByTestId('translate-panel')).toBeHidden({ timeout: 60_000 });
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'false', { timeout: 60_000 });
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-applying', 'false');
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
   }
 
   test('typing a value updates the viewport as a draft, then OK bakes it', async () => {

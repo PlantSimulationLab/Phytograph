@@ -11317,26 +11317,29 @@ export default function PointCloudViewer({
     return true;
   }, [meshes, meshDeltaInput, transformDeltaMatrix, captureTransform, scene]);
 
-  // OK for the Transformation tool.
+  // Apply for the Transformation tool. The panel STAYS OPEN afterwards, with
+  // the same objects checked and the fields back to zero, so several objects
+  // can be moved by different amounts in turn without reopening the tool.
   //
   // Meshes commit first (synchronous, undoable, cannot fail once the panel has
-  // let OK through) and are unchecked, so a retry after a cloud failure cannot
-  // apply them twice. Clouds then bake one after another. A cloud that baked is
-  // unchecked too (its draft is consumed, and the delta must not re-apply to
-  // it); a cloud that failed stays checked with the delta still drawn, so OK
-  // retries exactly the remainder and Cancel reverts it. All done → close.
-  const handleApplyTransform = useCallback(async () => {
+  // let Apply through) and are unchecked while the clouds bake, so the preview
+  // can't draw the delta on top of the transform they now carry. Clouds then
+  // bake one after another. All done → delta back to identity, meshes
+  // re-checked. A cloud that failed stays checked with the delta still drawn
+  // (everything that DID apply is unchecked), so Apply retries exactly the
+  // remainder and Cancel reverts it. Resolves true when everything applied.
+  const handleApplyTransform = useCallback(async (): Promise<boolean> => {
     const d = transformDeltaRef.current;
     const targets = transformTargetsRef.current;
     const meshIds = idsOfKind(targets, 'mesh');
     const cloudIds = idsOfKind(targets, 'cloud');
-    if (!commitTransformToMeshes(meshIds, d)) return;
-    const afterMeshes = new Set([...targets].filter(k => parseTargetKey(k)?.kind !== 'mesh'));
-    transformTargetsRef.current = afterMeshes;
-    setTransformTargetsState(afterMeshes);
+    if (!commitTransformToMeshes(meshIds, d)) return false;
+    const withoutMeshes = new Set([...targets].filter(k => parseTargetKey(k)?.kind !== 'mesh'));
+    transformTargetsRef.current = withoutMeshes;
+    setTransformTargetsState(withoutMeshes);
 
     // Clear the baseline BEFORE the async bake so a mode change mid-bake can't
-    // revert a cloud the bake is consuming; re-armed below for failures.
+    // revert a cloud the bake is consuming; re-armed below.
     translateBaselineRef.current = new Map();
     setIsApplyingTranslate(true);
     let failures: string[] = [];
@@ -11345,9 +11348,14 @@ export default function PointCloudViewer({
     } finally {
       setIsApplyingTranslate(false);
     }
+    // A baked cloud's draft is consumed and a failed bake didn't move the
+    // geometry, so either way the pre-transform state is a zero draft.
+    const zero = () => ({ t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } });
     if (failures.length === 0) {
-      setEditMode('none');
-      return;
+      translateBaselineRef.current = new Map(cloudIds.map(id => [id, zero()]));
+      applyTransformDelta(IDENTITY_DELTA);
+      setTransformTargets(pruneTargets(targets, cloudsRef.current.map(c => c.id), meshes.map(m => m.id)));
+      return true;
     }
     const failed = new Set(failures);
     const remaining = new Set([...transformTargetsRef.current].filter(k => {
@@ -11356,12 +11364,9 @@ export default function PointCloudViewer({
     }));
     transformTargetsRef.current = remaining;
     setTransformTargetsState(remaining);
-    // A failed bake didn't move geometry, so the pre-transform state is a zero
-    // draft: re-arm that as the baseline so Cancel/exit still reverts it.
-    translateBaselineRef.current = new Map(failures.map(id => [id, {
-      t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 },
-    }]));
-  }, [commitTransformToMeshes, bakeTransformsCollectingFailures]);
+    translateBaselineRef.current = new Map(failures.map(id => [id, zero()]));
+    return false;
+  }, [commitTransformToMeshes, bakeTransformsCollectingFailures, applyTransformDelta, setTransformTargets, meshes]);
 
   // OK for the skeleton translate panel: the offset is render-only, so OK just
   // keeps it (clearing the baseline makes the exit-revert a no-op).
@@ -27679,7 +27684,8 @@ export default function PointCloudViewer({
               selectedIds: transformTargets,
               onChange: setTransformTargets,
             }}
-            onApply={() => { void handleApplyTransform(); }}
+            onApply={handleApplyTransform}
+            keepOpenOnApply
             onCancel={handleCancelTranslate}
           />
         );

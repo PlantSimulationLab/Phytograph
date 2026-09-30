@@ -73,8 +73,13 @@ center, which spins or scales them in place.
 
 Nothing is applied until you decide:
 
-- **OK** applies the transform to every checked object and closes the panel.
-- **Cancel** discards it — everything snaps back to where it started.
+- **Apply** applies the transform to every checked object. The panel stays
+  open with the same objects checked and the values back to zero, so you can
+  go straight on to the next change — move another scan by a different
+  amount, or a mesh after a cloud — without reopening the tool.
+- **Cancel** discards the changes you haven't applied yet and closes the
+  panel — the objects snap back to where the last **Apply** left them. With
+  nothing pending the button reads **Close**.
 - **Reset Move** / **Reset Rotation** / **Reset Scale** return those values
   to zero (or 1) without closing, so you can start over.
 - Closing with the **✕** while you have unsaved changes asks whether to
@@ -90,14 +95,14 @@ edit. One case changes the mesh itself: a non-uniform scale on a mesh that is
 already rotated would shear it, which position / rotation / scale cannot
 express, so the stretch is baked into the mesh's vertices (still undoable; the
 panel says when this will happen). Voxel grids and generated plants cannot be
-sheared this way — OK is disabled with the reason shown — and a voxel grid can
+sheared this way — Apply is disabled with the reason shown — and a voxel grid can
 only be rotated about Z. To type an exact *absolute* position, rotation or
 size for one mesh, or to use **Fit to Scans** and grid subdivisions, use the
 transform button on that mesh's row in the **Meshes** pane.
 
-!!! note "OK bakes the transform into a point cloud's geometry"
+!!! note "Apply bakes the transform into a point cloud's geometry"
 
-    Clicking **OK** writes the move, rotation and scale into the cloud's
+    Clicking **Apply** writes the move, rotation and scale into the cloud's
     actual point coordinates rather than keeping a display-only offset.
     This is what guarantees that every later tool — triangulation, leaf
     area density, skeletons, QSM, export — operates on the cloud *where
@@ -114,7 +119,7 @@ transform button on that mesh's row in the **Meshes** pane.
       its points, which is what LAD and triangulation depend on.
     - Like applying a crop or a filter, an applied transform is a
       permanent edit to the working copy — it is not on the undo stack.
-      (Undo after a mixed OK reverts the meshes only.) Your source file on
+      (Undo after an Apply that moved both reverts the meshes only.) Your source file on
       disk is never modified.
     - **Applying is fast, including a rotation or scale.** The points
       themselves move straight away, so every tool sees the cloud where you

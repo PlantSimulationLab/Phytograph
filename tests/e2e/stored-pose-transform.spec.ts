@@ -64,8 +64,12 @@ test.describe('stored-pose transform', () => {
     const input = page.getByTestId('rotation-input-z');
     await input.fill(deg);
     await input.press('Enter');
+    // Apply commits and leaves the tool open (fields back to zero); then close.
     await page.getByTestId('translate-ok').click();
-    await expect(page.getByTestId('translate-panel')).toBeHidden({ timeout: 120_000 });
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'false', { timeout: 120_000 });
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-applying', 'false');
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
   }
 
   test('a rotation commits without rebuilding the octree', async () => {
