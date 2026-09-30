@@ -450,6 +450,21 @@ export interface MemoryBudgetInfo {
   psutil: boolean;
 }
 
+/** Resolve once the backend answers /health. A file the OS hands us at a cold
+ *  launch (a double-clicked project) arrives while the backend is still
+ *  starting behind the splash. */
+export async function waitForBackendHealthy(timeoutMs = 120_000): Promise<void> {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const res = await fetch(`${getBackendUrl()}/health`);
+      if (res.ok) return;
+    } catch { /* not listening yet */ }
+    if (Date.now() - t0 > timeoutMs) throw new Error('The backend did not start.');
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 export async function getMemoryBudget(signal?: AbortSignal): Promise<MemoryBudgetInfo> {
   const res = await fetch(`${getBackendUrl()}/health`, { signal });
   if (!res.ok) throw new Error(`health failed: ${res.status}`);

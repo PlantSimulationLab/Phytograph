@@ -9,6 +9,14 @@
 //   {"$buf": k, "dtype": "f32"}  a typed array, stored as buffer k
 //   {"$map": [[key, value], ...]} a Map
 //   {"$set": [...]}              a Set
+// and one thing it holds badly:
+//   {"$chunks": [k, ...]}        a long array, its items as JSON in buffers
+//                                k... (dtype "json"), CHUNK_ITEMS per chunk
+// V8 caps a string at ~512 MB, and the document used to be ONE
+// JSON.stringify on save and one JSON.parse on open: a scene with a big LAD
+// result (a record per voxel), many QSM cylinders or a large inventory could
+// fail to save or, worse, save and then fail to open. With long arrays
+// chunked, no string is ever bigger than one chunk.
 // Everything else is JSON as-is. Serializing generically, rather than per
 // object type, is what keeps a new field on a mesh or scan from being silently
 // dropped by the project file.
@@ -20,7 +28,14 @@
 import * as THREE from 'three';
 
 export const PROJECT_SCENE_MAGIC = 'PSC1';
-export const PROJECT_DOC_VERSION = 1;
+// 2: long arrays as `$chunks`. A version-1 document still decodes.
+export const PROJECT_DOC_VERSION = 2;
+
+/** Items per `$chunks` chunk (and the length above which an array is chunked). */
+export const CHUNK_ITEMS = 8192;
+
+/** A chunk of JSON text travelling in the buffer table (dtype "json"). */
+class JsonChunk extends Uint8Array {}
 
 type TypedArray =
   | Float32Array | Float64Array | Int8Array | Uint8Array | Uint8ClampedArray
@@ -39,6 +54,7 @@ const DTYPES: Record<string, { ctor: new (buf: ArrayBuffer, off: number, len: nu
 };
 
 function dtypeOf(a: TypedArray): string {
+  if (a instanceof JsonChunk) return 'json';
   if (a instanceof Float32Array) return 'f32';
   if (a instanceof Float64Array) return 'f64';
   if (a instanceof Int8Array) return 'i8';
@@ -58,9 +74,21 @@ export function toDocValue(v: unknown, buffers: TypedArray[]): unknown {
     buffers.push(a);
     return { $buf: buffers.length - 1, dtype: dtypeOf(a) };
   }
-  if (v instanceof Map) return { $map: [...v.entries()].map(([k, x]) => [toDocValue(k, buffers), toDocValue(x, buffers)]) };
-  if (v instanceof Set) return { $set: [...v].map(x => toDocValue(x, buffers)) };
-  if (Array.isArray(v)) return v.map(x => toDocValue(x, buffers));
+  if (v instanceof Map) return { $map: toDocValue([...v.entries()], buffers) };
+  if (v instanceof Set) return { $set: toDocValue([...v], buffers) };
+  if (Array.isArray(v)) {
+    if (v.length <= CHUNK_ITEMS) return v.map(x => toDocValue(x, buffers));
+    const enc = new TextEncoder();
+    const chunks: number[] = [];
+    for (let i = 0; i < v.length; i += CHUNK_ITEMS) {
+      const items = v.slice(i, i + CHUNK_ITEMS).map(x => toDocValue(x, buffers));
+      const bytes = enc.encode(JSON.stringify(items));
+      const chunk = new JsonChunk(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      buffers.push(chunk);
+      chunks.push(buffers.length - 1);
+    }
+    return { $chunks: chunks };
+  }
   if (typeof v === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
@@ -82,15 +110,26 @@ export function fromDocValue(v: unknown, buffers: TypedArray[]): unknown {
   if (v === null || typeof v !== 'object') return v;
   if (Array.isArray(v)) return v.map(x => fromDocValue(x, buffers));
   const o = v as Record<string, unknown>;
+  if ('$chunks' in o && Array.isArray(o.$chunks) && Object.keys(o).length === 1) {
+    const dec = new TextDecoder();
+    const out: unknown[] = [];
+    for (const k of o.$chunks as number[]) {
+      const b = buffers[k];
+      if (!(b instanceof Uint8Array)) throw new Error(`project scene is missing chunk ${k}`);
+      for (const x of JSON.parse(dec.decode(b)) as unknown[]) out.push(fromDocValue(x, buffers));
+    }
+    return out;
+  }
   if ('$buf' in o && typeof o.$buf === 'number') {
     const b = buffers[o.$buf];
     if (!b) throw new Error(`project scene is missing buffer ${o.$buf}`);
     return b;
   }
-  if ('$map' in o && Array.isArray(o.$map)) {
-    return new Map((o.$map as unknown[][]).map(([k, x]) => [fromDocValue(k, buffers), fromDocValue(x, buffers)]));
+  if ('$map' in o && o.$map && typeof o.$map === 'object') {
+    // An array of [key, value] pairs, or (a long map) that array chunked.
+    return new Map(fromDocValue(o.$map, buffers) as [unknown, unknown][]);
   }
-  if ('$set' in o && Array.isArray(o.$set)) return new Set((o.$set as unknown[]).map(x => fromDocValue(x, buffers)));
+  if ('$set' in o && o.$set && typeof o.$set === 'object') return new Set(fromDocValue(o.$set, buffers) as unknown[]);
   if ('$num' in o && typeof o.$num === 'string' && Object.keys(o).length === 1) return Number(o.$num);
   const out: Record<string, unknown> = {};
   for (const [k, x] of Object.entries(o)) out[k] = fromDocValue(x, buffers);
@@ -139,6 +178,12 @@ export function decodeProjectScene(bytes: ArrayBuffer | Uint8Array): unknown {
   }
   let off = pad8(8 + hlen);
   const buffers: TypedArray[] = header.buffers.map(({ dtype, byteLength }) => {
+    if (dtype === 'json') {
+      if (off + byteLength > u8.length) throw new Error('Project scene is truncated.');
+      const chunk = u8.subarray(off, off + byteLength);
+      off += pad8(byteLength);
+      return chunk;
+    }
     const spec = DTYPES[dtype];
     if (!spec) throw new Error(`Unknown array type ${dtype} in project.`);
     if (off + byteLength > u8.length) throw new Error('Project scene is truncated.');

@@ -131,11 +131,19 @@ maps and the edit states. So is the viewer state a user expects back:
 - tree-segmentation seed points and the batch-QSM settings.
 
 The document is stored as one PSC1 blob: a magic, a JSON header, then the
-document's typed arrays back to back. The JSON has three tagged forms:
+document's buffers back to back. The JSON has these tagged forms:
 
 - `{"$buf": k, "dtype": "f32"}` is the header's typed array `k`;
 - `{"$map": [[key, value], ...]}` is a `Map`;
-- `{"$set": [...]}` is a `Set`.
+- `{"$set": [...]}` is a `Set`;
+- `{"$chunks": [k, ...]}` is a long array (more than 8192 items), its items
+  written as JSON into buffers `k...` of dtype `json`, 8192 per chunk. V8
+  caps a string at ~512 MB, and the document used to be one
+  `JSON.stringify` on save and one `JSON.parse` on open, so a large LAD
+  result or QSM set could fail to save (measured: a 640 MB document threw
+  `RangeError: Invalid string length`). Chunked, no string is bigger than one
+  chunk. Maps and Sets go through the same path. Document version 2; a
+  version-1 document still opens.
 
 Any other value is written as itself.
 

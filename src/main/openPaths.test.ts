@@ -101,3 +101,15 @@ describe('isImportablePath', () => {
     expect(isImportablePath('/a/b/secret.key')).toBe(false);
   });
 });
+
+describe('project files', () => {
+  it('lets a .phyto through every OS route (double-click, Open With, argv)', () => {
+    const phyto = join(dir, 'plot.phyto');
+    writeFileSync(phyto, 'PK');
+    expect(authorizeOpenPaths([phyto, las])).toEqual([phyto, las]);
+    expect(isPathAllowed(phyto)).toBe(true);
+    expect(extractFilePathsFromArgv(['/Applications/Phytograph', '--flag', phyto])).toEqual([phyto]);
+    // Case-insensitive, as the OS may hand it back.
+    expect(authorizeOpenPaths([join(dir, 'PLOT.PHYTO')])).toHaveLength(1);
+  });
+});

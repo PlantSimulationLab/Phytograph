@@ -12,12 +12,17 @@
 // be imported from a test.
 
 import { existsSync } from 'node:fs';
-import { IMPORTABLE_EXTENSIONS } from '../shared/constants.js';
+import { IMPORTABLE_EXTENSIONS, isProjectPath } from '../shared/constants.js';
 import { allowPath } from './fsAllowlist.js';
 
 export function isImportablePath(p: string): boolean {
   const ext = p.toLowerCase().split('.').pop() ?? '';
   return (IMPORTABLE_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+/** A path the OS may ask us to open: anything importable, or a project. */
+export function isOpenablePath(p: string): boolean {
+  return isImportablePath(p) || isProjectPath(p);
 }
 
 /**
@@ -27,11 +32,11 @@ export function isImportablePath(p: string): boolean {
  * disk is a robust, platform-agnostic way to pick out genuine file arguments.
  */
 export function extractFilePathsFromArgv(argv: string[]): string[] {
-  return argv.filter((a) => !a.startsWith('-') && isImportablePath(a) && existsSync(a));
+  return argv.filter((a) => !a.startsWith('-') && isOpenablePath(a) && existsSync(a));
 }
 
 /**
- * Keep the importable paths and register each with the fs allowlist.
+ * Keep the importable paths (and projects) and register each with the fs allowlist.
  *
  * The allowlist otherwise only learns about dialog / drag-drop / <input
  * type=file> paths, so without this the renderer's `fs:readBinary` on an
@@ -41,7 +46,9 @@ export function extractFilePathsFromArgv(argv: string[]): string[] {
  * selection (scene.xml → scene.xyz) resolve identically on this route.
  */
 export function authorizeOpenPaths(paths: string[]): string[] {
-  const importable = paths.filter(isImportablePath);
+  // A project is opened by the backend from its path, but it is a user
+  // pick all the same, so it is registered like any other.
+  const importable = paths.filter(isOpenablePath);
   for (const p of importable) allowPath(p, 'file');
   return importable;
 }

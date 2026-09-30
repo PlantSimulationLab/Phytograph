@@ -81,7 +81,22 @@ describe('quit confirmation', () => {
     setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
     const detail = confirmDetail(currentSceneDirty());
     expect(detail).toMatch(/not saved|memory/i);
-    expect(detail).toMatch(/export/i);
+    // Points at the thing that keeps work now: a project, not an export.
+    expect(detail).toMatch(/Save Project/);
+    expect(detail).not.toMatch(/not saved anywhere/i);
+  });
+
+  it('offers Save Project, which cancels the close and starts a save', () => {
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
+    let saved = 0;
+    let buttons: string[] = [];
+    const allow = shouldAllowClose((opts) => { buttons = opts.buttons; return 2; }, () => { saved++; });
+    expect(allow).toBe(false);
+    expect(saved).toBe(1);
+    expect(buttons[2]).toMatch(/save project/i);
+    // Discard keeps its index (E2E answers by it) and still closes.
+    expect(shouldAllowClose(stubConfirm(1), () => { saved++; })).toBe(true);
+    expect(saved).toBe(1);
   });
 
   it('reverts to clean when the window goes away', () => {

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
   encodeProjectScene, decodeProjectScene, toDocValue, fromDocValue, rewireOpenedScene, sceneBackendRefs,
-  remapInventoryStateKey,
+  remapInventoryStateKey, CHUNK_ITEMS, PROJECT_SCENE_MAGIC,
 } from './projectDocument';
 
 describe('scene document round trip', () => {
@@ -156,5 +156,56 @@ describe('reopened cloud bounds', () => {
     expect(b.min).toBeInstanceOf(THREE.Vector3);
     expect(b.max.clone().toArray()).toEqual([3, 4, 5]);
     expect(b.size.clone().toArray()).toEqual([3, 3, 3]);
+  });
+});
+
+describe('long arrays (V8 string limit)', () => {
+  /** The JSON header's byte length: the one string that used to hold it all. */
+  const headerBytes = (u8: Uint8Array) => new DataView(u8.buffer, u8.byteOffset).getUint32(4, true);
+
+  it('round-trip a large array of records without one giant JSON string', () => {
+    // Shaped like a LAD result: a record per voxel.
+    const voxels = Array.from({ length: 50_000 }, (_, i) => ({
+      i, j: i % 97, k: i % 13, lad: i === 7 ? NaN : i * 0.001, occluded: i % 5 === 0, note: `v${i}`,
+    }));
+    const doc = { ladResults: [{ id: 'lad-1', voxels }] };
+    const bytes = encodeProjectScene(doc);
+    // Whole document as one JSON string would be ~3 MB; the header must hold
+    // only the structure, never the items.
+    expect(headerBytes(bytes)).toBeLessThan(4096);
+    const back = decodeProjectScene(bytes) as typeof doc;
+    expect(back.ladResults[0].voxels).toHaveLength(voxels.length);
+    expect(back.ladResults[0].voxels[49_999]).toEqual(voxels[49_999]);
+    expect(back.ladResults[0].voxels[7].lad).toBeNaN();
+    expect(back.ladResults[0].voxels.map(v => v.i)).toEqual(voxels.map(v => v.i));
+  });
+
+  it('chunks long Maps and Sets too, and arrays nested inside chunks', () => {
+    const edits = new Map(Array.from({ length: CHUNK_ITEMS * 2 + 3 }, (_, i) => [i, { species: `s${i}` }]));
+    const ids = new Set(Array.from({ length: CHUNK_ITEMS + 1 }, (_, i) => `id${i}`));
+    const nested = [Array.from({ length: CHUNK_ITEMS + 5 }, (_, i) => i)];
+    const bytes = encodeProjectScene({ edits, ids, nested });
+    expect(headerBytes(bytes)).toBeLessThan(4096);
+    const back = decodeProjectScene(bytes) as { edits: Map<number, { species: string }>; ids: Set<string>; nested: number[][] };
+    expect(back.edits).toBeInstanceOf(Map);
+    expect(back.edits.size).toBe(edits.size);
+    expect(back.edits.get(CHUNK_ITEMS * 2 + 2)).toEqual({ species: `s${CHUNK_ITEMS * 2 + 2}` });
+    expect(back.ids).toEqual(ids);
+    expect(back.nested[0]).toEqual(nested[0]);
+  });
+
+  it('still opens a version-1 document (one JSON header, no chunks)', () => {
+    const header = new TextEncoder().encode(JSON.stringify({
+      version: 1, buffers: [],
+      doc: { m: { $map: [['a', 1]] }, s: { $set: [1, 2] }, x: [1, 2, 3] },
+    }));
+    const u8 = new Uint8Array(((8 + header.length) + 7) & ~7);
+    u8.set(new TextEncoder().encode(PROJECT_SCENE_MAGIC), 0);
+    new DataView(u8.buffer).setUint32(4, header.length, true);
+    u8.set(header, 8);
+    const back = decodeProjectScene(u8) as { m: Map<string, number>; s: Set<number>; x: number[] };
+    expect(back.m.get('a')).toBe(1);
+    expect(back.s).toEqual(new Set([1, 2]));
+    expect(back.x).toEqual([1, 2, 3]);
   });
 });

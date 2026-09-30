@@ -43,3 +43,13 @@ export const IMPORTABLE_EXTENSIONS = [
   // Helios scan XML
   'xml',
 ] as const;
+
+// A Phytograph project. Opened, not imported: the OS routes (double-click,
+// Open With, a launch argument) and a drop onto the window send it to File →
+// Open Project, which replaces the scene. Kept out of IMPORTABLE_EXTENSIONS,
+// whose members all feed the importer.
+export const PROJECT_EXTENSION = 'phyto';
+
+export function isProjectPath(p: string): boolean {
+  return p.toLowerCase().endsWith(`.${PROJECT_EXTENSION}`);
+}

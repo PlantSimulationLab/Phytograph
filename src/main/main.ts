@@ -208,6 +208,14 @@ let quitConfirmShown = 0;
 /** The native confirmation, injected into shouldAllowClose so the decision
  *  logic stays testable without opening a real dialog. Synchronous because
  *  'close'/'before-quit' must call preventDefault() during the callback. */
+/** "Save Project…" in the quit confirmation: the close is canceled and the
+ *  renderer runs File → Save Project (the same command as the menu item). */
+function saveProjectFromQuit(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.MenuCommand, { kind: 'save-project' });
+  }
+}
+
 function showQuitConfirm(opts: Parameters<Parameters<typeof shouldAllowClose>[0]>[0]): number {
   quitConfirmShown++;
   // Readable from Playwright's app.evaluate (which runs in main), so a spec can
@@ -415,7 +423,7 @@ function createWindow(): void {
       // quitConfirmed: 'before-quit' may have already asked. Don't ask twice
       // for one user gesture.
       if (quitConfirmed) return;
-      if (shouldAllowClose(showQuitConfirm)) {
+      if (shouldAllowClose(showQuitConfirm, saveProjectFromQuit)) {
         // Off-darwin, closing the last window calls app.quit(), which fires
         // 'before-quit' — latch so that doesn't ask a second time for this one
         // gesture.
@@ -589,7 +597,7 @@ app.whenReady().then(async () => {
   // the quit the updater is about to perform.
   setInstallConfirm(() => {
     if (!quitConfirmArmed || quitConfirmed) return true;
-    if (!shouldAllowClose(showQuitConfirm)) return false;
+    if (!shouldAllowClose(showQuitConfirm, saveProjectFromQuit)) return false;
     quitConfirmed = true;
     return true;
   });
@@ -650,7 +658,7 @@ app.on('before-quit', (event) => {
   // session. Covers Cmd+Q, the app-menu Quit, and Dock → Quit — none of which
   // pass through the window's 'close' handler on macOS.
   if (quitConfirmArmed && !quitConfirmed) {
-    if (!shouldAllowClose(showQuitConfirm)) {
+    if (!shouldAllowClose(showQuitConfirm, saveProjectFromQuit)) {
       event.preventDefault();
       return;
     }

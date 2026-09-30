@@ -3,6 +3,7 @@ import { Box, FileUp, Bug, Lightbulb } from "lucide-react";
 import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
+import { splitProjectPaths } from "./lib/projectPaths";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import { scanDisplayName, type Scan, type ScanRegistration, createScanColorAllocator } from "./lib/scan";
@@ -1227,6 +1228,25 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // No `scans` dependency — see the note on handleFileUpload above.
   }, [makeScanColorAllocator, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
+  // A project among files the OS or a drop handed us: open it (File → Open
+  // Project with that path; it still confirms replacing the scene) and import
+  // nothing, since the open replaces the scene. True when it took the files.
+  const openProjectFrom = useCallback((paths: string[]): boolean => {
+    const { project, skipped } = splitProjectPaths(paths);
+    if (!project) return false;
+    const open = (window as any).__projectCommand;
+    if (typeof open !== 'function') {
+      showToast({ type: 'error', title: 'Open Project Failed', message: 'The viewer is not ready yet.' });
+      return true;
+    }
+    open('open-project', project);
+    if (skipped.length) {
+      showToast({ type: 'warning', title: 'Open Project',
+        message: `Opening ${project.split(/[\\/]/).pop()}. ${skipped.length} other file(s) were not imported: a project replaces the scene.` });
+    }
+    return true;
+  }, []);
+
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
     // Recover the on-disk paths captured in onDropCapture (keyed by File
@@ -1237,6 +1257,17 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // scans. Files without a recovered path (e.g. test Blobs) fall back as before.
     const paths = acceptedFiles.map(f => droppedPathsRef.current.get(fileKey(f)));
     droppedPathsRef.current.clear();
+    // A dropped project is opened, not imported.
+    if (acceptedFiles.some(f => f.name.toLowerCase().endsWith('.phyto'))) {
+      const i = acceptedFiles.findIndex(f => f.name.toLowerCase().endsWith('.phyto'));
+      if (!paths[i]) {
+        showToast({ type: 'error', title: 'Open Project Failed',
+          message: `Could not find "${acceptedFiles[i].name}" on disk. Use File > Open Project.` });
+        return;
+      }
+      openProjectFrom(acceptedFiles.map((f, k) => paths[k] ?? f.name));
+      return;
+    }
     // Drops always auto-detect. Pass it explicitly rather than trusting the
     // ref: menu imports no longer touch pendingImportTypeRef, but a canceled
     // import in older flows could leave it stale, which previously routed a
@@ -1246,7 +1277,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     } else if (acceptedFiles.length > 1) {
       handleMultipleFiles(acceptedFiles, { importType: 'auto', paths });
     }
-  }, [handleFileUpload, handleMultipleFiles]);
+  }, [handleFileUpload, handleMultipleFiles, openProjectFrom]);
 
   const { getRootProps, getInputProps } = useDropzone({
     onDrop,
@@ -1973,11 +2004,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // queued while the window/backend were still coming up (cold "Open With").
   useEffect(() => {
     const unsubscribe = window.electronAPI.onOpenFiles(({ paths }) => {
+      if (openProjectFrom(paths)) return;
       void importPathsByType(paths, 'auto');
     });
     window.electronAPI.notifyRendererReady();
     return unsubscribe;
-  }, [importPathsByType]);
+  }, [importPathsByType, openProjectFrom]);
 
   // File → New: reset to a fresh app, exactly as if it had just launched. Rather
   // than hand-reset the hundreds of useState/refs scattered across App and the

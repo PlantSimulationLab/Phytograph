@@ -758,9 +758,11 @@ and opens it again exactly as you left it. It contains:
 - every point cloud with all its points and scalar fields, including edits
   you have not baked. Undo still works on those edits after reopening;
 - every mesh, skeleton, QSM and LAD result, with their positions;
-- color modes, point size, measurements and picked points, the scene
-  origin and the camera;
-- the tree inventory, with your species, status and label entries.
+- hand labels you have painted but not yet baked into the display;
+- color modes, color ranges, display filters, point size, mesh opacity and
+  coloring, measurements and picked points, the scene origin and the camera;
+- the tree inventory, with your species, status and label entries for every
+  cloud you inventoried.
 
 The file does **not** refer back to the files you imported. It holds the
 data itself, so you can move it to another computer or send it to someone.
@@ -775,10 +777,20 @@ display.
 |---------|----------|---|
 | **File → Save Project** | <kbd>Cmd/Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Save to the current project file, or ask for a name the first time. |
 | **File → Save Project As…** | | Save under a new name. |
-| **File → Open Project…** | <kbd>Cmd/Ctrl</kbd>+<kbd>O</kbd> | Open a project. It **replaces** the current scene, so you are asked first when the scene is not empty. |
+| **File → Open Project…** | <kbd>Cmd/Ctrl</kbd>+<kbd>O</kbd> | Open a project. It **replaces** the current scene, so you are asked first when the scene has unsaved changes. |
 
-A save runs in the background with a progress bar you can cancel. A
-canceled or failed save leaves any existing project file untouched.
+You can also open a project by double-clicking the `.phyto` file, or by
+dropping it onto the Phytograph window. Dropping a project together with
+other files opens the project and imports nothing else, since the project
+replaces the scene.
+
+While a project saves or opens, the window is locked behind a progress bar
+you can cancel, so no edit can slip in half-way through. A canceled or failed
+save leaves any existing project file untouched.
+
+Closing Phytograph with unsaved changes asks first. **Save Project…** in that
+prompt cancels the close and saves; once the save finishes, closing no
+longer asks.
 
 !!! note "What a project does not keep"
     Undo history from before the save, app-wide settings (theme, the class

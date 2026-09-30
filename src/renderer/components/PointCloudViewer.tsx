@@ -10,7 +10,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, waitForBackendHealthy, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -20774,6 +20774,8 @@ export default function PointCloudViewer({
   useEffect(() => {
     (window as any).__setProjectUnchanged?.(projectUnchanged);
   }, [projectUnchanged]);
+  const projectUnchangedRef = useRef(projectUnchanged);
+  projectUnchangedRef.current = projectUnchanged;
 
   // While a project saves or opens, the app is modal: an edit landing mid-save
   // would be in the backend's copy of a cloud but not in the scene document
@@ -20807,7 +20809,21 @@ export default function PointCloudViewer({
           filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
         });
         if (!path) return;
-        if (!/\.phyto$/i.test(path)) path = `${path}.phyto`;
+        if (!/\.phyto$/i.test(path)) {
+          path = `${path}.phyto`;
+          // The dialog confirmed replacing the name the user TYPED, not this
+          // one: a GTK dialog on Linux does not append the extension, so
+          // "plot" over an existing plot.phyto was replaced without a word.
+          if (await window.electronAPI.fs.exists(path)) {
+            const r = await window.electronAPI.dialog.messageBox({
+              type: 'warning', title: 'Save Project',
+              message: `"${path.split(/[\\/]/).pop()}" already exists. Replace it?`,
+              detail: 'Replacing it overwrites the project saved there.',
+              buttons: ['Replace', 'Cancel'], defaultId: 1, cancelId: 1,
+            });
+            if (r.response !== 0) return;
+          }
+        }
       }
       projectAbortRef.current = abort;
       setProjectBusy({ label: 'Saving project…', value: null });
@@ -20840,10 +20856,13 @@ export default function PointCloudViewer({
     }
   }, [collectProjectDocument, markProjectClean, showToast]);
 
-  const openProjectFlow = useCallback(async () => {
+  // `given`: a path the OS or a drop handed us (no dialog). Otherwise ask.
+  const openProjectFlow = useCallback(async (given?: string) => {
     if (!window.electronAPI) return;
     const st = scene.state;
-    if (st.scans.length + st.meshes.length + st.skeletons.length + st.qsms.length + st.ladResults.length > 0) {
+    // Nothing to lose when the scene is exactly as last saved or opened.
+    if (!projectUnchangedRef.current
+        && st.scans.length + st.meshes.length + st.skeletons.length + st.qsms.length + st.ladResults.length > 0) {
       const r = await window.electronAPI.dialog.messageBox({
         type: 'warning', title: 'Open Project', message: 'Open a project?',
         detail: 'Opening a project replaces the current scene. Unsaved changes will be lost.',
@@ -20851,11 +20870,19 @@ export default function PointCloudViewer({
       });
       if (r.response !== 0) return;
     }
-    const picked = await window.electronAPI.dialog.open({
+    const picked = given ?? await window.electronAPI.dialog.open({
       title: 'Open Project', filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
     });
     const path = typeof picked === 'string' ? picked : Array.isArray(picked) ? picked[0] : null;
     if (!path) return;
+    if (given) {
+      try {
+        await waitForBackendHealthy();
+      } catch (err) {
+        showToast({ type: 'error', title: 'Open Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
+        return;
+      }
+    }
     const abort = new AbortController();
     projectAbortRef.current = abort;
     setProjectBusy({ label: 'Opening project…', value: null });
@@ -20892,11 +20919,11 @@ export default function PointCloudViewer({
     }
   }, [scene, showToast]);
 
-  const handleOpenProject = useCallback(async () => {
+  const handleOpenProject = useCallback(async (given?: string) => {
     if (projectBusyRef.current || !window.electronAPI) return;
     projectBusyRef.current = true;
     try {
-      await openProjectFlow();
+      await openProjectFlow(given);
     } finally {
       projectBusyRef.current = false;
     }
@@ -20909,8 +20936,8 @@ export default function PointCloudViewer({
   }, []);
 
   useEffect(() => {
-    (window as any).__projectCommand = (kind: string) => {
-      if (kind === 'open-project') void handleOpenProject();
+    (window as any).__projectCommand = (kind: string, path?: string) => {
+      if (kind === 'open-project') void handleOpenProject(path);
       else if (kind === 'save-project') void handleSaveProject(false);
       else if (kind === 'save-project-as') void handleSaveProject(true);
     };

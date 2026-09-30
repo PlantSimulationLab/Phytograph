@@ -5,9 +5,10 @@
  * read exactly once, at import; every later edit (crop, erase, filter, bake,
  * split, segment, label) mutates in-RAM session arrays and nothing writes them
  * back. Meshes, skeletons, plant models and analysis results are only ever in
- * RAM. So closing the window is unconditionally destructive whenever the scene
- * holds anything, and until now it happened on a single stray click with no
- * warning at all.
+ * RAM. The one thing that keeps them is File → Save Project, so closing is
+ * destructive whenever the scene holds anything not saved in a project, and
+ * the renderer reports exactly that (`dirty`: content, and not unchanged since
+ * the last project save or open).
  *
  * Deliberately electron-free apart from the injected dialog function, so the
  * decision logic is unit-testable without booting an app.
@@ -47,10 +48,10 @@ export function resetSceneDirty(): void {
  *  appears exactly when some cloud has unexported labels. */
 export function confirmDetail(state: SceneDirtyPayload): string {
   const base =
-    'Everything in this session — point clouds, meshes, skeletons, plant models, ' +
-    'scans, and analysis results — is held in memory and is not saved anywhere. ' +
-    'Closing discards it, including any edits made since import. Export anything ' +
-    'you want to keep first.';
+    'This session has changes that are not saved in a project. Point clouds and ' +
+    'their edits, meshes, skeletons, plant models and analysis results are held ' +
+    'in memory until you save them with File > Save Project; closing discards ' +
+    'everything since the last save.';
   const n = state.unexportedLabelClouds;
   if (n > 0) {
     // Hand-made labels are the one thing that cannot be recomputed by
@@ -78,15 +79,22 @@ export type ConfirmFn = (opts: {
   noLink: boolean;
 }) => number;
 
+/** The confirmation's button order. Cancel is 0 so Return/Escape are safe;
+ *  Discard stays 1 (E2E answers by index). */
+export const QUIT_BUTTONS = ['Cancel', 'Discard and Close', 'Save Project…'] as const;
+
 /**
  * Should the close proceed?
  *
  * Returns true to let the close through, false to cancel it. Must be
  * synchronous: Electron's 'close' and 'before-quit' handlers decide by
  * `event.preventDefault()` during the callback, so an awaited dialog would let
- * the window close first and prompt over the wreckage.
+ * the window close first and prompt over the wreckage. For the same reason
+ * "Save Project…" cannot save-then-close here: it cancels the close and calls
+ * `onSave`, which starts the save; once it succeeds the scene is clean and the
+ * next close goes through without asking.
  */
-export function shouldAllowClose(confirm: ConfirmFn): boolean {
+export function shouldAllowClose(confirm: ConfirmFn, onSave?: () => void): boolean {
   const state = currentSceneDirty();
   // An empty scene has nothing to lose — never make the user click twice to
   // close an app they just opened.
@@ -98,10 +106,14 @@ export function shouldAllowClose(confirm: ConfirmFn): boolean {
     detail: confirmDetail(state),
     // Cancel first so Return/Escape (defaultId/cancelId both 0) are the safe
     // answer — the whole point is that a stray input must not destroy work.
-    buttons: ['Cancel', 'Discard and Close'],
+    buttons: onSave ? [...QUIT_BUTTONS] : QUIT_BUTTONS.slice(0, 2),
     defaultId: 0,
     cancelId: 0,
     noLink: true,
   });
+  if (choice === 2 && onSave) {
+    onSave();
+    return false;
+  }
   return choice === 1;
 }

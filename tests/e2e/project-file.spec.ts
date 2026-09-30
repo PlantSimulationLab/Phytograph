@@ -205,3 +205,37 @@ test('labels painted but not yet baked are still drawn after save and open', asy
     if (existsSync(projectPath)) rmSync(projectPath);
   }
 });
+
+// A .phyto double-clicked in Finder / "Open With" arrives as macOS
+// 'open-file' (Windows/Linux: argv, same funnel). It used to be filtered out
+// as "not importable" and nothing happened. Driven through main's REAL
+// handler, which relays it to the renderer as it would from the OS.
+test('a project handed over by the OS (double-click) opens', async () => {
+  test.setTimeout(3 * 60_000);
+  const { app, page } = session;
+  await resetToFreshScene(app, page);
+  const projectPath = join(tmpdir(), `phytograph_project_osopen_${Date.now()}.phyto`);
+  try {
+    await importFiles(app, page, 'import-auto', TINY);
+    await completeImportWizard(page);
+    await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'))
+      .toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+    await stubSaveDialog(app, projectPath);
+    await menu(app, 'save-project');
+    await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Saved' }))
+      .toBeVisible({ timeout: 60_000 });
+
+    await resetToFreshScene(app, page);
+    await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(0);
+
+    await app.evaluate(({ app: electronApp }, p) => {
+      electronApp.emit('open-file', { preventDefault() {} }, p);
+    }, projectPath);
+    await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Opened' }))
+      .toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'))
+      .toHaveAttribute('data-point-count', '60', { timeout: 30_000 });
+  } finally {
+    if (existsSync(projectPath)) rmSync(projectPath);
+  }
+});
