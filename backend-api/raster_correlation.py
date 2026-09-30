@@ -51,6 +51,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+import open3d_warmup
+
 # How many correlation peaks to refine before choosing. On a uniform planting
 # the correlation surface has no decisive winner and the true translation is
 # often NOT the tallest peak: measured with ground stripped, it ranked 1st on
@@ -303,7 +305,7 @@ def _ranking_cloud(points: np.ndarray, voxel: float = 0.40):
     measured 0.330 s per candidate at 0.15 m against 0.089 s at 0.50 m, so a
     32-candidate shortlist went from ~10.6 s to ~2.8 s per pair.
     """
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     p = o3d.geometry.PointCloud()
     p.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64))
@@ -343,7 +345,7 @@ def _best_by_icp(candidates, target, source):
     than once per call.
     """
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
     except ImportError:
         return 0, None, None, 0.0
 

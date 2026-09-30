@@ -31,6 +31,8 @@ from __future__ import annotations
 import math
 import numpy as np
 
+import open3d_warmup
+
 # Fraction of points the strictness knob can trim at maximum (strictness=1).
 _MAX_TRIM = 0.25
 # Number of vertical slices for the per-slice lateral trim.
@@ -173,7 +175,7 @@ def _box_mesh(center: np.ndarray, R: np.ndarray, extent: np.ndarray):
 
 def _mesh_dict(verts: np.ndarray, tris: np.ndarray):
     """Build an open3d mesh from verts/tris, return (o3d_mesh, normals np array)."""
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
     m = o3d.geometry.TriangleMesh()
     m.vertices = o3d.utility.Vector3dVector(np.asarray(verts, dtype=np.float64))
     m.triangles = o3d.utility.Vector3iVector(np.asarray(tris, dtype=np.int32))
@@ -238,7 +240,7 @@ def _alpha_concave_hull(points: np.ndarray, alpha: "float | None"):
     the ONLY scalar that characterizes the hull). Raises ValueError if no
     triangles could be built at all.
     """
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64))
@@ -443,7 +445,7 @@ def fit_crown(
         _, normals = _mesh_dict(verts, tris)
 
     verts = np.asarray(verts, dtype=np.float64)
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
     m = o3d.geometry.TriangleMesh()
     m.vertices = o3d.utility.Vector3dVector(verts)
     m.triangles = o3d.utility.Vector3iVector(np.asarray(tris, dtype=np.int32))

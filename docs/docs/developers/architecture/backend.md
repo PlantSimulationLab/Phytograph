@@ -123,6 +123,26 @@ Two consequences worth knowing:
   body blocks it regardless of how the handler is declared; that is what the
   binary-frame transport below is for.
 
+## Open3D is warmed up in the background
+
+`import open3d` is the backend's most expensive import: ~14 s on a cold disk and
+~4 s warm, while a small mesh read with it takes about a millisecond. A startup
+hook imports it on a daemon thread (`open3d_warmup.start_background_warmup()`)
+right after libhelios has loaded — libhelios must load first on macOS, see the
+note at the top of `main.py`. Set `PHYTOGRAPH_OPEN3D_WARMUP=0` to turn the
+warm-up off.
+
+Call sites use `o3d = open3d_warmup.get_open3d()` instead of `import open3d`.
+When a tool needs open3d before the warm-up finishes, the call blocks on
+Python's import lock until the load completes, so open3d is never imported
+twice. While it waits, it posts *Loading Open3D (first use since the backend
+started)…* to the progress bar of any tool running under
+`_bin_frame_streaming_response`, and restores the tool's own label when the
+load is done. `tests/test_open3d_warmup.py` fails on any bare `import open3d`
+in `backend-api/*.py`. The one exemption is `seg_worker.py`, which runs in its
+own subprocess, so it imports open3d fresh on every job and the parent's
+warm-up never reaches it.
+
 ## Wire format: JSON vs binary frames
 
 Most endpoints exchange JSON. The **large array responses** — Helios + Open3D

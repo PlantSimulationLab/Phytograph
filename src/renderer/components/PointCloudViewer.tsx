@@ -103,7 +103,7 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction, SceneAction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
-import { getUnlabeledClusters, getLabelExtent, segmentPick, type UnlabeledCluster } from '../utils/backendApi';
+import { getUnlabeledClusters, getLabelExtent, segmentPick, isOpen3dLoadingMessage, type UnlabeledCluster } from '../utils/backendApi';
 import { screenStrokeTileTest } from '../lib/strokeTileTest';
 import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
@@ -27184,7 +27184,7 @@ export default function PointCloudViewer({
             extentY={demExtent?.y}
             inProgress={demInProgress}
             progress={demProgress?.value ?? null}
-            progressLabel={demBatchLabel}
+            progressLabel={isOpen3dLoadingMessage(demProgress?.label) ? demProgress!.label : demBatchLabel}
             error={demError}
             onClose={() => setShowDEMPanel(false)}
             onToggleSurface={(t, checked) => setDemSurfaces(prev => {

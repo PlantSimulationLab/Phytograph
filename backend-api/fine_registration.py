@@ -116,6 +116,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+import open3d_warmup
+
 # Correspondence window as a multiple of the level's voxel. Three voxels is
 # about two cells of slack either side: wide enough that a point still finds
 # its partner after the previous level's residual, tight enough that it cannot
@@ -541,7 +543,7 @@ class Pyramid:
     def __init__(self, points: np.ndarray,
                  levels: Sequence[Tuple[float, float]],
                  gridded_at: Optional[float] = None):
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
 
         pts = np.asarray(points, dtype=np.float64)
         if not np.isfinite(pts).all():
@@ -621,7 +623,7 @@ def align(target: Pyramid, source: Pyramid,
     voxel)` after each batch of iterations; raising from it (which is how
     cancellation is signaled) aborts the run between batches.
     """
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     transform = (np.eye(4) if init is None
                  else np.asarray(init, dtype=np.float64).reshape(4, 4).copy())
@@ -1016,7 +1018,7 @@ class SurfacePyramid:
         with self._lock:
             cloud = self._clouds[index]
             if cloud is None:
-                import open3d as o3d
+                o3d = open3d_warmup.get_open3d()
                 cloud = o3d.geometry.PointCloud()
                 cloud.points = o3d.utility.Vector3dVector(self._points[index])
                 shaped = _plane_shaped(self._normals[index])

@@ -33,6 +33,7 @@ import scalar_fields
 import session_store
 import tiled
 import label_segments
+import open3d_warmup
 from pytexit import py2tex
 
 # ==================== PyHelios source submodule ====================
@@ -437,6 +438,15 @@ async def _bound_worker_threadpool() -> None:
         anyio.to_thread.current_default_thread_limiter().total_tokens = _MAX_WORKER_THREADS
     except Exception as e:  # pragma: no cover - never fail startup over a knob
         print(f"[startup] could not size the worker threadpool: {e}", flush=True)
+
+
+@app.on_event("startup")
+async def _warm_open3d() -> None:
+    """Import open3d on a background thread so the first tool that needs it
+    doesn't pay 4-14 s behind an unrelated progress label (see open3d_warmup).
+    libhelios was already loaded at module import, so the macOS libomp
+    ordering above holds."""
+    open3d_warmup.start_background_warmup()
 
 
 @app.on_event("startup")
@@ -4819,7 +4829,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         _cancel_checkpoint(progress)
 
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
 
         _ckpt()
         _report(0.05, "Reading points")
@@ -6599,7 +6609,7 @@ def _dem_surface_from_reps(
     normals = None
     surface_area = None
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(verts)
         mesh.triangles = o3d.utility.Vector3iVector(tris.astype(np.int32))
@@ -7030,7 +7040,7 @@ def _mesh_from_grid(grid_z: np.ndarray, minx: float, miny: float, cell: float,
     normals = None
     surface_area = None
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(verts)
         mesh.triangles = o3d.utility.Vector3iVector(tris.astype(np.int32))
@@ -19041,7 +19051,7 @@ def segment_wood(
 
     # Voxel downsample (explicit or auto) → classify reduced set → propagate.
     if voxel_size and voxel_size > 0 and n_full > 0:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         from scipy.spatial import cKDTree
 
         pcd = o3d.geometry.PointCloud()
@@ -19130,7 +19140,7 @@ def remove_statistical_outliers(points: np.ndarray, nb_neighbors: int = 20, std_
     Points with mean distance > std_ratio * global std are removed.
     """
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
         cl, ind = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
@@ -23015,7 +23025,7 @@ def _import_ply_mesh(ply_path: Path) -> dict:
     Returns the dict shape `_pack_mesh_frame` expects — arrays stay as numpy so
     they're packed straight into the binary frame without a .tolist() round-trip
     (a 3 M-vertex mesh is ~700 MB as JSON, over V8's 512 MB string cap)."""
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     try:
         mesh = o3d.io.read_triangle_mesh(str(ply_path))
@@ -23065,11 +23075,48 @@ def import_textured_mesh(request: MeshImportRequest):
     string-length cap — `response.json()` then throws ERR_STRING_TOO_LONG in the
     renderer no matter how long it waits. The binary frame is ~6x smaller and
     decodes as zero-copy typed arrays. Materials/textures ride in the frame's
-    JSON meta, which stays small (base64 images only)."""
-    return Response(
-        content=_pack_mesh_frame(_do_mesh_import(request), index_key="indices"),
-        media_type="application/octet-stream",
+    JSON meta, which stays small (base64 images only).
+
+    Streamed with progress markers so a PLY import that has to wait for open3d
+    to finish loading says so, instead of sitting on "Reading mesh" for up to
+    ~14 s. The bad-path / bad-extension checks run BEFORE the stream starts so
+    they still answer with a real 404 / 400 status."""
+    _check_mesh_import_path(request.path)
+    return _bin_frame_streaming_response(
+        lambda progress: _pack_mesh_frame(_do_mesh_import(request), index_key="indices"),
     )
+
+
+def _check_mesh_import_path(path: str) -> None:
+    p = Path(path)
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail=f"Mesh file not found: {path}")
+    if p.suffix.lower() not in (".ply", ".obj"):
+        raise HTTPException(status_code=400, detail="Only .obj and .ply files are supported for mesh import")
+    # A vertices-only PLY is a point cloud. Reject it from the header, before the
+    # stream commits a 200, so the caller still gets a real 400. (The triangle
+    # check in `_import_ply_mesh` stays as the backstop for a lying header.)
+    if p.suffix.lower() == ".ply" and _ply_header_face_count(p) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No faces found in PLY mesh (file appears to be a point cloud).",
+        )
+
+
+def _ply_header_face_count(path: Path) -> int:
+    """`element face N` from a PLY header (0 if absent), without reading the body."""
+    faces = 0
+    with open(path, "rb") as f:
+        for i, raw in enumerate(f):
+            parts = raw.decode("latin-1", errors="replace").split()
+            if parts[:1] == ["end_header"] or i > 10000:
+                break
+            if len(parts) >= 3 and parts[0] == "element" and parts[1].lower() == "face":
+                try:
+                    faces = int(parts[2])
+                except ValueError:
+                    pass
+    return faces
 
 
 def _do_mesh_import(request: MeshImportRequest) -> dict:
@@ -26888,8 +26935,12 @@ class _ProgressReporter:
         self._queue = progress_queue
         self._cancel_event = cancel_event
         self._cancel_int = None  # ctypes.c_int, set by bind_cancel_int()
+        # Last (fraction, message) reported, so an interjected notice (e.g.
+        # open3d_warmup's "Loading Open3D…") can hold the bar and restore it.
+        self.last = None
 
     def __call__(self, fraction, message: str) -> None:
+        self.last = (fraction, message)
         self._queue.put((fraction, message))
 
     def should_cancel(self) -> bool:
@@ -27007,7 +27058,10 @@ def _bin_frame_streaming_response(
     reporter = _ProgressReporter(progress_queue, cancel_event)
 
     def _run():
-        return build_frame(reporter) if wants_progress else build_frame()
+        if not wants_progress:
+            return build_frame()
+        with open3d_warmup.reporting_to(reporter):
+            return build_frame(reporter)
     _run = _run_pinned(_run)
 
     # Poll the executor future frequently in BOTH modes so the finished frame is
@@ -27210,7 +27264,7 @@ def _load_ply_pcd_arrays(
     and PCD. If a downstream consumer needs them we'd need to parse the
     formats directly; none for now."""
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
     except ImportError:
         raise HTTPException(
             status_code=500,
@@ -42477,7 +42531,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
     {success: False, error} (preserving the endpoint's HTTP-200 error contract);
     only ScanCanceled propagates so the stream emits its terminal marker."""
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         import numpy as np
 
         _cancel_checkpoint(progress)
@@ -42876,7 +42930,7 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
     0.15→0.95 fraction so the renderer's pill advances per batch. A no-op when
     progress is None (e.g. direct unit-test callers).
     """
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
     import numpy as np
 
     current_transform = init_transform.copy()
@@ -42933,7 +42987,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
 
     See _do_c2m_distance for the streaming/cancel/error contract."""
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         import numpy as np
 
         _cancel_checkpoint(progress)
@@ -43468,7 +43522,7 @@ def _preprocess_for_fpfh(points: np.ndarray, voxel: float):
     voxel dominates and this behaves conventionally; on a sparse anchor cloud the
     spacing dominates, so each anchor's descriptor actually covers its
     neighbors instead of being computed on an empty ball."""
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     pts = np.asarray(points, dtype=np.float64)[:, :3]
     pcd = o3d.geometry.PointCloud()
@@ -43504,7 +43558,7 @@ def run_global_registration(target_pts: np.ndarray, source_pts: np.ndarray,
     points agree between the two clouds, so a candidate set that maps each tree
     onto its neighbor (preserving positions but not the pairing) is rejected.
     """
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     # FPFH+RANSAC/FGR is a DENSE-SURFACE method. It is used here only for the
     # raw-surface fallback (and for built scenes, where it is the right tool);
@@ -44832,7 +44886,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
 
     See _do_c2m_distance for the streaming/cancel/error contract."""
     try:
-        import open3d as o3d
+        o3d = open3d_warmup.get_open3d()
         import numpy as np
 
         _cancel_checkpoint(progress)

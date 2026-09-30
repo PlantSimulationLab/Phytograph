@@ -82,6 +82,8 @@ from typing import Any, Optional, Sequence, Tuple
 import numpy as np
 from scipy.spatial import cKDTree
 
+import open3d_warmup
+
 # Session columns written by the compute_normals endpoint, in output order.
 # The slugs are the renderer's buffer keys and the LAS/PLY extra-dim names, so
 # they are a contract with `main._PLY_PROPERTY_TYPES` and `_ply_role_for`:
@@ -202,7 +204,7 @@ def _eigen_normals(points: np.ndarray, k: int,
     fixes that, separately, because orientation is the part that must stay
     independent of tiling.
     """
-    import open3d as o3d
+    o3d = open3d_warmup.get_open3d()
 
     n = len(points)
     out = np.zeros((n, N_COLUMNS), dtype=np.float32)

@@ -699,7 +699,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           let materialsDropped = false;
           if ((ext === 'obj' || ext === 'ply') && objPath) {
             try {
-              const resp = await importTexturedMesh(objPath);
+              const resp = await importTexturedMesh(objPath, (_p, message) => {
+                if (message) {
+                  setImportProgress((prev) => (prev ? { ...prev, hint: message } : prev));
+                }
+              });
               // The backend is the only path that applies a mesh's embedded
               // materials: MTL `Kd` → per-vertex colors and textures for OBJ,
               // and per-vertex color + binary support for PLY. The local
@@ -1006,7 +1010,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           let backendMesh: MeshImportResult | null = null;
           if ((ext === 'obj' || ext === 'ply') && meshPath) {
             try {
-              const resp = await importTexturedMesh(meshPath);
+              const resp = await importTexturedMesh(meshPath, (_p, message) => {
+                if (message) {
+                  setImportProgress((prev) => (prev ? { ...prev, hint: message } : prev));
+                }
+              });
               // Prefer the backend result whenever it succeeds — it's the only
               // path that applies embedded materials (MTL Kd → per-vertex
               // colors, textures, binary PLY). Local parse is the fallback.

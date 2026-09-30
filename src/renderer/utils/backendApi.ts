@@ -3392,11 +3392,16 @@ export interface MeshImportResult {
  * buffers become the returned MeshData's typed arrays with no per-element
  * repacking, so this also skips the number[][] round-trip entirely.
  */
-export async function importTexturedMesh(filePath: string): Promise<MeshImportResult> {
+export async function importTexturedMesh(
+  filePath: string,
+  onProgress?: BinaryFrameProgress,
+): Promise<MeshImportResult> {
   // 10 minutes: reading + normal-generating a multi-million-triangle mesh off
   // disk is tens of seconds, and the frame still has to cross the socket.
+  // `onProgress` surfaces the backend's stage messages — chiefly "Loading
+  // Open3D…" when a PLY import lands before open3d has finished loading.
   const { meta, buffers } = await fetchBinaryFrame(
-    '/api/mesh/import', { path: filePath }, undefined, 600000,
+    '/api/mesh/import', { path: filePath }, undefined, 600000, onProgress,
   );
   if (!meta.success) {
     throw new Error((meta.error as string) ?? 'Mesh import failed');
@@ -3661,6 +3666,14 @@ function toRequestBody(b: ArrayBuffer | Uint8Array): ArrayBuffer {
 // Reporter for per-stage progress streamed ahead of the PHB1 frame as PHP1
 // markers (see _bin_frame_streaming_response in backend-api/main.py).
 export type BinaryFrameProgress = (progress: number | null, message: string) => void;
+
+// The backend's notice while a tool waits for open3d to finish its first import
+// (backend-api/open3d_warmup.py LOADING_MESSAGE). Panels that normally show
+// their own phase label instead of the backend's still surface this one, since
+// it can hold the bar for 4-14 s right after the backend starts.
+export function isOpen3dLoadingMessage(message: string | null | undefined): boolean {
+  return !!message && message.startsWith('Loading Open3D');
+}
 
 // Cancellation + progress plumbing for a point-cloud import. Importing a
 // multi-GB scan is a minute-scale operation the user must be able to abort, and
