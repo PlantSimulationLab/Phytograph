@@ -1213,6 +1213,40 @@ def _docker_argv(args: "list[str]") -> "list[str]":
     return [_docker_exe() or "docker"] + list(args[1:])
 
 
+def _docker_env(env: "dict | None" = None) -> dict:
+    """`env` (default: this process's) with the docker CLI's helpers findable.
+
+    Resolving the docker binary by absolute path (_docker_exe) is not enough on
+    its own: the CLI then execs its credential helper — `docker-credential-
+    desktop`, named by `credsStore` in ~/.docker/config.json — by BARE NAME
+    through PATH. Under a GUI launch's launchd PATH that fails as
+    `error getting credentials: exec: "docker-credential-desktop": executable
+    file not found in $PATH`, on any registry access: `docker build` resolving
+    its base image, or `docker run` pulling one. The probes never touch a
+    registry, so Settings reports Docker healthy and the failure only surfaces
+    when the reader image is (re)built — which is why it appeared right after
+    an update: a changed reader makes the existing image stale, and the
+    self-heal rebuild is the first registry access the app has made. It bites
+    hardest on Docker Desktop's per-user install, which puts the CLI AND the
+    helpers in ~/.docker/bin and nothing in /usr/local/bin.
+
+    So append the resolved CLI's own directory (the helpers ship beside it) and
+    every fallback directory to PATH. Appended, never prepended: the same "PATH
+    first" rule as _docker_exe, so a shell-launched dev backend is unchanged.
+    """
+    out = dict(os.environ if env is None else env)
+    parts = [p for p in out.get("PATH", "").split(os.pathsep) if p]
+    exe = _docker_exe()
+    extra = ([os.path.dirname(exe)] if exe else []) + [
+        os.path.dirname(c) for c in _DOCKER_FALLBACK_PATHS
+    ]
+    for d in extra:
+        if d and d not in parts:
+            parts.append(d)
+    out["PATH"] = os.pathsep.join(parts)
+    return out
+
+
 # The three outcomes of asking Docker whether it is there, kept apart because
 # they need different words in front of the user. Folding "no CLI" into
 # "not running" is exactly the bug above.
@@ -1893,6 +1927,8 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
     # _riegl_expected_stamp). The ARG is declared at the BOTTOM of the
     # Dockerfile, below every RUN, so passing it cannot invalidate the pip/apt
     # layers — a reader-only change stays a ~2 s COPY rebuild.
+    env = _docker_env(env)
+
     cmd = _docker_argv(["docker", "build", "--platform", "linux/amd64"])
     stamp = _riegl_expected_stamp(context)
     if stamp:
@@ -2760,6 +2796,7 @@ def _riegl_reader_invocation(args: List[str], mounts: List[tuple]) -> tuple:
     # Unique per run so a cancel can only ever target this container, even with
     # several imports in flight (the backend is genuinely concurrent).
     container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
+    env = _docker_env(env)
     cmd = _docker_argv(["docker", "run", "--rm", "--name", container_name,
                         "--platform", "linux/amd64"])
     for host, container, mode in mounts:

@@ -1909,3 +1909,51 @@ def test_a_rebuild_that_still_reads_stale_says_so(monkeypatch, tmp_path):
     assert exc.value.status_code == 503
     assert "Rebuilding again will not help" in exc.value.detail
     assert "next .rxp import updates it" not in exc.value.detail
+
+
+def test_docker_children_can_find_the_credential_helper(monkeypatch, tmp_path):
+    """A GUI launch's bare PATH must still reach `docker-credential-desktop`.
+
+    The CLI is resolved by absolute path, but it execs its credential helper by
+    bare name, so a PATH without the CLI's own directory fails every registry
+    access ("docker-credential-desktop: executable file not found in $PATH") —
+    first seen when an update made the reader image stale and the self-heal
+    rebuild had to resolve the base image. Docker Desktop's per-user install
+    keeps both in ~/.docker/bin, which launchd's PATH never includes.
+    """
+    bindir = tmp_path / ".docker" / "bin"
+    bindir.mkdir(parents=True)
+    docker = bindir / "docker"
+    docker.write_text("#!/bin/sh\n")
+    docker.chmod(0o755)
+    monkeypatch.setattr(main, "_docker_exe", lambda: str(docker))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+
+    parts = main._docker_env()["PATH"].split(os.pathsep)
+    # User's PATH keeps precedence; the helper directories are appended.
+    assert parts[:4] == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    assert str(bindir) in parts
+    assert "/usr/local/bin" in parts
+    assert "/Applications/Docker.app/Contents/Resources/bin" in parts
+    assert len(parts) == len(set(parts))
+
+    # Both docker spawns that can touch a registry get it: the reader run...
+    monkeypatch.setattr(main, "_riegl_runtime", lambda: "docker")
+    _cmd, env, _name = main._riegl_reader_invocation(["--help"], [])
+    assert str(bindir) in env["PATH"].split(os.pathsep)
+
+    # ...and the image build.
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_segproc(cmd, env, log_path, **kw):
+        seen["env"] = env
+        raise _Stop
+
+    monkeypatch.setattr(main, "_SegProc", fake_segproc)
+    monkeypatch.setattr(main, "_riegl_expected_stamp", lambda ctx: None)
+    with pytest.raises(Exception):
+        main._run_docker_build(tmp_path)
+    assert str(bindir) in seen["env"]["PATH"].split(os.pathsep)

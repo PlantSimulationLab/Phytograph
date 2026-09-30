@@ -589,6 +589,19 @@ loaded.**
   not responding"*, which means the daemon itself is stopped or wedged — start
   or restart Docker Desktop for that one.
 
+**Building the reader image fails with `error getting credentials … "docker-credential-desktop": executable file not found in $PATH`.** *(macOS)*
+: Fixed after v0.93.0. Phytograph found the `docker` command by its full
+  path, but `docker` then looks up its credential helper by name on the same
+  bare startup `PATH`, and that fails whenever Docker has to contact a
+  registry. Docker Desktop's per-user install hits this most often, because
+  it puts both programs in `~/.docker/bin`. Status checks never contact a
+  registry, so Docker showed as ready. The error only appeared when the
+  reader image was built, which Phytograph also does by itself after an
+  update changes the reader. Phytograph now makes the helper visible to the
+  `docker` processes it starts. On an older build, run
+  `sudo ln -sf ~/.docker/bin/docker-credential-desktop /usr/local/bin/`
+  and try again.
+
 **macOS: the import is slower than RiSCAN PRO, or than the same scan on
 Windows or Linux.**
 : Expected. RiVLib runs natively in those cases; on macOS it runs under x86
