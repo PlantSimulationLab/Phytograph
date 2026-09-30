@@ -291,10 +291,15 @@ export function isBackendUnreachable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   // A deadline abort means the backend was reachable but too slow — not absent.
   if (error instanceof BackendTimeoutError) return false;
-  return (
-    error.name === 'TypeError' ||
-    /failed to fetch|networkerror|load failed|connection/i.test(error.message)
-  );
+  // Match only the phrasings fetch ITSELF rejects with (Chromium's "Failed to
+  // fetch" and mid-body "network error", Firefox's "NetworkError when attempting
+  // to fetch", WebKit's "Load failed"), anchored to the start of the message.
+  // This used to accept any TypeError and any message containing "connection",
+  // so a backend that answered with a failure quoting a tool's own output — a
+  // `docker build` log saying "connection reset" while pulling its base image —
+  // was reported as "could not reach the backend", hiding the real error behind
+  // one that sent the user looking for a crash that never happened.
+  return /^(failed to fetch|network ?error|load failed)/i.test(error.message);
 }
 
 /**

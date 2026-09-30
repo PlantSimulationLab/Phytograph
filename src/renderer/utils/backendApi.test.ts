@@ -524,6 +524,26 @@ describe('isBackendUnreachable', () => {
     ).toBe(false);
   });
 
+  it('is false for a backend failure whose text merely mentions a connection', () => {
+    // A docker build log tail quoted in a streamed error, as the RIEGL reader
+    // image rebuild returns it. The backend answered; the dialog must show this.
+    expect(
+      isBackendUnreachable(
+        new Error('docker build failed (exit 1). ERROR: failed to do request: read: connection reset by peer'),
+      ),
+    ).toBe(false);
+    expect(isBackendUnreachable(new Error('error during connect: Get "http://docker/_ping"'))).toBe(false);
+  });
+
+  it('is false for a TypeError that is a code bug, not a fetch rejection', () => {
+    expect(isBackendUnreachable(new TypeError("Cannot read properties of undefined (reading 'x')"))).toBe(false);
+  });
+
+  it('is true for a stream cut off mid-body', () => {
+    expect(isBackendUnreachable(new TypeError('network error'))).toBe(true);
+    expect(isBackendUnreachable(new TypeError('Load failed'))).toBe(true);
+  });
+
   it('is false for a timeout — the backend was reachable, just slow', () => {
     expect(isBackendUnreachable(new BackendTimeoutError('/api/mesh/import', 600000))).toBe(false);
   });
