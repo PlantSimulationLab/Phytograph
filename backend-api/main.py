@@ -1897,10 +1897,21 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
     proc = None
     try:
         with open(log_path, "w") as log_handle:
-            proc = subprocess.Popen(
-                cmd, stdout=log_handle, stderr=subprocess.STDOUT, env=env,
-                text=True,
-            )
+            if hasattr(os, "posix_spawn"):
+                # Never fork this process, even for a thin client like the
+                # docker CLI: the crash happens in the forked copy of THIS
+                # image, in the post-fork/pre-exec window while PROJ's
+                # pthread_atfork handler tears down its SQLite handle cache,
+                # before exec could make the child anything else. It fires
+                # once anything in the backend has touched a CRS (proj.db is
+                # open), which is why the rebuild failed "exit -11" with an
+                # empty log only on a backend that had already imported data.
+                proc = _SegProc(cmd, env, log_path)
+            else:
+                proc = subprocess.Popen(
+                    cmd, stdout=log_handle, stderr=subprocess.STDOUT, env=env,
+                    text=True,
+                )
             started = time.time()
             while proc.poll() is None:
                 if cancel_event is not None and cancel_event.is_set():
@@ -2802,19 +2813,23 @@ def _run_riegl_container(
 
     proc = None
     try:
-        if container_name is None and hasattr(os, "posix_spawn"):
-            # NATIVE runtime on POSIX: the reader is a child of THIS process, so
-            # the spawn mechanism matters. `Popen` fork()s the loaded image
-            # whenever close_fds is true (the default), and this backend has
-            # BOTH libhelios' GLFW (lidar->visualizer plugin) and open3d's own
-            # copy loaded — they register duplicate Objective-C classes, and
-            # forking that image kills the child in the post-fork/pre-exec
-            # window with SIGSEGV, surfacing only as "RIEGL reader failed
-            # (exit -11)" before a line of the reader runs. Same reason
-            # _run_potree_converter and _spawn_seg_worker use _SegProc.
+        if hasattr(os, "posix_spawn"):
+            # On POSIX the child — the native reader OR the docker CLI — is
+            # spawned WITHOUT forking this process. `Popen` fork()s the loaded
+            # image whenever close_fds is true (the default), and this backend
+            # has libhelios' GLFW (lidar->visualizer plugin), open3d's own copy,
+            # and PROJ/libsqlite3 loaded; forking that image kills the child in
+            # the post-fork/pre-exec window with SIGSEGV, surfacing only as
+            # "RIEGL reader failed (exit -11)" before a line of the reader runs.
+            # Same reason _run_potree_converter and _spawn_seg_worker use
+            # _SegProc.
             #
-            # Docker keeps Popen: the `docker` CLI is a thin client that loads
-            # none of this, and the container is not in our process tree anyway.
+            # That includes docker. This used to keep Popen on the reasoning
+            # that "the docker CLI is a thin client that loads none of this" —
+            # but the crash is in the forked copy of THIS image, before exec, so
+            # what the child would have become is irrelevant. PROJ's atfork
+            # handler segfaults in every fork once proj.db is open, so the
+            # docker runtime died as soon as a CRS had been touched.
             proc = _SegProc(cmd, env, log_path, stdout_log=out_path)
         else:
             log_handle = open(log_path, "w")
@@ -2926,12 +2941,12 @@ def _stream_riegl_container(
     trailer: List[dict] = []
     try:
         with open(log_path, "w") as log_handle:
-            if container_name is None and hasattr(os, "posix_spawn"):
-                # NATIVE runtime on POSIX — spawn WITHOUT forking this process.
-                # See _run_riegl_container for the full reason: libhelios' GLFW
-                # and open3d's own copy are both loaded here, and fork()+exec()
-                # kills the child in the post-fork/pre-exec window (SIGSEGV,
-                # exit -11). Popen takes that path whenever close_fds is true.
+            if hasattr(os, "posix_spawn"):
+                # POSIX (native reader AND docker CLI) — spawn WITHOUT forking
+                # this process. See _run_riegl_container for the full reason:
+                # fork()+exec() of this loaded image kills the child in the
+                # post-fork/pre-exec window (SIGSEGV, exit -11), whatever the
+                # child was going to exec. Popen forks whenever close_fds is true.
                 #
                 # The header still has to arrive on a PIPE rather than a file,
                 # because it is read incrementally while the reader keeps

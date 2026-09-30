@@ -1371,11 +1371,14 @@ def test_build_passes_the_stamp_as_a_build_arg(monkeypatch, tmp_path):
         def kill(self):
             pass
 
-    def _fake_popen(cmd, **kwargs):
+    def _fake_popen(cmd, *args, **kwargs):
         seen["cmd"] = cmd
         return _FakeProc()
 
+    # Both spawn seams: POSIX builds through _SegProc (posix_spawn, never
+    # fork -- see test_riegl_spawn_no_fork), Windows through Popen.
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(main, "_SegProc", _fake_popen)
     main._run_docker_build(ctx)
 
     cmd = seen["cmd"]
