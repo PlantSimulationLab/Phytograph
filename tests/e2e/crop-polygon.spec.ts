@@ -498,3 +498,63 @@ for (const exit of ['close-button', 'escape'] as const) {
     expect(moved).toBeGreaterThan(1e-3);
   });
 }
+
+// Cropping is usually repeated: the same shape, the same Keep mode, cloud after
+// cloud. Closing the tool used to reset it to Box / Keep Inside, so every
+// reopen meant re-picking both. The last choice must survive a close, and it
+// must be LIVE on reopen — the lasso armed without clicking Polygon again, and
+// Apply actually excluding the inside (asserted by the emptying-crop confirm,
+// not just by which button reads pressed).
+test('polygon lasso crop: reopening Crop restores the last shape and Keep Outside', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
+  await expect(row).toHaveAttribute('data-selected', 'true');
+
+  // First visit: pick Polygon + Keep Outside, then leave without applying.
+  await page.getByTestId('tool-crop').click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toHaveAttribute('data-crop-mode', 'box');
+  await expect(page.getByTestId('crop-mode-inside')).toHaveAttribute('aria-pressed', 'true');
+  await page.getByTestId('crop-shape-polygon').click();
+  await page.getByTestId('crop-mode-outside').click();
+  await page.getByTestId('crop-close').click();
+  await expect(panel).toHaveCount(0);
+
+  // Reopen: both choices are back, and the lasso is armed straight away.
+  await page.getByTestId('tool-crop').click();
+  await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
+  await expect(page.getByTestId('crop-mode-outside')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('crop-mode-inside')).toHaveAttribute('aria-pressed', 'false');
+
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-polygon-overlay has no bounding box');
+  const inset = 8;
+  const corners = [
+    { x: box.x + inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ];
+  for (let i = 0; i < corners.length; i++) {
+    await page.mouse.click(corners[i].x, corners[i].y);
+    await expect(overlay.locator('circle')).toHaveCount(i + 1);
+  }
+  await page.keyboard.press('Enter');
+  await page.getByTestId('crop-apply').click();
+
+  // Keep Outside over a lasso enclosing every point empties the cloud, which
+  // surfaces the delete confirmation. A reopen that only LOOKED like Keep
+  // Outside (Keep Inside underneath) would keep all 60 and never ask.
+  const confirm = page.getByTestId('confirm-delete');
+  await expect(confirm).toBeVisible({ timeout: 10_000 });
+  await confirm.click();
+  await expect(row).toHaveCount(0, { timeout: 5_000 });
+});

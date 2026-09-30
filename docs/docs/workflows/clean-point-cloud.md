@@ -174,8 +174,9 @@ a region. Three shapes are supported — a 3D **Box**, a screen-space
 **Rect**(angle), and a freeform **Polygon** lasso — and the same region
 applies to every scan you have selected.
 
-1. Click **Crop**. A green box appears around the union of the selected
-   scans' bounding boxes.
+1. Click **Crop**. The first time, a green box appears around the union
+   of the selected scans' bounding boxes (after that, Crop reopens in the
+   shape you last used — see below).
 2. In the panel choose **Box**, **Rect**, or **Polygon** at the top, then a
    **Mode** below it: **Keep Inside** (default), **Keep Outside**, or
    **Segment**. The first two discard the points you don't keep;
@@ -186,6 +187,14 @@ applies to every scan you have selected.
    hidden the whole time (in **Segment** mode nothing is hidden, since
    both halves are kept). Click the **×** in the panel header to dismiss
    without applying.
+
+Crop remembers the shape and mode you last picked. Reopen it after closing
+or applying and it comes back as you left it — Polygon with Keep Outside,
+say, with the lasso already armed — so a repeated crop across several
+clouds needs no re-picking. The region itself is not kept (a Box starts
+from the new selection's bounds, a Rect or Polygon is drawn fresh), nor is
+**Keep original cloud**, which always starts unticked. **File → New**
+returns Crop to Box / Keep Inside.
 
 When more than one scan is selected, the panel shows "Applies to N scans"
 and each scan gets its own cropped result — identities are preserved. The

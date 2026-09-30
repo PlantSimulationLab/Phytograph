@@ -2455,6 +2455,16 @@ export default function PointCloudViewer({
   // in-region points (normal crop) and the cropped-out (inverse) points
   // become a brand-new cloud added to the scene — no points are discarded.
   const [cropSegment, setCropSegment] = useState(false);
+  // The shape + keep mode the user last picked in the crop panel, restored on
+  // the next entry. Cropping is usually repeated (polygon / Keep Outside, over
+  // and over), and resetting to Box / Keep Inside on every open made the user
+  // re-pick both each time. Tracked separately from cropMode because the
+  // label tool borrows cropMode ('polygon') for its lasso. Retain-original is
+  // deliberately NOT remembered (see cropRetainOriginal), nor is the region
+  // itself: a screen-space polygon is frozen to the camera it was drawn from.
+  const lastCropChoiceRef = useRef<{ mode: CropMode; invert: boolean; segment: boolean }>({
+    mode: 'box', invert: false, segment: false,
+  });
 
   // Lower the octree point budget while a crop box is being previewed, restore
   // when it ends. potree clips with a fragment `discard` (no early-Z), so the
@@ -3383,10 +3393,15 @@ export default function PointCloudViewer({
     setPolygonInProgress([]);
     setRectDragStart(null);
     rectDragCurrentRef.current = null;
-    setCropDrawState('idle');
-    setCropMode('box');
-    setCropInvert(false);
-    setCropSegment(false);
+    const last = lastCropChoiceRef.current;
+    setCropDrawState(
+      last.mode === 'rect' ? 'drawing-rect'
+        : last.mode === 'polygon' ? 'drawing-polygon'
+        : 'idle',
+    );
+    setCropMode(last.mode);
+    setCropInvert(last.invert);
+    setCropSegment(last.segment);
     setEditMode('crop');
   }, [editMode, selectedIds, clouds, getEditState, closeAllToolPanels]);
 
@@ -26295,6 +26310,7 @@ export default function PointCloudViewer({
             cameraLocked={screenRegionLive}
             onClose={closeCropPanel}
             onSelectShape={(mode) => {
+              lastCropChoiceRef.current = { ...lastCropChoiceRef.current, mode };
               setCropMode(mode);
               setPolygonInProgress([]);
               setCropPolygon(null);
@@ -26309,9 +26325,18 @@ export default function PointCloudViewer({
                 setCropDrawState('drawing-polygon');
               }
             }}
-            onKeepInside={() => { setCropInvert(false); setCropSegment(false); }}
-            onKeepOutside={() => { setCropInvert(true); setCropSegment(false); }}
-            onSegment={() => { setCropInvert(false); setCropSegment(true); }}
+            onKeepInside={() => {
+              lastCropChoiceRef.current = { ...lastCropChoiceRef.current, invert: false, segment: false };
+              setCropInvert(false); setCropSegment(false);
+            }}
+            onKeepOutside={() => {
+              lastCropChoiceRef.current = { ...lastCropChoiceRef.current, invert: true, segment: false };
+              setCropInvert(true); setCropSegment(false);
+            }}
+            onSegment={() => {
+              lastCropChoiceRef.current = { ...lastCropChoiceRef.current, invert: false, segment: true };
+              setCropInvert(false); setCropSegment(true);
+            }}
             onToggleRetainOriginal={setCropRetainOriginal}
             onSetBoxSize={(axisKey, newSize) => setCropBox(prev => {
               if (!prev) return prev;
