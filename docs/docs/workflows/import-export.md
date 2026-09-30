@@ -764,7 +764,12 @@ and opens it again exactly as you left it. It contains:
 
 The file does **not** refer back to the files you imported. It holds the
 data itself, so you can move it to another computer or send it to someone.
-It is as large as the clouds in it.
+Its size depends on the clouds in it. Point data is compressed losslessly
+(about 27 bytes per point for a RIEGL scan with its GPS time, reflectance and
+amplitude). The display cache is left out whenever it can be rebuilt. So on a
+computer that has never shown these clouds, opening the project takes about
+as long as the first import did, while Phytograph rebuilds each cloud's
+display.
 
 | Command | Shortcut | |
 |---------|----------|---|

@@ -162,9 +162,13 @@ interface MeshLike { plantSessionId?: string }
  * session and never re-read the file. Live plant-growth sessions do not
  * survive a save; their meshes lose the link (the plant keeps its seed and
  * parameters and can be regenerated).
+ *
+ * `octreeMap` renames display octrees the backend rebuilt from a session on
+ * open (a project leaves out any octree its session reproduces exactly); the
+ * rebuild hashes to a new cache id, so every reference has to follow it.
  */
 export function rewireOpenedScene<S extends { scans: ScanLike[]; meshes: MeshLike[] }>(
-  scene: S, sessionMap: Record<string, string>,
+  scene: S, sessionMap: Record<string, string>, octreeMap: Record<string, string> = {},
 ): { scene: S; missing: string[] } {
   const missing: string[] = [];
   const scans = scene.scans.map((s) => {
@@ -172,10 +176,12 @@ export function rewireOpenedScene<S extends { scans: ScanLike[]; meshes: MeshLik
     if (!oct?.sessionId) return s;
     const next = sessionMap[oct.sessionId];
     if (!next) missing.push(s.id);
-    return {
-      ...s,
-      data: { ...s.data, octree: { ...oct, sessionId: next ?? undefined, divergedFromSource: true } },
-    };
+    const remapped: OctreeLike = { ...oct, sessionId: next ?? undefined, divergedFromSource: true };
+    if (oct.cacheId && octreeMap[oct.cacheId]) remapped.cacheId = octreeMap[oct.cacheId];
+    if (oct.missOctreeCacheId && octreeMap[oct.missOctreeCacheId]) {
+      remapped.missOctreeCacheId = octreeMap[oct.missOctreeCacheId];
+    }
+    return { ...s, data: { ...s.data, octree: remapped } };
   });
   const meshes = scene.meshes.map(m => (m.plantSessionId ? { ...m, plantSessionId: undefined } : m));
   return { scene: { ...scene, scans, meshes }, missing };

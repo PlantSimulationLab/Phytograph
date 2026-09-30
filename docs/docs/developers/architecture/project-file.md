@@ -12,29 +12,53 @@ itself.
 ## Container
 
 A `.phyto` file is a **ZIP archive** (ZIP64, so members and the archive may
-exceed 4 GB). Point arrays are stored **uncompressed**: they compress poorly
-and are the bulk of the bytes, and storing them keeps save and open close to
-disk speed. JSON members are deflated.
+exceed 4 GB). JSON members are deflated. Point arrays are the bulk of the
+bytes and are written as **`.pz` columns**: independent ~8 MB blocks, each
+run through a transform picked per column from a sample, then raw-deflated
+(level 1), compressed and decompressed on a thread pool. The ZIP member itself
+is stored, since the compression happens inside it where it can run in
+parallel. The transforms are:
+
+| Filter | Wins on |
+|--------|---------|
+| `none` | small-integer columns: intensity, flags, target index and count |
+| `shuffle` (byte planes) | float columns (reflectance) |
+| `delta_shuffle` (differences of the integer view, then byte planes) | monotone columns: GPS time goes from 56% of raw size to 27% |
+
+Deltas are taken on the integer view of the bits, so every column
+round-trips **bit-exactly** (NaN payloads, `-0.0`, integer wraparound). On a
+21 M-point RIEGL scan the columns go from ~48 to ~27 bytes/point. Float64
+positions set the floor at ~76%, because their low mantissa bytes are
+measurement noise. A `.pz` member is `PHYZ\x01\n`, a u32 header length, a
+JSON header `{dtype, shape, filter, block_rows}`, then per block a u32
+compressed length and the deflate body. Readers validate the header and each
+block's decompressed length, so a damaged column fails the open instead of
+loading garbage. A 0-d array is written as `.npy`.
 
 ```text
 manifest.json                       format, version, app version, members
 scene.json                          the renderer's scene document
 buffers/<k>.bin                     typed arrays referenced from scene.json
 sessions/<sid>/session.json         one cloud session's scalar fields
-sessions/<sid>/<column>.npy         its point-aligned arrays
-sessions/<sid>/history/<k>.npy      delete / label undo deltas
-sessions/<sid>/misses/<key>.npy     the backfilled-miss buffer
-octrees/<cacheId>/<file>            the display octrees the scene points at
+sessions/<sid>/<column>.pz          its point-aligned arrays
+sessions/<sid>/history/<k>.pz       delete / label undo deltas
+sessions/<sid>/misses/<key>.pz      the backfilled-miss buffer
+octrees/<cacheId>/<file>            display octrees a session cannot rebuild
 ```
 
-`manifest.json` holds `{"format": "phytograph-project", "version": 1,
-"app_version", "created", "sessions": [...], "octrees": [...]}`. A reader
-refuses an unknown `format`, or a `version` newer than its own, with a
-message saying which Phytograph version wrote the file.
+`manifest.json` holds `{"format": "phytograph-project", "version": 2,
+"app_version", "created", "sessions": [...], "octrees": [...],
+"regenerate": [...]}`. `octrees` are embedded; `regenerate` names octrees
+the file leaves out because a saved session rebuilds them. A reader refuses
+an unknown `format`, or a `version` newer than its own, with a message saying
+which Phytograph version wrote the file. Version 1 files (every column a
+`.npy`, every octree embedded, no `regenerate`) still open: a reader looks
+for `<stem>.pz` first and falls back to `<stem>.npy`.
 
 **No pickle, anywhere.** A project is a file people send each other.
 Unpickling one would run whatever code it carries, so every array is a
-`.npy` read with `allow_pickle=False`, and every other value is JSON. Member
+`.pz` column (plain numeric dtypes only) or a `.npy` read with
+`allow_pickle=False`, and every other value is JSON. Member
 names come from the manifest and are validated (`[A-Za-z0-9_.-]`, no path
 separators). A name that fails validation fails the open, so no member can
 write outside its target directory.
@@ -55,10 +79,30 @@ Pending (unbaked) deletions therefore reopen still pending, and undo still
 works across a save. The backend's `deleted` mask and the renderer's
 `pendingDeletes` are both saved, so they stay in step.
 
-**Display octrees.** The octree directories the scene points at (each
-cloud's current octree and its miss octree) are copied in. On open, each is
-installed into the octree cache under the same content address, unless it
-is already there. Reopening a large cloud therefore does not reconvert it.
+**Display octrees.** A display octree is a second full copy of its cloud,
+about 50 bytes/point, the same as the session itself. Embedding every one
+doubled a project (a 675 MB, three-scan RIEGL project saved at 6.2 GB, half of
+it octrees). So an octree is embedded only when the saved session **cannot**
+reproduce it:
+
+- **Left out (`regenerate`)**: the cloud's current octree and its miss
+  octree, when the octree matches the session. That means `octree_cache_id`
+  is set, and there is no `rendered_octree_cache_id` and no `octree_pose`.
+  On open, if the id is not already in this machine's cache (reopening on the
+  machine that saved finds it there and rebuilds nothing), the backend
+  rebuilds it from the restored session *before* registering it, and returns
+  `octree_map` (saved id → rebuilt id). The rebuild hashes the LAS it writes,
+  not the one import wrote, so the id can change. The renderer rewrites each
+  cloud's `cacheId`/`missOctreeCacheId` through the map. The cost is one
+  PotreeConverter pass per cloud on a machine without the cache, the same
+  as the original import's.
+- **Embedded (`octrees`)**: everything else. A stale octree (a pending
+  deletion the renderer masks, `rendered_octree_cache_id`) or a posed one
+  (`octree_pose`, a transform the renderer applies on top) is a different
+  picture than a rebuild would give, and the saved renderer state is written
+  against that picture. On open each is installed into the cache under the
+  same content address, unless it is already there.
+
 An octree missing at save time, for example evicted from the cache, is
 simply left out. The cloud's session is the source of truth, and the octree
 is rebuilt from it on first display.
@@ -106,16 +150,17 @@ cloud holds no second copy in RAM.
 **Open** (`POST /api/project/open`, same properties). The backend:
 
 1. validates the manifest;
-2. installs the octrees;
+2. installs the embedded octrees;
 3. creates **new** sessions from the saved ones. The ids are new, so an open
    can never collide with a live cloud. Columns are streamed straight into a
    memory-mapped session store for a large cloud, or into RAM for a small
    one, by the same size rule import uses;
-4. returns the scene document, its buffers, and a map from the saved
-   session ids to the new ones.
+4. rebuilds the `regenerate` octrees this machine's cache lacks (above);
+5. returns the scene document, its buffers, a map from the saved session
+   ids to the new ones, and the `octree_map`.
 
 The renderer resets the scene (as **File → New**), rewrites every cloud's
-session id through that map, and loads the document.
+session id and octree ids through those maps, and loads the document.
 
 Opening a project replaces the current scene, so a scene with unsaved
 changes asks for confirmation first, as **File → New** does.

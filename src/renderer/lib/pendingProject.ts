@@ -9,6 +9,7 @@ export interface PendingProject {
   path: string;
   doc: { scene: Record<string, unknown>; viewer: Record<string, unknown> };
   sessionMap: Record<string, string>;
+  octreeMap: Record<string, string>;
 }
 
 let pending: PendingProject | null = null;

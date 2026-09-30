@@ -132,3 +132,82 @@ def test_endpoints_are_plain_def():
     import inspect
     assert not inspect.iscoroutinefunction(main.project_save)
     assert not inspect.iscoroutinefunction(main.project_open)
+
+
+# ---- octrees the project leaves out and rebuilds -------------------------
+
+from pathlib import Path
+
+LEAFCUBE_XYZ = (Path(__file__).resolve().parent
+                / "fixtures" / "lad-leafcube-multi" / "leafcube_multi.xyz")
+
+
+def _octree_points(root, cid):
+    return int(json.loads((root / cid / "metadata.json").read_text())["points"])
+
+
+def _save(client, tmp_path, sid, octree_ids, name="p.phyto"):
+    up = client.post("/api/project/scene", content=b"scene",
+                     headers={"Content-Type": "application/octet-stream"})
+    target = tmp_path / name
+    saved = _post_stream(client, "/api/project/save",
+                         {"path": str(target), "scene_token": up.json()["token"],
+                          "session_ids": [sid], "octree_ids": octree_ids})
+    assert saved["success"], saved
+    return target
+
+
+def test_unedited_cloud_octrees_are_rebuilt_not_embedded(client, cache_root, tmp_path):
+    """A display octree is a second full copy of the cloud, and for a cloud
+    whose octree matches its session the session rebuilds it exactly - so the
+    project leaves it (and the miss octree) out, and open rebuilds both and
+    tells the renderer the new ids."""
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": "x y z timestamp target_index target_count"},
+    ).content)
+    sid, hits, miss = created["session_id"], created["cache_id"], created["miss_octree_cache_id"]
+    assert hits and miss
+    n_hits, n_miss = _octree_points(cache_root, hits), _octree_points(cache_root, miss)
+    target = _save(client, tmp_path, sid, [hits, miss])
+    with zipfile.ZipFile(target) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+        assert manifest["version"] == 2
+        assert manifest["octrees"] == [] and set(manifest["regenerate"]) == {hits, miss}
+        assert not [n for n in zf.namelist() if n.startswith("octrees/")]
+        assert all(n.endswith((".pz", ".json")) for n in zf.namelist() if n.startswith("sessions/"))
+
+    # Same machine, cache intact: nothing is rebuilt.
+    same = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert same["success"] and same["octree_map"] == {}
+
+    # Another machine: no cache. Both octrees come back from the session.
+    client.delete(f"/api/cloud/session/{sid}")
+    import shutil
+    shutil.rmtree(cache_root)
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"], opened
+    m = opened["octree_map"]
+    assert set(m) == {hits, miss}
+    s2 = main._cloud_sessions[opened["session_map"][sid]]
+    assert s2.octree_cache_id == m[hits] and s2.miss_octree_cache_id == m[miss]
+    assert _octree_points(cache_root, m[hits]) == n_hits
+    assert _octree_points(cache_root, m[miss]) == n_miss
+
+
+def test_stale_octree_is_still_embedded(client, cache_root, tmp_path):
+    """A pending deletion leaves the drawn octree BEHIND the session (the
+    renderer masks the deleted points), so a rebuild is a different picture:
+    that octree must travel in the file."""
+    f, _pts = _cloud_file(tmp_path)
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)
+    sid = created["session_id"]
+    client.post(f"/api/cloud/session/{sid}/delete_region",
+                json={"region": {"kind": "box", "min": [0, 0, 0], "max": [3, 3, 10]}})
+    target = _save(client, tmp_path, sid, [created["cache_id"]])
+    with zipfile.ZipFile(target) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert created["cache_id"] in manifest["octrees"]
+    assert created["cache_id"] not in manifest["regenerate"]

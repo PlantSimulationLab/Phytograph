@@ -165,3 +165,78 @@ def test_session_with_bad_row_count_is_refused():
     f["extras"]["short"] = np.zeros(10, np.float32)
     with pytest.raises(pf.ProjectError, match="rows"):
         _roundtrip(f)
+
+
+# ---- .pz columns ----------------------------------------------------------
+
+def _pz_roundtrip(arr):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", allowZip64=True) as zf:
+        member = pf.write_array(zf, "a", arr)
+    buf.seek(0)
+    zf = zipfile.ZipFile(buf)
+    return zf, member, pf.read_array(zf, "a")
+
+
+@pytest.mark.parametrize("arr", [
+    np.array([np.nan, -np.nan, np.inf, -np.inf, -0.0, 5e-324]),
+    np.random.default_rng(0).integers(-2**63, 2**63 - 1, 50_000, dtype=np.int64),
+    np.random.default_rng(1).normal(size=(40_001, 3)) * 1e3 + 6e5,
+    np.random.default_rng(2).random(3_000_000) < 0.3,
+    np.zeros((0, 3), np.float32),
+    np.arange(9, dtype=np.uint16).reshape(3, 3),
+], ids=["nonfinite", "int64-wrap", "positions-multiblock", "bool-multiblock", "empty", "tiny2d"])
+def test_pz_columns_round_trip_bit_exactly(arr):
+    """Every filter works on the integer view, so floats (NaN payloads, -0.0,
+    denormals) and wrapping integer deltas must come back byte for byte, and
+    across block boundaries."""
+    _zf, member, back = _pz_roundtrip(arr)
+    assert member.endswith(".pz")
+    assert back.dtype == arr.dtype and back.shape == arr.shape and back.tobytes() == arr.tobytes()
+
+
+def test_pz_picks_the_filter_that_compresses():
+    """GPS time is monotone: delta coding more than halves it, where a fixed
+    shuffle-for-floats rule leaves it at ~40%."""
+    t = np.cumsum(np.random.default_rng(0).uniform(0, 2e-6, 2_000_000)) + 3.2e5
+    zf, member, back = _pz_roundtrip(t)
+    assert np.array_equal(back, t)
+    with zf.open(member) as f:
+        assert pf._pz_read_header(f, member)["filter"] == "delta_shuffle"
+    assert zf.getinfo(member).file_size < 0.35 * t.nbytes
+
+
+def test_pz_damage_is_an_error_not_garbage():
+    arr = np.arange(100_000, dtype=np.float64)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        pf.write_array(zf, "a", arr)
+    zf = zipfile.ZipFile(buf)
+    raw = bytearray(zf.read("a.pz"))
+    raw[-20:] = b"\x00" * 20
+    bad = io.BytesIO()
+    with zipfile.ZipFile(bad, "w") as z2:
+        z2.writestr("a.pz", bytes(raw))
+    with pytest.raises(pf.ProjectError):
+        pf.read_array(zipfile.ZipFile(bad), "a")
+
+
+def test_version_1_npy_sessions_still_open():
+    """Projects saved before `.pz` hold every column as `.npy`."""
+    f = _fields()
+    buf = io.BytesIO()
+    real = pf.write_array
+    try:
+        pf.write_array = lambda zf, stem, arr, check=None: pf.write_npy(zf, stem + ".npy", arr)
+        with zipfile.ZipFile(buf, "w", allowZip64=True) as zf:
+            entry = pf.write_session(zf, "s0", f)
+            pf.write_manifest(zf, app_version="0.0.0", sessions=[entry], octrees=[])
+    finally:
+        pf.write_array = real
+    buf.seek(0)
+    with zipfile.ZipFile(buf) as zf:
+        assert not [n for n in zf.namelist() if n.endswith(".pz")]
+        g = pf.read_session(zf, "s0")
+    for k in ("positions", "colors", "intensity", "deleted", "timestamps"):
+        assert np.array_equal(g[k], f[k])
+    assert [h.tolist() for h in g["deleted_history"]] == [h.tolist() for h in f["deleted_history"]]

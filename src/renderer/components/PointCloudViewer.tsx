@@ -20777,7 +20777,7 @@ export default function PointCloudViewer({
       };
       // The reset below remounts this component; the opened project waits for
       // the fresh one (see the mount effect after this block).
-      setPendingProject({ path, doc, sessionMap: res.session_map ?? {} });
+      setPendingProject({ path, doc, sessionMap: res.session_map ?? {}, octreeMap: res.octree_map ?? {} });
       await (window as any).__resetSceneForProject?.();
     } catch (err) {
       if (abort.signal.aborted || err instanceof ScanCanceledError) return;
@@ -20821,7 +20821,7 @@ export default function PointCloudViewer({
   }, []);
 
   function applyOpenedProject(p: NonNullable<ReturnType<typeof takePendingProject>>) {
-    const { scene: sc, missing } = rewireOpenedScene(p.doc.scene as never, p.sessionMap);
+    const { scene: sc, missing } = rewireOpenedScene(p.doc.scene as never, p.sessionMap, p.octreeMap);
     const keys = ['scans', 'meshes', 'skeletons', 'qsms', 'ladResults', 'meshPositions', 'meshRotations',
       'meshScales', 'skeletonPositions', 'editStates', 'labelStates'] as const;
     const patch: Record<string, unknown> = { past: [], future: [] };

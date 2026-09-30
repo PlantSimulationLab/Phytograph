@@ -87,6 +87,20 @@ describe('rewireOpenedScene', () => {
     expect(out.meshes[0].plantSessionId).toBeUndefined();
     expect(scene.scans[0].data!.octree!.sessionId).toBe('old1');   // input untouched
   });
+
+  it('follows octrees the backend rebuilt on open to their new ids', () => {
+    const scene = {
+      scans: [
+        { id: 'a', data: { octree: { sessionId: 's1', cacheId: 'h1', missOctreeCacheId: 'm1' } } },
+        { id: 'b', data: { octree: { sessionId: 's2', cacheId: 'h2', missOctreeCacheId: null } } },
+      ],
+      meshes: [],
+    };
+    const { scene: out } = rewireOpenedScene(scene, { s1: 'n1', s2: 'n2' }, { h1: 'H1', m1: 'M1' });
+    expect(out.scans[0].data!.octree).toMatchObject({ cacheId: 'H1', missOctreeCacheId: 'M1' });
+    // An octree the file embedded keeps its id.
+    expect(out.scans[1].data!.octree).toMatchObject({ cacheId: 'h2', missOctreeCacheId: null });
+  });
 });
 
 describe('sceneBackendRefs', () => {

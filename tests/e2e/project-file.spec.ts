@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
@@ -64,9 +64,25 @@ test('save a project, open it back, and keep working on it', async () => {
     await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Saved' }))
       .toBeVisible({ timeout: 120_000 });
     expect(existsSync(projectPath)).toBe(true);
-    // A ZIP (PK..), holding the cloud's columns: bigger than the scene JSON.
-    expect(readFileSync(projectPath).subarray(0, 2).toString()).toBe('PK');
-    expect(statSync(projectPath).size).toBeGreaterThan(24_000 * 3 * 8);
+    // A ZIP (PK..) holding the cloud's columns as compressed `.pz` members
+    // (member names are plain text in the ZIP headers). The display octree
+    // matches its session after Segment Ground's rebuild, so it is NOT
+    // embedded (the session rebuilds it on open), and the whole file is
+    // smaller than the raw float64 positions alone.
+    const bytes = readFileSync(projectPath);
+    expect(bytes.subarray(0, 2).toString()).toBe('PK');
+    expect(bytes.includes('/positions.pz')).toBe(true);
+    expect(bytes.includes('octrees/')).toBe(false);
+    expect(statSync(projectPath).size).toBeLessThan(parseInt(pointCount ?? '0', 10) * 3 * 8);
+
+    // ---- Open on a machine that has never shown this cloud ----
+    // Empty the octree cache, so the open has to rebuild the display from the
+    // saved session (and the renderer has to follow any renamed ids). The
+    // `.sessions` spill dir holds live session stores, not octrees; keep it.
+    const octreeDirs = () => readdirSync(session.octreeCacheRoot).filter((n) => /^[0-9a-f]{40}$/.test(n));
+    expect(octreeDirs().length).toBeGreaterThan(0);
+    for (const d of octreeDirs()) rmSync(join(session.octreeCacheRoot, d), { recursive: true, force: true });
+    expect(octreeDirs()).toEqual([]);
 
     // ---- Open (replaces the scene: the confirmation is asked, and answered) ----
     await stubMessageBox(app, 0);
@@ -75,6 +91,8 @@ test('save a project, open it back, and keep working on it', async () => {
     await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Opened' }))
       .toBeVisible({ timeout: 120_000 });
     expect((await getMessageBoxCalls(app)).length).toBe(1);
+    // Rebuilt by the open, not by a later missing-octree recovery.
+    expect(octreeDirs().length).toBeGreaterThan(0);
 
     const reopened = page.locator('[data-testid="scan-row"][data-scan-name="forest-plot"]');
     await expect(reopened).toHaveCount(1, { timeout: 30_000 });

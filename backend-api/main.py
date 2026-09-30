@@ -39269,6 +39269,56 @@ def project_file_mod():
     return project_file
 
 
+def _project_regenerable_octrees(fields: dict) -> List[str]:
+    """The octree ids of a snapshot that open can rebuild EXACTLY from the
+    saved session, so the project need not carry them.
+
+    A display octree is a second full copy of the cloud - ~50 bytes/point
+    against the session's ~48, so embedding it doubled every project. But it
+    is only a copy while it describes the session's current geometry: a stale
+    octree (`octree_cache_id` cleared by an edit; the renderer draws
+    `rendered_octree_cache_id` and masks the edit) or a posed one
+    (`octree_pose`: the renderer applies a transform the octree lacks) is a
+    DIFFERENT picture than a rebuild would give, and the renderer's saved
+    state is written against that picture. Those are still embedded."""
+    if (not fields.get("octree_cache_id") or fields.get("rendered_octree_cache_id")
+            or fields.get("octree_pose") is not None):
+        return []
+    return [c for c in (fields.get("octree_cache_id"), fields.get("miss_octree_cache_id")) if c]
+
+
+def _project_rebuild_octrees(sess: "CloudSession", regenerate: set, octree_map: dict,
+                             progress, span: "Tuple[float, float]") -> None:
+    """Rebuild a reopened session's octrees that the project left out
+    (`_project_regenerable_octrees`) and are not already in this machine's
+    cache, recording old id -> new id in `octree_map`. The new id can differ
+    (it hashes the LAS the rebuild writes, not the one import wrote), so the
+    renderer remaps the scene through the map."""
+    root = _octree_cache_root()
+
+    def missing(cid):
+        return bool(cid) and cid in regenerate and not (root / cid / "metadata.json").is_file()
+
+    old_hits, old_miss = sess.octree_cache_id, sess.miss_octree_cache_id
+    if missing(old_hits):
+        # private: the reopened session is not registered yet, so nothing
+        # else can name it (see `_session_rebuild`).
+        new_hits, _dir, _meta = _session_rebuild(
+            sess, progress=progress, cancel_event=getattr(progress, "cancel_event", None),
+            span=span, private=True)
+        octree_map[old_hits] = new_hits
+    if missing(old_miss):
+        new_miss = _build_miss_octree(sess, sess.miss_octree_origin,
+                                      cancel_event=getattr(progress, "cancel_event", None))
+        if new_miss is None:
+            # The saved id proves the cloud had placeable misses; a None here
+            # is a failed build, and a silently absent overlay is not an open.
+            raise project_file_mod().ProjectError("could not rebuild the miss display of a cloud")
+        with _cloud_session_lock:
+            sess.miss_octree_cache_id = new_miss
+        octree_map[old_miss] = new_miss
+
+
 def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
     import zipfile
     pf = project_file_mod()
@@ -39297,6 +39347,7 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                     _shutil.copyfileobj(src, dst, 16 << 20)
                 entries = []
                 wanted_octrees = list(dict.fromkeys(request.octree_ids))
+                regenerate: set = set()
                 for i, (sid, sess) in enumerate(sessions):
                     _report(0.05 + 0.75 * i / max(1, len(sessions)), f"Saving cloud {i + 1}/{len(sessions)}")
                     fields = _project_session_snapshot(sess)
@@ -39305,14 +39356,18 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                     for k in ("octree_cache_id", "rendered_octree_cache_id", "miss_octree_cache_id"):
                         if fields.get(k):
                             wanted_octrees.append(fields[k])
+                    regenerate.update(_project_regenerable_octrees(fields))
                 for j, cid in enumerate(dict.fromkeys(wanted_octrees)):
+                    if cid in regenerate:
+                        continue
                     _report(0.8 + 0.18 * j / max(1, len(wanted_octrees)), "Saving display octrees")
                     try:
                         if pf.write_octree(zf, cid, _octree_cache_root() / pf.check_cache_id(cid)):
                             octrees.append(cid)
                     except pf.ProjectError:
                         continue
-                pf.write_manifest(zf, app_version=BACKEND_VERSION, sessions=entries, octrees=octrees)
+                pf.write_manifest(zf, app_version=BACKEND_VERSION, sessions=entries, octrees=octrees,
+                                  regenerate=sorted(regenerate))
         os.replace(partial, target)
     except BaseException:
         try:
@@ -39416,6 +39471,7 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
         _cancel_checkpoint(progress)
 
     restored: Dict[str, "CloudSession"] = {}
+    octree_map: Dict[str, str] = {}
     try:
         with pf.open_zip(request.path) as zf:
             manifest = pf.read_manifest(zf)
@@ -39424,7 +39480,7 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
                                   f"open project ({total_n:,} pts)"):
                 octs = manifest.get("octrees", [])
                 for j, cid in enumerate(octs):
-                    _report(0.02 + 0.2 * j / max(1, len(octs)), "Installing display octrees")
+                    _report(0.02 + 0.08 * j / max(1, len(octs)), "Installing display octrees")
                     cache_dir = _octree_cache_root() / cid
                     with _octree_build_lock(cid):
                         if (cache_dir / "metadata.json").is_file():
@@ -39437,8 +39493,17 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
                         _install_octree_dir(staging, cache_dir)
                 sessions = manifest["sessions"]
                 for i, s in enumerate(sessions):
-                    _report(0.25 + 0.7 * i / max(1, len(sessions)), f"Opening cloud {i + 1}/{len(sessions)}")
+                    _report(0.1 + 0.3 * i / max(1, len(sessions)), f"Opening cloud {i + 1}/{len(sessions)}")
                     restored[s["key"]] = _project_restore_session(zf, s["key"])
+                # Octrees the file left out because the session rebuilds them
+                # exactly. Before the sessions are registered, so the renderer
+                # never sees a cloud whose display is still missing.
+                regenerate = set(manifest.get("regenerate", []))
+                for i, sess in enumerate(restored.values()):
+                    lo = 0.4 + 0.58 * i / max(1, len(restored))
+                    hi = 0.4 + 0.58 * (i + 1) / max(1, len(restored))
+                    _report(lo, f"Building display for cloud {i + 1}/{len(restored)}")
+                    _project_rebuild_octrees(sess, regenerate, octree_map, progress, (lo, hi))
                 token, path = _project_blob_new()
                 with zf.open(_PROJECT_SCENE_MEMBER) as src, open(path, "wb") as dst:
                     _shutil.copyfileobj(src, dst, 16 << 20)
@@ -39455,6 +39520,7 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
     _report(1.0, "Opened")
     return {"success": True, "scene_token": token,
             "session_map": {old: s.session_id for old, s in restored.items()},
+            "octree_map": octree_map,
             "app_version": manifest.get("app_version")}
 
 
