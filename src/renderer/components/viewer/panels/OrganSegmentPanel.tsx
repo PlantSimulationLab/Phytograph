@@ -9,8 +9,12 @@ export type OrganColorBy = 'organ' | 'leaflet';
 
 // Presentational tool panel for ML plant-organ segmentation (soil / stem / leaf
 // plus one id per leaflet). State and the `onSegment` handler live in
-// PointCloudViewer; the parent gates on `showOrganSegmentPanel && selectedIds.size === 1`.
+// PointCloudViewer; the parent gates on `showOrganSegmentPanel && selectedIds.size >= 1`.
+// With several clouds selected, each is segmented on its own, in turn.
 interface OrganSegmentPanelProps {
+  selectedCount: number;
+  /** Which scan is running, while a multi-selection runs; null otherwise. */
+  progress: { index: number; total: number } | null;
   units: OrganUnits;
   colorBy: OrganColorBy;
   modelId: string | null;
@@ -25,6 +29,8 @@ interface OrganSegmentPanelProps {
 }
 
 export function OrganSegmentPanel({
+  selectedCount,
+  progress,
   units,
   colorBy,
   modelId,
@@ -55,6 +61,13 @@ export function OrganSegmentPanel({
         or pot in; it is one of the classes. Needs about 3 mm point spacing or
         finer.
       </div>
+
+      {selectedCount > 1 && (
+        <div data-testid="organ-multi-note" className="mb-3 text-[10px] text-neutral-400">
+          {selectedCount} scans selected. Each is segmented on its own, one
+          after another, so each should hold one plant.
+        </div>
+      )}
 
       <div className="mb-3">
         <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
@@ -124,7 +137,7 @@ export function OrganSegmentPanel({
               className="flex-1 px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-neutral-600 text-neutral-400 cursor-not-allowed"
             >
               <Loader2 className="w-3 h-3 animate-spin" />
-              Segmenting…
+              {progress ? `Segmenting ${progress.index} of ${progress.total}…` : 'Segmenting…'}
             </button>
             <button
               data-testid="organ-segment-cancel-button"
@@ -142,7 +155,7 @@ export function OrganSegmentPanel({
             className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
           >
             <Clover className="w-3 h-3" />
-            Segment Organs
+            {selectedCount > 1 ? `Segment ${selectedCount} Scans` : 'Segment Organs'}
           </button>
         )}
       </div>

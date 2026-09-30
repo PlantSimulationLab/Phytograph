@@ -143,3 +143,50 @@ test('explicit meters on a millimeter scan warns that it is not plant-sized', as
   const info = page.locator('[data-testid="toast-info"]').last();
   await expect(info.getByTestId('toast-message')).toContainText('not the size of a plant', { timeout: 30_000 });
 });
+
+test('segments every selected scan, each on its own', async () => {
+  const { page } = session;
+  // Two different plants in two different units, so the summary has to name
+  // each scan's units and each scan's leaflet count separately.
+  const tomato = await importOne(page, TOMATO, 'potted-tomato', 60745);
+  const beet = await importOne(page, BEET_MM, 'sugar-beet-mm', 11267);
+  if ((await tomato.getAttribute('data-selected')) !== 'true') {
+    await tomato.click({ modifiers: ['ControlOrMeta'] });
+  }
+  await expect(tomato).toHaveAttribute('data-selected', 'true');
+  await expect(beet).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-organ-segment').click();
+  await expect(page.getByTestId('organ-segment-panel')).toBeVisible();
+  await expect(page.getByTestId('organ-multi-note')).toContainText('2 scans selected');
+  const run = page.getByTestId('organ-segment-run-button');
+  await expect(run).toHaveText('Segment 2 Scans');
+  await page.getByTestId('organ-color-by').selectOption('leaflet');
+  await run.click();
+
+  const toast = page.locator('[data-testid="toast-success"]').last();
+  await expect(toast.getByTestId('toast-title')).toContainText('Plant Organ Segmentation Complete', { timeout: 240_000 });
+  const text = ((await toast.getByTestId('toast-message').textContent()) ?? '').replace(/,/g, '');
+  expect(text).toContain('Segmented 2 of 2 scans.');
+  const tm = text.match(/potted-tomato[^:]*: (\d+) leaflets \(meters\)/);
+  const bm = text.match(/sugar-beet-mm[^:]*: (\d+) leaflets \(millimeters\)/);
+  expect(tm, `unexpected toast: ${text}`).not.toBeNull();
+  expect(bm, `unexpected toast: ${text}`).not.toBeNull();
+  // The same bounds as the single-scan tests: each plant was read on its own.
+  expect(+tm![1]).toBeGreaterThanOrEqual(85);
+  expect(+tm![1]).toBeLessThanOrEqual(135);
+  expect(+bm![1]).toBeGreaterThanOrEqual(4);
+  expect(+bm![1]).toBeLessThanOrEqual(9);
+  await expect(page.getByTestId('organ-segment-panel')).toHaveCount(0);
+
+  // Both clouds carry the columns and were left colored by leaflet.
+  await page.getByRole('button', { name: 'Display' }).click();
+  const colorMode = page.getByTestId('display-color-mode');
+  for (const row of [tomato, beet]) {
+    await row.click();
+    await expect(row).toHaveAttribute('data-selected', 'true');
+    await expect(colorMode).toHaveValue('scalar:leaflet_id');
+    await colorMode.selectOption('scalar:plant_organ');
+    await expect(colorMode).toHaveValue('scalar:plant_organ');
+  }
+});

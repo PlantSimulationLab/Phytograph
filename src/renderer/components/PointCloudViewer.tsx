@@ -1295,6 +1295,8 @@ export default function PointCloudViewer({
   const [showOrganSegmentPanel, setShowOrganSegmentPanel] = useState(false);
   const [organSegmentInProgress, setOrganSegmentInProgress] = useState(false);
   const [organSegmentError, setOrganSegmentError] = useState<string | null>(null);
+  // "Scan k of N" while a multi-selection runs; null for a single cloud.
+  const [organSegmentProgress, setOrganSegmentProgress] = useState<{ index: number; total: number } | null>(null);
   const [organUnits, setOrganUnits] = useState<OrganUnits>('auto');
   const [organColorBy, setOrganColorBy] = useState<OrganColorBy>('organ');
   const [organModelId, setOrganModelId] = useState<string | null>(null);
@@ -15437,76 +15439,121 @@ export default function PointCloudViewer({
 
   // Plant organs (ML, backend-api/ml/organs.py). Writes TWO columns and colors
   // by the one the panel picks: `plant_organ` (1 soil, 2 stem, 3 leaf) and
-  // `leaflet_id` (0 = not a leaflet, 1..N numbered by height). One cloud at a
-  // time: the model is for a single plant or pot, so there is no together-mode.
-  // Session (octree) clouds run on the in-RAM HIT points and append both columns
-  // (no file re-read); flat clouds send `ps.hits` and scatter both results back
-  // to full length (misses = 0 in both).
+  // `leaflet_id` (0 = not a leaflet, 1..N numbered by height). The model is for
+  // a single plant or pot, so there is no together-mode: a multi-selection runs
+  // each cloud on its own, in sequence, and one cloud's failure doesn't stop the
+  // rest. Session (octree) clouds run on the in-RAM HIT points and append both
+  // columns (no file re-read); flat clouds send `ps.hits` and scatter both
+  // results back to full length (misses = 0 in both).
+  const segmentOneOrganCloud = useCallback(async (
+    cloud: PointCloudEntry,
+    params: { units: OrganUnits; model_id?: string },
+    signal: AbortSignal,
+  ): Promise<OrganSegmentationCounts> => {
+    const id = cloud.id;
+    const ps = await buildPointSource(cloud);
+    if (ps.kind === 'source') {
+      const octreeInfo = cloud.data.octree;
+      if (!octreeInfo?.sessionId) {
+        throw new Error('Octree cloud is missing its editable session.');
+      }
+      const meta = await sessionSegmentOrgans(octreeInfo.sessionId, params, signal);
+      onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? id));
+      return meta;
+    }
+    const d = ps.data;
+    const { points, hitIndices } = ps.hits;
+    const response = await segmentOrgans({ points, ...params }, signal);
+    if (!response.success) {
+      throw new Error(response.error || 'Organ segmentation failed');
+    }
+    const organ = scatterToFullLength(response.organ, hitIndices, d.pointCount);
+    const leaflet = scatterToFullLength(response.leaflet, hitIndices, d.pointCount);
+    onUpdateCloud(id, {
+      ...d,
+      scalarFields: {
+        ...(d.scalarFields ?? {}),
+        [PLANT_ORGAN_ATTRIBUTE]: { values: organ, min: 1, max: 3 },
+        [LEAFLET_ID_ATTRIBUTE]: { values: leaflet, min: 0, max: Math.max(1, response.num_leaflets) },
+      },
+    });
+    return response;
+  }, [buildPointSource, onUpdateCloud]);
+
   const handleOrganSegment = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    const targets = Array.from(selectedIds)
+      .map(tid => clouds.find(c => c.id === tid))
+      .filter((c): c is PointCloudEntry => !!c);
+    if (targets.length === 0) return;
     const params = { units: organUnits, ...(organModelId ? { model_id: organModelId } : {}) };
     const field = organColorBy === 'leaflet' ? LEAFLET_ID_ATTRIBUTE : PLANT_ORGAN_ATTRIBUTE;
+    const unitName = (u?: string | null) => ({ m: 'meters', cm: 'centimeters', mm: 'millimeters' } as Record<string, string>)[u ?? 'm'] ?? 'meters';
     setOrganSegmentInProgress(true);
     setOrganSegmentError(null);
     const abort = new AbortController();
     organSegmentAbortRef.current = abort;
+    const done: { name: string; counts: OrganSegmentationCounts }[] = [];
+    const failed: { name: string; message: string }[] = [];
     try {
-      const ps = await buildPointSource(cloud);
-      let counts: OrganSegmentationCounts;
-      if (ps.kind === 'source') {
-        const octreeInfo = cloud.data.octree;
-        if (!octreeInfo?.sessionId) {
-          throw new Error('Octree cloud is missing its editable session.');
+      for (let k = 0; k < targets.length; k++) {
+        if (abort.signal.aborted) return;
+        const cloud = targets[k];
+        const name = cloud.data.fileName ?? cloud.id;
+        if (targets.length > 1) setOrganSegmentProgress({ index: k + 1, total: targets.length });
+        try {
+          const counts = await segmentOneOrganCloud(cloud, params, abort.signal);
+          setCloudColorMode(cloud.id, { mode: 'scalar', field });
+          done.push({ name, counts });
+          if (counts.warnings && counts.warnings.length > 0) {
+            const prefix = targets.length > 1 ? `${name}: ` : '';
+            showToast({ type: 'info', title: 'Plant Organ Segmentation', message: prefix + counts.warnings.join(' ') });
+          }
+        } catch (error) {
+          // User canceled (Cancel aborted the fetch): stop the whole run.
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          console.error(`Organ segmentation error (${name}):`, error);
+          failed.push({ name, message: describeBackendError(error, 'Organ segmentation').message });
         }
-        const meta = await sessionSegmentOrgans(octreeInfo.sessionId, params, abort.signal);
-        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? id));
-        counts = meta;
-      } else {
-        const d = ps.data;
-        const { points, hitIndices } = ps.hits;
-        const response = await segmentOrgans({ points, ...params }, abort.signal);
-        if (!response.success) {
-          throw new Error(response.error || 'Organ segmentation failed');
-        }
-        const organ = scatterToFullLength(response.organ, hitIndices, d.pointCount);
-        const leaflet = scatterToFullLength(response.leaflet, hitIndices, d.pointCount);
-        onUpdateCloud(id, {
-          ...d,
-          scalarFields: {
-            ...(d.scalarFields ?? {}),
-            [PLANT_ORGAN_ATTRIBUTE]: { values: organ, min: 1, max: 3 },
-            [LEAFLET_ID_ATTRIBUTE]: { values: leaflet, min: 0, max: Math.max(1, response.num_leaflets) },
-          },
+      }
+
+      if (done.length === 1 && targets.length === 1) {
+        const counts = done[0].counts;
+        showToast({
+          type: 'success',
+          title: 'Plant Organ Segmentation Complete',
+          message: `${counts.num_leaflets.toLocaleString()} leaflets; ${counts.num_soil.toLocaleString()} soil, `
+            + `${counts.num_stem.toLocaleString()} stem, ${counts.num_leaf.toLocaleString()} leaf points. `
+            + `Read the cloud in ${unitName(counts.units)}.`,
         });
-        counts = response;
+      } else if (done.length > 0) {
+        // One summary instead of a toast per scan. Units are named per scan only
+        // when auto-detection read them differently.
+        const units = new Set(done.map(r => unitName(r.counts.units)));
+        const perScan = done.map(r => `${r.name}: ${r.counts.num_leaflets.toLocaleString()} leaflets`
+          + (units.size > 1 ? ` (${unitName(r.counts.units)})` : '')).join('; ');
+        showToast({
+          type: 'success',
+          title: 'Plant Organ Segmentation Complete',
+          message: `Segmented ${done.length} of ${targets.length} scans. ${perScan}.`
+            + (units.size === 1 ? ` Read every cloud in ${[...units][0]}.` : ''),
+        });
       }
-      setCloudColorMode(id, { mode: 'scalar', field });
-      setShowOrganSegmentPanel(false);
-      const unitName = { m: 'meters', cm: 'centimeters', mm: 'millimeters' }[counts.units ?? 'm'];
-      showToast({
-        type: 'success',
-        title: 'Plant Organ Segmentation Complete',
-        message: `${counts.num_leaflets.toLocaleString()} leaflets; ${counts.num_soil.toLocaleString()} soil, `
-          + `${counts.num_stem.toLocaleString()} stem, ${counts.num_leaf.toLocaleString()} leaf points. `
-          + `Read the cloud in ${unitName}.`,
-      });
-      if (counts.warnings && counts.warnings.length > 0) {
-        showToast({ type: 'info', title: 'Plant Organ Segmentation', message: counts.warnings.join(' ') });
+
+      if (failed.length > 0) {
+        const message = targets.length === 1
+          ? failed[0].message
+          : failed.map(f => `${f.name}: ${f.message}`).join(' ');
+        setOrganSegmentError(message);
+        showToast({ type: 'error', title: 'Plant Organ Segmentation Failed', message });
+      } else {
+        setShowOrganSegmentPanel(false);
       }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      console.error('Organ segmentation error:', error);
-      const message = describeBackendError(error, 'Organ segmentation').message;
-      setOrganSegmentError(message);
-      showToast({ type: 'error', title: 'Plant Organ Segmentation Failed', message });
     } finally {
       setOrganSegmentInProgress(false);
+      setOrganSegmentProgress(null);
       organSegmentAbortRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits, organModelId, organColorBy]);
+  }, [selectedIds, clouds, segmentOneOrganCloud, organUnits, organModelId, organColorBy]);
 
   // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
   // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
@@ -20886,6 +20933,7 @@ export default function PointCloudViewer({
     organSegmentAbortRef.current?.abort();
     organSegmentAbortRef.current = null;
     setOrganSegmentInProgress(false);
+    setOrganSegmentProgress(null);
   }, []);
 
   const cancelWoodSegment = useCallback(() => {
@@ -26966,8 +27014,10 @@ export default function PointCloudViewer({
       )}
 
       {/* Plant Organ Segmentation Panel (ML) */}
-      {showOrganSegmentPanel && selectedIds.size === 1 && (
+      {showOrganSegmentPanel && selectedIds.size >= 1 && (
         <OrganSegmentPanel
+          selectedCount={selectedIds.size}
+          progress={organSegmentProgress}
           units={organUnits}
           colorBy={organColorBy}
           modelId={organModelId}

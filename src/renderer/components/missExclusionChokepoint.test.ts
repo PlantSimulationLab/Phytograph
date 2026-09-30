@@ -55,9 +55,10 @@ describe('buildPointSource is the miss-exclusion chokepoint', () => {
 describe('no compute path serializes raw positions', () => {
   it('organ segmentation sends hits and scatters both columns back to full length', async () => {
     const src = await viewerSource();
-    const start = src.indexOf('const handleOrganSegment = useCallback');
+    // The per-cloud worker (handleOrganSegment loops it over the selection).
+    const start = src.indexOf('const segmentOneOrganCloud = useCallback');
     expect(start).toBeGreaterThan(-1);
-    const end = src.indexOf('}, [selectedIds, clouds, buildPointSource, onUpdateCloud, organUnits', start);
+    const end = src.indexOf('}, [buildPointSource, onUpdateCloud]);', start);
     expect(end).toBeGreaterThan(start);
     const block = src.slice(start, end);
     // A miss ~1 km out would make units="auto" read the plant as millimeters.

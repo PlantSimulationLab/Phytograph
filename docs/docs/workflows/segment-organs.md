@@ -24,7 +24,9 @@ leaf but merges small leaflets.
 
 ## Segment
 
-1. Select **one** point cloud holding the plant.
+1. Select the point cloud holding the plant. To do several plants in one go,
+   select all their clouds (**Cmd**/**Ctrl**-click); each is segmented on its
+   own, one after another, so each cloud should hold one plant.
 2. Click **Segment Plant Organs** (the clover icon in the **Tools** ›
    Segmentation group), or open the command palette and choose
    **Segment Plant Organs**.
@@ -41,12 +43,19 @@ leaf but merges small leaflets.
       by when the run finishes.
     - A **GPU**/**CPU** pill shows where the model will run. When more than
       one plant-organ model is installed, a model picker appears above it.
-4. Click **Segment Organs**. While it runs, a **Cancel** button appears beside
-   it; canceling stops the computation and leaves the cloud unchanged.
+4. Click **Segment Organs** (**Segment N Scans** with several selected). While
+   it runs, a **Cancel** button appears beside it; canceling stops the
+   computation and leaves the cloud being worked on unchanged. With several
+   clouds, the button counts through them (**Segmenting 2 of 5…**), and
+   canceling also skips the ones not yet started; clouds already finished keep
+   their result.
 
 When it finishes, a message reports the number of leaflets, the soil, stem and
-leaf point counts, and **which units it read the cloud in**. A second message
-appears when the units deserve a look:
+leaf point counts, and **which units it read the cloud in**. With several
+clouds it lists each one's leaflet count instead, and names each cloud's units
+when **Auto** read them differently. If one cloud fails, the others are still
+segmented; an error names the one that failed and the panel stays open. A
+second message appears when the units deserve a look:
 
 - the cloud is not plant-sized in the units used (under 2 cm or over 5 m
   across): pick the real units and run it again;
