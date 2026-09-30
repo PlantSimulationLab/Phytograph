@@ -69,7 +69,7 @@ def test_save_then_open_restores_the_session(client, cache_root, tmp_path, monke
                          {"path": str(target), "scene_token": up.json()["token"], "session_ids": [sid],
                           "octree_ids": [before["cache"]]})
     assert saved["success"], saved
-    assert target.is_file() and not (tmp_path / "plot.phyto.partial").exists()
+    assert target.is_file() and not list(tmp_path.glob("*.partial"))
     with zipfile.ZipFile(target) as zf:
         manifest = json.loads(zf.read("manifest.json"))
         assert manifest["format"] == "phytograph-project"
@@ -125,7 +125,7 @@ def test_failed_save_keeps_the_existing_file(client, cache_root, tmp_path):
         _post_stream(client, "/api/project/save",
                      {"path": str(target), "scene_token": up.json()["token"], "session_ids": ["nope"]})
     assert target.read_bytes() == b"previous project"
-    assert not (tmp_path / "keep.phyto.partial").exists()
+    assert not list(tmp_path.glob("*.partial"))
 
 
 def test_endpoints_are_plain_def():
@@ -211,3 +211,181 @@ def test_stale_octree_is_still_embedded(client, cache_root, tmp_path):
         manifest = json.loads(zf.read("manifest.json"))
     assert created["cache_id"] in manifest["octrees"]
     assert created["cache_id"] not in manifest["regenerate"]
+
+
+# ---- regressions: hangs, concurrent saves, dtype-narrowing undo ------------
+
+def _session_from_xyz(client, tmp_path):
+    f, _pts = _cloud_file(tmp_path)
+    return decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)
+
+
+def test_open_that_rebuilds_an_octree_does_not_hang_on_a_tight_budget(client, cache_root, tmp_path,
+                                                                      monkeypatch):
+    """The open held its admission while the octree rebuild asked for a
+    second, nested one. An admission only lets an oversized job through when
+    NOTHING else is admitted, so on a tight budget the rebuild waited for the
+    open that was waiting for it: 'Opening project…' forever, cancel inert.
+    That is the normal path for a project sent to a colleague (no cache)."""
+    import shutil
+    import threading
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    target = _save(client, tmp_path, sid, [created["cache_id"]])
+    client.delete(f"/api/cloud/session/{sid}")
+    shutil.rmtree(cache_root)
+    monkeypatch.setenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", str(10_000))
+    out = {}
+    t = threading.Thread(target=lambda: out.update(
+        r=_post_stream(client, "/api/project/open", {"path": str(target)})), daemon=True)
+    t.start()
+    t.join(timeout=60)
+    assert not t.is_alive(), "project open deadlocked rebuilding its octree"
+    assert out["r"]["success"], out["r"]
+    assert created["cache_id"] in out["r"]["octree_map"] or (cache_root / created["cache_id"]).is_dir()
+
+
+def test_two_saves_to_one_path_leave_a_valid_project(client, cache_root, tmp_path, monkeypatch):
+    """Cancel then Save again (the canceled save runs on to its next
+    checkpoint), or a double press: both saves wrote `<target>.partial`, the
+    second truncating the first's archive mid-write, and the first renamed
+    that garbage over the user's project while reporting success."""
+    import threading
+    import time as _time
+    import project_file as pf
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    real = pf.write_session
+    calls = []
+
+    def slow_write_session(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            _time.sleep(1.0)   # hold the first save mid-archive
+        return real(*a, **k)
+
+    monkeypatch.setattr(pf, "write_session", slow_write_session)
+    results = []
+
+    def save():
+        up = client.post("/api/project/scene", content=b"scene",
+                         headers={"Content-Type": "application/octet-stream"})
+        results.append(_post_stream(client, "/api/project/save",
+                                    {"path": str(tmp_path / "same.phyto"), "scene_token": up.json()["token"],
+                                     "session_ids": [sid], "octree_ids": [created["cache_id"]]}))
+
+    a = threading.Thread(target=save)
+    a.start()
+    _time.sleep(0.3)
+    save()
+    a.join(timeout=60)
+    assert len(results) == 2 and all(r["success"] for r in results), results
+    assert not list(tmp_path.glob("*.partial"))
+    opened = _post_stream(client, "/api/project/open", {"path": str(tmp_path / "same.phyto")})
+    assert opened["success"], opened
+    s2 = main._cloud_sessions[opened["session_map"][sid]]
+    assert np.array_equal(np.asarray(s2.positions), np.asarray(main._cloud_sessions[sid].positions))
+
+
+EVERYWHERE = {"kind": "box", "min": [-100, -100, -100], "max": [100, 100, 100]}
+
+
+@pytest.mark.parametrize("first", [300, 70000])
+def test_label_undo_after_reopen_restores_wide_values(client, cache_root, tmp_path, first):
+    """Open used to compact every column to fit its CURRENT values. Paint
+    instance id 300 (the column widens to uint16), overpaint everything with
+    5, save and reopen: the column came back uint8, and undo wrote 300 into
+    it as 44. A live column only ever widens; undo relies on that."""
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    for to, stroke in ((first, "a"), (5, "b")):
+        res = client.post(f"/api/cloud/session/{sid}/label_region", json={
+            "slug": "tree_instance", "strokes": [{"region": EVERYWHERE, "to_class": to, "stroke_id": stroke}]})
+        assert res.status_code == 200, res.text
+    wide = main._cloud_sessions[sid].extras["tree_instance"].dtype
+    target = _save(client, tmp_path, sid, [created["cache_id"]])
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"], opened
+    new_sid = opened["session_map"][sid]
+    assert main._cloud_sessions[new_sid].extras["tree_instance"].dtype == wide
+    res = client.post(f"/api/cloud/session/{new_sid}/reset_label_edits",
+                      json={"edit_count": 1, "slug": "tree_instance"})
+    assert res.status_code == 200, res.text
+    assert np.all(np.asarray(main._cloud_sessions[new_sid].extras["tree_instance"]) == first)
+
+
+def test_float_column_relabeled_to_whole_numbers_keeps_its_type(client, cache_root, tmp_path):
+    """Labeling an imported float column with whole numbers, then save and
+    reopen: it came back uint8, and undo wrote the original negative floats
+    into it as garbage."""
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    sess = main._cloud_sessions[sid]
+    with main._cloud_session_lock:
+        main._session_add_extra_column(sess, "refl_db", "Reflectance (dB)",
+                                       -np.asarray(sess.positions)[:, 2].astype(np.float32) - 0.5)
+    orig = np.array(sess.extras["refl_db"])
+    assert orig.dtype.kind == "f" and (orig < 0).all()
+    res = client.post(f"/api/cloud/session/{sid}/label_region", json={
+        "slug": "refl_db", "strokes": [{"region": EVERYWHERE, "to_class": 3, "stroke_id": "a"}]})
+    assert res.status_code == 200, res.text
+    target = _save(client, tmp_path, sid, [created["cache_id"]])
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    new_sid = opened["session_map"][sid]
+    assert main._cloud_sessions[new_sid].extras["refl_db"].dtype == orig.dtype
+    res = client.post(f"/api/cloud/session/{new_sid}/reset_label_edits",
+                      json={"edit_count": 0, "slug": "refl_db"})
+    assert res.status_code == 200, res.text
+    assert np.array_equal(np.asarray(main._cloud_sessions[new_sid].extras["refl_db"]), orig)
+
+
+class _CancelAt:
+    """A progress reporter whose run is canceled once it reaches `frac`: the
+    user's cancel landing at the last checkpoint."""
+
+    def __init__(self, frac):
+        self.frac, self.last = frac, 0.0
+
+    def __call__(self, frac, _msg):
+        self.last = frac
+
+    def should_cancel(self):
+        return self.last >= self.frac
+
+
+def test_a_cancel_at_the_very_end_of_open_leaks_no_session(client, cache_root, tmp_path, monkeypatch):
+    """The final progress report is a cancel checkpoint. It ran AFTER the
+    restored sessions were registered, so a cancel landing there left them
+    live with nobody holding their ids."""
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    target = _save(client, tmp_path, sid, [created["cache_id"]])
+    before = set(main._cloud_sessions)
+
+    with pytest.raises(main.ScanCanceled):
+        main._do_project_open(main.ProjectOpenRequest(path=str(target)), progress=_CancelAt(1.0))
+    assert set(main._cloud_sessions) == before
+
+
+def test_a_cancel_at_the_very_end_of_save_is_not_reported_after_the_file_is_written(
+        client, cache_root, tmp_path):
+    """The final report ran after the rename, so a cancel there said
+    'canceled' about a file that had in fact been replaced."""
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    up = client.post("/api/project/scene", content=b"scene",
+                     headers={"Content-Type": "application/octet-stream"})
+    target = tmp_path / "end.phyto"
+
+    progress = _CancelAt(0.99)
+    # Either the save completes, or it is canceled and the target untouched.
+    try:
+        main._do_project_save(main.ProjectSaveRequest(
+            path=str(target), scene_token=up.json()["token"], session_ids=[sid],
+            octree_ids=[created["cache_id"]]), progress=progress)
+        completed = True
+    except main.ScanCanceled:
+        completed = False
+    assert completed == target.exists()

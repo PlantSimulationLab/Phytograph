@@ -1,5 +1,5 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
-import { flushSync } from 'react-dom';
+import { flushSync, createPortal } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
@@ -20686,70 +20686,132 @@ export default function PointCloudViewer({
   const projectPathRef = useRef<string | null>(null);
   const pendingCameraRef = useRef<{ position: number[]; target: number[]; up?: number[] } | null>(null);
 
+  // Every piece of viewer state a project saves, as ONE memoised object: its
+  // identity changes exactly when one of them does, which is what the
+  // unsaved-changes test below compares. Add a saved field here and it is
+  // both saved and tracked.
+  const projectViewerState = useMemo(() => ({
+    cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
+    measurements, pickedPoints, sceneOriginOverride,
+    treeInventory, treeInventoryEdits, treeQsm, standSettings, treeInventorySettings,
+  }), [cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
+    measurements, pickedPoints, sceneOriginOverride, treeInventory, treeInventoryEdits, treeQsm,
+    standSettings, treeInventorySettings]);
+
   const collectProjectDocument = useCallback(() => {
     const st = scene.state;
     const cam = (window as any).__getCameraState?.();
     const off = displayOffsetRef.current;
     const toWorld = (v: number[] | null | undefined) => (v ? [v[0] + off.x, v[1] + off.y, v[2] + off.z] : null);
     return {
-      scene: {
-        scans: st.scans, meshes: st.meshes, skeletons: st.skeletons, qsms: st.qsms,
-        ladResults: st.ladResults, meshPositions: st.meshPositions, meshRotations: st.meshRotations,
-        meshScales: st.meshScales, skeletonPositions: st.skeletonPositions,
-        editStates: st.editStates, labelStates: st.labelStates,
-      },
-      viewer: {
-        cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
-        measurements, pickedPoints, sceneOriginOverride,
-        // The camera in WORLD terms (display + offset): the display offset is
-        // derived from the content and may differ when reopened.
-        camera: cam ? { position: toWorld(cam.position), target: toWorld(cam.target), up: cam.up } : null,
-        treeInventory, treeInventoryEdits, treeQsm, standSettings, treeInventorySettings,
+      // What the document was built from: a save marks THIS clean, not
+      // whatever the scene has become by the time the save finishes.
+      snapshot: { state: st as unknown, viewer: projectViewerState as unknown },
+      doc: {
+        scene: {
+          scans: st.scans, meshes: st.meshes, skeletons: st.skeletons, qsms: st.qsms,
+          ladResults: st.ladResults, meshPositions: st.meshPositions, meshRotations: st.meshRotations,
+          meshScales: st.meshScales, skeletonPositions: st.skeletonPositions,
+          editStates: st.editStates, labelStates: st.labelStates,
+        },
+        viewer: {
+          ...projectViewerState,
+          // The camera in WORLD terms (display + offset): the display offset is
+          // derived from the content and may differ when reopened.
+          camera: cam ? { position: toWorld(cam.position), target: toWorld(cam.target), up: cam.up } : null,
+        },
       },
     };
-  }, [scene, cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
-    measurements, pickedPoints, sceneOriginOverride, treeInventory, treeInventoryEdits, treeQsm,
-    standSettings, treeInventorySettings]);
+  }, [scene, projectViewerState]);
+
+  // "Unchanged since the project was last saved or opened": the scene store
+  // AND every saved piece of viewer state are the very objects that were
+  // saved. Scene-store identity alone missed the viewer state entirely: a
+  // tree inventory run, typed species, measurements or a colormap change after
+  // a save left the app "clean", and quitting discarded them without asking.
+  const projectCleanRef = useRef<{ state: unknown; viewer: unknown } | null>(null);
+  const markCleanAfterOpenRef = useRef(false);
+  const [, setProjectCleanTick] = useState(0);
+  const markProjectClean = useCallback((snap: { state: unknown; viewer: unknown }) => {
+    projectCleanRef.current = snap;
+    setProjectCleanTick((t) => t + 1);
+  }, []);
+  useEffect(() => {
+    // The render carrying an opened project's replace + viewer setters (one
+    // batch, see applyOpenedProject) is the state to call clean.
+    if (!markCleanAfterOpenRef.current) return;
+    markCleanAfterOpenRef.current = false;
+    markProjectClean({ state: scene.state, viewer: projectViewerState });
+  });
+  const projectUnchanged = projectCleanRef.current !== null
+    && projectCleanRef.current.state === scene.state
+    && projectCleanRef.current.viewer === projectViewerState;
+  useEffect(() => {
+    (window as any).__setProjectUnchanged?.(projectUnchanged);
+  }, [projectUnchanged]);
+
+  // While a project saves or opens, the app is modal: an edit landing mid-save
+  // would be in the backend's copy of a cloud but not in the scene document
+  // already staged (or the reverse), and the file would disagree with itself.
+  // A ref, not the state, so a second trigger in the same tick (a double
+  // press, a key repeat, Save As while the dialog is up) is refused too.
+  const projectBusyRef = useRef(false);
+  useEffect(() => {
+    (window as any).__projectBusy = !!projectBusy;
+    if (!projectBusy) return;
+    const swallow = (e: KeyboardEvent) => { e.preventDefault(); e.stopImmediatePropagation(); };
+    window.addEventListener('keydown', swallow, true);
+    window.addEventListener('keyup', swallow, true);
+    return () => {
+      (window as any).__projectBusy = false;
+      window.removeEventListener('keydown', swallow, true);
+      window.removeEventListener('keyup', swallow, true);
+    };
+  }, [projectBusy]);
 
   const handleSaveProject = useCallback(async (saveAs: boolean) => {
-    if (projectBusy || !window.electronAPI) return;
-    let path = saveAs ? null : projectPathRef.current;
-    if (!path) {
-      path = await window.electronAPI.dialog.save({
-        title: 'Save Project',
-        defaultPath: 'project.phyto',
-        filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
-      });
-      if (!path) return;
-      if (!/\.phyto$/i.test(path)) path = `${path}.phyto`;
-    }
+    if (projectBusyRef.current || !window.electronAPI) return;
+    projectBusyRef.current = true;
     const abort = new AbortController();
-    projectAbortRef.current = abort;
-    setProjectBusy({ label: 'Saving project…', value: null });
     try {
-      const doc = collectProjectDocument();
+      let path = saveAs ? null : projectPathRef.current;
+      if (!path) {
+        path = await window.electronAPI.dialog.save({
+          title: 'Save Project',
+          defaultPath: 'project.phyto',
+          filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
+        });
+        if (!path) return;
+        if (!/\.phyto$/i.test(path)) path = `${path}.phyto`;
+      }
+      projectAbortRef.current = abort;
+      setProjectBusy({ label: 'Saving project…', value: null });
+      const { doc, snapshot } = collectProjectDocument();
       const token = await uploadProjectScene(encodeProjectScene(doc));
-      const refs = sceneBackendRefs(scene.state.scans as never);
+      const refs = sceneBackendRefs((snapshot.state as typeof scene.state).scans as never);
       const res = await saveProject({ path, scene_token: token, session_ids: refs.sessionIds, octree_ids: refs.octreeIds },
         abort.signal, (value, label) => setProjectBusy({ label, value }),
         (runId) => { projectRunIdRef.current = runId; });
       if (abort.signal.aborted) return;
       if (!res.success) throw new Error(res.error ?? 'Save failed.');
       projectPathRef.current = path;
-      (window as any).__markProjectClean?.();
+      markProjectClean(snapshot);
       showToast({ type: 'success', title: 'Project Saved', message: `Saved ${path.split(/[\\/]/).pop()}.` });
     } catch (err) {
       if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({ type: 'error', title: 'Save Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
-      setProjectBusy(null);
-      projectAbortRef.current = null;
-      projectRunIdRef.current = null;
+      projectBusyRef.current = false;
+      if (projectAbortRef.current === abort) {
+        setProjectBusy(null);
+        projectAbortRef.current = null;
+        projectRunIdRef.current = null;
+      }
     }
-  }, [projectBusy, collectProjectDocument, scene, showToast]);
+  }, [collectProjectDocument, markProjectClean, showToast]);
 
-  const handleOpenProject = useCallback(async () => {
-    if (projectBusy || !window.electronAPI) return;
+  const openProjectFlow = useCallback(async () => {
+    if (!window.electronAPI) return;
     const st = scene.state;
     if (st.scans.length + st.meshes.length + st.skeletons.length + st.qsms.length + st.ladResults.length > 0) {
       const r = await window.electronAPI.dialog.messageBox({
@@ -20787,7 +20849,17 @@ export default function PointCloudViewer({
       projectAbortRef.current = null;
       projectRunIdRef.current = null;
     }
-  }, [projectBusy, scene, showToast]);
+  }, [scene, showToast]);
+
+  const handleOpenProject = useCallback(async () => {
+    if (projectBusyRef.current || !window.electronAPI) return;
+    projectBusyRef.current = true;
+    try {
+      await openProjectFlow();
+    } finally {
+      projectBusyRef.current = false;
+    }
+  }, [openProjectFlow]);
 
   const cancelProjectOp = useCallback(() => {
     if (projectRunIdRef.current) void cancelRun(projectRunIdRef.current);
@@ -20812,7 +20884,7 @@ export default function PointCloudViewer({
     if (!p) return;
     // One tick later: this is the viewer's MOUNT effect, and React runs a
     // child's effects before its parents'. The toast host and App's
-    // __markProjectClean register in parent effects, so applying now would
+    // __setProjectUnchanged register in parent effects, so applying now would
     // drop the "Project Opened" toast and the clean mark.
     const timer = setTimeout(() => applyOpenedProject(p), 0);
     return () => clearTimeout(timer);
@@ -20844,8 +20916,9 @@ export default function PointCloudViewer({
     if (v.treeInventorySettings) setTreeInventorySettings(v.treeInventorySettings);
     pendingCameraRef.current = v.camera?.position && v.camera?.target ? v.camera : null;
     projectPathRef.current = p.path;
-    // Clean once the replace has landed.
-    setTimeout(() => (window as any).__markProjectClean?.(), 0);
+    // Clean as of the render that carries this replace and these setters
+    // (one batch): see the effect beside markProjectClean.
+    markCleanAfterOpenRef.current = true;
     showToast({
       type: missing.length ? 'warning' : 'success', title: 'Project Opened',
       message: missing.length
@@ -24429,13 +24502,21 @@ export default function PointCloudViewer({
         />
       )}
 
-      {projectBusy && (
-        <StatusPill
-          testId="project-busy"
-          label={projectBusy.label}
-          progress={projectBusy.value}
-          onCancel={cancelProjectOp}
-        />
+      {projectBusy && createPortal(
+        // Modal: covers the whole window (toolbar and panels too), so nothing
+        // can edit the scene while it is being written or replaced. Keys are
+        // swallowed and menu commands refused for the same span (see
+        // projectBusyRef).
+        <div data-testid="project-busy-overlay" className="fixed inset-0 z-[1000] bg-black/30 cursor-wait">
+          <StatusPill
+            standalone
+            testId="project-busy"
+            label={projectBusy.label}
+            progress={projectBusy.value}
+            onCancel={cancelProjectOp}
+          />
+        </div>,
+        document.body,
       )}
 
       {crownFitRunning && (

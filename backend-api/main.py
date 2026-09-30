@@ -38171,11 +38171,14 @@ def _session_put_column_locked(sess: "CloudSession", slug: str, arr: np.ndarray)
     return m
 
 
-def _session_compact_extras_locked(sess: "CloudSession") -> None:
-    """Compact every scalar column of a session (see _compact_column). A
-    store-backed column is rewritten in its store and stays a memory map.
-    Caller holds the lock (or owns a session nobody else can see yet)."""
+def _session_compact_extras_locked(sess: "CloudSession", skip: "Optional[set]" = None) -> None:
+    """Compact every scalar column of a session (see _compact_column), except
+    the slugs in `skip`. A store-backed column is rewritten in its store and
+    stays a memory map. Caller holds the lock (or owns a session nobody else
+    can see yet)."""
     for slug, arr in list(sess.extras.items()):
+        if skip and slug in skip:
+            continue
         new = _compact_column(arr, slug)
         if new is arr:
             continue
@@ -39153,6 +39156,18 @@ _PROJECT_SCENE_MEMBER = "scene.bin"
 _project_blobs: Dict[str, Tuple[str, float]] = {}   # token -> (path, created)
 _project_blobs_lock = threading.Lock()
 _PROJECT_BLOB_TTL_S = 3600.0
+# One save at a time per target file. Two saves to the same path (Cancel then
+# Save again: the canceled one runs on to its next checkpoint) would otherwise
+# interleave, and the first to finish renames the other's half-written archive
+# over the user's project.
+_project_save_locks: Dict[str, threading.Lock] = {}
+_project_save_locks_guard = threading.Lock()
+
+
+def _project_save_lock(target: "_Path") -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(str(target)))
+    with _project_save_locks_guard:
+        return _project_save_locks.setdefault(key, threading.Lock())
 
 
 def _project_blob_dir() -> _Path:
@@ -39334,11 +39349,23 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
     blob = _project_blob_path(request.scene_token)
     sessions = [(sid, _get_cloud_session(sid)) for sid in dict.fromkeys(request.session_ids)]
     n_total = sum(int(len(s.positions)) for _sid, s in sessions)
-    partial = target.with_name(target.name + ".partial")
+    # Unique per run, so nothing else can ever write into this archive.
+    partial = target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.partial")
     octrees: list = []
+    save_lock = _project_save_lock(target)
+    try:
+        while not save_lock.acquire(timeout=0.25):
+            _cancel_checkpoint(progress)
+    except BaseException:
+        _project_blob_drop(request.scene_token)
+        raise
     try:
         # The deleted-mask copies plus one chunk buffer.
         with _ADMISSION.admit(n_total + (64 << 20), f"save project ({n_total:,} pts)"):
+            # Every session at ONE moment, before any is written: snapshotting
+            # each as its turn came let an edit to a later cloud land in its
+            # saved arrays but not in the scene document staged before it.
+            snapshots = [_project_session_snapshot(sess) for _sid, sess in sessions]
             with zipfile.ZipFile(partial, "w", allowZip64=True) as zf:
                 _report(0.02, "Writing scene")
                 zi = zipfile.ZipInfo(_PROJECT_SCENE_MEMBER, date_time=time.localtime()[:6])
@@ -39348,9 +39375,8 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                 entries = []
                 wanted_octrees = list(dict.fromkeys(request.octree_ids))
                 regenerate: set = set()
-                for i, (sid, sess) in enumerate(sessions):
+                for i, ((sid, _sess), fields) in enumerate(zip(sessions, snapshots)):
                     _report(0.05 + 0.75 * i / max(1, len(sessions)), f"Saving cloud {i + 1}/{len(sessions)}")
-                    fields = _project_session_snapshot(sess)
                     entry = pf.write_session(zf, sid, fields, check=lambda: _cancel_checkpoint(progress))
                     entries.append(entry)
                     for k in ("octree_cache_id", "rendered_octree_cache_id", "miss_octree_cache_id"):
@@ -39368,6 +39394,9 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                         continue
                 pf.write_manifest(zf, app_version=BACKEND_VERSION, sessions=entries, octrees=octrees,
                                   regenerate=sorted(regenerate))
+            # Last cancel point: past the rename the file IS saved, and
+            # reporting "canceled" would leave the renderer thinking not.
+            _report(0.99, "Finishing")
         os.replace(partial, target)
     except BaseException:
         try:
@@ -39376,8 +39405,10 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
             pass
         raise
     finally:
+        save_lock.release()
         _project_blob_drop(request.scene_token)
-    _report(1.0, "Saved")
+    if progress is not None:
+        progress(1.0, "Saved")
     return {"success": True, "path": str(target), "bytes": int(target.stat().st_size),
             "sessions": len(sessions), "octrees": len(octrees)}
 
@@ -39393,10 +39424,18 @@ def project_save(request: ProjectSaveRequest, http_request: Request):
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
-def _project_restore_session(zf, key: str) -> "CloudSession":
+def _project_restore_session(zf, key: str, compact: bool = False) -> "CloudSession":
     """A NEW session (new id) from a saved one: columns stream into a
     memory-mapped store for a large cloud, into RAM for a small one - the
-    size rule import uses."""
+    size rule import uses.
+
+    Every column comes back in the dtype it was SAVED in. A live session's
+    columns only ever widen (`_column_widen_for_locked`), and label undo
+    writes its recorded values back relying on that; narrowing a column here
+    to fit its current values (a uint16 instance column whose ids >255 were
+    all overpainted) makes a later undo wrap them silently. `compact` is for
+    version-1 files only, some of which predate compaction and hold every
+    column as float32; even then a column with label history is left alone."""
     pf = project_file_mod()
     sid = uuid.uuid4().hex[:8]
     doc_n = int(pf.read_json(zf, f"sessions/{pf.check_name(key)}/session.json")["n"])
@@ -39451,8 +39490,8 @@ def _project_restore_session(zf, key: str) -> "CloudSession":
         store.set_attr("extras_order", list(f["extras"]))
         store.flush()
         sess.store = store
-    # A project saved before columns were compacted holds them as float32.
-    _session_compact_extras_locked(sess)
+    if compact:
+        _session_compact_extras_locked(sess, skip=set(deltas))
     return sess
 
 
@@ -39494,19 +39533,32 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
                 sessions = manifest["sessions"]
                 for i, s in enumerate(sessions):
                     _report(0.1 + 0.3 * i / max(1, len(sessions)), f"Opening cloud {i + 1}/{len(sessions)}")
-                    restored[s["key"]] = _project_restore_session(zf, s["key"])
-                # Octrees the file left out because the session rebuilds them
-                # exactly. Before the sessions are registered, so the renderer
-                # never sees a cloud whose display is still missing.
-                regenerate = set(manifest.get("regenerate", []))
-                for i, sess in enumerate(restored.values()):
-                    lo = 0.4 + 0.58 * i / max(1, len(restored))
-                    hi = 0.4 + 0.58 * (i + 1) / max(1, len(restored))
-                    _report(lo, f"Building display for cloud {i + 1}/{len(restored)}")
-                    _project_rebuild_octrees(sess, regenerate, octree_map, progress, (lo, hi))
-                token, path = _project_blob_new()
+                    restored[s["key"]] = _project_restore_session(
+                        zf, s["key"], compact=int(manifest.get("version", 1)) < 2)
+            # Octrees the file left out because the session rebuilds them
+            # exactly. Before the sessions are registered, so the renderer
+            # never sees a cloud whose display is still missing. OUTSIDE the
+            # open's admission: the octree build takes its own, and a nested
+            # admit on the same thread waits for the outer one forever
+            # whenever the two together exceed the budget (the admission
+            # only lets an oversized job through when nothing else is in).
+            regenerate = set(manifest.get("regenerate", []))
+            for i, sess in enumerate(restored.values()):
+                lo = 0.4 + 0.58 * i / max(1, len(restored))
+                hi = 0.4 + 0.58 * (i + 1) / max(1, len(restored))
+                _report(lo, f"Building display for cloud {i + 1}/{len(restored)}")
+                _project_rebuild_octrees(sess, regenerate, octree_map, progress, (lo, hi))
+            token, path = _project_blob_new()
+            try:
                 with zf.open(_PROJECT_SCENE_MEMBER) as src, open(path, "wb") as dst:
                     _shutil.copyfileobj(src, dst, 16 << 20)
+                # The last point a cancel can land: after it the sessions are
+                # registered and handed back, so a cancel past here would
+                # leave them live with no one knowing their ids.
+                _report(1.0, "Opened")
+            except BaseException:
+                _project_blob_drop(token)
+                raise
     except pf.ProjectError as e:
         _project_drop_restored(restored)
         return {"success": False, "error": str(e)}
@@ -39517,7 +39569,6 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
     with _cloud_session_lock:
         for sess in restored.values():
             _cloud_sessions[sess.session_id] = sess
-    _report(1.0, "Opened")
     return {"success": True, "scene_token": token,
             "session_map": {old: s.session_id for old, s in restored.items()},
             "octree_map": octree_map,

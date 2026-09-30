@@ -10,6 +10,9 @@ interface StatusPillProps {
   /** When provided, a cancel (X) button is rendered. */
   onCancel?: () => void;
   testId?: string;
+  /** Position itself rather than joining the pill column (see StatusPillHost):
+   *  for a pill drawn inside a modal overlay, above the column. */
+  standalone?: boolean;
 }
 
 /**
@@ -68,8 +71,9 @@ export function StatusPillHost({ children }: { children?: ReactNode }) {
  * Extracted from the formerly-duplicated inline markup in PointCloudViewer so
  * every long operation gets a consistent indicator.
  */
-export default function StatusPill({ label, progress, onCancel, testId }: StatusPillProps) {
-  const host = useContext(StatusPillHostContext);
+export default function StatusPill({ label, progress, onCancel, testId, standalone }: StatusPillProps) {
+  const contextHost = useContext(StatusPillHostContext);
+  const host = standalone ? null : contextHost;
   const hasProgress = typeof progress === 'number' && Number.isFinite(progress);
   const pct = hasProgress ? Math.max(0, Math.min(1, progress as number)) : 0;
 

@@ -37,8 +37,7 @@ loading garbage. A 0-d array is written as `.npy`.
 
 ```text
 manifest.json                       format, version, app version, members
-scene.json                          the renderer's scene document
-buffers/<k>.bin                     typed arrays referenced from scene.json
+scene.bin                           the renderer's scene document (PSC1, below)
 sessions/<sid>/session.json         one cloud session's scalar fields
 sessions/<sid>/<column>.pz          its point-aligned arrays
 sessions/<sid>/history/<k>.pz       delete / label undo deltas
@@ -117,9 +116,10 @@ maps and the edit states. So is the viewer state a user expects back:
 - the tree inventory, with its species/status/label entries and stand
   settings.
 
-The document is plain JSON with three tagged forms:
+The document is stored as one PSC1 blob: a magic, a JSON header, then the
+document's typed arrays back to back. The JSON has three tagged forms:
 
-- `{"$buf": k, "dtype": "f32"}` is a typed array stored as `buffers/<k>.bin`;
+- `{"$buf": k, "dtype": "f32"}` is the header's typed array `k`;
 - `{"$map": [[key, value], ...]}` is a `Map`;
 - `{"$set": [...]}` is a `Set`.
 
@@ -139,13 +139,35 @@ Any other value is written as itself.
 ## Save and open
 
 **Save** (`POST /api/project/save`, a plain `def`, admission-gated,
-streaming progress, cancelable). The renderer sends its scene document and
-buffers as one PHB1 frame, together with the target path and the ids of the
-sessions the scene uses. The backend writes to `<path>.partial` and renames
-it over the target only when the archive is complete. A failed or canceled
-save never damages an existing project. Session arrays are streamed from
-their (possibly memory-mapped) columns in chunks, so saving a 100 M-point
-cloud holds no second copy in RAM.
+streaming progress, cancelable). The renderer first stages its scene
+document (`POST /api/project/scene`, which returns a token), then sends the
+token, the target path and the ids of the sessions the scene uses. The
+backend snapshots **every** session at one moment, before writing any, then
+writes to a `<path>.<run>.partial` unique to the run and renames it over
+the target only when the archive is complete. Saves to one target are
+serialized by a per-path lock: two overlapping saves (Cancel, then Save
+again, while the canceled one runs on to its next checkpoint) once shared
+one `.partial`, and the first to finish renamed the other's half-written
+archive over the project. A failed or canceled save never damages an
+existing project, and the last cancel point is **before** the rename, so a
+save reported canceled never replaced the file. Session arrays are streamed
+from their (possibly memory-mapped) columns in chunks, so saving a
+100 M-point cloud holds no second copy in RAM.
+
+The renderer makes a save (and an open) **modal**: an overlay covers the
+window, keys are swallowed and menu commands refused until it finishes. An
+edit landing mid-save would otherwise be in a cloud's saved session but not
+in the scene document staged before it (or the reverse), and the file would
+disagree with itself. When the save succeeds, the renderer marks as saved
+the scene state and viewer state the document was **built from**, not
+whatever they are by then.
+
+**Unsaved changes.** The scene counts as unchanged since the last save or
+open only while the scene store *and* the saved viewer state (the
+`projectViewerState` object in `PointCloudViewer`) are the very objects that
+were saved. The quit/close prompt reads that. A field added to the saved
+viewer state belongs in `projectViewerState`, which both saves and tracks
+it.
 
 **Open** (`POST /api/project/open`, same properties). The backend:
 
@@ -154,10 +176,21 @@ cloud holds no second copy in RAM.
 3. creates **new** sessions from the saved ones. The ids are new, so an open
    can never collide with a live cloud. Columns are streamed straight into a
    memory-mapped session store for a large cloud, or into RAM for a small
-   one, by the same size rule import uses;
-4. rebuilds the `regenerate` octrees this machine's cache lacks (above);
-5. returns the scene document, its buffers, a map from the saved session
-   ids to the new ones, and the `octree_map`.
+   one, by the same size rule import uses. Every column comes back in the
+   dtype it was saved in: a live column only ever widens, and label undo
+   writes its recorded values back relying on that, so narrowing a column
+   to fit its current values (an instance column whose ids above 255 were
+   all overpainted) made a later undo wrap them. Only version-1 files, some
+   of which predate column compaction, are compacted on open, and even then
+   not a column with label history;
+4. rebuilds the `regenerate` octrees this machine's cache lacks (above),
+   outside the open's own memory admission: the octree build takes its own,
+   and nesting the two deadlocked whenever together they exceeded the
+   budget;
+5. stages the scene document and returns its token, a map from the saved
+   session ids to the new ones, and the `octree_map`. The last cancel point
+   is before the new sessions are registered, so a canceled open leaves none
+   behind.
 
 The renderer resets the scene (as **File → New**), rewrites every cloud's
 session id and octree ids through those maps, and loads the document.

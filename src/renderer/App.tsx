@@ -2019,23 +2019,20 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     scene.state.skeletons.length +
     scene.state.qsms.length +
     scene.state.ladResults.length;
-  // The scene exactly as last saved or opened as a project. Any dispatch makes
-  // a new state object, so "unchanged since the project was saved" is an
-  // identity test. The viewer marks it after a save or an open.
-  const [projectCleanState, setProjectCleanState] = useState<unknown>(null);
-  const sceneStateRef = useRef(scene.state);
-  sceneStateRef.current = scene.state;
+  // Whether the scene is exactly as last saved or opened as a project. The
+  // viewer decides (it owns the viewer state a project also saves) and pushes
+  // it here; see `projectUnchanged` in PointCloudViewer.
+  const [unchangedSinceProjectSave, setUnchangedSinceProjectSave] = useState(false);
   useEffect(() => {
-    (window as any).__markProjectClean = () => setProjectCleanState(sceneStateRef.current);
+    (window as any).__setProjectUnchanged = (v: boolean) => setUnchangedSinceProjectSave(!!v);
     // Opening a project reuses File → New's reset: free the old sessions and
     // remount, after which the viewer takes the opened project.
     (window as any).__resetSceneForProject = () => handleResetToNew();
     return () => {
-      delete (window as any).__markProjectClean;
+      delete (window as any).__setProjectUnchanged;
       delete (window as any).__resetSceneForProject;
     };
   }, [handleResetToNew]);
-  const unchangedSinceProjectSave = projectCleanState !== null && projectCleanState === scene.state;
   // Clouds whose hand labels changed since they were last exported, pushed by
   // the viewer whenever it changes (for this confirmation and File > New's).
   // Labels are on the cloud from the stroke that paints them, so what is at
@@ -2053,6 +2050,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // native file dialog (handleMenuImport) rather than the renderer dropzone.
   useEffect(() => {
     const unsubscribe = window.electronAPI.onMenuCommand((payload) => {
+      // A project save/open is modal (see projectBusyRef in the viewer): a
+      // menu edit landing mid-save would make the file disagree with itself.
+      if ((window as any).__projectBusy) return;
       switch (payload.kind) {
         case 'new':
           setNewConfirmOpen(true);

@@ -184,10 +184,14 @@ def test_project_round_trip_keeps_types_and_compacts_old_float_columns(tmp_path)
         zf.writestr("scene.bin", b"")
     buf.seek(0)
     with zipfile.ZipFile(buf) as zf:
-        restored = main._project_restore_session(zf, "k")
+        # A version-1 file (open passes compact=True) may predate compaction.
+        restored = main._project_restore_session(zf, "k", compact=True)
+        # A current file holds exactly the live dtypes: nothing is narrowed.
+        as_saved = main._project_restore_session(zf, "k")
     assert restored.extras["c"].dtype == np.uint8
     assert restored.extras["old"].dtype == np.uint8
     assert restored.extras["old"].tolist() == [0, 1, 1, 0]
+    assert as_saved.extras["old"].dtype == np.float32
 
 
 def test_continuous_quantities_stay_float_even_when_whole():

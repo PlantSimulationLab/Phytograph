@@ -30,6 +30,15 @@ test.afterAll(async () => {
   await session?.close();
 });
 
+/** What MAIN believes about unsaved work (its quit/close prompt reads this). */
+async function expectMainDirty(app: LaunchedApp['app'], dirty: boolean, why: string) {
+  await expect.poll(
+    () => app.evaluate(() => ((globalThis as Record<string, unknown>).__sceneDirty as
+      { dirty: boolean } | undefined)?.dirty ?? null),
+    { message: `main should think the scene is ${dirty ? 'dirty' : 'clean'}: ${why}`, timeout: 20_000 },
+  ).toBe(dirty);
+}
+
 async function menu(app: LaunchedApp['app'], kind: string) {
   await app.evaluate(({ BrowserWindow }, k) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: k });
@@ -64,6 +73,14 @@ test('save a project, open it back, and keep working on it', async () => {
     await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Saved' }))
       .toBeVisible({ timeout: 120_000 });
     expect(existsSync(projectPath)).toBe(true);
+    await expectMainDirty(app, false, 'just saved');
+
+    // Viewer-only state is saved too, so changing it must count as unsaved
+    // work. Scene-store identity alone missed it: quitting after e.g. a tree
+    // inventory, measurements or this point-size change asked nothing.
+    await page.getByRole('button', { name: 'Display', exact: true }).click();
+    await page.getByTitle('Increase Point Size').click();
+    await expectMainDirty(app, true, 'point size changed after the save');
     // A ZIP (PK..) holding the cloud's columns as compressed `.pz` members
     // (member names are plain text in the ZIP headers). The display octree
     // matches its session after Segment Ground's rebuild, so it is NOT
@@ -91,6 +108,7 @@ test('save a project, open it back, and keep working on it', async () => {
     await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Opened' }))
       .toBeVisible({ timeout: 120_000 });
     expect((await getMessageBoxCalls(app)).length).toBe(1);
+    await expectMainDirty(app, false, 'just opened');
     // Rebuilt by the open, not by a later missing-octree recovery.
     expect(octreeDirs().length).toBeGreaterThan(0);
 
