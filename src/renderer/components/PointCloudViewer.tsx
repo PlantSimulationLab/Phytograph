@@ -20707,9 +20707,21 @@ export default function PointCloudViewer({
     // strokes whose background bake had not reached the screen yet: the same
     // work, one step later.
     labelPending, labelCommitHolds,
+    // The auto pivot (the scanner stations' centroid, latched when the scene
+    // first filled). Not re-derived on open: the scene "filling" on open
+    // re-seeded it from EVERY scan, and a pivot the user had reset to the
+    // scene center came back as the stations' centroid.
+    scannerSceneOrigin,
+    // Display state a user set by hand: per-mesh opacity, coloring and layer,
+    // custom color-ramp ranges, live display filters, tree seeds and the
+    // batch-QSM settings.
+    meshOpacities, meshColorModes, selectedMeshLayer, colorRanges, cloudFilters,
+    treeSeedPoints, treeQsmSettings,
   }), [cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
     measurements, pickedPoints, sceneOriginOverride, treeInventory, treeInventoryEdits, treeInventoryStash,
-    treeQsm, standSettings, treeInventorySettings, labelPending, labelCommitHolds]);
+    treeQsm, standSettings, treeInventorySettings, labelPending, labelCommitHolds, scannerSceneOrigin,
+    meshOpacities, meshColorModes, selectedMeshLayer, colorRanges, cloudFilters, treeSeedPoints,
+    treeQsmSettings]);
 
   const collectProjectDocument = useCallback(() => {
     const st = scene.state;
@@ -20809,7 +20821,12 @@ export default function PointCloudViewer({
       if (!res.success) throw new Error(res.error ?? 'Save failed.');
       projectPathRef.current = path;
       markProjectClean(snapshot);
-      showToast({ type: 'success', title: 'Project Saved', message: `Saved ${path.split(/[\\/]/).pop()}.` });
+      const lost = (res.missing_sessions ?? []).map((sid) =>
+        (snapshot.state as typeof scene.state).scans.find((sc) => sc.data?.octree?.sessionId === sid)?.label ?? sid);
+      showToast(lost.length
+        ? { type: 'warning', title: 'Project Saved',
+          message: `Saved ${path.split(/[\\/]/).pop()}, but ${lost.length} cloud(s) had no data left on the backend and were not saved: ${lost.join(', ')}.` }
+        : { type: 'success', title: 'Project Saved', message: `Saved ${path.split(/[\\/]/).pop()}.` });
     } catch (err) {
       if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({ type: 'error', title: 'Save Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
@@ -20860,7 +20877,8 @@ export default function PointCloudViewer({
       if (abort.signal.aborted) return;
       // The reset below remounts this component; the opened project waits for
       // the fresh one (see the mount effect after this block).
-      setPendingProject({ path, doc, sessionMap: res.session_map ?? {}, octreeMap: res.octree_map ?? {} });
+      setPendingProject({ path, doc, sessionMap: res.session_map ?? {}, octreeMap: res.octree_map ?? {},
+        warnings: res.warnings ?? [] });
       restored = [];
       await (window as any).__resetSceneForProject?.();
     } catch (err) {
@@ -20936,6 +20954,20 @@ export default function PointCloudViewer({
     if (Array.isArray(v.measurements)) setMeasurements(v.measurements);
     if (Array.isArray(v.pickedPoints)) setPickedPoints(v.pickedPoints);
     setSceneOriginOverride(v.sceneOriginOverride ?? null);
+    if ('scannerSceneOrigin' in v) {
+      // Restored, not re-derived: disarm the empty→populated latch this
+      // replace would otherwise trip (a file from before this was saved
+      // leaves the latch armed and gets the derived pivot, as before).
+      sceneWasEmptyRef.current = false;
+      setScannerSceneOrigin(v.scannerSceneOrigin ?? null);
+    }
+    if (v.meshOpacities instanceof Map) setMeshOpacities(v.meshOpacities);
+    if (v.meshColorModes instanceof Map) setMeshColorModes(v.meshColorModes);
+    if (v.selectedMeshLayer instanceof Map) setSelectedMeshLayer(v.selectedMeshLayer);
+    if (v.colorRanges && typeof v.colorRanges === 'object') setColorRanges(v.colorRanges);
+    if (v.cloudFilters instanceof Map) setCloudFilters(v.cloudFilters);
+    if (Array.isArray(v.treeSeedPoints)) setTreeSeedPoints(v.treeSeedPoints);
+    if (v.treeQsmSettings) setTreeQsmSettings(v.treeQsmSettings);
     if (v.treeInventory) {
       // Its staleness key names the octree it was measured on; a rebuilt
       // octree is the same picture under a new id.
@@ -20956,24 +20988,35 @@ export default function PointCloudViewer({
     if (v.treeQsm) setTreeQsm(v.treeQsm);
     if (v.standSettings) setStandSettings(v.standSettings);
     if (v.treeInventorySettings) setTreeInventorySettings(v.treeInventorySettings);
-    pendingCameraRef.current = v.camera?.position && v.camera?.target ? v.camera : null;
+    // A project with nothing in it has nothing to frame: leaving its camera
+    // pending would snap the NEXT import's view to it.
+    const hasContent = keys.some((k) => Array.isArray(patch[k]) && (patch[k] as unknown[]).length > 0);
+    pendingCameraRef.current = hasContent && v.camera?.position && v.camera?.target ? v.camera : null;
     projectPathRef.current = p.path;
     // Clean as of the render that carries this replace and these setters
     // (one batch): see the effect beside markProjectClean.
     markCleanAfterOpenRef.current = true;
+    const notes = [
+      ...(missing.length ? [`${missing.length} cloud(s) had no saved data.`] : []),
+      ...(p.warnings ?? []),
+    ];
     showToast({
-      type: missing.length ? 'warning' : 'success', title: 'Project Opened',
-      message: missing.length
-        ? `Opened ${p.path.split(/[\\/]/).pop()}, but ${missing.length} cloud(s) had no saved data.`
+      type: notes.length ? 'warning' : 'success', title: 'Project Opened',
+      message: notes.length
+        ? `Opened ${p.path.split(/[\\/]/).pop()}, but ${notes.join(' ')}`
         : `Opened ${p.path.split(/[\\/]/).pop()}.`,
     });
   }
 
   // The saved camera, once the reopened content is in the scene (so the
   // display offset is final and the new-content auto-frame has nothing to do).
+  const sceneContentCount = scene.state.scans.length + scene.state.meshes.length
+    + scene.state.skeletons.length + scene.state.qsms.length + scene.state.ladResults.length;
   useEffect(() => {
     const cam = pendingCameraRef.current;
-    if (!cam || scans.length === 0) return;
+    // Any content, not only scans: a meshes-only project (plants, QSMs)
+    // never restored its camera.
+    if (!cam || sceneContentCount === 0) return;
     const t = setTimeout(() => {
       const off = displayOffsetRef.current;
       const d = (w: number[]): [number, number, number] => [w[0] - off.x, w[1] - off.y, w[2] - off.z];
@@ -20981,7 +21024,7 @@ export default function PointCloudViewer({
       pendingCameraRef.current = null;
     }, 300);
     return () => clearTimeout(t);
-  }, [scans, displayOffset]);
+  }, [scans, sceneContentCount, displayOffset]);
 
   const cancelDEM = useCallback(() => {
     // Stop the backend gridding (frees the scipy/numpy memory), then abort the

@@ -110,9 +110,13 @@ is rebuilt from it on first display.
 scans and their clouds, meshes, skeletons, QSMs, LAD results, the transform
 maps and the edit states. So is the viewer state a user expects back:
 
-- per-cloud color modes and the colormap;
+- per-cloud color modes, the colormap and custom color-ramp ranges, and
+  live display filters;
+- per-mesh opacity, color mode and displayed layer;
 - point size, measurements and picked points;
-- the scene origin and the camera;
+- the scene origin (both a user-set pivot and the scanner-stations pivot
+  latched when the scene first filled, which is restored rather than
+  re-derived) and the camera (restored for any content, not only clouds);
 - the tree inventory, with its species/status/label entries and stand
   settings, and the entries typed for every other cloud inventoried earlier
   (the per-cloud stash the panel restores when you return to one). Its
@@ -123,7 +127,8 @@ maps and the edit states. So is the viewer state a user expects back:
   session's label column but not the display octree, so these are what draw
   it until a bake. Without them a reopened cloud showed its pre-label
   octree, and the labels looked erased. A hold comes back marked as a failed
-  bake, so the next bake retries it.
+  bake, so the next bake retries it;
+- tree-segmentation seed points and the batch-QSM settings.
 
 The document is stored as one PSC1 blob: a magic, a JSON header, then the
 document's typed arrays back to back. The JSON has three tagged forms:
@@ -161,7 +166,11 @@ archive over the project. A failed or canceled save never damages an
 existing project, and the last cancel point is **before** the rename, so a
 save reported canceled never replaced the file. Session arrays are streamed
 from their (possibly memory-mapped) columns in chunks, so saving a
-100 M-point cloud holds no second copy in RAM.
+100 M-point cloud holds no second copy in RAM. A listed session the backend
+no longer has (its spill trimmed) is left out and named in
+`missing_sessions`, rather than failing the save: that cloud is already
+unusable, and failing stopped the user saving anything else. The renderer
+names those clouds in its warning.
 
 The renderer makes a save (and an open) **modal**: an overlay covers the
 window, keys are swallowed and menu commands refused until it finishes. An
@@ -192,10 +201,13 @@ it.
    all overpainted) made a later undo wrap them. Only version-1 files, some
    of which predate column compaction, are compacted on open, and even then
    not a column with label history;
-4. rebuilds the `regenerate` octrees this machine's cache lacks (above),
-   outside the open's own memory admission: the octree build takes its own,
-   and nesting the two deadlocked whenever together they exceeded the
-   budget;
+4. rebuilds the `regenerate` octrees this machine's cache lacks (above).
+   A rebuild that fails is a warning, not a failed open: the session came
+   back whole, the octree id is left unmapped, and the renderer's
+   missing-octree recovery rebuilds it from the session when the cloud is
+   shown. The rebuild runs outside the open's own memory admission: the
+   octree build takes its own, and nesting the two deadlocked whenever
+   together they exceeded the budget;
 5. stages the scene document and returns its token, a map from the saved
    session ids to the new ones, and the `octree_map`. The last cancel point
    is before the new sessions are registered, so a canceled open leaves none

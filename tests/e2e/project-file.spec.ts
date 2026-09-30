@@ -69,6 +69,10 @@ test('save a project, open it back, and keep working on it', async () => {
     const meshRows = page.locator('[data-testid="mesh-row"]');
     await expect(meshRows).toHaveCount(1, { timeout: 20_000 });
     const meshName = await meshRows.first().getAttribute('data-mesh-name');
+    // Display state set by hand must come back too (it used to reset).
+    await meshRows.first().getByTestId('mesh-color-expand').click();
+    await page.getByTestId('mesh-opacity').fill('0.8');
+    await expect(page.getByTestId('mesh-opacity')).toHaveValue('0.8');
 
     // ---- Save ----
     await stubSaveDialog(app, projectPath);
@@ -120,6 +124,8 @@ test('save a project, open it back, and keep working on it', async () => {
     await expect(reopened).toHaveAttribute('data-point-count', pointCount!);
     await expect(page.locator('[data-testid="mesh-row"]')).toHaveCount(1);
     await expect(page.locator(`[data-testid="mesh-row"][data-mesh-name="${meshName}"]`)).toHaveCount(1);
+    await page.locator('[data-testid="mesh-row"]').first().getByTestId('mesh-color-expand').click();
+    await expect(page.getByTestId('mesh-opacity')).toHaveValue('0.8');
     await expect(page.getByTestId('scalar-overlay'))
       .toHaveAttribute('data-active-scalar', 'ground_class', { timeout: 30_000 });
 

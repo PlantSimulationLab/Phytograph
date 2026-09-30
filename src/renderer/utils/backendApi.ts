@@ -6247,12 +6247,18 @@ export async function downloadProjectScene(token: string, signal?: AbortSignal):
   return await response.arrayBuffer();
 }
 
-export interface ProjectSaveResult { success: boolean; path?: string; bytes?: number; error?: string }
+export interface ProjectSaveResult {
+  success: boolean; path?: string; bytes?: number; error?: string;
+  // Session ids the backend no longer had (their clouds are left out).
+  missing_sessions?: string[];
+}
 export interface ProjectOpenResult {
   success: boolean; scene_token?: string; session_map?: Record<string, string>;
   // Saved octree cache id -> the id it was rebuilt under (octrees a project
   // leaves out because the session regenerates them).
   octree_map?: Record<string, string>;
+  // Non-fatal problems, e.g. a display octree that could not be rebuilt.
+  warnings?: string[];
   app_version?: string; error?: string;
 }
 

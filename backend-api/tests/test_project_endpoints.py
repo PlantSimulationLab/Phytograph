@@ -116,14 +116,24 @@ def test_open_refuses_a_foreign_file_and_leaves_nothing(client, cache_root, tmp_
     assert set(main._cloud_sessions) == before
 
 
-def test_failed_save_keeps_the_existing_file(client, cache_root, tmp_path):
+def test_failed_save_keeps_the_existing_file(client, cache_root, tmp_path, monkeypatch):
+    import project_file as pf
     target = tmp_path / "keep.phyto"
     target.write_bytes(b"previous project")
+    f, _pts = _cloud_file(tmp_path)
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)["session_id"]
+
+    def disk_full(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pf, "write_session", disk_full)   # fails mid-archive
     up = client.post("/api/project/scene", content=b"x",
                      headers={"Content-Type": "application/octet-stream"})
     with pytest.raises(Exception):
         _post_stream(client, "/api/project/save",
-                     {"path": str(target), "scene_token": up.json()["token"], "session_ids": ["nope"]})
+                     {"path": str(target), "scene_token": up.json()["token"], "session_ids": [sid]})
     assert target.read_bytes() == b"previous project"
     assert not list(tmp_path.glob("*.partial"))
 
@@ -389,3 +399,51 @@ def test_a_cancel_at_the_very_end_of_save_is_not_reported_after_the_file_is_writ
     except main.ScanCanceled:
         completed = False
     assert completed == target.exists()
+
+
+def test_a_missing_session_does_not_block_saving_the_rest(client, cache_root, tmp_path):
+    """One session gone (its spill trimmed, deleted) failed the WHOLE save with
+    a 404, so none of the user's other work could be saved. It is left out and
+    named; open then reports that cloud as having no saved data."""
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    up = client.post("/api/project/scene", content=b"scene",
+                     headers={"Content-Type": "application/octet-stream"})
+    target = tmp_path / "partly.phyto"
+    saved = _post_stream(client, "/api/project/save",
+                         {"path": str(target), "scene_token": up.json()["token"],
+                          "session_ids": [sid, "gone1234"], "octree_ids": [created["cache_id"]]})
+    assert saved["success"], saved
+    assert saved["missing_sessions"] == ["gone1234"] and saved["sessions"] == 1
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"], opened
+    assert set(opened["session_map"]) == {sid}
+
+
+def test_a_failed_octree_rebuild_opens_the_project_with_a_warning(client, cache_root, tmp_path,
+                                                                  monkeypatch):
+    """A rebuild failure on open (a converter or disk error) failed the whole
+    open, though every session had come back intact. The cloud opens; its id
+    is left unmapped so the renderer's missing-octree recovery rebuilds it
+    from the session when shown."""
+    import shutil
+    created = _session_from_xyz(client, tmp_path)
+    sid = created["session_id"]
+    target = _save(client, tmp_path, sid, [created["cache_id"]])
+    shutil.rmtree(cache_root)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("PotreeConverter exited with 1")
+
+    monkeypatch.setattr(main, "_session_rebuild", broken)
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"], opened
+    assert opened["octree_map"] == {}
+    assert any("PotreeConverter exited with 1" in w for w in opened["warnings"])
+    s2 = main._cloud_sessions[opened["session_map"][sid]]
+    assert len(s2.positions) == len(main._cloud_sessions[sid].positions)
+    # The recovery path the renderer takes works on the reopened session.
+    monkeypatch.undo()
+    res = decode_streamed_json(client.post(
+        f"/api/cloud/session/{s2.session_id}/rebuild_octree", json={}).content)
+    assert res.get("cache_id"), res

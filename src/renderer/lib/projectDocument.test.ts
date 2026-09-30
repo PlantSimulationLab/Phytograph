@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import * as THREE from 'three';
 import {
   encodeProjectScene, decodeProjectScene, toDocValue, fromDocValue, rewireOpenedScene, sceneBackendRefs,
   remapInventoryStateKey,
@@ -140,5 +141,20 @@ describe('uncommitted label strokes', () => {
     expect(back.viewer.labelPending).toBeInstanceOf(Map);
     expect(entry.dirty).toBe(true);
     expect(entry.strokes).toEqual(pending.get('cloud-1')!.get('manual_class')!.strokes);
+  });
+});
+
+describe('reopened cloud bounds', () => {
+  it('come back as THREE.Vector3, so .clone() works (Duplicate on a flat cloud)', () => {
+    const doc = { scans: [{ id: 'flat', data: { bounds: {
+      min: new THREE.Vector3(0, 1, 2), max: new THREE.Vector3(3, 4, 5),
+      center: new THREE.Vector3(1.5, 2.5, 3.5), size: new THREE.Vector3(3, 3, 3),
+    } } }], meshes: [] };
+    const back = decodeProjectScene(encodeProjectScene(doc)) as typeof doc;
+    const { scene } = rewireOpenedScene(back, {});
+    const b = scene.scans[0].data.bounds;
+    expect(b.min).toBeInstanceOf(THREE.Vector3);
+    expect(b.max.clone().toArray()).toEqual([3, 4, 5]);
+    expect(b.size.clone().toArray()).toEqual([3, 3, 3]);
   });
 });

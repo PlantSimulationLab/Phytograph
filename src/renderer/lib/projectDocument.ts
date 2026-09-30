@@ -17,6 +17,8 @@
 // zero-pad to 8 | each buffer's bytes, each padded to 8. The header holds the
 // document and the buffer table [{dtype, byteLength}].
 
+import * as THREE from 'three';
+
 export const PROJECT_SCENE_MAGIC = 'PSC1';
 export const PROJECT_DOC_VERSION = 1;
 
@@ -152,7 +154,24 @@ export function decodeProjectScene(bytes: ArrayBuffer | Uint8Array): unknown {
 // ---------------------------------------------------------------- scene -----
 
 interface OctreeLike { sessionId?: string; divergedFromSource?: boolean; cacheId?: string; missOctreeCacheId?: string | null }
-interface ScanLike { id: string; data?: { octree?: OctreeLike | null } | null }
+interface ScanLike { id: string; data?: { octree?: OctreeLike | null; bounds?: unknown } | null }
+
+type Vec = { x: number; y: number; z: number };
+const isVec = (v: unknown): v is Vec =>
+  !!v && typeof v === 'object' && typeof (v as Vec).x === 'number'
+  && typeof (v as Vec).y === 'number' && typeof (v as Vec).z === 'number';
+
+/** A cloud's `bounds` holds THREE.Vector3s, which the document stores as
+ *  plain {x,y,z}; code that calls `.clone()` on them (duplicating a flat
+ *  cloud) threw on every reopened cloud. */
+function reviveBounds<B>(bounds: B): B {
+  if (!bounds || typeof bounds !== 'object') return bounds;
+  const out: Record<string, unknown> = { ...(bounds as Record<string, unknown>) };
+  for (const [k, v] of Object.entries(out)) {
+    if (isVec(v) && !(v instanceof THREE.Vector3)) out[k] = new THREE.Vector3(v.x, v.y, v.z);
+  }
+  return out as B;
+}
 interface MeshLike { plantSessionId?: string }
 
 /**
@@ -171,7 +190,8 @@ export function rewireOpenedScene<S extends { scans: ScanLike[]; meshes: MeshLik
   scene: S, sessionMap: Record<string, string>, octreeMap: Record<string, string> = {},
 ): { scene: S; missing: string[] } {
   const missing: string[] = [];
-  const scans = scene.scans.map((s) => {
+  const scans = scene.scans.map((s0) => {
+    const s = s0.data?.bounds ? { ...s0, data: { ...s0.data, bounds: reviveBounds(s0.data.bounds) } } : s0;
     const oct = s.data?.octree;
     if (!oct?.sessionId) return s;
     const next = sessionMap[oct.sessionId];

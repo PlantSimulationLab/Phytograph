@@ -39303,7 +39303,8 @@ def _project_regenerable_octrees(fields: dict) -> List[str]:
 
 
 def _project_rebuild_octrees(sess: "CloudSession", regenerate: set, octree_map: dict,
-                             progress, span: "Tuple[float, float]") -> None:
+                             progress, span: "Tuple[float, float]",
+                             warnings: "Optional[List[str]]" = None) -> None:
     """Rebuild a reopened session's octrees that the project left out
     (`_project_regenerable_octrees`) and are not already in this machine's
     cache, recording old id -> new id in `octree_map`. The new id can differ
@@ -39315,23 +39316,44 @@ def _project_rebuild_octrees(sess: "CloudSession", regenerate: set, octree_map: 
         return bool(cid) and cid in regenerate and not (root / cid / "metadata.json").is_file()
 
     old_hits, old_miss = sess.octree_cache_id, sess.miss_octree_cache_id
+    # A failed rebuild is a DISPLAY problem, not a data one: the session came
+    # back whole. Failing the open over it made the whole project unopenable
+    # on this machine. The cloud opens instead; its octree id stays unmapped,
+    # so the renderer finds it missing and rebuilds it from the session the
+    # first time it is shown (every reopened cloud is `divergedFromSource`,
+    # so that recovery never reads the source file). Cancel still propagates.
     if missing(old_hits):
-        # private: the reopened session is not registered yet, so nothing
-        # else can name it (see `_session_rebuild`).
-        new_hits, _dir, _meta = _session_rebuild(
-            sess, progress=progress, cancel_event=getattr(progress, "cancel_event", None),
-            span=span, private=True)
-        octree_map[old_hits] = new_hits
+        try:
+            # private: the reopened session is not registered yet, so nothing
+            # else can name it (see `_session_rebuild`).
+            new_hits, _dir, _meta = _session_rebuild(
+                sess, progress=progress, cancel_event=getattr(progress, "cancel_event", None),
+                span=span, private=True)
+            octree_map[old_hits] = new_hits
+        except ScanCanceled:
+            raise
+        except Exception as e:
+            logger.exception("project open: rebuilding the display of a cloud failed")
+            if warnings is not None:
+                warnings.append(f"The display of a cloud could not be rebuilt ({e}); it is rebuilt when shown.")
     if missing(old_miss):
-        new_miss = _build_miss_octree(sess, sess.miss_octree_origin,
-                                      cancel_event=getattr(progress, "cancel_event", None))
+        try:
+            new_miss = _build_miss_octree(sess, sess.miss_octree_origin,
+                                          cancel_event=getattr(progress, "cancel_event", None))
+        except ScanCanceled:
+            raise
+        except Exception as e:
+            logger.exception("project open: rebuilding the miss display of a cloud failed")
+            new_miss, why = None, str(e)
+        else:
+            why = "the build produced nothing"
         if new_miss is None:
-            # The saved id proves the cloud had placeable misses; a None here
-            # is a failed build, and a silently absent overlay is not an open.
-            raise project_file_mod().ProjectError("could not rebuild the miss display of a cloud")
-        with _cloud_session_lock:
-            sess.miss_octree_cache_id = new_miss
-        octree_map[old_miss] = new_miss
+            if warnings is not None:
+                warnings.append(f"The sky/miss display of a cloud could not be rebuilt ({why}).")
+        else:
+            with _cloud_session_lock:
+                sess.miss_octree_cache_id = new_miss
+            octree_map[old_miss] = new_miss
 
 
 def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
@@ -39347,7 +39369,19 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
     if not target.parent.is_dir():
         return {"success": False, "error": f"Folder does not exist: {target.parent}"}
     blob = _project_blob_path(request.scene_token)
-    sessions = [(sid, _get_cloud_session(sid)) for sid in dict.fromkeys(request.session_ids)]
+    # A session that no longer exists (its spill trimmed, deleted) is left
+    # out and reported, not fatal: failing here stopped the user saving ANY of
+    # their work over one cloud that is already unusable (every compute and
+    # export needs its session). Open reports such a cloud as having no data.
+    sessions, missing_sessions = [], []
+    for sid in dict.fromkeys(request.session_ids):
+        try:
+            sessions.append((sid, _get_cloud_session(sid)))
+        except HTTPException as e:
+            if e.status_code != 404:
+                _project_blob_drop(request.scene_token)
+                raise
+            missing_sessions.append(sid)
     n_total = sum(int(len(s.positions)) for _sid, s in sessions)
     # Unique per run, so nothing else can ever write into this archive.
     partial = target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.partial")
@@ -39410,7 +39444,7 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
     if progress is not None:
         progress(1.0, "Saved")
     return {"success": True, "path": str(target), "bytes": int(target.stat().st_size),
-            "sessions": len(sessions), "octrees": len(octrees)}
+            "sessions": len(sessions), "octrees": len(octrees), "missing_sessions": missing_sessions}
 
 
 @app.post("/api/project/save")
@@ -39511,6 +39545,7 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
 
     restored: Dict[str, "CloudSession"] = {}
     octree_map: Dict[str, str] = {}
+    warnings: List[str] = []
     try:
         with pf.open_zip(request.path) as zf:
             manifest = pf.read_manifest(zf)
@@ -39547,7 +39582,7 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
                 lo = 0.4 + 0.58 * i / max(1, len(restored))
                 hi = 0.4 + 0.58 * (i + 1) / max(1, len(restored))
                 _report(lo, f"Building display for cloud {i + 1}/{len(restored)}")
-                _project_rebuild_octrees(sess, regenerate, octree_map, progress, (lo, hi))
+                _project_rebuild_octrees(sess, regenerate, octree_map, progress, (lo, hi), warnings)
             token, path = _project_blob_new()
             try:
                 with zf.open(_PROJECT_SCENE_MEMBER) as src, open(path, "wb") as dst:
@@ -39571,7 +39606,7 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
             _cloud_sessions[sess.session_id] = sess
     return {"success": True, "scene_token": token,
             "session_map": {old: s.session_id for old, s in restored.items()},
-            "octree_map": octree_map,
+            "octree_map": octree_map, "warnings": warnings,
             "app_version": manifest.get("app_version")}
 
 
