@@ -10,7 +10,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -33,7 +33,7 @@ import { TreeInventoryPanel, type TreeInventorySettings, type TreeQsmSettings } 
 import { summarizeStand, standTrees, treeBiomassKg, buildStandCsv, DEFAULT_STAND_SETTINGS, type StandSettings } from '../lib/standSummary';
 import { TreeInventoryOverlay } from './viewer/renderers/TreeInventoryOverlay';
 import { exportBaseName } from '../lib/exportObjects';
-import { encodeProjectScene, decodeProjectScene, rewireOpenedScene, sceneBackendRefs } from '../lib/projectDocument';
+import { encodeProjectScene, decodeProjectScene, rewireOpenedScene, sceneBackendRefs, remapInventoryStateKey } from '../lib/projectDocument';
 import { setPendingProject, takePendingProject } from '../lib/pendingProject';
 import { buildTreeListCsv, buildStemCurveCsv, buildTreeQsmCsv, carryOverEdits, treeFrameTarget, EMPTY_TREE_EDIT, type TreeEdits, type TreeEdit } from '../lib/treeInventory';
 import { CROWN_SHAPE_LABELS, crownColorForTreeId, allocateCrownColor, type CrownFitScanEligibility } from '../lib/crownFit';
@@ -2109,8 +2109,11 @@ export default function PointCloudViewer({
   // Per-cloud memory of the user's own inventory inputs: the species/status/
   // label entries (with the trees they were typed against, for carry-over) and
   // an entered plot area. Running another cloud stashes the current one's
-  // here instead of discarding it, and coming back restores it.
-  const treeInventoryStashRef = useRef<Map<string, { trees: TreeInventoryTree[]; edits: TreeEdits; plotAreaM2: number | null }>>(new Map());
+  // here instead of discarding it, and coming back restores it. State, not a
+  // ref: it is hand-typed work, so a project saves it (projectViewerState).
+  const [treeInventoryStash, setTreeInventoryStash] = useState<ReadonlyMap<string, {
+    trees: TreeInventoryTree[]; edits: TreeEdits; plotAreaM2: number | null;
+  }>>(() => new Map());
   const treeInventoryRunIdRef = useRef<string | null>(null);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
@@ -20457,13 +20460,14 @@ export default function PointCloudViewer({
       // Stash the cloud being replaced, then carry over from this cloud's
       // own previous run (the live one, or its stash).
       if (treeInventory && treeInventory.cloudId !== cloud.id) {
-        treeInventoryStashRef.current.set(treeInventory.cloudId, {
-          trees: treeInventory.trees, edits: treeInventoryEdits, plotAreaM2: standSettings.plotAreaM2,
-        });
+        const replaced = treeInventory;
+        setTreeInventoryStash((prev) => new Map(prev).set(replaced.cloudId, {
+          trees: replaced.trees, edits: treeInventoryEdits, plotAreaM2: standSettings.plotAreaM2,
+        }));
       }
       const previous = treeInventory?.cloudId === cloud.id
         ? { trees: treeInventory.trees, edits: treeInventoryEdits, plotAreaM2: standSettings.plotAreaM2 }
-        : treeInventoryStashRef.current.get(cloud.id) ?? null;
+        : treeInventoryStash.get(cloud.id) ?? null;
       const carried = previous
         ? carryOverEdits(previous.trees, previous.edits, res.trees)
         : { edits: {}, dropped: 0 };
@@ -20501,7 +20505,7 @@ export default function PointCloudViewer({
       treeInventoryAbortRef.current = null;
       treeInventoryRunIdRef.current = null;
     }
-  }, [treeInventoryTarget, treeInventoryRunning, treeInventorySettings, treeInventory, treeInventoryEdits, treeInventoryStateKey, standSettings.plotAreaM2, scans, showToast]);
+  }, [treeInventoryTarget, treeInventoryRunning, treeInventorySettings, treeInventory, treeInventoryEdits, treeInventoryStash, treeInventoryStateKey, standSettings.plotAreaM2, scans, showToast]);
 
   const cancelTreeInventory = useCallback(() => {
     if (treeInventoryRunIdRef.current) void cancelRun(treeInventoryRunIdRef.current);
@@ -20693,10 +20697,19 @@ export default function PointCloudViewer({
   const projectViewerState = useMemo(() => ({
     cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
     measurements, pickedPoints, sceneOriginOverride,
-    treeInventory, treeInventoryEdits, treeQsm, standSettings, treeInventorySettings,
+    treeInventory, treeInventoryEdits, treeInventoryStash, treeQsm, standSettings, treeInventorySettings,
+    // Uncommitted label strokes. A stroke writes the backend's label column
+    // but not the display octree (only Commit rebuilds it); these strokes are
+    // what the overlay paints over the octree meanwhile. Without them a
+    // reopened cloud showed its pre-label octree: the labels looked erased,
+    // and Commit was hidden. Their ids match the saved `labelStates` and the
+    // session's saved label history, so undo still lines up. Holds are
+    // strokes whose background bake had not reached the screen yet: the same
+    // work, one step later.
+    labelPending, labelCommitHolds,
   }), [cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
-    measurements, pickedPoints, sceneOriginOverride, treeInventory, treeInventoryEdits, treeQsm,
-    standSettings, treeInventorySettings]);
+    measurements, pickedPoints, sceneOriginOverride, treeInventory, treeInventoryEdits, treeInventoryStash,
+    treeQsm, standSettings, treeInventorySettings, labelPending, labelCommitHolds]);
 
   const collectProjectDocument = useCallback(() => {
     const st = scene.state;
@@ -20829,22 +20842,32 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     projectAbortRef.current = abort;
     setProjectBusy({ label: 'Opening project…', value: null });
+    // The sessions the backend restored for this open, until the scene takes
+    // them. Any way out before that (a cancel landing after the backend
+    // finished, a failed download or decode) must free them: nothing else
+    // knows their ids, and each holds a whole cloud.
+    let restored: string[] = [];
     try {
       const res = await openProject(path, abort.signal, (value, label) => setProjectBusy({ label, value }),
         (runId) => { projectRunIdRef.current = runId; });
+      restored = Object.values(res.session_map ?? {});
       if (abort.signal.aborted) return;
       if (!res.success || !res.scene_token) throw new Error(res.error ?? 'Open failed.');
-      const doc = decodeProjectScene(await downloadProjectScene(res.scene_token)) as {
+      const doc = decodeProjectScene(await downloadProjectScene(res.scene_token, abort.signal)) as {
         scene: Record<string, unknown>; viewer: Record<string, unknown>;
       };
+      // Last point a Cancel can win: past here the current scene is replaced.
+      if (abort.signal.aborted) return;
       // The reset below remounts this component; the opened project waits for
       // the fresh one (see the mount effect after this block).
       setPendingProject({ path, doc, sessionMap: res.session_map ?? {}, octreeMap: res.octree_map ?? {} });
+      restored = [];
       await (window as any).__resetSceneForProject?.();
     } catch (err) {
       if (abort.signal.aborted || err instanceof ScanCanceledError) return;
       showToast({ type: 'error', title: 'Open Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
+      for (const sid of restored) void deleteCloudSession(sid).catch(() => {});
       setProjectBusy(null);
       projectAbortRef.current = null;
       projectRunIdRef.current = null;
@@ -20880,13 +20903,17 @@ export default function PointCloudViewer({
   // scene). Collections go in as one history-free replace; viewer state
   // through its setters; the camera once the clouds are in (below).
   useEffect(() => {
-    const p = takePendingProject();
-    if (!p) return;
     // One tick later: this is the viewer's MOUNT effect, and React runs a
     // child's effects before its parents'. The toast host and App's
     // __setProjectUnchanged register in parent effects, so applying now would
-    // drop the "Project Opened" toast and the clean mark.
-    const timer = setTimeout(() => applyOpenedProject(p), 0);
+    // drop the "Project Opened" toast and the clean mark. TAKEN inside the
+    // timeout too: StrictMode (npm run dev) mounts, unmounts and remounts, and
+    // taking it in the first mount's effect, whose timer the unmount clears,
+    // lost the project after the old scene was already gone.
+    const timer = setTimeout(() => {
+      const p = takePendingProject();
+      if (p) applyOpenedProject(p);
+    }, 0);
     return () => clearTimeout(timer);
     // Mount-only: the pending project exists exactly once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -20909,7 +20936,22 @@ export default function PointCloudViewer({
     if (Array.isArray(v.measurements)) setMeasurements(v.measurements);
     if (Array.isArray(v.pickedPoints)) setPickedPoints(v.pickedPoints);
     setSceneOriginOverride(v.sceneOriginOverride ?? null);
-    if (v.treeInventory) setTreeInventory(v.treeInventory);
+    if (v.treeInventory) {
+      // Its staleness key names the octree it was measured on; a rebuilt
+      // octree is the same picture under a new id.
+      setTreeInventory({ ...v.treeInventory,
+        stateKey: remapInventoryStateKey(v.treeInventory.stateKey, p.octreeMap) });
+    }
+    if (v.treeInventoryStash instanceof Map) setTreeInventoryStash(v.treeInventoryStash);
+    if (v.labelPending instanceof Map) setLabelPending(v.labelPending);
+    if (v.labelCommitHolds instanceof Map) {
+      // Its bake was in flight when the project was saved, and whether the
+      // reopened octree carries the strokes is not known: keep painting them,
+      // and mark the bake failed so the next bake (panel close, a pause)
+      // retries it rather than finding nothing to do.
+      setLabelCommitHolds(new Map([...v.labelCommitHolds].map(([id, h]: [string, any]) =>
+        [id, { ...h, failed: true, releaseOnCacheId: undefined }])));
+    }
     if (v.treeInventoryEdits) setTreeInventoryEdits(v.treeInventoryEdits);
     if (v.treeQsm) setTreeQsm(v.treeQsm);
     if (v.standSettings) setStandSettings(v.standSettings);

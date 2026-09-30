@@ -6241,8 +6241,8 @@ export async function uploadProjectScene(bytes: Uint8Array): Promise<string> {
   return (await response.json()).token as string;
 }
 
-export async function downloadProjectScene(token: string): Promise<ArrayBuffer> {
-  const response = await fetch(`${getBackendUrl()}/api/project/scene/${token}`);
+export async function downloadProjectScene(token: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const response = await fetch(`${getBackendUrl()}/api/project/scene/${token}`, { signal });
   if (!response.ok) throw new Error(`Could not read the project's scene (HTTP ${response.status}).`);
   return await response.arrayBuffer();
 }

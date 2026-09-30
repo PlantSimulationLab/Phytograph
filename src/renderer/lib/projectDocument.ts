@@ -187,6 +187,21 @@ export function rewireOpenedScene<S extends { scans: ScanLike[]; meshes: MeshLik
   return { scene: { ...scene, scans, meshes }, missing };
 }
 
+/**
+ * A saved tree inventory's staleness key (`treeInventoryStateKey`: the octree
+ * cache id it was measured on, then the edit state, `|`-joined) with its
+ * octree id followed through `octreeMap`. Without it an inventory reopened on
+ * a machine that rebuilt the octree read "stale" and hid its overlays,
+ * although nothing about the cloud had changed.
+ */
+export function remapInventoryStateKey(key: string, octreeMap: Record<string, string>): string {
+  if (typeof key !== 'string') return key;
+  const bar = key.indexOf('|');
+  const cid = bar < 0 ? key : key.slice(0, bar);
+  const next = octreeMap[cid];
+  return next ? next + (bar < 0 ? '' : key.slice(bar)) : key;
+}
+
 /** Session ids and octree cache ids a scene uses, for the save request. */
 export function sceneBackendRefs(scans: ScanLike[]): { sessionIds: string[]; octreeIds: string[] } {
   const sessionIds = new Set<string>();

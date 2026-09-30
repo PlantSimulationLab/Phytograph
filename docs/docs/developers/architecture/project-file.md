@@ -114,7 +114,16 @@ maps and the edit states. So is the viewer state a user expects back:
 - point size, measurements and picked points;
 - the scene origin and the camera;
 - the tree inventory, with its species/status/label entries and stand
-  settings.
+  settings, and the entries typed for every other cloud inventoried earlier
+  (the per-cloud stash the panel restores when you return to one). Its
+  staleness key names the octree it was measured on, and is remapped through
+  `octree_map` on open, so a rebuilt octree does not read as "stale";
+- uncommitted label strokes (`labelPending`, and `labelCommitHolds` for
+  strokes whose bake had not reached the screen). A stroke writes the
+  session's label column but not the display octree, so these are what draw
+  it until a bake. Without them a reopened cloud showed its pre-label
+  octree, and the labels looked erased. A hold comes back marked as a failed
+  bake, so the next bake retries it.
 
 The document is stored as one PSC1 blob: a magic, a JSON header, then the
 document's typed arrays back to back. The JSON has three tagged forms:
@@ -193,7 +202,11 @@ it.
    behind.
 
 The renderer resets the scene (as **File → New**), rewrites every cloud's
-session id and octree ids through those maps, and loads the document.
+session id and octree ids through those maps, and loads the document. A
+Cancel wins until the scene document is downloaded and decoded; past that the
+current scene is replaced. Any way out before the new scene takes the
+restored sessions (a late cancel, a failed download) deletes them, since
+nothing else knows their ids.
 
 Opening a project replaces the current scene, so a scene with unsaved
 changes asks for confirmation first, as **File → New** does.

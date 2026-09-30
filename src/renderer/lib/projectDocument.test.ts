@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   encodeProjectScene, decodeProjectScene, toDocValue, fromDocValue, rewireOpenedScene, sceneBackendRefs,
+  remapInventoryStateKey,
 } from './projectDocument';
 
 describe('scene document round trip', () => {
@@ -111,5 +112,33 @@ describe('sceneBackendRefs', () => {
       { id: 'c', data: { octree: null } },
     ]);
     expect(refs).toEqual({ sessionIds: ['s1'], octreeIds: ['c1', 'm1'] });
+  });
+});
+
+describe('remapInventoryStateKey', () => {
+  it('follows a rebuilt octree id and keeps the edit state', () => {
+    const key = ['h1', 3, 0, 0, 0.5, 0, 0, 0].join('|');
+    expect(remapInventoryStateKey(key, { h1: 'H1' })).toBe(['H1', 3, 0, 0, 0.5, 0, 0, 0].join('|'));
+    // An octree the file embedded (not rebuilt) keeps its key.
+    expect(remapInventoryStateKey(key, { other: 'X' })).toBe(key);
+    // An inventory on a cloud with no octree id.
+    expect(remapInventoryStateKey('|0|0|0|0|0|0|0', { h1: 'H1' })).toBe('|0|0|0|0|0|0|0');
+  });
+});
+
+describe('uncommitted label strokes', () => {
+  it('round-trip as the Map-of-Maps the label overlay reads', () => {
+    const pending = new Map([['cloud-1', new Map([['manual_class', {
+      strokes: [{ strokeId: 's1', region: { kind: 'box', min: [0, 0, 0], max: [1, 1, 1] }, toClass: 2,
+        fromClasses: null }],
+      dirty: true,
+      palette: { slug: 'manual_class', name: 'Manual', classes: [{ value: 2, name: 'Wood', color: '#8b4513' }] },
+    }]])]]);
+    const back = decodeProjectScene(encodeProjectScene({ viewer: { labelPending: pending } })) as
+      { viewer: { labelPending: Map<string, Map<string, { strokes: unknown[]; dirty: boolean }>> } };
+    const entry = back.viewer.labelPending.get('cloud-1')!.get('manual_class')!;
+    expect(back.viewer.labelPending).toBeInstanceOf(Map);
+    expect(entry.dirty).toBe(true);
+    expect(entry.strokes).toEqual(pending.get('cloud-1')!.get('manual_class')!.strokes);
   });
 });

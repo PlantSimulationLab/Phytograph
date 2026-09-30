@@ -8,8 +8,11 @@ import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { stubMessageBox, getMessageBoxCalls } from './helpers/stubMessageBox';
+import { resetToFreshScene } from './helpers/resetApp';
+import { fixturePoints, pointsDrawnIn } from './helpers/pointColors';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'forest-plot.xyz');
+const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
 // Save a scene as a .phyto project, open it back, and prove the reopened
 // scene is the same scene - and still live, not a picture of one:
@@ -133,6 +136,65 @@ test('save a project, open it back, and keep working on it', async () => {
     await page.getByTestId('dem-run-button').click();
     await expect(page.locator('[data-testid="mesh-row"][data-mesh-name="forest-plot DEM"]'))
       .toBeVisible({ timeout: 120_000 });
+  } finally {
+    if (existsSync(projectPath)) rmSync(projectPath);
+  }
+});
+
+// Uncommitted label strokes. A stroke writes the backend's label column but
+// not the display octree (a bake does that later); until then the overlay is
+// the only thing drawing it. The project saved the column but not the
+// overlay, and reopened with the cached PRE-label octree: the hand labels
+// looked erased, and nothing offered to bake them.
+test('labels painted but not yet baked are still drawn after save and open', async () => {
+  test.setTimeout(4 * 60_000);
+  const { app, page } = session;
+  await resetToFreshScene(app, page);
+  const projectPath = join(tmpdir(), `phytograph_project_labels_${Date.now()}.phyto`);
+  try {
+    await importFiles(app, page, 'import-auto', TINY);
+    await completeImportWizard(page);
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+    await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+    await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+    await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+
+    await page.getByTestId('tool-label').click();
+    const panel = page.getByTestId('label-panel');
+    await expect(panel).toBeVisible();
+    const active = await panel.getAttribute('data-active-class');
+    const color = (await page.getByTestId(`label-class-${active}`).getAttribute('data-color'))!;
+    const overlay = page.getByTestId('crop-polygon-overlay');
+    await expect(overlay.locator('circle')).toHaveCount(0, { timeout: 10_000 });
+    const box = (await overlay.boundingBox())!;
+    const corners = [[8, 8], [box.width - 8, 8], [box.width - 8, box.height - 8], [8, box.height - 8]];
+    for (let i = 0; i < corners.length; i++) {
+      await page.mouse.click(box.x + corners[i][0], box.y + corners[i][1]);
+      await expect(overlay.locator('circle')).toHaveCount(i + 1);
+    }
+    await page.keyboard.press('Enter');
+    await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+    await expect(panel).toHaveAttribute('data-label-dirty', 'true');
+
+    // Saved with the stroke still pending (the panel open, no bake yet).
+    await stubSaveDialog(app, projectPath);
+    await menu(app, 'save-project');
+    await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Saved' }))
+      .toBeVisible({ timeout: 60_000 });
+    await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+
+    await stubMessageBox(app, 0);
+    await stubOpenDialog(app, projectPath);
+    await menu(app, 'open-project');
+    await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Opened' }))
+      .toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]')).toHaveCount(1);
+
+    const pts = fixturePoints(TINY);
+    await expect.poll(async () => (await pointsDrawnIn(page, pts, color, 40)).matched, {
+      message: `the painted points should still be drawn in the label color ${color} after reopening`,
+      timeout: 30_000,
+    }).toBeGreaterThan(30);
   } finally {
     if (existsSync(projectPath)) rmSync(projectPath);
   }
