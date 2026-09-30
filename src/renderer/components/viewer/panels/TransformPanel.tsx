@@ -167,6 +167,7 @@ export function TransformPanel({
                 value={rotation[axis]}
                 format={(n) => n.toFixed(1)}
                 onCommit={(n) => onSetRotation(axis, n)}
+                data-testid={`mesh-rot-${axis}`}
                 className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
               />
             </div>

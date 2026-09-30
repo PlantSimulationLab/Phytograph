@@ -482,7 +482,7 @@ wrong:
 1. **Try [Auto-Register](#auto-register-when-clouds-start-far-apart)** — for
    two clouds of a planting, this is usually the fix rather than a
    workaround: it does not need a starting guess at all.
-2. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
+2. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-move-rotate-and-scale)
    — translate and rotate to within ~10 cm and a few degrees before running ICP.
 2. **Crop away non-overlapping regions** so the correspondence search isn't
    dominated by geometry the other input doesn't contain.

@@ -1,12 +1,21 @@
 import { useState, useCallback } from 'react';
-import { Move, RotateCcw, X, Loader2 } from 'lucide-react';
+import { Move, RotateCcw, X, Loader2, Maximize2, Lock, Unlock, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 
 type Axis = 'x' | 'y' | 'z';
 interface Vec3 { x: number; y: number; z: number }
 
-// Transformation panel for clouds and skeletons (meshes use TransformPanel):
-// X/Y/Z translation AND (clouds only) X/Y/Z rotation in degrees.
+// Transformation panel. Two users:
+//
+//  - The Transformation tool (clouds + meshes): a target PICKER listing every
+//    cloud and mesh in the scene, and one RELATIVE delta — move by / rotate by /
+//    scale by, about the scene origin — applied to every checked object alike.
+//    Passing `picker` turns this mode on.
+//  - The skeleton translate panel: translation only (`showRotation` false, no
+//    picker, no scale).
+//
+// The per-mesh absolute editor (grid, Fit to Scans, …) is TransformPanel.
 //
 // Editing model (see the flow the user specified):
 //  - The panel is a DRAFT editor. Typing an axis value (or dragging a gizmo,
@@ -52,6 +61,24 @@ interface TransformationPanelProps {
   onApply: () => void;
   /** Discard: revert to baseline and close. */
   onCancel: () => void;
+  /** Target picker (Transformation tool). Omitted for the skeleton panel. */
+  picker?: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
+  /** Draft SCALE factors. Omitted → no scale section. */
+  scale?: Vec3;
+  scaleLocked?: boolean;
+  onScaleLockedChange?: (locked: boolean) => void;
+  onScaleChange?: (axis: Axis, value: number) => void;
+  onResetScale?: () => void;
+  /** Read-only description of the pivot (e.g. the scene origin's coordinates). */
+  pivotLabel?: string;
+  /** Advisory notes shown above OK (non-blocking). */
+  warnings?: { testId: string; text: string }[];
+  /** When set, OK is disabled and this explains why. */
+  okBlockedReason?: string | null;
 }
 
 const AXES: Axis[] = ['x', 'y', 'z'];
@@ -59,7 +86,12 @@ const AXES: Axis[] = ['x', 'y', 'z'];
 export function TransformationPanel({
   position, rotation, showRotation, objectName, isDirty, isApplying,
   onCoordChange, onRotationChange, onReset, onResetRotation, onApply, onCancel,
+  picker, scale, scaleLocked = true, onScaleLockedChange, onScaleChange, onResetScale,
+  pivotLabel, warnings, okBlockedReason,
 }: TransformationPanelProps) {
+  // With a picker the numbers are a DELTA applied to many objects, so say so.
+  const relative = !!picker;
+  const nothingChecked = !!picker && picker.selectedIds.size === 0;
   // Whether the X-close confirm ("Apply or discard?") is showing.
   const [confirmClose, setConfirmClose] = useState(false);
 
@@ -71,7 +103,9 @@ export function TransformationPanel({
 
   return (
     <div
-      className="absolute top-4 right-[280px] z-20 bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+      className={`absolute top-4 right-[280px] z-20 bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg ${
+        relative ? 'w-72 max-h-[calc(100%-2rem)] overflow-y-auto' : 'w-56'
+      }`}
       data-testid="translate-panel"
       data-dirty={isDirty ? 'true' : 'false'}
       data-applying={isApplying ? 'true' : 'false'}
@@ -98,10 +132,34 @@ export function TransformationPanel({
         </span>
       </div>
 
+      {picker && (
+        <div className="mb-3">
+          <ObjectPicker
+            items={picker.items}
+            selectedIds={picker.selectedIds}
+            onChange={picker.onChange}
+            label="Objects"
+            emptyMessage="No point clouds or meshes in the scene."
+            rowTestId="transform-target-row"
+            data-testid="transform-targets"
+          />
+          {picker.selectedIds.size === 0 && picker.items.length > 0 && (
+            <p className="mt-1 text-[10px] text-neutral-500" data-testid="transform-none-checked">
+              Check the objects to transform.
+            </p>
+          )}
+        </div>
+      )}
+      {pivotLabel && (
+        <div className="mb-2 text-[10px] text-neutral-500" data-testid="transform-pivot">
+          About {pivotLabel}
+        </div>
+      )}
+
       {/* Position */}
       <div className="text-[10px] text-neutral-400 mb-1.5 flex items-center gap-1">
         <Move className="w-3 h-3" />
-        Position
+        {relative ? 'Move by' : 'Position'}
       </div>
       <div className="space-y-2">
         {AXES.map((axis) => (
@@ -129,7 +187,7 @@ export function TransformationPanel({
         data-testid="translate-reset"
         className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-xs disabled:opacity-40 disabled:cursor-not-allowed"
       >
-        Reset Position
+        {relative ? 'Reset Move' : 'Reset Position'}
       </button>
 
       {/* Rotation (clouds only). Degrees, Euler XYZ, applied about the active
@@ -138,7 +196,7 @@ export function TransformationPanel({
         <>
           <div className="text-[10px] text-neutral-400 mt-3 mb-1.5 flex items-center gap-1">
             <RotateCcw className="w-3 h-3" />
-            Rotation (°)
+            {relative ? 'Rotate by (°)' : 'Rotation (°)'}
           </div>
           <div className="space-y-2">
             {AXES.map((axis) => (
@@ -170,6 +228,80 @@ export function TransformationPanel({
         </>
       )}
 
+      {/* Scale (Transformation tool). Per world axis, applied about the pivot
+          BEFORE the rotation. The lock keeps it uniform. */}
+      {scale && onScaleChange && (
+        <>
+          <div className="text-[10px] text-neutral-400 mt-3 mb-1.5 flex items-center gap-1">
+            <Maximize2 className="w-3 h-3" />
+            <span className="flex-1">Scale by (×)</span>
+            <button
+              type="button"
+              onClick={() => onScaleLockedChange?.(!scaleLocked)}
+              disabled={isApplying}
+              data-testid="scale-lock"
+              data-locked={scaleLocked ? 'true' : 'false'}
+              title={scaleLocked ? 'Uniform scale (click to scale axes independently)' : 'Independent axes (click to lock uniform)'}
+              aria-label={scaleLocked ? 'Unlock scale axes' : 'Lock scale axes'}
+              className="p-0.5 hover:bg-neutral-700 rounded disabled:opacity-40"
+            >
+              {scaleLocked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+            </button>
+          </div>
+          <div className="space-y-2">
+            {AXES.map((axis) => (
+              <div key={axis} className="flex items-center gap-2">
+                <label className="text-[10px] text-neutral-400 w-3 uppercase font-medium">
+                  {axis}
+                </label>
+                <DebouncedNumberInput
+                  step={0.1}
+                  min={0.001}
+                  value={scale[axis]}
+                  format={(n) => n.toFixed(3)}
+                  onCommit={(n) => onScaleChange(axis, n)}
+                  disabled={isApplying}
+                  debounceMs={0}
+                  data-testid={`scale-input-${axis}`}
+                  className="flex-1 bg-neutral-700 text-neutral-200 text-xs px-2 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+                />
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={onResetScale}
+            disabled={isApplying}
+            data-testid="scale-reset"
+            className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Reset Scale
+          </button>
+        </>
+      )}
+
+      {warnings && warnings.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {warnings.map((w) => (
+            <div
+              key={w.testId}
+              data-testid={w.testId}
+              className="flex gap-1.5 text-[10px] leading-snug text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded p-1.5"
+            >
+              <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-px" />
+              <span>{w.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {okBlockedReason && (
+        <div
+          data-testid="transform-ok-blocked"
+          className="mt-2 text-[10px] leading-snug text-red-300 bg-red-500/10 border border-red-500/30 rounded p-1.5"
+        >
+          {okBlockedReason}
+        </div>
+      )}
+
       {/* OK / Cancel */}
       <div className="mt-3 flex items-center gap-2">
         <button
@@ -182,7 +314,8 @@ export function TransformationPanel({
         </button>
         <button
           onClick={onApply}
-          disabled={isApplying}
+          disabled={isApplying || !!okBlockedReason || nothingChecked}
+          title={okBlockedReason ?? (nothingChecked ? 'Check the objects to transform' : undefined)}
           data-testid="translate-ok"
           className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium disabled:opacity-60 disabled:cursor-wait flex items-center justify-center gap-1.5"
         >
@@ -209,6 +342,7 @@ export function TransformationPanel({
           <div className="flex flex-col gap-2">
             <button
               onClick={() => { setConfirmClose(false); onApply(); }}
+              disabled={!!okBlockedReason}
               data-testid="translate-confirm-apply"
               className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium"
             >

@@ -23,9 +23,25 @@ export function applyOctreePose(
   rotation?: { x: number; y: number; z: number } | null,
   pivot?: { x: number; y: number; z: number } | null,
   displayOffset?: { x: number; y: number; z: number } | null,
+  // The full WORLD pose when it is affine (a scale is in play) — see
+  // `OctreePose.matrix`. When given it replaces translation/rotation/pivot:
+  //     M = T(−displayOffset) · matrix · T(base)
+  poseMatrix?: THREE.Matrix4 | null,
 ) {
   const t = translation ?? { x: 0, y: 0, z: 0 };
   const o = displayOffset ?? { x: 0, y: 0, z: 0 };
+  if (poseMatrix) {
+    _poseM.makeTranslation(-o.x, -o.y, -o.z);
+    _poseM.multiply(poseMatrix);
+    _poseM.multiply(_poseTmp.makeTranslation(base.x, base.y, base.z));
+    pco.matrixAutoUpdate = false;
+    pco.matrix.copy(_poseM);
+    // position/quaternion/scale kept in sync: potree reads max(scale) for its
+    // point-spacing / LOD math, so a scaled octree must report its scale.
+    pco.matrix.decompose(pco.position, pco.quaternion, pco.scale);
+    return;
+  }
+  pco.scale.set(1, 1, 1);
   const hasRotation = !!rotation && (rotation.x !== 0 || rotation.y !== 0 || rotation.z !== 0);
   if (!hasRotation) {
     // Fast path: pure translation is a position write (matrixAutoUpdate stays on).

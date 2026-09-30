@@ -32,7 +32,7 @@ by the four stages of a typical processing pipeline.
 
 - :material-broom: **[Clean a point cloud](clean-point-cloud.md)** — the whole cleaning pass, in the order to do it.
 
-- :phytograph-transform: **[Transform](clean-point-cloud.md#transform-translate-and-rotate)** — move and rotate a cloud, and set the scene origin.
+- :phytograph-transform: **[Transform](clean-point-cloud.md#transform-move-rotate-and-scale)** — move, rotate and scale clouds and meshes together, and set the scene origin.
 
 - :phytograph-crop: **[Crop](clean-point-cloud.md#crop)** — keep or discard a region with a box, rectangle, or freeform polygon.
 

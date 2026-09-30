@@ -6,7 +6,10 @@ import { BakeQueue } from '../lib/pendingBakes';
 import { shouldDeferOctreeRebuild } from '../lib/deferOctreeRebuild';
 import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
-import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
+import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
+import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
+import { diffTargets, idsOfKind, parseTargetKey, pruneTargets, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
+import { bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, meshWorldMatrix } from '../lib/meshTransform';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
@@ -403,7 +406,14 @@ function woodClassSuffix(value: number): string {
 
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
-type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase' | 'label';
+// 'translate' is the Transformation tool (clouds + meshes, see
+// openTransformTool); 'skeleton-translate' the skeleton's own translate panel;
+// 'mesh-translate' / 'rotate' the per-mesh TransformPanel's gizmo toggles.
+// Shared, never mutated: the no-op preview matrix for meshes the Transformation
+// tool is not moving.
+const IDENTITY_MATRIX4 = new THREE.Matrix4();
+
+type EditMode = 'none' | 'translate' | 'skeleton-translate' | 'mesh-translate' | 'crop' | 'rotate' | 'erase' | 'label';
 
 // Tuning fields threaded from handleWoodSegment to each per-cloud worker. The
 // optional `reflectance_weight_max` (>0) and `scalar_slug` enable the reflectance
@@ -2337,6 +2347,7 @@ export default function PointCloudViewer({
   const translateBaselineRef = useRef<Map<string, {
     t: { x: number; y: number; z: number };
     r: { x: number; y: number; z: number };
+    s?: { x: number; y: number; z: number };
   }>>(new Map());
   // True while an OK-triggered bake is in flight (drives the panel's "Applying…"
   // state and blocks a second commit).
@@ -2972,16 +2983,17 @@ export default function PointCloudViewer({
     axis: TransformAxis;
     startScreen: { x: number; y: number };
     pivot: { x: number; y: number; z: number };
-    target: 'mesh' | 'skeleton' | 'cloud' | 'pose' | 'scan';
+    // 'tool' = the open Transformation tool: the gesture drives its shared
+    // delta (every checked cloud and mesh), never an object directly.
+    target: 'mesh' | 'skeleton' | 'pose' | 'scan' | 'tool';
+    originalDelta?: AffineDelta;
     // Every selected mesh / skeleton, not just the first: t/s/r transform the
     // whole selection as a group about a shared pivot (the centroid of the set).
     // The originals are per-id, captured up front, so each object's delta is
     // always applied to its OWN pre-gesture transform and repeated mouse moves
-    // don't compound — the same shape `cloudIds` + `originalCloudTranslations`
-    // already used for a multi-cloud translate.
+    // don't compound.
     meshIds?: string[];
     skeletonIds?: string[];
-    cloudIds?: string[];
     // Scan position (scanner marker). `t` drives params.origin and `r` drives
     // the scanner tilt — the same fields the Scan Parameters dialog edits.
     // The whole params object is captured up front so apply* can spread a new
@@ -3001,9 +3013,6 @@ export default function PointCloudViewer({
     originalMeshScale?: Map<string, { x: number; y: number; z: number }>;
     originalMeshRot?: Map<string, { x: number; y: number; z: number }>;
     originalSkeletonPos?: Map<string, { x: number; y: number; z: number }>;
-    originalCloudTranslations?: Map<string, { x: number; y: number; z: number }>;
-    // Draft rotation (degrees) of each cloud at gesture start, for `r` on a cloud.
-    originalCloudRotations?: Map<string, { x: number; y: number; z: number }>;
     // Numeric input buffer (Blender-style). When parseable, overrides mouse-driven value.
     numericBuffer: string;
   }
@@ -3286,8 +3295,7 @@ export default function PointCloudViewer({
   // Helper to close all tool panels and reset edit mode (for mutual exclusivity)
   const closeAllToolPanels = useCallback((except?: string) => {
     if (except !== 'editMode') setEditMode('none');
-    // The mesh TransformPanel is now fronted by the Transform toolbar button
-    // (not just the Meshes-panel row button), so it joins the mutually
+    // The mesh TransformPanel (opened from a mesh row) joins the mutually
     // exclusive set like every other tool panel — opening another tool closes
     // it instead of leaving two transform surfaces stacked on screen.
     if (except !== 'mesh-transform') setShowResizePanel(false);
@@ -3513,22 +3521,12 @@ export default function PointCloudViewer({
     const pos = meshPositionsRef.current.get(meshId) || { x: 0, y: 0, z: 0 };
     const scl = meshScalesRef.current.get(meshId) || { x: 1, y: 1, z: 1 };
     const rot = meshRotationsRef.current.get(meshId) || { x: 0, y: 0, z: 0 };
-    const rotX = rot.x * Math.PI / 180, rotY = rot.y * Math.PI / 180, rotZ = rot.z * Math.PI / 180;
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-    const v = mesh.data.vertices;
-    for (let i = 0; i < mesh.data.vertexCount; i++) {
-      const x = v[i * 3] * scl.x, y = v[i * 3 + 1] * scl.y, z = v[i * 3 + 2] * scl.z;
-      const y1 = y * cosX - z * sinX, z1 = y * sinX + z * cosX;
-      const x2 = x * cosY + z1 * sinY, z2 = -x * sinY + z1 * cosY;
-      const x3 = x2 * cosZ - y1 * sinZ, y3 = x2 * sinZ + y1 * cosZ;
-      const wx = x3 + pos.x, wy = y3 + pos.y, wz = z2 + pos.z;
+    forEachWorldVertex(mesh.data.vertices, mesh.data.vertexCount, meshWorldMatrix(pos, rot, scl), (wx, wy, wz) => {
       min.x = Math.min(min.x, wx); min.y = Math.min(min.y, wy); min.z = Math.min(min.z, wz);
       max.x = Math.max(max.x, wx); max.y = Math.max(max.y, wy); max.z = Math.max(max.z, wz);
-    }
+    });
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
     frameSelection({ center, size });
@@ -3840,6 +3838,131 @@ export default function PointCloudViewer({
   scansRef.current = scans;
   const editStatesRef = useRef(editStates);
   editStatesRef.current = editStates;
+
+  // ── Transformation tool: the checked targets and the ONE shared delta ─────
+  //
+  // The tool lists every cloud and mesh in the scene and applies a single
+  // relative transform (move / rotate / scale about the scene origin) to all the
+  // checked ones. It no longer reads the Scans/Meshes pane selection after it
+  // opens: the selection only SEEDS the checked set, so clicking rows while the
+  // tool is open changes nothing it will commit.
+  //
+  // `transformDelta` is the source of truth. Checked CLOUDS mirror it into their
+  // draft edit state (translation / rotation / scale — what the octree renderer
+  // and the bake read); checked MESHES read it at render time (a matrix group
+  // around the mesh) and compose it onto their transform on OK. Both refs are
+  // written synchronously so gizmo drags and the T/R/S modal never read a stale
+  // value between renders.
+  const [transformTargets, setTransformTargetsState] = useState<Set<string>>(() => new Set());
+  const transformTargetsRef = useRef<Set<string>>(transformTargets);
+  const [transformDelta, setTransformDeltaState] = useState<AffineDelta>(IDENTITY_DELTA);
+  const transformDeltaRef = useRef<AffineDelta>(IDENTITY_DELTA);
+  const [transformScaleLocked, setTransformScaleLocked] = useState(true);
+  // Whether the targets were seeded for the current open (openTransformTool
+  // seeds synchronously so a T/R keypress that opens the tool can drive it at
+  // once; the enter effect seeds any other way in).
+  const transformSeededRef = useRef(false);
+
+  // A cloud's draft IS the delta while it is checked.
+  const cloudDraftFromDelta = useCallback(
+    (state: CloudEditState | undefined, d: AffineDelta): CloudEditState => ({
+      ...(state ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() }),
+      translation: { ...d.t },
+      rotation: { ...d.r },
+      scale: d.s.x === 1 && d.s.y === 1 && d.s.z === 1 ? undefined : { ...d.s },
+    }),
+    [],
+  );
+
+  const applyTransformDelta = useCallback((next: AffineDelta) => {
+    transformDeltaRef.current = next;
+    setTransformDeltaState(next);
+    const ids = idsOfKind(transformTargetsRef.current, 'cloud');
+    if (ids.length === 0) return;
+    setEditStates(prev => {
+      const m = new Map(prev);
+      for (const id of ids) m.set(id, cloudDraftFromDelta(m.get(id), next));
+      return m;
+    });
+  }, [setEditStates, cloudDraftFromDelta]);
+
+  const updateTransformDelta = useCallback(
+    (fn: (d: AffineDelta) => AffineDelta) => applyTransformDelta(fn(transformDeltaRef.current)),
+    [applyTransformDelta],
+  );
+
+  // Check / uncheck targets. A newly checked cloud records its baseline and
+  // takes the CURRENT delta at once (the fields apply to everything checked, so
+  // it would be a lie for it to start at zero); an unchecked cloud goes back to
+  // its baseline, i.e. it is simply no longer part of the operation. Meshes need
+  // nothing here — their preview reads the checked set.
+  const setTransformTargets = useCallback((nextRaw: Set<string>) => {
+    const prev = transformTargetsRef.current;
+    const next = new Set(nextRaw);
+    const { added, removed } = diffTargets(prev, next);
+    transformTargetsRef.current = next;
+    setTransformTargetsState(next);
+    const cloudIdsOf = (keys: string[]) => keys
+      .map(parseTargetKey)
+      .filter((k): k is { kind: 'cloud'; id: string } => !!k && k.kind === 'cloud')
+      .map(k => k.id);
+    const addedClouds = cloudIdsOf(added);
+    const removedClouds = cloudIdsOf(removed);
+    if (addedClouds.length === 0 && removedClouds.length === 0) return;
+    const base = translateBaselineRef.current;
+    for (const id of addedClouds) {
+      if (base.has(id)) continue;
+      const st = editStatesRef.current.get(id);
+      base.set(id, {
+        t: { ...(st?.translation ?? { x: 0, y: 0, z: 0 }) },
+        r: { ...(st?.rotation ?? { x: 0, y: 0, z: 0 }) },
+        ...(st?.scale ? { s: { ...st.scale } } : {}),
+      });
+    }
+    const restore = new Map(removedClouds.flatMap(id => {
+      const b = base.get(id);
+      return b ? [[id, b] as const] : [];
+    }));
+    for (const id of removedClouds) base.delete(id);
+    const d = transformDeltaRef.current;
+    setEditStates(prevStates => {
+      const m = new Map(prevStates);
+      for (const [id, b] of restore) {
+        const st = m.get(id);
+        if (st) m.set(id, { ...st, translation: { ...b.t }, rotation: { ...b.r }, scale: b.s ? { ...b.s } : undefined });
+      }
+      for (const id of addedClouds) m.set(id, cloudDraftFromDelta(m.get(id), d));
+      return m;
+    });
+  }, [setEditStates, cloudDraftFromDelta]);
+
+  // Seed the checked set from the pane selection (see seedTransformTargets —
+  // nothing selected means nothing checked) and reset the delta to identity.
+  // Read through a ref so the enter effect can call it without re-running on
+  // every selection change.
+  const seedTransformToolRef = useRef<() => void>(() => {});
+  seedTransformToolRef.current = () => {
+    translateBaselineRef.current = new Map();
+    transformTargetsRef.current = new Set();
+    transformDeltaRef.current = IDENTITY_DELTA;
+    setTransformDeltaState(IDENTITY_DELTA);
+    setTransformTargets(seedTransformTargets({
+      cloudIds: cloudsRef.current.map(c => c.id),
+      meshIds: meshes.map(m => m.id),
+      selectedScanIds: selectedIds,
+      selectedMeshIds,
+    }));
+    transformSeededRef.current = true;
+  };
+
+  // Open the Transformation tool. Seeds synchronously (rather than leaving it
+  // to the enter effect) so a `t`/`r`/`s` keypress that opens the tool can
+  // start driving the delta in the same event.
+  const openTransformTool = useCallback(() => {
+    closeAllToolPanels('editMode');
+    seedTransformToolRef.current();
+    setEditMode('translate');
+  }, [closeAllToolPanels]);
   // Same reason again, for the multi-scan filter apply: the loop clears each
   // cloud's filters as it commits them, so an iteration reading the closure's
   // `cloudFilters` would see entries the previous iteration already dropped.
@@ -8637,8 +8760,8 @@ export default function PointCloudViewer({
     }
 
     // Include mesh bounds. Vertices are stored in the mesh's local space; apply
-    // the same world transform the renderer uses (scale -> rotate(Euler XYZ) ->
-    // translate, see extractMeshWorldGeometry) before accumulating. Skipping the
+    // the same world transform the renderer uses (meshWorldMatrix) before
+    // accumulating. Skipping the
     // transform collapses e.g. a Helios <grid> voxel — a unit cube placed at
     // [center] with [size] scale — back to a ±0.5 box at the origin, which makes
     // fit-to-view zoom to near-zero distance and cull everything.
@@ -8648,28 +8771,14 @@ export default function PointCloudViewer({
       const pos = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
       const scl = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
       const rot = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
-      const rotX = rot.x * Math.PI / 180, rotY = rot.y * Math.PI / 180, rotZ = rot.z * Math.PI / 180;
-      const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-      const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-      const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
-      for (let i = 0; i < vertexCount; i++) {
-        const x = vertices[i * 3] * scl.x;
-        const y = vertices[i * 3 + 1] * scl.y;
-        const z = vertices[i * 3 + 2] * scl.z;
-        const y1 = y * cosX - z * sinX;
-        const z1 = y * sinX + z * cosX;
-        const x2 = x * cosY + z1 * sinY;
-        const z2 = -x * sinY + z1 * cosY;
-        const x3 = x2 * cosZ - y1 * sinZ;
-        const y3 = x2 * sinZ + y1 * cosZ;
-        const wx = x3 + pos.x, wy = y3 + pos.y, wz = z2 + pos.z;
+      forEachWorldVertex(vertices, vertexCount, meshWorldMatrix(pos, rot, scl), (wx, wy, wz) => {
         min.x = Math.min(min.x, wx);
         min.y = Math.min(min.y, wy);
         min.z = Math.min(min.z, wz);
         max.x = Math.max(max.x, wx);
         max.y = Math.max(max.y, wy);
         max.z = Math.max(max.z, wz);
-      }
+      });
     }
 
     // Include skeleton bounds
@@ -9754,6 +9863,7 @@ export default function PointCloudViewer({
           translation: pose?.translation ?? es.translation,
           rotation: pose?.rotation ?? getEditRotation(c.id),
           pivot: pose?.pivot,
+          matrix: pose?.matrix?.elements ?? null,
         }),
         geometry: geometryKey({
           pointCount: c.data.pointCount,
@@ -9792,8 +9902,12 @@ export default function PointCloudViewer({
       const before = prevPoses.get(cloudId);
       const after = cloudPoseById.get(cloudId);
       if (!before || !after) return p;
-      const unposed = unposePoint(p, before.translation, before.rotation, before.pivot);
-      return transformPoint(unposed, after.translation, after.rotation, after.pivot);
+      // Through matrices, not the (translation, rotation, pivot) triple: an
+      // affine pose (a scale) has no triple form, and poseMatrixOf covers both.
+      const v = new THREE.Vector3(p[0], p[1], p[2])
+        .applyMatrix4(poseMatrixOf(before).invert())
+        .applyMatrix4(poseMatrixOf(after));
+      return [v.x, v.y, v.z];
     };
 
     // A cloud's persistent import-time shift, for re-deriving `world` after a
@@ -9966,29 +10080,16 @@ export default function PointCloudViewer({
 
 
       // ── Pre-processing ──────────────────────────────────────────────
-      // ONE toolbar button fronting two panels, chosen by what's selected.
-      //
-      // A mesh has had full transform support all along (position / rotation /
-      // scale, Move to Origin, Fit to Scans) in its own floating TransformPanel
-      // — but the only way in was the transform button on the mesh's own row in
-      // the Meshes panel, and this button was gated `requires: 'cloud'`, so it
-      // grayed out for the exact selection it can serve. A MESH selection now
-      // opens that panel; a cloud keeps the editMode draft it always had.
-      //
-      // Mesh wins when both are selected: the cloud path is a draft the panel
-      // must commit, so silently preferring it would leave a pending bake
-      // behind a button the user pressed expecting the mesh dialog.
+      // Transform: ONE panel that lists every cloud and mesh in the scene and
+      // moves / rotates / scales the checked ones together about the scene
+      // origin. It picks its own inputs (seeded from the pane selection), so it
+      // is a multi-input tool: available whenever there is anything to move,
+      // selected or not. The mesh row's own transform button still opens the
+      // per-mesh absolute editor (TransformPanel).
       { id: 'cloud-translate', name: 'Transform', keywords: ['move', 'position', 'translate', 'rotate', 'rotation', 'transform', 'scale', 'resize', 'mesh'], action: () => {
-        if (hasMeshSelected) {
-          const open = showResizePanel;
-          closeAllToolPanels('mesh-transform');
-          setShowResizePanel(!open);
-          return;
-        }
-        setShowResizePanel(false);
-        closeAllToolPanels('editMode');
-        setEditMode(editMode === 'translate' ? 'none' : 'translate');
-      }, category: 'Point Cloud', requires: 'cloud-or-mesh', toolGroup: 'preprocess', icon: Move3d, isActive: () => (hasMeshSelected ? showResizePanel : editMode === 'translate') },
+        if (editMode === 'translate') { setEditMode('none'); return; }
+        openTransformTool();
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud-or-mesh', toolGroup: 'preprocess', icon: Move3d, isActive: () => editMode === 'translate' },
       // Viewport-level, not scan-level: the scene origin is the rotation pivot,
       // meaningful even with an empty scene (you can type coordinates), so it is
       // NOT gated on a selection (`requires: null`). It is a SCENE CONTROL, not an
@@ -10098,7 +10199,7 @@ export default function PointCloudViewer({
       { id: 'plant-morph', name: 'Morph Plant', keywords: ['parameter', 'shoot', 'tune', 'modify'], action: () => setShowMorphPopup(true), category: 'Plant', requires: 'plant' },
 
       // Skeleton tools (palette/menu only)
-      { id: 'skeleton-translate', name: 'Translate Skeleton', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Skeleton', requires: 'skeleton' },
+      { id: 'skeleton-translate', name: 'Translate Skeleton', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'skeleton-translate' ? 'none' : 'skeleton-translate'); }, category: 'Skeleton', requires: 'skeleton' },
 
       // Export (palette/menu only — removed from the static toolbar; lives in File → Export)
       { id: 'cloud-export', name: 'Export Point Cloud', keywords: ['save', 'las', 'laz', 'xyz'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Point Cloud', requires: 'cloud' },
@@ -10119,7 +10220,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, openTransformTool, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
       // Label Points' isActive and blockedReason read these.
       showLabelPanel, clouds]);
 
@@ -10134,9 +10235,11 @@ export default function PointCloudViewer({
   // single derived list feeds the menu bridge, the palette, and both Toolbars,
   // so all four entry points gate identically.
   const guardedCommands = useMemo<ToolCommand[]>(() => {
-    if (editMode !== 'translate') return commands;
+    if (editMode !== 'translate' && editMode !== 'skeleton-translate') return commands;
+    // The open tool's own button stays live so it can close the tool.
+    const ownId = editMode === 'translate' ? 'cloud-translate' : 'skeleton-translate';
     return commands.map(cmd => {
-      if (cmd.id === 'cloud-translate' || cmd.id === 'skeleton-translate' || cmd.category === 'View') {
+      if (cmd.id === ownId || cmd.category === 'View') {
         return cmd;
       }
       // isDisabled grays the button out (Toolbar reads isCommandAvailable) AND
@@ -10197,8 +10300,9 @@ export default function PointCloudViewer({
     // scan XML (e.g. almond.xml) creates param-only scans with no point data;
     // those still count, so the tools' own modals can take over from there.
     totalScanCount: scans.length,
+    totalCloudCount: clouds.length,
     totalMeshCount: meshes.length,
-  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedCloudCount, selectedMeshIds.size, scans.length, meshes.length]);
+  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedCloudCount, selectedMeshIds.size, scans.length, clouds.length, meshes.length]);
   toolSelectionRef.current = toolSelection;
 
   // Filter and sort commands based on search (guarded list, so the palette
@@ -10244,26 +10348,18 @@ export default function PointCloudViewer({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [showCommandPalette]);
 
-  // Handle gizmo translation for selected clouds
+  // The Transformation tool's gizmo: arrows and rings drive the ONE shared
+  // delta (every checked cloud and mesh follows it). Render-only until OK.
   const handleGizmoTranslate = useCallback((delta: { x: number; y: number; z: number }) => {
-    updateSelectedEditStates(state => ({
-      ...state,
-      translation: {
-        x: state.translation.x + delta.x,
-        y: state.translation.y + delta.y,
-        z: state.translation.z + delta.z,
-      },
+    updateTransformDelta(d => ({
+      ...d,
+      t: { x: d.t.x + delta.x, y: d.t.y + delta.y, z: d.t.z + delta.z },
     }));
-  }, [updateSelectedEditStates]);
+  }, [updateTransformDelta]);
 
-  // Accumulate a rotation-ring drag (or numeric) delta into the draft rotation of
-  // every selected cloud. Render-only preview; baked on OK (bakeCloudTransform).
   const handleGizmoRotate = useCallback((axis: 'x' | 'y' | 'z', deltaDeg: number) => {
-    updateSelectedEditStates(state => {
-      const rot = state.rotation ?? { x: 0, y: 0, z: 0 };
-      return { ...state, rotation: { ...rot, [axis]: rot[axis] + deltaDeg } };
-    });
-  }, [updateSelectedEditStates]);
+    updateTransformDelta(d => ({ ...d, r: { ...d.r, [axis]: d.r[axis] + deltaDeg } }));
+  }, [updateTransformDelta]);
 
   // Handle gizmo translation for selected mesh
   const handleMeshTranslate = useCallback((delta: { x: number; y: number; z: number }) => {
@@ -10811,9 +10907,11 @@ export default function PointCloudViewer({
     const liveState = editStatesRef.current.get(cloudId) ?? getEditState(cloudId);
     const t = liveState.translation;
     const rot = liveState.rotation ?? { x: 0, y: 0, z: 0 };
+    const scl = liveState.scale ?? { x: 1, y: 1, z: 1 };
     const hasTranslation = t.x !== 0 || t.y !== 0 || t.z !== 0;
     const hasRotation = rot.x !== 0 || rot.y !== 0 || rot.z !== 0;
-    if (!hasTranslation && !hasRotation) return { ok: 'noop' };
+    const hasScale = scl.x !== 1 || scl.y !== 1 || scl.z !== 1;
+    if (!hasTranslation && !hasRotation && !hasScale) return { ok: 'noop' };
     // Re-entrancy guard. Two commit points can fire for one user action (gizmo
     // drag-end, then the leave-transform-mode effect), and the session transform
     // is slow enough that the second call would read the still-unbaked draft
@@ -10842,6 +10940,7 @@ export default function PointCloudViewer({
             ...state,
             translation: { x: 0, y: 0, z: 0 },
             rotation: { x: 0, y: 0, z: 0 },
+            scale: undefined,
             storedPose: undefined,
           });
           return next;
@@ -10853,36 +10952,24 @@ export default function PointCloudViewer({
       const P = new THREE.Vector3(
         sceneOriginRef.current[0], sceneOriginRef.current[1], sceneOriginRef.current[2],
       );
-      // Rotation quaternion / matrix from the Euler draft (degrees, XYZ order —
-      // matches the backend's R = Rz·Ry·Rx, verified in the transform test).
-      const euler = new THREE.Euler(
-        THREE.MathUtils.degToRad(rot.x),
-        THREE.MathUtils.degToRad(rot.y),
-        THREE.MathUtils.degToRad(rot.z),
-        'XYZ',
-      );
-      const q = new THREE.Quaternion().setFromEuler(euler);
-      const R3 = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(q));
-      // Apply the full rigid transform to a single world point: R·(p−P)+P+t.
-      const applyRigid = (x: number, y: number, z: number): [number, number, number] => {
-        const dx = x - P.x, dy = y - P.y, dz = z - P.z;
-        const e = R3.elements; // column-major 3x3
-        const rx = e[0] * dx + e[3] * dy + e[6] * dz;
-        const ry = e[1] * dx + e[4] * dy + e[7] * dz;
-        const rz = e[2] * dx + e[5] * dy + e[8] * dz;
-        return [rx + P.x + t.x, ry + P.y + t.y, rz + P.z + t.z];
+      // The draft as ONE affine matrix in the STORED frame (the frame bounds,
+      // the pivot and the renderer all live in): scale along the world axes,
+      // then rotate (Euler XYZ, degrees), both about P, then translate —
+      // `poseToMatrix`, the same builder the renderer draws the draft with.
+      const M = poseToMatrix(t, rot, P, scl);
+      const q = rotationQuat(rot);
+      const applyAffine = (x: number, y: number, z: number): [number, number, number] => {
+        const v = new THREE.Vector3(x, y, z).applyMatrix4(M);
+        return [v.x, v.y, v.z];
       };
-      // Row-major flat 4x4 for the endpoint / transformPoseStream: R in the top-
-      // left, t_eff = P − R·P + t in the last column.
-      const rE = R3.elements;
-      const rp = new THREE.Vector3(P.x, P.y, P.z).applyMatrix3(R3); // R·P
-      const teff = { x: P.x - rp.x + t.x, y: P.y - rp.y + t.y, z: P.z - rp.z + t.z };
-      const rowMajor = [
-        rE[0], rE[3], rE[6], teff.x,
-        rE[1], rE[4], rE[7], teff.y,
-        rE[2], rE[5], rE[8], teff.z,
-        0, 0, 0, 1,
-      ];
+      // Row-major flat 4x4 for transformPoseStream (stored-frame, like the
+      // params it moves).
+      const rowMajor = toRowMajor(M);
+      // What `session_transform` gets: the same move, re-expressed in TRUE
+      // WORLD coordinates. The session holds points with the import-time shift
+      // subtracted and applies the matrix to (stored + shift), so a stored-frame
+      // matrix with any rotation or scale lands (L·shift − shift) away.
+      const sessionRowMajor = toRowMajor(conjugateByShift(M, cloud.data.octree?.worldShift));
 
       // The scanner ORIGIN (and, for a moving-platform scan, the whole trajectory
       // of per-pose emission points) is WORLD-frame geometry that must move WITH
@@ -10895,7 +10982,7 @@ export default function PointCloudViewer({
       const transformScanParams = () => {
         const p = cloud.params;
         if (!p) return;
-        const o = applyRigid(p.origin.x, p.origin.y, p.origin.z);
+        const o = applyAffine(p.origin.x, p.origin.y, p.origin.z);
         const nextParams: ScanParameters = {
           ...p,
           origin: { x: o[0], y: o[1], z: o[2] },
@@ -10910,7 +10997,7 @@ export default function PointCloudViewer({
       };
       // Transform the octree's fallback scanOrigin copy for buildSessionOctreeData.
       const transformedScanOrigin = (o: [number, number, number] | null | undefined) =>
-        o ? applyRigid(o[0], o[1], o[2]) : o;
+        o ? applyAffine(o[0], o[1], o[2]) : o;
 
       const octreeInfo = cloud.data.octree;
       if (octreeInfo?.sessionId) {
@@ -10928,7 +11015,7 @@ export default function PointCloudViewer({
         // octree is correct everywhere the user can interact with it.
         let result: Awaited<ReturnType<typeof sessionTransform>>;
         try {
-          result = await sessionTransform(octreeInfo.sessionId, rowMajor, 'pose');
+          result = await sessionTransform(octreeInfo.sessionId, sessionRowMajor, 'pose');
         } catch (err) {
           // Leave the draft up so the cloud stays where the user put it and they
           // can retry — silently dropping it would move the cloud back under
@@ -10952,7 +11039,7 @@ export default function PointCloudViewer({
           // `data.bounds` moves NOW because the geometry has — framing, zoom,
           // displayOffset and the scene origin all read it and would otherwise
           // describe where the cloud used to be.
-          const moved = transformBoundsAabb(cloud.data.bounds, t, rot, P);
+          const moved = transformAabbByMatrix(cloud.data.bounds, M);
           const size = new THREE.Vector3().subVectors(moved.max, moved.min);
           const center = new THREE.Vector3()
             .addVectors(moved.min, moved.max).multiplyScalar(0.5);
@@ -10960,12 +11047,12 @@ export default function PointCloudViewer({
           // parameter seeding read; it is tuples, not Vector3s.
           const rb = cloud.data.robustBounds;
           const movedRobust = rb
-            ? transformBoundsAabb(
+            ? transformAabbByMatrix(
                 {
                   min: new THREE.Vector3(rb.min[0], rb.min[1], rb.min[2]),
                   max: new THREE.Vector3(rb.max[0], rb.max[1], rb.max[2]),
                 },
-                t, rot, P,
+                M,
               )
             : undefined;
           onUpdateCloud(cloudId, {
@@ -10977,10 +11064,10 @@ export default function PointCloudViewer({
                     min: [movedRobust.min.x, movedRobust.min.y, movedRobust.min.z] as [number, number, number],
                     max: [movedRobust.max.x, movedRobust.max.y, movedRobust.max.z] as [number, number, number],
                   },
-                  // Rigid transforms preserve lengths, so a pure translation
-                  // leaves the extent untouched; a rotation only re-orients the
-                  // box, and the AABB of it is looser. Recompute from the moved
-                  // box so the two never disagree.
+                  // A pure translation leaves the extent untouched; a rotation
+                  // re-orients the box (its AABB is looser) and a scale
+                  // stretches it. Recompute from the moved box so the two
+                  // never disagree.
                   robustExtent: [
                     movedRobust.max.x - movedRobust.min.x,
                     movedRobust.max.y - movedRobust.min.y,
@@ -10991,7 +11078,7 @@ export default function PointCloudViewer({
             // A rotation turns an outlier-resistant percentile into a raw box
             // minimum; a pure translation keeps it exact. Restored on refresh.
             ...(cloud.data.groundZ !== undefined
-              ? { groundZ: transformGroundZ(cloud.data.groundZ, cloud.data.bounds.center, t, rot, P) }
+              ? { groundZ: transformGroundZ(cloud.data.groundZ, cloud.data.bounds.center, t, rot, P, scl) }
               : {}),
             octree: {
               ...movedOctreeInfo,
@@ -11010,20 +11097,18 @@ export default function PointCloudViewer({
               // now standing in for an octree that is behind.
               translation: { x: 0, y: 0, z: 0 },
               rotation: { x: 0, y: 0, z: 0 },
+              scale: undefined,
               // COMPOSE onto any pose already standing in for this octree.
               // Each commit moves the session geometry again, so the pose has to
               // describe the TOTAL displacement from the octree's frame — writing
               // just this commit's draft would silently discard every earlier
-              // one and snap the cloud back.
-              storedPose: {
-                ...composeCloudPose(
-                  { translation: t, rotation: rot, storedPose: st.storedPose },
-                  result.cache_id,
-                  { x: P.x, y: P.y, z: P.z },
-                ),
-                pivot: { x: P.x, y: P.y, z: P.z },
-                cacheId: result.cache_id,
-              },
+              // one and snap the cloud back. A scale makes it an affine pose,
+              // which `commitStoredPose` records as a matrix.
+              storedPose: commitStoredPose(
+                { translation: t, rotation: rot, scale: scl, storedPose: st.storedPose },
+                result.cache_id,
+                { x: P.x, y: P.y, z: P.z },
+              ),
             });
             return next;
           });
@@ -11054,7 +11139,7 @@ export default function PointCloudViewer({
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
       for (let i = 0; i < src.positions.length; i += 3) {
-        const [x, y, z] = applyRigid(src.positions[i], src.positions[i + 1], src.positions[i + 2]);
+        const [x, y, z] = applyAffine(src.positions[i], src.positions[i + 1], src.positions[i + 2]);
         positions[i] = x; positions[i + 1] = y; positions[i + 2] = z;
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
@@ -11069,6 +11154,8 @@ export default function PointCloudViewer({
           center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
           size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
         },
+        // Normals are directions: they take the inverse-transpose, not M.
+        scalarFields: transformNormalFields(src.scalarFields, M),
         // Move a flat cloud's embedded octree.scanOrigin fallback with the points.
         octree: src.octree
           ? { ...src.octree, scanOrigin: transformedScanOrigin(src.octree.scanOrigin) }
@@ -11094,10 +11181,9 @@ export default function PointCloudViewer({
   // failure is collected and surfaced in a SINGLE toast rather than one per
   // cloud. A failed cloud keeps its render draft, so the user can retry (and
   // the leave-tool safety net will).
-  const bakeSelectedTransforms = useCallback(async (ids?: Iterable<string>): Promise<boolean> => {
-    const idList = [...(ids ?? selectedIds)];
+  const bakeTransformsCollectingFailures = useCallback(async (ids: Iterable<string>): Promise<string[]> => {
     const failures: string[] = [];
-    for (const id of idList) {
+    for (const id of ids) {
       const r = await bakeCloudTransform(id);
       if (r.ok === false && !r.gone) failures.push(id);
     }
@@ -11113,17 +11199,24 @@ export default function PointCloudViewer({
         type: 'error',
       });
     }
+    return failures;
+  }, [bakeCloudTransform, clouds]);
+
+  const bakeSelectedTransforms = useCallback(async (ids?: Iterable<string>): Promise<boolean> => {
+    const failures = await bakeTransformsCollectingFailures([...(ids ?? selectedIds)]);
     return failures.length === 0;
-  }, [selectedIds, bakeCloudTransform, clouds]);
+  }, [selectedIds, bakeTransformsCollectingFailures]);
 
   // Keep the early-declared ref pointing at the latest closure (see its
   // declaration near editStatesRef for why it lives up there).
   bakeSelectedTranslationsRef.current = bakeSelectedTransforms;
 
-  // Revert the translate DRAFT back to the baseline captured when the tool
-  // opened. For clouds this rewrites the render-only `translation` in editStates;
-  // for a skeleton it rewrites skeletonPositions. Clears the baseline map. Used
-  // by Cancel, X→Discard, and the exit-without-OK safety net.
+  // Revert the DRAFT back to the baseline captured when the tool opened (or
+  // when a cloud was checked). For clouds this rewrites the render-only
+  // translation / rotation / scale in editStates; for a skeleton it rewrites
+  // skeletonPositions. Clears the baseline map. Used by Cancel, X→Discard, and
+  // the exit-without-OK safety net. Meshes never need it: their preview is
+  // computed from the delta at render time and nothing is written until OK.
   const revertTranslateDraftToBaseline = useCallback(() => {
     const base = translateBaselineRef.current;
     if (base.size === 0) return;
@@ -11131,11 +11224,12 @@ export default function PointCloudViewer({
       const p = base.get(selectedSkeletonId)!.t;
       setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { ...p }));
     } else {
+      const entries = [...base];
       setEditStates(prev => {
         const next = new Map(prev);
-        for (const [id, { t, r }] of base) {
+        for (const [id, { t, r, s: sc }] of entries) {
           const state = next.get(id);
-          if (state) next.set(id, { ...state, translation: { ...t }, rotation: { ...r } });
+          if (state) next.set(id, { ...state, translation: { ...t }, rotation: { ...r }, scale: sc ? { ...sc } : undefined });
         }
         return next;
       });
@@ -11143,46 +11237,138 @@ export default function PointCloudViewer({
     translateBaselineRef.current = new Map();
   }, [selectedSkeletonId]);
 
-  // OK: commit the pending translate. Skeletons keep their render-only offset
-  // (nothing to bake) so OK just closes; clouds bake into geometry. Clears the
-  // baseline FIRST so the exit-revert safety net becomes a no-op for this path,
-  // then flips the "Applying…" state until the bake resolves and closes. On a
-  // bake failure the panel stays open (isApplying back to false) so the user can
-  // retry — the offset is still in edit-state.
-  const handleApplyTranslate = useCallback(async () => {
-    // Clearing the baseline BEFORE the async bake means a mode change mid-bake
-    // won't double-revert; the bake itself resets translation to 0 on success.
-    translateBaselineRef.current = new Map();
-    if (selectedSkeletonId) {
-      setEditMode('none');  // skeleton translate is render-only; just close
-      return;
+  // What a checked mesh is, for composeMeshDelta: its live transform, the
+  // worldShift its vertices are expressed against (same rule as the render
+  // loop), and whether it is a voxel grid or a generated plant.
+  const meshDeltaInput = useCallback((mesh: MeshEntry) => {
+    const sourceCloud = cloudsRef.current.find(c => c.id === mesh.sourceCloudId);
+    return {
+      position: meshPositionsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 },
+      rotation: meshRotationsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 },
+      scale: meshScalesRef.current.get(mesh.id) || { x: 1, y: 1, z: 1 },
+      worldShift: mesh.method === 'dem' ? null : (sourceCloud?.data?.octree?.worldShift ?? null),
+      kind: mesh.gridSubdivisions ? 'grid' as const : mesh.isPlant ? 'plant' as const : 'mesh' as const,
+    };
+  }, []);
+
+  // The delta as one matrix in the scene's render frame, about the scene origin.
+  const transformDeltaMatrix = useCallback((d: AffineDelta) => {
+    const P = sceneOriginRef.current;
+    return poseToMatrix(d.t, d.r, { x: P[0], y: P[1], z: P[2] }, d.s);
+  }, []);
+
+  // Per checked mesh, what OK would do with it (trs / vertex bake / blocked).
+  // Drives the panel's OK gate and its "will be baked" note.
+  const transformMeshOutcomes = useMemo(() => {
+    const out = new Map<string, ReturnType<typeof composeMeshDelta>>();
+    if (editMode !== 'translate') return out;
+    const D = transformDeltaMatrix(transformDelta);
+    for (const id of idsOfKind(transformTargets, 'mesh')) {
+      const mesh = meshes.find(m => m.id === id);
+      if (mesh) out.set(id, composeMeshDelta(D, meshDeltaInput(mesh)));
     }
+    return out;
+    // meshPositions/Rotations/Scales: meshDeltaInput reads their refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, transformDelta, transformTargets, meshes, meshPositions, meshRotations, meshScales, sceneOrigin, transformDeltaMatrix, meshDeltaInput]);
+
+  // Commit the delta onto every checked mesh as ONE undoable transaction: a
+  // `transform` per mesh, plus a `replaceObject` for a mesh whose result needs
+  // its residual stretch baked into the vertices. Refs are written first
+  // (captureTransform and the gizmo read them synchronously). Returns false
+  // when a mesh cannot take the delta (the panel already disables OK then).
+  const commitTransformToMeshes = useCallback((meshIds: string[], d: AffineDelta): boolean => {
+    if (meshIds.length === 0 || isIdentityDelta(d)) return true;
+    const D = transformDeltaMatrix(d);
+    const planned: { mesh: MeshEntry; res: Exclude<ReturnType<typeof composeMeshDelta>, { kind: 'blocked' }> }[] = [];
+    for (const id of meshIds) {
+      const mesh = meshes.find(m => m.id === id);
+      if (!mesh) continue;
+      const res = composeMeshDelta(D, meshDeltaInput(mesh));
+      if (res.kind === 'blocked') return false;
+      planned.push({ mesh, res });
+    }
+    const actions: SceneAction[] = [];
+    for (const { mesh, res } of planned) {
+      const before = captureTransform('mesh', mesh.id) as TransformState;
+      const after: TransformState = {
+        position: res.position,
+        rotation: res.rotation,
+        scale: res.kind === 'trs' ? res.scale : { x: 1, y: 1, z: 1 },
+      };
+      meshPositionsRef.current.set(mesh.id, after.position!);
+      meshRotationsRef.current.set(mesh.id, after.rotation!);
+      meshScalesRef.current.set(mesh.id, after.scale!);
+      actions.push({ t: 'transform', kind: 'mesh', id: mesh.id, before, after });
+      if (res.kind === 'residual') {
+        actions.push({
+          t: 'replaceObject', kind: 'mesh', id: mesh.id,
+          before: mesh,
+          after: { ...mesh, data: bakeResidualIntoMeshData(mesh.data, res.K) },
+        });
+      }
+    }
+    if (actions.length > 0) {
+      scene.commit({
+        label: planned.length === 1 ? 'transform mesh' : `transform ${planned.length} meshes`,
+        actions,
+      });
+    }
+    return true;
+  }, [meshes, meshDeltaInput, transformDeltaMatrix, captureTransform, scene]);
+
+  // OK for the Transformation tool.
+  //
+  // Meshes commit first (synchronous, undoable, cannot fail once the panel has
+  // let OK through) and are unchecked, so a retry after a cloud failure cannot
+  // apply them twice. Clouds then bake one after another. A cloud that baked is
+  // unchecked too (its draft is consumed, and the delta must not re-apply to
+  // it); a cloud that failed stays checked with the delta still drawn, so OK
+  // retries exactly the remainder and Cancel reverts it. All done → close.
+  const handleApplyTransform = useCallback(async () => {
+    const d = transformDeltaRef.current;
+    const targets = transformTargetsRef.current;
+    const meshIds = idsOfKind(targets, 'mesh');
+    const cloudIds = idsOfKind(targets, 'cloud');
+    if (!commitTransformToMeshes(meshIds, d)) return;
+    const afterMeshes = new Set([...targets].filter(k => parseTargetKey(k)?.kind !== 'mesh'));
+    transformTargetsRef.current = afterMeshes;
+    setTransformTargetsState(afterMeshes);
+
+    // Clear the baseline BEFORE the async bake so a mode change mid-bake can't
+    // revert a cloud the bake is consuming; re-armed below for failures.
+    translateBaselineRef.current = new Map();
     setIsApplyingTranslate(true);
-    let ok = false;
+    let failures: string[] = [];
     try {
-      ok = await bakeSelectedTransforms();
+      failures = await bakeTransformsCollectingFailures(cloudIds);
     } finally {
       setIsApplyingTranslate(false);
     }
-    if (ok) {
+    if (failures.length === 0) {
       setEditMode('none');
-    } else {
-      // Bake failed: re-arm the baseline so a later Cancel/exit can still revert
-      // the offset the user is still seeing (bakeSelectedTransforms left it in
-      // edit-state). Recapture from the CURRENT (pre-bake) selection state.
-      const rearmed = new Map<string, {
-        t: { x: number; y: number; z: number };
-        r: { x: number; y: number; z: number };
-      }>();
-      for (const id of selectedIds) {
-        // Baseline is the ORIGINAL pose (translation/rotation 0 unless already
-        // baked-in); since a failed bake didn't move geometry, reverting to zero
-        // draft restores the visible pre-transform state.
-        rearmed.set(id, { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } });
-      }
-      translateBaselineRef.current = rearmed;
+      return;
     }
-  }, [selectedSkeletonId, bakeSelectedTransforms, selectedIds]);
+    const failed = new Set(failures);
+    const remaining = new Set([...transformTargetsRef.current].filter(k => {
+      const p = parseTargetKey(k);
+      return !!p && p.kind === 'cloud' && failed.has(p.id);
+    }));
+    transformTargetsRef.current = remaining;
+    setTransformTargetsState(remaining);
+    // A failed bake didn't move geometry, so the pre-transform state is a zero
+    // draft: re-arm that as the baseline so Cancel/exit still reverts it.
+    translateBaselineRef.current = new Map(failures.map(id => [id, {
+      t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 },
+    }]));
+  }, [commitTransformToMeshes, bakeTransformsCollectingFailures]);
+
+  // OK for the skeleton translate panel: the offset is render-only, so OK just
+  // keeps it (clearing the baseline makes the exit-revert a no-op).
+  const handleApplySkeletonTranslate = useCallback(() => {
+    translateBaselineRef.current = new Map();
+    setEditMode('none');
+  }, []);
 
   // Cancel / Discard: revert to baseline and close.
   const handleCancelTranslate = useCallback(() => {
@@ -11190,43 +11376,50 @@ export default function PointCloudViewer({
     setEditMode('none');
   }, [revertTranslateDraftToBaseline]);
 
-  // Translate mode is a DRAFT session with explicit OK/Cancel — it does NOT
-  // auto-bake. On ENTER we snapshot each selected object's current translation
-  // as the baseline (so Cancel/X-discard can revert to it). On EXIT we restore
-  // any object still holding a non-baseline offset — this is the safety net for
-  // exits that bypass the panel buttons (e.g. the tool is toggled off via its
-  // toolbar button or Cmd+K): leaving without OK means the pending translate is
-  // DISCARDED, never silently baked. OK bakes explicitly (handleApplyTranslate)
-  // and clears the baseline first so this exit-revert is a no-op for it.
+  // Both transform modes are DRAFT sessions with explicit OK/Cancel — they do
+  // NOT auto-bake. On ENTER the baseline is captured (the Transformation tool
+  // does it while seeding its targets; the skeleton panel here). On EXIT
+  // anything still off its baseline is restored — the safety net for exits that
+  // bypass the panel buttons (the toolbar button, Cmd+K, another tool opening):
+  // leaving without OK DISCARDS the draft, never silently bakes it. OK clears
+  // the baseline first so this exit-revert is a no-op for it.
   const prevEditModeRef = useRef(editMode);
   useEffect(() => {
     const prev = prevEditModeRef.current;
     prevEditModeRef.current = editMode;
 
-    if (prev !== 'translate' && editMode === 'translate') {
-      // ENTER: capture baselines (translation + rotation) for the current selection.
-      const base = new Map<string, {
-        t: { x: number; y: number; z: number };
-        r: { x: number; y: number; z: number };
-      }>();
+    if (prev !== 'skeleton-translate' && editMode === 'skeleton-translate') {
+      const base = new Map<string, { t: { x: number; y: number; z: number }; r: { x: number; y: number; z: number } }>();
       if (selectedSkeletonId) {
         const p = skeletonPositionsRef.current.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
         base.set(selectedSkeletonId, { t: { ...p }, r: { x: 0, y: 0, z: 0 } });
-      } else {
-        for (const id of selectedIds) {
-          const state = editStatesRef.current.get(id);
-          const t = state?.translation ?? { x: 0, y: 0, z: 0 };
-          const r = state?.rotation ?? { x: 0, y: 0, z: 0 };
-          base.set(id, { t: { ...t }, r: { ...r } });
-        }
       }
       translateBaselineRef.current = base;
-    } else if (prev === 'translate' && editMode !== 'translate') {
-      // EXIT: revert anything still off its baseline (discard the draft). If OK
-      // baked, it already cleared the baseline map, so this loop finds nothing.
+    } else if (prev === 'skeleton-translate' && editMode !== 'skeleton-translate') {
       revertTranslateDraftToBaseline();
     }
-  }, [editMode, selectedSkeletonId, selectedIds, revertTranslateDraftToBaseline]);
+
+    if (prev !== 'translate' && editMode === 'translate') {
+      if (!transformSeededRef.current) seedTransformToolRef.current();
+    } else if (prev === 'translate' && editMode !== 'translate') {
+      revertTranslateDraftToBaseline();
+      transformTargetsRef.current = new Set();
+      setTransformTargetsState(new Set());
+      transformDeltaRef.current = IDENTITY_DELTA;
+      setTransformDeltaState(IDENTITY_DELTA);
+      transformSeededRef.current = false;
+    }
+  }, [editMode, selectedSkeletonId, revertTranslateDraftToBaseline]);
+
+  // An object deleted while the tool is open drops out of the checked set.
+  useEffect(() => {
+    if (editMode !== 'translate') return;
+    const pruned = pruneTargets(transformTargetsRef.current, clouds.map(c => c.id), meshes.map(m => m.id));
+    if (pruned.size !== transformTargetsRef.current.size) {
+      transformTargetsRef.current = pruned;
+      setTransformTargetsState(pruned);
+    }
+  }, [editMode, clouds, meshes]);
 
   // Resolve a cloud to either its in-memory display data (flat clouds) or a
   // backend point-source descriptor (octree clouds, whose positions buffer is
@@ -12434,29 +12627,13 @@ export default function PointCloudViewer({
     const meshScale = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
     const meshRot = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
 
-    const rotX = meshRot.x * Math.PI / 180;
-    const rotY = meshRot.y * Math.PI / 180;
-    const rotZ = meshRot.z * Math.PI / 180;
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
-
+    // The drawn transform (meshWorldMatrix), so the scan sees the mesh exactly
+    // where the viewport shows it.
     const vertices: number[][] = [];
-    for (let i = 0; i < mesh.data.vertexCount; i++) {
-      let x = mesh.data.vertices[i * 3] * meshScale.x;
-      let y = mesh.data.vertices[i * 3 + 1] * meshScale.y;
-      let z = mesh.data.vertices[i * 3 + 2] * meshScale.z;
-      // Rotate around X
-      let y1 = y * cosX - z * sinX;
-      let z1 = y * sinX + z * cosX;
-      // Rotate around Y
-      let x2 = x * cosY + z1 * sinY;
-      let z2 = -x * sinY + z1 * cosY;
-      // Rotate around Z
-      let x3 = x2 * cosZ - y1 * sinZ;
-      let y3 = x2 * sinZ + y1 * cosZ;
-      vertices.push([x3 + meshPos.x, y3 + meshPos.y, z2 + meshPos.z]);
-    }
+    forEachWorldVertex(
+      mesh.data.vertices, mesh.data.vertexCount, meshWorldMatrix(meshPos, meshRot, meshScale),
+      (wx, wy, wz) => { vertices.push([wx, wy, wz]); },
+    );
 
     const triangles: number[][] = [];
     for (let i = 0; i < mesh.data.triangleCount; i++) {
@@ -16407,19 +16584,15 @@ export default function PointCloudViewer({
                 rotation: { x: 0, y: 0, z: 0 },
                 // COMPOSE onto any pose already standing in for this octree —
                 // registering a scan twice must accumulate, not replace.
-                storedPose: {
-                  ...composeCloudPose(
-                    {
-                      translation: posed.translation,
-                      rotation: posed.rotation,
-                      storedPose: state.storedPose,
-                    },
-                    result.cache_id,
-                    pivot,
-                  ),
+                storedPose: commitStoredPose(
+                  {
+                    translation: posed.translation,
+                    rotation: posed.rotation,
+                    storedPose: state.storedPose,
+                  },
+                  result.cache_id,
                   pivot,
-                  cacheId: result.cache_id,
-                },
+                ),
               });
               return next;
             });
@@ -16970,19 +17143,15 @@ export default function PointCloudViewer({
                   // renders un-posed — and `ensureOctreeFrameCurrent` would never
                   // fire again for it, letting a later screen-space edit ship a
                   // frozen camera into a mismatched frame with no guard.
-                  storedPose: {
-                    ...composeCloudPose(
-                      {
-                        translation: posed.translation,
-                        rotation: posed.rotation,
-                        storedPose: st.storedPose,
-                      },
-                      result.cache_id,
-                      pivot,
-                    ),
+                  storedPose: commitStoredPose(
+                    {
+                      translation: posed.translation,
+                      rotation: posed.rotation,
+                      storedPose: st.storedPose,
+                    },
+                    result.cache_id,
                     pivot,
-                    cacheId: result.cache_id,
-                  },
+                  ),
                 });
                 return next;
               });
@@ -18275,6 +18444,19 @@ export default function PointCloudViewer({
     };
 
     const applyRotate = (modal: TransformModalState, angleDeg: number) => {
+      if (modal.target === 'tool') {
+        const o = modal.originalDelta ?? IDENTITY_DELTA;
+        const r = { ...o.r };
+        // Free defaults to Z, matching the cloud and mesh gestures.
+        if (modal.axis === 'x') r.x = o.r.x + angleDeg;
+        else if (modal.axis === 'y') r.y = o.r.y + angleDeg;
+        else if (modal.axis === 'z' || modal.axis === 'free') r.z = o.r.z + angleDeg;
+        else if (modal.axis === 'yz') { r.y = o.r.y + angleDeg; r.z = o.r.z + angleDeg; }
+        else if (modal.axis === 'xz') { r.x = o.r.x + angleDeg; r.z = o.r.z + angleDeg; }
+        else if (modal.axis === 'xy') { r.x = o.r.x + angleDeg; r.y = o.r.y + angleDeg; }
+        applyTransformDelta({ ...o, r });
+        return;
+      }
       if (modal.target === 'scan') {
         if (!modal.scanId || !modal.originalScanParams) return;
         // Rotation for a scan position IS its scanner tilt — the same two
@@ -18314,30 +18496,6 @@ export default function PointCloudViewer({
         });
         return;
       }
-      if (modal.target === 'cloud') {
-        if (!modal.cloudIds || !modal.originalCloudRotations) return;
-        // Writes the cloud's DRAFT rotation — the panel's Rotation fields, turned
-        // about the scene origin like the gizmo rings — never a bake. Free
-        // defaults to Z, matching meshes.
-        setEditStates(prev => {
-          const next = new Map(prev);
-          for (const id of modal.cloudIds!) {
-            const orig = modal.originalCloudRotations!.get(id);
-            const state = next.get(id);
-            if (!orig || !state) continue;
-            const rot = { ...orig };
-            if (modal.axis === 'x') rot.x = orig.x + angleDeg;
-            else if (modal.axis === 'y') rot.y = orig.y + angleDeg;
-            else if (modal.axis === 'z' || modal.axis === 'free') rot.z = orig.z + angleDeg;
-            else if (modal.axis === 'yz') { rot.y = orig.y + angleDeg; rot.z = orig.z + angleDeg; }
-            else if (modal.axis === 'xz') { rot.x = orig.x + angleDeg; rot.z = orig.z + angleDeg; }
-            else if (modal.axis === 'xy') { rot.x = orig.x + angleDeg; rot.y = orig.y + angleDeg; }
-            next.set(id, { ...state, rotation: rot });
-          }
-          return next;
-        });
-        return;
-      }
       if (modal.target !== 'mesh' || !modal.meshIds || !modal.originalMeshRot) return;
       // Every selected mesh turns by the SAME angle about its own origin — the
       // per-object convention the rotation gizmo already uses. Each is computed
@@ -18367,6 +18525,11 @@ export default function PointCloudViewer({
     };
 
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
+      if (modal.target === 'tool') {
+        const o = modal.originalDelta ?? IDENTITY_DELTA;
+        applyTransformDelta({ ...o, t: { x: o.t.x + delta.x, y: o.t.y + delta.y, z: o.t.z + delta.z } });
+        return;
+      }
       if (modal.target === 'scan') {
         if (!modal.scanId || !modal.originalScanParams) return;
         // Writes params.origin — the dialog's Origin X/Y/Z fields. The delta is
@@ -18425,27 +18588,22 @@ export default function PointCloudViewer({
           for (const [id, pos] of updates) next.set(id, pos);
           return next;
         });
-      } else if (modal.target === 'cloud' && modal.cloudIds && modal.originalCloudTranslations) {
-        setEditStates(prev => {
-          const next = new Map(prev);
-          for (const id of modal.cloudIds!) {
-            const orig = modal.originalCloudTranslations!.get(id);
-            if (!orig) continue;
-            const state = next.get(id) || {
-              translation: { x: 0, y: 0, z: 0 },
-              erasedIndices: new Set<number>(),
-            };
-            next.set(id, {
-              ...state,
-              translation: { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z },
-            });
-          }
-          return next;
-        });
       }
     };
 
     const applyScale = (modal: TransformModalState, factor: { x: number; y: number; z: number }) => {
+      if (modal.target === 'tool') {
+        const o = modal.originalDelta ?? IDENTITY_DELTA;
+        applyTransformDelta({
+          ...o,
+          s: {
+            x: Math.max(0.001, o.s.x * factor.x),
+            y: Math.max(0.001, o.s.y * factor.y),
+            z: Math.max(0.001, o.s.z * factor.z),
+          },
+        });
+        return;
+      }
       if (modal.target === 'mesh' && modal.meshIds && modal.originalMeshScale) {
         // Same factor onto each mesh's own captured scale, so meshes of
         // different sizes keep their relative proportions.
@@ -18529,6 +18687,14 @@ export default function PointCloudViewer({
     const cancelModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
+      if (modal.target === 'tool') {
+        applyTransformDelta(modal.originalDelta ?? IDENTITY_DELTA);
+        pendingHistoryRef.current = null;
+        transformModalRef.current = null;
+        setTransformModal(null);
+        setGizmoDragging(false);
+        return;
+      }
       if (modal.target === 'scan') {
         // The captured params ARE the pre-gesture state, so writing them back
         // restores origin and tilt in one shot — nothing to reconstruct.
@@ -18602,22 +18768,6 @@ export default function PointCloudViewer({
             return next;
           });
         }
-      } else if (modal.target === 'cloud' && modal.cloudIds) {
-        setEditStates(prev => {
-          const next = new Map(prev);
-          for (const id of modal.cloudIds!) {
-            const state = next.get(id);
-            if (!state) continue;
-            const t = modal.originalCloudTranslations?.get(id);
-            const r = modal.originalCloudRotations?.get(id);
-            next.set(id, {
-              ...state,
-              ...(t ? { translation: t } : {}),
-              ...(r ? { rotation: r } : {}),
-            });
-          }
-          return next;
-        });
       }
       pendingHistoryRef.current = null;
       transformModalRef.current = null;
@@ -18628,21 +18778,18 @@ export default function PointCloudViewer({
     const commitModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
-      const isCloudDraft = modal.target === 'cloud' && modal.cloudIds;
-      // A cloud translate/rotate via the Blender-style modal does NOT bake on Enter.
-      // It only updates the pending DRAFT (already written into editStates by
-      // applyTranslate), exactly like dragging the gizmo or typing in the panel.
-      // The Translate panel's OK button is the single commit point, so all three
-      // input methods (T-modal, gizmo, numeric panel) share one apply/cancel
-      // path and can't disagree. No undo history is recorded for the draft (the
-      // eventual bake is non-undoable). Meshes/skeletons keep their render-only
-      // transform and DO record history as before.
+      // A gesture on the open Transform tool does NOT commit on Enter. It only
+      // updates the tool's DRAFT delta, exactly like dragging the gizmo or typing
+      // in the panel; the panel's OK is the single commit point, so all three
+      // input methods share one apply/cancel path and can't disagree. Direct
+      // mesh/skeleton gestures (tool closed) keep their own transform and DO
+      // record history as before.
       // A scan transform writes params straight through onUpdateScanParams and
       // records no history: 'scan' isn't a kind pendingHistoryRef/captureTransform
       // can represent, and handleUpdateScanParams dispatches the non-undoable
       // replaceCollection. Same gap pose edits already have. Explicit rather
       // than relying on commitHistoryEntry's no-pending early return.
-      if (isCloudDraft || modal.target === 'scan') {
+      if (modal.target === 'scan' || modal.target === 'tool') {
         pendingHistoryRef.current = null;  // drop the BEFORE from startModal
       } else {
         commitHistoryEntry();
@@ -18652,7 +18799,9 @@ export default function PointCloudViewer({
       setGizmoDragging(false);
     };
 
-    const startModal = (op: 'translate' | 'scale' | 'rotate') => {
+    // `forTool`: the gesture that just OPENED the Transformation tool — its
+    // editMode is still the pre-open value in this closure.
+    const startModal = (op: 'translate' | 'scale' | 'rotate', forTool = false) => {
       if (transformModalRef.current) return;
       if (!mainCameraRef.current) return;
       if (!lastMouse.set) return;
@@ -18702,6 +18851,21 @@ export default function PointCloudViewer({
           originalPoseRot: { rollDeg: d.rollDeg, pitchDeg: d.pitchDeg, yawDeg: d.yawDeg },
           numericBuffer: '',
         };
+      } else if (forTool || editMode === 'translate') {
+        // The Transformation tool is open: drive its ONE delta, whatever the
+        // panes have selected. Rotation and scale turn about the scene origin
+        // (the pivot the rings show and the bake uses).
+        if (transformTargetsRef.current.size === 0) return;
+        const o = sceneOriginRef.current;
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot: op === 'translate' ? pivot : { x: o[0] - off.x, y: o[1] - off.y, z: o[2] - off.z },
+          target: 'tool',
+          originalDelta: transformDeltaRef.current,
+          numericBuffer: '',
+        };
       } else if (selectedMeshes.length > 0) {
         const meshIds: string[] = [];
         const origPos = new Map<string, { x: number; y: number; z: number }>();
@@ -18746,10 +18910,11 @@ export default function PointCloudViewer({
           numericBuffer: '',
         };
         startHistoryEntry('skeleton', skeletonIds[0]);
-      } else if (op !== 'scale' && editMode !== 'translate' && scanTarget) {
-        // Scan position. Ahead of the cloud branch and gated on the Transform
-        // tool being closed: with it OPEN, `t` keeps its existing meaning of
-        // moving the point cloud, so no existing gesture changes behavior.
+      } else if (op !== 'scale' && scanTarget) {
+        // Scan position. Reached only with the Transform tool closed (the tool
+        // branch above wins while it is open, so `t` then drives the tool).
+        // A cloud selected without a scan position opens the tool instead (see
+        // `cloudGesture` in handleKeyDown), so there is no bare cloud branch.
         // Scale is skipped for the same reason a pose skips it — a scanner has
         // no size. No history entry: 'scan' isn't a representable history kind
         // (see commitModal), matching how pose edits behave today.
@@ -18762,36 +18927,6 @@ export default function PointCloudViewer({
           target: 'scan',
           scanId: scan.id,
           originalScanParams: scan.params,
-          numericBuffer: '',
-        };
-      } else if (op !== 'scale' && selectedIds.size > 0) {
-        const originals = new Map<string, { x: number; y: number; z: number }>();
-        const originalRots = new Map<string, { x: number; y: number; z: number }>();
-        const ids: string[] = [];
-        for (const id of selectedIds) {
-          if (!clouds.some(c => c.id === id)) continue;
-          const s = editStates.get(id);
-          originals.set(id, { ...(s?.translation ?? { x: 0, y: 0, z: 0 }) });
-          originalRots.set(id, { ...(s?.rotation ?? { x: 0, y: 0, z: 0 }) });
-          ids.push(id);
-        }
-        if (ids.length === 0) return;
-        // History only captures one entry at a time (existing limitation)
-        startHistoryEntry('cloud', ids[0]);
-        // A cloud rotates about the SCENE ORIGIN (the rings' pivot, and what the
-        // bake uses), so the cursor's sweep must be measured around that point
-        // on screen, not around the cloud's center.
-        const o = sceneOriginRef.current;
-        state = {
-          op,
-          axis: 'free',
-          startScreen: { x: lastMouse.x, y: lastMouse.y },
-          pivot: op === 'rotate' ? { x: o[0] - off.x, y: o[1] - off.y, z: o[2] - off.z } : pivot,
-          target: 'cloud',
-          cloudIds: ids,
-          ...(op === 'rotate'
-            ? { originalCloudRotations: originalRots }
-            : { originalCloudTranslations: originals }),
           numericBuffer: '',
         };
       }
@@ -18826,7 +18961,7 @@ export default function PointCloudViewer({
         // own commit, no panel involved). With the tool OPEN, editMode ===
         // 'translate' and the cloud keeps the gesture.
         const cloudGesture =
-          (k === 't' || k === 'r') && editMode !== 'translate' &&
+          (k === 't' || k === 'r' || k === 's') && editMode !== 'translate' &&
           selectedIds.size > 0 && selectedMeshes.length === 0 && selectedSkeletons.length === 0 &&
           trajectoryEditorRef.current?.selectedIndex == null &&
           !scanTransformTarget();
@@ -18835,10 +18970,8 @@ export default function PointCloudViewer({
           if (editMode !== 'none') return;
           if (!clouds.some(c => selectedIds.has(c.id))) return;
           e.preventDefault();
-          setShowResizePanel(false);
-          closeAllToolPanels('editMode');
-          setEditMode('translate');
-          startModal(k === 't' ? 'translate' : 'rotate');
+          openTransformTool();
+          startModal(k === 't' ? 'translate' : k === 'r' ? 'rotate' : 'scale', true);
           return;
         }
         if (k === 't') { e.preventDefault(); startModal('translate'); }
@@ -18939,6 +19072,8 @@ export default function PointCloudViewer({
     startHistoryEntry,
     commitHistoryEntry,
     closeAllToolPanels,
+    openTransformTool,
+    applyTransformDelta,
     // Scan-position transforms. The scan list itself is read through
     // scansWithParamsRef, NOT listed here — a gesture rewrites params on every
     // mouse move, so depending on it would re-subscribe all four listeners per
@@ -20417,8 +20552,9 @@ export default function PointCloudViewer({
     const e = editStates.get(cloud.id);
     const t = e?.translation ?? { x: 0, y: 0, z: 0 };
     const r = e?.rotation ?? { x: 0, y: 0, z: 0 };
+    const sc = e?.scale ?? { x: 1, y: 1, z: 1 };
     return [cloud.data.octree?.cacheId ?? '', e?.pendingDeletes?.length ?? 0,
-      t.x, t.y, t.z, r.x, r.y, r.z].join('|');
+      t.x, t.y, t.z, r.x, r.y, r.z, sc.x, sc.y, sc.z].join('|');
   }, [editStates]);
 
   // The one selected cloud the inventory would run on, and why it can't.
@@ -22801,6 +22937,7 @@ export default function PointCloudViewer({
                   translation={hasResamplePreview ? undefined : cloudPose.translation}
                   rotation={hasResamplePreview ? undefined : cloudPose.rotation}
                   pivot={hasResamplePreview ? undefined : cloudPose.pivot}
+                  poseMatrix={hasResamplePreview ? null : cloudPose.matrix ?? null}
                   // Render-only precision safety net: the resample preview lives
                   // at the origin already (group [0,0,0]), so it gets no offset;
                   // the live cloud renders at world − displayOffset.
@@ -22952,8 +23089,10 @@ export default function PointCloudViewer({
                 // frame here is world coords. Wrap in T(pivot)·R·T(−pivot) groups to
                 // rotate about the pivot (scene origin, else the cloud's bbox
                 // center). Zero rotation renders the bare cloud (no extra nodes).
-                const rot = editState.rotation;
-                const hasRot = !!rot && (rot.x !== 0 || rot.y !== 0 || rot.z !== 0);
+                const rot = editState.rotation ?? { x: 0, y: 0, z: 0 };
+                const scl = editState.scale ?? { x: 1, y: 1, z: 1 };
+                const hasRot = rot.x !== 0 || rot.y !== 0 || rot.z !== 0
+                  || scl.x !== 1 || scl.y !== 1 || scl.z !== 1;
                 const cloudEl = (
                   <PointCloud
                     data={sourceData}
@@ -22978,15 +23117,18 @@ export default function PointCloudViewer({
                 if (!hasRot || hasResamplePreview) return cloudEl;
                 const P = { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] };
                 const euler: [number, number, number] = [
-                  THREE.MathUtils.degToRad(rot!.x),
-                  THREE.MathUtils.degToRad(rot!.y),
-                  THREE.MathUtils.degToRad(rot!.z),
+                  THREE.MathUtils.degToRad(rot.x),
+                  THREE.MathUtils.degToRad(rot.y),
+                  THREE.MathUtils.degToRad(rot.z),
                 ];
+                // T(P)·R·S·T(−P) — the same order as `poseToMatrix`.
                 return (
                   <group position={[P.x, P.y, P.z]}>
                     <group rotation={euler}>
-                      <group position={[-P.x, -P.y, -P.z]}>
-                        {cloudEl}
+                      <group scale={[scl.x, scl.y, scl.z]}>
+                        <group position={[-P.x, -P.y, -P.z]}>
+                          {cloudEl}
+                        </group>
                       </group>
                     </group>
                   </group>
@@ -23023,6 +23165,7 @@ export default function PointCloudViewer({
               translation={cloudPose.translation}
               rotation={cloudPose.rotation}
               pivot={cloudPose.pivot}
+              poseMatrix={cloudPose.matrix ?? null}
               displayOffset={displayOffset}
             />
           );
@@ -23039,7 +23182,12 @@ export default function PointCloudViewer({
           // For non-shape meshes, also apply source cloud translation
           const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
           const editState = sourceCloud ? getEditState(sourceCloud.id) : null;
-          const cloudOffset = editState
+          // A mesh CHECKED in the Transformation tool is previewed through the
+          // tool's delta (the wrapping matrix group below), so it must not also
+          // follow its source cloud's draft — that cloud may be checked too, and
+          // the mesh would move twice.
+          const isTransformTarget = editMode === 'translate' && transformTargets.has(targetKey('mesh', mesh.id));
+          const cloudOffset = editState && !isTransformTarget
             ? { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z }
             : { x: 0, y: 0, z: 0 };
           // A mesh triangulated/derived from a worldShift-imported cloud has WORLD-frame
@@ -23052,9 +23200,25 @@ export default function PointCloudViewer({
             ? [0, 0, 0]
             : (sourceCloud?.data?.octree?.worldShift ?? [0, 0, 0]);
 
+          // Preview of the Transformation tool's delta D (render frame, about
+          // the scene origin): the drawn group already sits at −displayOffset,
+          // so conjugate: T(−o)·D·T(o). Identity for every other mesh.
+          const previewMatrix = isTransformTarget
+            ? new THREE.Matrix4().makeTranslation(-displayOffset.x, -displayOffset.y, -displayOffset.z)
+              .multiply(transformDeltaMatrix(transformDelta))
+              .multiply(new THREE.Matrix4().makeTranslation(displayOffset.x, displayOffset.y, displayOffset.z))
+            : IDENTITY_MATRIX4;
+
           return (
             <group
               key={mesh.id}
+              matrixAutoUpdate={false}
+              matrix={previewMatrix}
+              // With matrixAutoUpdate off, three only recomputes matrixWorld when
+              // this flag is set — R3F's copy into `.matrix` does not set it.
+              onUpdate={(self) => { self.matrixWorldNeedsUpdate = true; }}
+            >
+            <group
               // Render-only precision safety net: subtract displayOffset so the
               // mesh renders near the origin (secondary fix — mesh vertices are a
               // packed Float32Array, like flat clouds). Rotation/scale unaffected.
@@ -23178,6 +23342,7 @@ export default function PointCloudViewer({
                   />
                 ) : null;
               })()}
+            </group>
             </group>
           );
         })}
@@ -23718,7 +23883,7 @@ export default function PointCloudViewer({
             arrows are drawn), so it's the half that can move. Deliberately does
             NOT follow the draft translation: the rings don't either, and handles
             that slide away mid-drag are worse than handles that stay put. */}
-        {editMode === 'translate' && firstSelectedCloud && (
+        {editMode === 'translate' && transformTargets.size > 0 && (
           <TranslationGizmo
             // center in DISPLAY space (world − displayOffset): the gizmo's
             // DragHandler projects the center through the display-space camera, so
@@ -23752,7 +23917,7 @@ export default function PointCloudViewer({
             origin (the pivot the marker shows), concentric with the translation
             arrows above. Dragging updates the draft rotation (render-only); OK
             bakes it. */}
-        {editMode === 'translate' && firstSelectedCloud && (() => {
+        {editMode === 'translate' && transformTargets.size > 0 && (() => {
           const P = { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] };
           return (
             <RotationGizmo
@@ -23770,7 +23935,7 @@ export default function PointCloudViewer({
         })()}
 
         {/* Translation Gizmo for selected mesh */}
-        {editMode === 'translate' && selectedMesh && (() => {
+        {editMode === 'mesh-translate' && selectedMesh && (() => {
           const meshPos = meshPositions.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
           return (
             <TranslationGizmo
@@ -23790,7 +23955,7 @@ export default function PointCloudViewer({
         })()}
 
         {/* Translation Gizmo for selected skeleton */}
-        {editMode === 'translate' && selectedSkeleton && selectedSkeleton.data.pointCount > 0 && (() => {
+        {editMode === 'skeleton-translate' && selectedSkeleton && selectedSkeleton.data.pointCount > 0 && (() => {
           const skelPos = skeletonPositions.get(selectedSkeleton.id) || { x: 0, y: 0, z: 0 };
           // Calculate skeleton bounds for the gizmo's CENTER (its on-screen size
           // is fixed in pixels, so the extent is no longer needed for scaling).
@@ -25274,6 +25439,7 @@ export default function PointCloudViewer({
                         st?.translation ?? { x: 0, y: 0, z: 0 },
                         st?.rotation ?? { x: 0, y: 0, z: 0 },
                         renderPivot(sceneOrigin, b.center),
+                        st?.scale,
                       );
                       return [out.min.x, out.min.y, out.min.z, out.max.x, out.max.y, out.max.z]
                         .map(v => v.toFixed(3)).join(',');
@@ -25805,8 +25971,9 @@ export default function PointCloudViewer({
               }
               setSelectedMeshIds(new Set([id]));
               setSelectedSkeletonIds(new Set());
-              // Same panel the Transform toolbar button opens, so it closes any
-              // other open tool exactly as pressing that button would.
+              // The per-mesh ABSOLUTE editor (the toolbar's Transform tool is the
+              // relative, multi-object one). A tool panel like any other, so it
+              // closes whatever else is open.
               closeAllToolPanels('mesh-transform');
               setShowResizePanel(true);
             }}
@@ -27350,7 +27517,7 @@ export default function PointCloudViewer({
         onStartFit={(fitArgs) => { void handleFitCrown(fitArgs); }}
       />
 
-      {/* Transform Panel - shows when a mesh is selected and the Transform button is toggled */}
+      {/* Per-mesh Transform Panel (absolute values, grid, Fit to Scans) — opened from the mesh row's transform button */}
       {showResizePanel && selectedMesh && (() => {
         const mesh = selectedMesh;
         const scale = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
@@ -27368,12 +27535,12 @@ export default function PointCloudViewer({
             scale={scale}
             grid={mesh.gridSubdivisions || { x: 1, y: 1, z: 1 }}
             scaleLocked={scaleLocked}
-            translateActive={editMode === 'translate'}
+            translateActive={editMode === 'mesh-translate'}
             rotateActive={editMode === 'rotate'}
             fitAvailable={!!fit}
             onClose={() => setShowResizePanel(false)}
             onScaleLockedChange={setScaleLocked}
-            onToggleTranslate={() => setEditMode(editMode === 'translate' ? 'none' : 'translate')}
+            onToggleTranslate={() => setEditMode(editMode === 'mesh-translate' ? 'none' : 'mesh-translate')}
             onToggleRotate={() => setEditMode(editMode === 'rotate' ? 'none' : 'rotate')}
             onMoveToOrigin={handleMoveToOrigin}
             onFitToScans={() => {
@@ -27442,112 +27609,113 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Transformation Panel (translate + rotate) - shown for clouds/skeletons.
-          Meshes use the Transform panel instead. Rotation is cloud-only. */}
-      {editMode === 'translate' && !selectedMesh && (selectedSkeletonId || selectedIds.size > 0) && (() => {
-        // Resolve current translation + rotation + display name from the active
-        // selection. Skeletons have no rotation (render-only offset is translate).
-        let currentPos = { x: 0, y: 0, z: 0 };
-        let currentRot = { x: 0, y: 0, z: 0 };
-        let objectName = '';
-        const isCloud = !selectedSkeletonId && selectedIds.size > 0;
-        if (selectedSkeletonId) {
-          currentPos = skeletonPositions.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
-          const skeleton = skeletons.find(s => s.id === selectedSkeletonId);
-          objectName = skeleton ? `Skeleton ${skeleton.id.slice(0, 8)}` : 'Skeleton';
-        } else if (isCloud) {
-          const firstCloudId = Array.from(selectedIds)[0];
-          const editState = getEditState(firstCloudId);
-          currentPos = { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z };
-          currentRot = { ...getEditRotation(firstCloudId) };
-          objectName = clouds.find(c => c.id === firstCloudId)?.data.fileName || 'Point Cloud';
+      {/* Transformation tool: every cloud and mesh in a picker, one relative
+          move / rotate / scale about the scene origin for all checked ones. */}
+      {editMode === 'translate' && (() => {
+        const d = transformDelta;
+        const cloudTargetIds = idsOfKind(transformTargets, 'cloud');
+        const outcomes = [...transformMeshOutcomes.values()];
+        const blocked = outcomes.find(o => o.kind === 'blocked');
+        const nonUniform = !isUniformScale(d.s);
+        const warnings: { testId: string; text: string }[] = [];
+        if (nonUniform && cloudTargetIds.length > 0) {
+          warnings.push({
+            testId: 'transform-nonuniform-warning',
+            text: 'Non-uniform scale distorts each scan\'s beam geometry: Leaf Area Density, '
+              + 'Backfill Misses, scanner range values and trajectories are no longer '
+              + 'physically meaningful for these clouds.',
+          });
         }
+        if (outcomes.some(o => o.kind === 'residual')) {
+          warnings.push({
+            testId: 'transform-mesh-bake-note',
+            text: 'This scale shears a rotated mesh, so the stretch will be baked into its '
+              + 'vertices (still undoable).',
+          });
+        }
+        const P = sceneOrigin;
+        const fmt = (n: number) => (Math.abs(n) >= 1e4 ? n.toFixed(1) : n.toFixed(2));
+        const setAxis = (key: 't' | 'r', axis: 'x' | 'y' | 'z', v: number) =>
+          updateTransformDelta(cur => ({ ...cur, [key]: { ...cur[key], [axis]: v } }));
+        return (
+          <TransformationPanel
+            position={d.t}
+            rotation={d.r}
+            showRotation
+            objectName={`${transformTargets.size} checked`}
+            isDirty={!isIdentityDelta(d)}
+            isApplying={isApplyingTranslate}
+            onCoordChange={(axis, v) => setAxis('t', axis, v)}
+            onRotationChange={(axis, v) => setAxis('r', axis, v)}
+            onReset={() => updateTransformDelta(cur => ({ ...cur, t: { x: 0, y: 0, z: 0 } }))}
+            onResetRotation={() => updateTransformDelta(cur => ({ ...cur, r: { x: 0, y: 0, z: 0 } }))}
+            scale={d.s}
+            scaleLocked={transformScaleLocked}
+            onScaleLockedChange={setTransformScaleLocked}
+            onScaleChange={(axis, v) => {
+              const f = Math.max(0.001, v);
+              updateTransformDelta(cur => ({
+                ...cur,
+                s: transformScaleLocked ? { x: f, y: f, z: f } : { ...cur.s, [axis]: f },
+              }));
+            }}
+            onResetScale={() => updateTransformDelta(cur => ({ ...cur, s: { x: 1, y: 1, z: 1 } }))}
+            pivotLabel={`scene origin (${fmt(P[0])}, ${fmt(P[1])}, ${fmt(P[2])})`}
+            warnings={warnings}
+            okBlockedReason={blocked && blocked.kind === 'blocked' ? blocked.reason : null}
+            picker={{
+              items: transformPickerItems(
+                clouds.map(c => ({
+                  id: c.id,
+                  label: (() => {
+                    const sc = scans.find(x => x.id === c.id);
+                    return sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud');
+                  })(),
+                  color: c.color,
+                  pointCount: c.data.pointCount,
+                })),
+                meshes.map(m => ({ id: m.id, label: displayNameOfMesh(m), color: m.color })),
+              ),
+              selectedIds: transformTargets,
+              onChange: setTransformTargets,
+            }}
+            onApply={() => { void handleApplyTransform(); }}
+            onCancel={handleCancelTranslate}
+          />
+        );
+      })()}
 
-        // Dirty = the live draft (translation AND rotation) differs from the
-        // baseline captured when the tool opened. Drives the X-close confirm and
-        // the OK enabled state. Compare against the first selected object's
-        // baseline (the panel edits all selected clouds by the same delta, so one
-        // representative suffices).
-        const baselineId = selectedSkeletonId ?? Array.from(selectedIds)[0];
-        const baseline = (baselineId && translateBaselineRef.current.get(baselineId))
+      {/* Skeleton translate panel (render-only offset, translation only). */}
+      {editMode === 'skeleton-translate' && selectedSkeletonId && (() => {
+        const currentPos = skeletonPositions.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
+        const skeleton = skeletons.find(sk => sk.id === selectedSkeletonId);
+        const objectName = skeleton ? `Skeleton ${skeleton.id.slice(0, 8)}` : 'Skeleton';
+        const baseline = translateBaselineRef.current.get(selectedSkeletonId)
           || { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } };
         const isDirty =
           Math.abs(currentPos.x - baseline.t.x) > 1e-9 ||
           Math.abs(currentPos.y - baseline.t.y) > 1e-9 ||
-          Math.abs(currentPos.z - baseline.t.z) > 1e-9 ||
-          Math.abs(currentRot.x - baseline.r.x) > 1e-9 ||
-          Math.abs(currentRot.y - baseline.r.y) > 1e-9 ||
-          Math.abs(currentRot.z - baseline.r.z) > 1e-9;
-
+          Math.abs(currentPos.z - baseline.t.z) > 1e-9;
         return (
           <TransformationPanel
             position={currentPos}
-            rotation={currentRot}
-            showRotation={isCloud}
+            rotation={{ x: 0, y: 0, z: 0 }}
+            showRotation={false}
             objectName={objectName}
             isDirty={isDirty}
-            isApplying={isApplyingTranslate}
+            isApplying={false}
             onCoordChange={(axis, numValue) => {
-              if (selectedSkeletonId) {
-                setSkeletonPositions(prev => {
-                  const next = new Map(prev);
-                  const pos = next.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
-                  next.set(selectedSkeletonId, { ...pos, [axis]: numValue });
-                  return next;
-                });
-              } else if (selectedIds.size > 0) {
-                setEditStates(prev => {
-                  const next = new Map(prev);
-                  for (const cloudId of selectedIds) {
-                    const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
-                    next.set(cloudId, { ...state, translation: { ...state.translation, [axis]: numValue } });
-                  }
-                  return next;
-                });
-              }
-            }}
-            onRotationChange={(axis, numValue) => {
-              // Clouds only (rotation section is hidden for skeletons).
-              if (selectedIds.size === 0) return;
-              setEditStates(prev => {
+              setSkeletonPositions(prev => {
                 const next = new Map(prev);
-                for (const cloudId of selectedIds) {
-                  const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
-                  const rot = state.rotation ?? { x: 0, y: 0, z: 0 };
-                  next.set(cloudId, { ...state, rotation: { ...rot, [axis]: numValue } });
-                }
+                const pos = next.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
+                next.set(selectedSkeletonId, { ...pos, [axis]: numValue });
                 return next;
               });
             }}
-            onReset={() => {
-              // Zero the DRAFT translation (not a bake). Note: this makes the draft
-              // differ from a non-zero baseline, so isDirty stays true and OK/Cancel
-              // still resolve it — Reset is just "set the pending offset to 0".
-              if (selectedSkeletonId) {
-                setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { x: 0, y: 0, z: 0 }));
-              } else if (selectedIds.size > 0) {
-                setEditStates(prev => {
-                  const next = new Map(prev);
-                  for (const cloudId of selectedIds) {
-                    const state = next.get(cloudId);
-                    if (state) next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 } });
-                  }
-                  return next;
-                });
-              }
-            }}
-            onResetRotation={() => {
-              if (selectedIds.size === 0) return;
-              setEditStates(prev => {
-                const next = new Map(prev);
-                for (const cloudId of selectedIds) {
-                  const state = next.get(cloudId);
-                  if (state) next.set(cloudId, { ...state, rotation: { x: 0, y: 0, z: 0 } });
-                }
-                return next;
-              });
-            }}
-            onApply={() => { void handleApplyTranslate(); }}
+            onRotationChange={() => {}}
+            onReset={() => setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { x: 0, y: 0, z: 0 }))}
+            onResetRotation={() => {}}
+            onApply={handleApplySkeletonTranslate}
             onCancel={handleCancelTranslate}
           />
         );
@@ -27595,6 +27763,7 @@ export default function PointCloudViewer({
                 st.translation,
                 st.rotation ?? { x: 0, y: 0, z: 0 },
                 renderPivot(sceneOrigin, s.data!.bounds.center),
+                st.scale,
               )
             : origin;
           return [{ id: s.id, label: scanDisplayName(s), position }];

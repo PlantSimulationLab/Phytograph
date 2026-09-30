@@ -26,6 +26,7 @@ import pytest
 import requests
 
 import main
+import normals as normals_mod
 from tests.binframe import _create_session_direct, decode_streamed_json
 
 
@@ -703,3 +704,129 @@ def test_dropping_the_octree_also_drops_the_stale_pose(tmp_path, monkeypatch):
     assert sess.octree_cache_id is None
     assert sess.octree_pose is None, (
         "a session with no cached octree must not claim a stale pose")
+
+
+# ---------------------------------------------------------------------------
+# Affine matrices (the Transformation tool's SCALE)
+# ---------------------------------------------------------------------------
+
+def _affine(L: np.ndarray, t=(0.0, 0.0, 0.0)) -> list:
+    M = np.eye(4)
+    M[:3, :3] = L
+    M[:3, 3] = t
+    return M.reshape(-1).tolist()
+
+
+def _seed_normals(sess, normal: np.ndarray, zero_rows=()):
+    """Give every point the same unit normal (and zero some rows, as a deleted /
+    miss row that never received one would be)."""
+    n = np.tile(np.asarray(normal, dtype=np.float64), (len(sess.positions), 1))
+    for i in zero_rows:
+        n[i] = 0.0
+    with main._cloud_session_lock:
+        for i, slug in enumerate((normals_mod.NORMAL_X_SLUG, normals_mod.NORMAL_Y_SLUG,
+                                  normals_mod.NORMAL_Z_SLUG)):
+            main._session_put_column_locked(sess, slug, n[:, i].astype(np.float32))
+        main._session_put_column_locked(
+            sess, normals_mod.CURVATURE_SLUG, np.full(len(n), 0.01, dtype=np.float32))
+        main._session_put_column_locked(
+            sess, normals_mod.VERTICALITY_SLUG, np.zeros(len(n), dtype=np.float32))
+        sess.normals_stale = False
+
+
+def _normals(sess) -> np.ndarray:
+    return np.column_stack([np.asarray(sess.extras[s], dtype=np.float64) for s in (
+        normals_mod.NORMAL_X_SLUG, normals_mod.NORMAL_Y_SLUG, normals_mod.NORMAL_Z_SLUG)])
+
+
+def test_affine_scale_moves_every_point_under_a_world_shift(tmp_path, monkeypatch):
+    """Non-uniform scale + rotation + translation, conjugated by the shift, on
+    positions (read back in WORLD frame) — the same `_apply` every other point
+    array (beam origins, backfilled misses, miss origin) goes through."""
+    shift = np.array([545_000.0, 4_183_000.0, 30.0])
+    sid = _grid_session(tmp_path, monkeypatch, shift=shift)
+    src = main.PointSource(source_path="", session_id=sid)
+    before = main._read_points_from_source(src)[0].copy()
+    L = _rot_z(30.0) @ np.diag([2.0, 1.0, 0.5])
+    t = np.array([3.0, -1.0, 0.25])
+    main.session_transform(sid, main.SessionTransformRequest(matrix=_affine(L, t), octree_mode="pose"))
+    after = main._read_points_from_source(src)[0]
+    np.testing.assert_allclose(after, before @ L.T + t, atol=1e-6)
+
+
+def test_affine_scale_transforms_normals_by_the_inverse_transpose(tmp_path, monkeypatch):
+    """The plane x + z = 0 under scale (2, 1, 1) has normal ∝ (0.5, 0, 1): a
+    normal multiplied by L instead would be ∝ (2, 0, 1), off by ~37 deg. Zero
+    rows stay zero, and verticality follows the new normal."""
+    sid = _grid_session(tmp_path, monkeypatch)
+    sess = main._cloud_sessions[sid]
+    _seed_normals(sess, np.array([1.0, 0.0, 1.0]) / np.sqrt(2.0), zero_rows=(0,))
+    main.session_transform(
+        sid, main.SessionTransformRequest(matrix=_affine(np.diag([2.0, 1.0, 1.0])), octree_mode="pose"))
+    n = _normals(sess)
+    want = np.array([0.5, 0.0, 1.0]) / np.linalg.norm([0.5, 0.0, 1.0])
+    np.testing.assert_allclose(n[1:], np.tile(want, (len(n) - 1, 1)), atol=1e-6)
+    np.testing.assert_array_equal(n[0], [0.0, 0.0, 0.0])
+    vert = np.asarray(sess.extras[normals_mod.VERTICALITY_SLUG], dtype=np.float64)
+    assert vert[1] == pytest.approx(np.degrees(np.arccos(want[2])), abs=1e-3)
+    # Non-uniform scale reshapes every neighborhood: curvature is now stale.
+    assert sess.normals_stale is True
+
+
+def test_rigid_and_uniform_transforms_leave_normals_fresh(tmp_path, monkeypatch):
+    sid = _grid_session(tmp_path, monkeypatch)
+    sess = main._cloud_sessions[sid]
+    _seed_normals(sess, np.array([0.0, 0.0, 1.0]))
+    main.session_transform(sid, main.SessionTransformRequest(matrix=_rot_matrix(), octree_mode="pose"))
+    assert sess.normals_stale is False
+    main.session_transform(
+        sid, main.SessionTransformRequest(matrix=_affine(3.0 * _rot_z(10.0)), octree_mode="pose"))
+    assert sess.normals_stale is False
+    np.testing.assert_allclose(np.linalg.norm(_normals(sess), axis=1), 1.0, atol=1e-6)
+
+
+def test_uniform_scale_scales_the_distance_column(tmp_path, monkeypatch):
+    sid = _grid_session(tmp_path, monkeypatch)
+    sess = main._cloud_sessions[sid]
+    d0 = np.linspace(1.0, 10.0, len(sess.positions)).astype(np.float32)
+    with main._cloud_session_lock:
+        main._session_put_column_locked(sess, "distance", d0)
+    main.session_transform(sid, main.SessionTransformRequest(matrix=_affine(2.5 * np.eye(3)), octree_mode="pose"))
+    np.testing.assert_allclose(np.asarray(sess.extras["distance"]), d0 * 2.5, rtol=1e-6)
+    # A non-uniform scale has no single factor: the column is left as is.
+    main.session_transform(
+        sid, main.SessionTransformRequest(matrix=_affine(np.diag([2.0, 1.0, 1.0])), octree_mode="pose"))
+    np.testing.assert_allclose(np.asarray(sess.extras["distance"]), d0 * 2.5, rtol=1e-6)
+
+
+def test_pose_mode_keeps_the_octree_for_an_affine_matrix(tmp_path, monkeypatch):
+    sid = _grid_session(tmp_path, monkeypatch)
+    sess = main._cloud_sessions[sid]
+    before_id = sess.octree_cache_id
+
+    def _boom(*a, **k):
+        raise AssertionError("PotreeConverter ran for a deferred transform")
+
+    monkeypatch.setattr(main, "_run_potree_converter", _boom)
+    res = main.session_transform(
+        sid, main.SessionTransformRequest(matrix=_affine(np.diag([2.0, 1.0, 1.0])), octree_mode="pose"))
+    assert res["octree_posed"] is True
+    assert res["cache_id"] == before_id
+    import octree_transform
+    is_pure, _ = octree_transform.classify_matrix(_affine(np.diag([2.0, 1.0, 1.0])))
+    assert is_pure is False, "a scale is not a pure translation"
+
+
+@pytest.mark.parametrize("matrix, why", [
+    (_affine(np.diag([-1.0, 1.0, 1.0])), "mirror"),
+    (_affine(np.diag([0.0, 1.0, 1.0])), "zero scale"),
+    ([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0, 0, 1], "projective bottom row"),
+    ([float("nan")] + [0.0] * 15, "non-finite"),
+])
+def test_non_affine_or_mirroring_matrices_are_rejected(tmp_path, monkeypatch, matrix, why):
+    sid = _grid_session(tmp_path, monkeypatch)
+    before = main._cloud_sessions[sid].positions.copy()
+    with pytest.raises(main.HTTPException) as exc:
+        main.session_transform(sid, main.SessionTransformRequest(matrix=matrix, octree_mode="pose"))
+    assert exc.value.status_code == 400, why
+    np.testing.assert_array_equal(main._cloud_sessions[sid].positions, before)

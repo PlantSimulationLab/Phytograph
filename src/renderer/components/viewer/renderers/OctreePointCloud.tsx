@@ -203,6 +203,11 @@ export interface OctreePointCloudProps {
   // World-space pivot the rotation turns about (scene origin, or the cloud's bbox
   // center when none is set). Ignored when rotation is zero. Defaults to origin.
   pivot?: { x: number; y: number; z: number };
+  // The full WORLD pose when it is affine (a draft or committed SCALE) — see
+  // `OctreePose.matrix`. When set it replaces translation/rotation/pivot for
+  // placing the octree; those stay passed for the readers that only need to
+  // know "is this cloud posed at all".
+  poseMatrix?: THREE.Matrix4 | null;
   // Render-only display offset (Layer 2 precision safety net). The whole scene
   // renders at (world − displayOffset) so large UTM coordinates land near the
   // origin. The octree attaches to the scene root, so — like `translation` — the
@@ -339,7 +344,9 @@ function cropClipsEverything(
   bounds: { min: THREE.Vector3; max: THREE.Vector3 },
   translation: { x: number; y: number; z: number },
   rotation?: { x: number; y: number; z: number } | null,
+  poseMatrix?: THREE.Matrix4 | null,
 ): boolean {
+  if (poseMatrix) return false;  // affine pose: see below
   // Bail whenever ANY pose is active — rotation or translation.
   //
   // `bounds` is world and already carries every committed move, while the
@@ -416,6 +423,7 @@ export function OctreePointCloud({
   translation,
   rotation,
   pivot,
+  poseMatrix = null,
   displayOffset,
   onFirstTilesReady,
   onOctreeReady,
@@ -485,6 +493,11 @@ export function OctreePointCloud({
   rotationRef.current = rotation;
   const pivotRef = useRef(pivot);
   pivotRef.current = pivot;
+  const poseMatrixRef = useRef(poseMatrix);
+  poseMatrixRef.current = poseMatrix;
+  // Value key for the matrix: a fresh Matrix4 arrives every render, so the pose
+  // effect keys on its elements rather than its identity.
+  const poseMatrixKey = poseMatrix ? poseMatrix.elements.join(',') : '';
 
   // Same pattern for the render-only display offset, so the cacheId-keyed loader
   // seeds the initial position with the offset already applied (no streaming jump)
@@ -561,6 +574,7 @@ export function OctreePointCloud({
           applyOctreePose(
             pco, base,
             translationRef.current, rotationRef.current, pivotRef.current, displayOffsetRef.current,
+            poseMatrixRef.current,
           );
           pco.updateMatrixWorld(true);
         };
@@ -654,7 +668,7 @@ export function OctreePointCloud({
   useEffect(() => {
     if (!octree) return;
     const base = basePositionRef.current;
-    applyOctreePose(octree, base, translation, rotation, pivot, displayOffset);
+    applyOctreePose(octree, base, translation, rotation, pivot, displayOffset, poseMatrixRef.current);
     // E2E hook: expose the live octree's net translation (offset from its base
     // load position) keyed by cacheId. Tests assert on THIS (the three.js object
     // state) rather than React state, because the translate bug was precisely
@@ -688,7 +702,7 @@ export function OctreePointCloud({
         matrix: octree.matrix.toArray(),
       };
     }
-  }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
+  }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, poseMatrixKey, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
 
   // Drop the E2E position + crop-hidden hooks for this cloud on unmount.
   useEffect(() => {
@@ -1335,14 +1349,14 @@ export function OctreePointCloud({
   // there for why it is keyed rather than a bare boolean.
   const emptyFilterKeyRef = useRef<string | null>(null);
   const frameStateRef = useRef({
-    clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    clipBox, translation, rotation, poseMatrix, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
     labelStatsId, labelHiddenIndices, filterSpec, cacheId,
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
     // emptiness for a rotated cloud (see cropClipsEverything).
-    clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    clipBox, translation, rotation, poseMatrix, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
     labelStatsId, labelHiddenIndices, filterSpec, cacheId,
   };
@@ -1364,7 +1378,7 @@ export function OctreePointCloud({
       frozen: () => stagingRef.current,
       shouldSkip: () => {
         const { clipBox: cb, data: d, translation: t } = frameStateRef.current;
-        const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 }, frameStateRef.current.rotation);
+        const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 }, frameStateRef.current.rotation, frameStateRef.current.poseMatrix);
         if (cropEmpty !== cropHiddenRef.current) {
           cropHiddenRef.current = cropEmpty;
           const cacheId = d.octree?.cacheId;

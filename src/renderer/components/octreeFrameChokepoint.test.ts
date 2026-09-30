@@ -224,18 +224,29 @@ describe('a committed transform keeps render pose and geometry in step', () => {
     expect(src).toMatch(/if \(result\.octree_posed\)/);
   });
 
+  it('sends the Transformation tool bake to the backend in TRUE-WORLD coordinates', async () => {
+    const src = await viewerSource();
+    // The tool builds its matrix in the stored frame (world − worldShift), where
+    // bounds, the pivot and the renderer live; session_transform applies it to
+    // (stored + shift). Sending the stored-frame matrix moved a rotated or
+    // scaled UTM-shifted scan by (L·shift − shift) — kilometers.
+    expect(src).toMatch(/const sessionRowMajor = toRowMajor\(conjugateByShift\(M, cloud\.data\.octree\?\.worldShift\)\)/);
+    expect(src).toMatch(/await sessionTransform\(octreeInfo\.sessionId, sessionRowMajor, 'pose'\)/);
+  });
+
   it('records the pose against the cache id it was measured on', async () => {
     const src = await viewerSource();
     // The cacheId stamp is what lets ~10 rebuild paths stay ignorant of this
     // feature: a rebuild yields a new id, the stamp stops matching, and the pose
     // is dropped instead of double-applying.
-    expect(src).toMatch(/storedPose: \{[\s\S]{0,400}?cacheId: result\.cache_id,/);
+    // `commitStoredPose(edit, cacheId, pivot)` stamps its second argument.
+    expect(src).toMatch(/storedPose: commitStoredPose\([\s\S]{0,400}?result\.cache_id,/);
   });
 
   it('consumes the draft into the stored pose rather than leaving both', async () => {
     const src = await viewerSource();
     // Leaving the draft up alongside the stored pose would apply the move twice.
-    const at = src.indexOf('storedPose: {');
+    const at = src.indexOf('storedPose: commitStoredPose(');
     expect(at).toBeGreaterThan(-1);
     const before = src.slice(Math.max(0, at - 700), at);
     expect(before).toMatch(/translation: \{ x: 0, y: 0, z: 0 \}/);
@@ -248,13 +259,14 @@ describe('a committed transform keeps render pose and geometry in step', () => {
     // displacement from the octree's frame. Writing just the latest draft
     // silently discards every earlier one — caught in E2E as two 30 degree
     // rotations rendering as 30, not 60.
-    const writes = [...src.matchAll(/storedPose: \{/g)];
+    // `commitStoredPose` composes (through composeCloudPose) whatever pose it is
+    // handed as `storedPose`, so each write must hand it the previous one.
+    const writes = [...src.matchAll(/storedPose: commitStoredPose\(/g)];
     expect(writes.length).toBeGreaterThanOrEqual(2);
     for (const w of writes) {
       const after = src.slice(w.index!, w.index! + 400);
       expect(after, 'a storedPose write must compose the previous pose')
-        .toMatch(/composeCloudPose\(/);
-      expect(after).toMatch(/storedPose: (st|state)\.storedPose/);
+        .toMatch(/storedPose: (st|state)\.storedPose/);
     }
   });
 
@@ -262,7 +274,8 @@ describe('a committed transform keeps render pose and geometry in step', () => {
     const src = await viewerSource();
     // Framing, zoom-to-selection, displayOffset and the scene origin all read
     // data.bounds; leaving it behind would describe where the cloud used to be.
-    expect(src).toMatch(/transformBoundsAabb\(cloud\.data\.bounds/);
+    // The Transformation tool's commit moves bounds through its (affine) matrix.
+    expect(src).toMatch(/transformAabbByMatrix\(cloud\.data\.bounds, M\)/);
     expect(src).toMatch(/transformBoundsAabb\(\s*sourceCloud\.data\.bounds/);
   });
 
@@ -295,7 +308,7 @@ describe('a committed transform keeps render pose and geometry in step', () => {
     // its original pose, discarding the transform. The invariant is
     // "storedPose ⟹ divergedFromSource", so check it at each write rather than
     // asserting the string exists somewhere in a 20k-line file.
-    const writes = [...src.matchAll(/storedPose: \{/g)];
+    const writes = [...src.matchAll(/storedPose: commitStoredPose\(/g)];
     expect(writes.length).toBeGreaterThanOrEqual(2);
     for (const w of writes) {
       // The onUpdateCloud that installs the octree precedes the setEditStates

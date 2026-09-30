@@ -252,7 +252,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.93.0"
+BACKEND_VERSION = "0.94.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -41960,12 +41960,15 @@ def session_scalar_field_manage(session_id: str,
 
 
 class SessionTransformRequest(BaseModel):
-    """Apply a rigid 4x4 transform (rotation + translation) to a session's
-    geometry in place, then rebuild the octree. Used by cloud-to-cloud ICP to
-    MOVE an octree-backed source cloud onto the target: ICP computes the matrix
-    on world-frame points and this bakes it into the session so the streamed
-    octree follows. `matrix` is 16 floats, ROW-MAJOR world-frame (the same
-    layout `ICPRegistrationResponse.transformation_matrix` returns)."""
+    """Apply an AFFINE 4x4 transform to a session's geometry in place, then
+    rebuild (or pose) the octree. Rigid for cloud-to-cloud ICP, which MOVES an
+    octree-backed source cloud onto the target (ICP computes the matrix on
+    world-frame points and this bakes it into the session so the streamed octree
+    follows); rigid-plus-scale for the Transformation tool, whose scale may be
+    non-uniform. `matrix` is 16 floats, ROW-MAJOR world-frame (the same layout
+    `ICPRegistrationResponse.transformation_matrix` returns). The bottom row
+    must be [0, 0, 0, 1] and the linear part must have a positive determinant
+    (no mirroring, no collapse)."""
     matrix: List[float]
     # What to do with the DERIVED OCTREE. The geometry moves either way.
     #
@@ -41989,18 +41992,39 @@ class SessionTransformRequest(BaseModel):
 
 @app.post("/api/cloud/session/{session_id}/transform")
 def session_transform(session_id: str, request: SessionTransformRequest):
-    """Bake a rigid 4x4 transform into the session's in-RAM geometry and rebuild
-    the octree. The matrix acts in WORLD coordinates; the session stores points
-    with `world_shift` subtracted, so we conjugate by the shift:
-    stored_new = R·(stored + shift) + t − shift. A permanent (non-undoable)
-    geometry change, like a filter commit."""
+    """Bake an affine 4x4 transform into the session's in-RAM geometry and
+    rebuild the octree. The matrix acts in WORLD coordinates; the session stores
+    points with `world_shift` subtracted, so we conjugate by the shift:
+    stored_new = L·(stored + shift) + t − shift. A permanent (non-undoable)
+    geometry change, like a filter commit.
+
+    Positions and every other POINT (beam origins, backfilled misses, the miss
+    projection origin) take the full matrix. Stored normals are DIRECTIONS and
+    take the inverse-transpose of L, renormalized. A non-similarity (non-uniform
+    scale) changes each point's neighborhood shape, so curvature is flagged
+    stale; a uniform scale c multiplies any scanner `distance` column by c."""
     if len(request.matrix) != 16:
         raise HTTPException(status_code=400, detail=f"matrix must be 16 floats (row-major 4x4); got {len(request.matrix)}")
 
-    sess = _get_cloud_session(session_id)
     M = np.asarray(request.matrix, dtype=np.float64).reshape(4, 4)
-    R = M[:3, :3]
+    if not np.all(np.isfinite(M)):
+        raise HTTPException(status_code=400, detail="matrix must be finite")
+    if not np.allclose(M[3], [0.0, 0.0, 0.0, 1.0], atol=1e-9):
+        raise HTTPException(status_code=400, detail="matrix must be affine (bottom row 0, 0, 0, 1)")
+    R = M[:3, :3]   # the linear part L (rotation, possibly times a scale)
     t = M[:3, 3]
+    if np.linalg.det(R) <= 1e-12:
+        raise HTTPException(
+            status_code=400,
+            detail="matrix must preserve orientation (positive determinant): no mirroring or zero scale")
+    # L is a similarity (rotation × uniform scale c) iff LᵀL = c²·I.
+    _gram = R.T @ R
+    _c2 = float(np.trace(_gram)) / 3.0
+    is_similarity = bool(np.allclose(_gram, _c2 * np.eye(3), rtol=0.0, atol=1e-9 * max(_c2, 1.0)))
+    uniform_scale = float(np.sqrt(_c2)) if is_similarity else None
+    is_rigid = is_similarity and abs(uniform_scale - 1.0) <= 1e-9
+
+    sess = _get_cloud_session(session_id)
 
     def _apply(pts: np.ndarray, shift: np.ndarray) -> np.ndarray:
         # world = stored + shift; stored_new = (R·world + t) − shift
@@ -42031,16 +42055,18 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             sess.beam_origins = _apply(sess.beam_origins, shift)
 
         # Stored normals are DIRECTIONS, so they rotate but must not translate:
-        # `R @ n`, not `_apply` (which adds t and the world shift and would turn a
-        # unit vector into a point). Rotating them here rather than flagging them
+        # `L⁻ᵀ n` (just `R n` when rigid), not `_apply` (which adds t and the
+        # world shift and would turn a unit vector into a point). Rotating them here rather than flagging them
         # stale is the difference between a small approximation error and a hard
         # frame error — after a 90 deg rotation an unrotated normal is wrong BY 90
         # deg, and `verticality` (measured against world +Z) flips a flat ground
         # plane to a vertical wall while still reporting itself fresh. That fires
         # on the ICP / alignment commit path, which is a first-class workflow.
         #
-        # `curvature` is rotation-invariant (a ratio of eigenvalues) and is left
-        # alone; `verticality` is recomputed from the rotated Z component.
+        # `curvature` is invariant under a rotation or a uniform scale (a ratio of
+        # eigenvalues) and is left alone then; a NON-uniform scale changes the
+        # neighborhood's shape, so the normals are flagged stale below.
+        # `verticality` is recomputed from the transformed Z component.
         _nx = sess.extras.get(normals_mod.NORMAL_X_SLUG)
         if _nx is not None and all(s in sess.extras for s, _ in normals_mod.COLUMNS):
             _n = np.column_stack([
@@ -42049,8 +42075,14 @@ def session_transform(session_id: str, request: SessionTransformRequest):
                 sess.extras[normals_mod.NORMAL_Z_SLUG],
             ]).astype(np.float64)
             # Rows that never received a normal (deleted/miss, zero-filled) stay
-            # zero: rotating a zero vector is a no-op, so no guard is needed.
-            _n = _n @ R.T
+            # zero: transforming a zero vector is a no-op. Row-vector form of
+            # n' = L⁻ᵀ n is n'ᵀ = nᵀ L⁻¹; renormalize every live row, since a
+            # scale changes the length (rigid: a no-op up to rounding).
+            _was_live = np.linalg.norm(_n, axis=1) > 0.5
+            _n = _n @ R.T if is_rigid else _n @ np.linalg.inv(R)
+            if not is_rigid:
+                _len = np.linalg.norm(_n[_was_live], axis=1, keepdims=True)
+                _n[_was_live] = _n[_was_live] / _len
             for _i, _slug in enumerate((normals_mod.NORMAL_X_SLUG, normals_mod.NORMAL_Y_SLUG,
                                         normals_mod.NORMAL_Z_SLUG)):
                 _session_put_column_locked(sess, _slug, _n[:, _i].astype(np.float32))
@@ -42060,6 +42092,17 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             _vert[_live] = np.degrees(np.arccos(
                 np.clip(np.abs(_n[_live, 2]) / _norm[_live], 0.0, 1.0)))
             _session_put_column_locked(sess, normals_mod.VERTICALITY_SLUG, _vert)
+        if not is_similarity:
+            _mark_normals_stale_locked(sess)
+
+        # A scanner RANGE is a length: a uniform scale c multiplies it by c. A
+        # non-uniform scale has no single factor (it depends on the beam's
+        # direction), so the column is left as recorded — the Transformation
+        # tool warns that range-derived results stop being physical then.
+        if uniform_scale is not None and not is_rigid and "distance" in sess.extras:
+            _session_put_column_locked(
+                sess, "distance",
+                (np.asarray(sess.extras["distance"], dtype=np.float64) * uniform_scale).astype(np.float32))
 
         # Separate backfilled-miss buffer (session frame). Its `positions` and
         # per-pulse `origins` are geometry and move; `directions` are LAD beam

@@ -5,45 +5,78 @@ covers the five operations you'll reach for most often: **transform**,
 **crop**, **erase**, **filter**, and **resample**. Apply them in
 roughly that order.
 
-## Transform (translate and rotate)
+## Transform (move, rotate and scale)
 
-Use **Transform** (in the tool column, or right-click the cloud →
-Transform) to move *and rotate* a cloud in world space — most often to
-bring it to the origin, level a tilted scan, or line it up with another
-cloud before registration.
+Use **Transform** (in the tool column) to move, rotate and scale point clouds
+and meshes in world space — most often to bring data to the origin, level a
+tilted scan, or line it up with another cloud before registration.
 
-Opening the tool shows a **Transform** panel with **Position** and
-**Rotation (°)** sections, plus translation arrows and rotation rings drawn
-together at the **scene origin** — the point rotation pivots about, marked by
-the red-and-white ring. The gizmo keeps a fixed size on screen, so it stays
-the same size to grab whether you are looking at a whole survey or zoomed
-into one branch. Set the change any of these ways — all update the viewport
-**live** so you can see the result before committing:
+### Choosing what to transform
 
-- Type exact **X / Y / Z** values (meters for position, degrees for
-  rotation) in the panel.
-- Drag the gizmo's **arrows** to translate along an axis, or its colored
+The panel opens with an **Objects** list of every point cloud and mesh in the
+scene, each with a checkbox. The ones you had selected in the **Scans** and
+**Meshes** panes start checked; if nothing was selected, **nothing is checked**
+and you tick what you want to move. The transform applies to every checked
+object at once, as a group, so a cloud and the mesh built from it can be moved
+together. The button is available whenever the scene holds a cloud or a mesh —
+you do not need to select anything first.
+
+Once the panel is open, only the checkboxes decide what moves: clicking rows in
+the Scans or Meshes panes does not change it. Unchecking an object takes it out
+of the operation (it snaps back); checking one mid-edit applies the current
+values to it straight away.
+
+### Setting the transform
+
+The numbers are **relative**, and the same values apply to every checked
+object:
+
+- **Move by** — X / Y / Z in meters.
+- **Rotate by (°)** — X / Y / Z in degrees.
+- **Scale by (×)** — X / Y / Z factors. The lock (on by default) keeps the
+  three equal; unlock it to stretch one axis. Factors must be positive, so
+  scaling cannot mirror an object.
+
+Everything turns and scales about the **scene origin** (see below), shown at
+the top of the panel. The order is fixed: **scale** along the world axes
+first, then **rotate**, then **move**. The translation arrows and rotation
+rings drawn at the scene origin move all checked objects together, and keep a
+fixed size on screen whether you are looking at a whole survey or zoomed into
+one branch. Every change updates the viewport **live** before you commit it:
+
+- Type exact values in the panel.
+- Drag the gizmo's **arrows** to move along an axis, or its colored
   **rings** to rotate about an axis.
-- Use the Blender-style shortcuts: press <kbd>T</kbd> to translate or
-  <kbd>R</kbd> to rotate, optionally lock an axis with <kbd>X</kbd> /
-  <kbd>Y</kbd> / <kbd>Z</kbd>, type a distance (or angle in degrees), then
-  click (or <kbd>Enter</kbd>) to set it. With a cloud selected, either key
-  also opens the Transform tool if it isn't open yet. Unlike the gizmo, the
-  gesture works from wherever the cursor is, so it's handy when the scene
-  origin is off screen. See [Keyboard shortcuts](../reference/shortcuts.md).
+- Use the Blender-style shortcuts: press <kbd>T</kbd> to move, <kbd>R</kbd>
+  to rotate or <kbd>S</kbd> to scale, optionally lock an axis with
+  <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd>, type a distance (angle in
+  degrees, or factor), then click (or <kbd>Enter</kbd>) to set it. With a
+  cloud selected, the key also opens the Transform tool if it isn't open yet.
+  Unlike the gizmo, the gesture works from wherever the cursor is, so it's
+  handy when the scene origin is off screen. See
+  [Keyboard shortcuts](../reference/shortcuts.md).
 
-Rotation turns the cloud about the **scene origin** (see below). There is
-always one: until you place it yourself it sits at the center of the loaded
-scene, marked in the viewport by a red-and-white ring. Move it first when you
-need to pivot around a specific point — for a single cloud, **Center on
-selection** puts it on the cloud's own center, which spins the cloud in place.
+Rotation and scale work about the **scene origin**. There is always one: until
+you place it yourself it sits at the center of the loaded scene, marked in the
+viewport by a red-and-white ring. Move it first when you need to pivot around a
+specific point — **Center on selection** puts it on the selected clouds' own
+center, which spins or scales them in place.
+
+!!! warning "Stretching a scan along one axis"
+
+    A **non-uniform** scale (different X / Y / Z factors) on a point cloud
+    distorts its scan geometry: beam angles, recorded ranges and trajectory
+    lever arms no longer match the points. The panel warns you when this
+    applies. Leaf Area Density and Backfill Misses on that scan are no longer
+    physically meaningful afterward. A **uniform** scale keeps the scan
+    consistent (recorded ranges are scaled with it).
 
 Nothing is applied until you decide:
 
-- **OK** applies the transform (see the note below) and closes the panel.
-- **Cancel** discards it — the cloud snaps back to where it started.
-- **Reset Position** / **Reset Rotation** zero the pending values without
-  closing, so you can start over.
+- **OK** applies the transform to every checked object and closes the panel.
+- **Cancel** discards it — everything snaps back to where it started.
+- **Reset Move** / **Reset Rotation** / **Reset Scale** return those values
+  to zero (or 1) without closing, so you can start over.
 - Closing with the **✕** while you have unsaved changes asks whether to
   **Apply** or **Discard** first.
 
@@ -51,37 +84,48 @@ While the panel is open the other tools are locked, so you always finish
 (or cancel) a change before doing anything else — a half-entered transform
 can never leak into a later step.
 
-!!! note "OK bakes the transform into the geometry"
+**Meshes** keep their transform as position / rotation / scale, and applying
+it is **undoable** (<kbd>⌘Z</kbd> / <kbd>Ctrl+Z</kbd>) like any other mesh
+edit. One case changes the mesh itself: a non-uniform scale on a mesh that is
+already rotated would shear it, which position / rotation / scale cannot
+express, so the stretch is baked into the mesh's vertices (still undoable; the
+panel says when this will happen). Voxel grids and generated plants cannot be
+sheared this way — OK is disabled with the reason shown — and a voxel grid can
+only be rotated about Z. To type an exact *absolute* position, rotation or
+size for one mesh, or to use **Fit to Scans** and grid subdivisions, use the
+transform button on that mesh's row in the **Meshes** pane.
 
-    Clicking **OK** writes the translation and rotation into the cloud's
+!!! note "OK bakes the transform into a point cloud's geometry"
+
+    Clicking **OK** writes the move, rotation and scale into the cloud's
     actual point coordinates rather than keeping a display-only offset.
     This is what guarantees that every later tool — triangulation, leaf
     area density, skeletons, QSM, export — operates on the cloud *where
     and how you placed it*.
 
-    Two consequences worth knowing:
+    Consequences worth knowing:
 
-    - Everything tied to the scan's world position moves and rotates with
-      it: the recorded **scanner origin** (and, for a moving-platform scan,
-      the whole trajectory *and its per-pose orientation*), the sky/miss
-      points, per-pulse beam origins, and the miss overlay. So a
-      transformed scan stays internally consistent — the scanner still
-      sits in the right place relative to its points, which is what LAD and
-      triangulation depend on.
+    - Everything tied to the scan's world position moves with it: the
+      recorded **scanner origin** (and, for a moving-platform scan, the
+      whole trajectory *and its per-pose orientation*), the sky/miss
+      points, per-pulse beam origins, and the miss overlay. Stored normals
+      are re-oriented too. So a transformed scan stays internally
+      consistent — the scanner still sits in the right place relative to
+      its points, which is what LAD and triangulation depend on.
     - Like applying a crop or a filter, an applied transform is a
       permanent edit to the working copy — it is not on the undo stack.
-      Your source file on disk is never modified.
-    - **Applying is fast, including a rotation.** The points themselves move
-      straight away, so every tool — triangulation, LAD, skeletons, QSM,
-      export — sees the cloud where you put it immediately. What is *not*
-      redone straight away is the display index a streamed cloud is drawn
-      from: rebuilding that after a rotation would take far longer than the
-      move itself, so the viewer simply draws the existing index in its new
-      position. You will not see a difference.
+      (Undo after a mixed OK reverts the meshes only.) Your source file on
+      disk is never modified.
+    - **Applying is fast, including a rotation or scale.** The points
+      themselves move straight away, so every tool sees the cloud where you
+      put it immediately. What is *not* redone straight away is the display
+      index a streamed cloud is drawn from: rebuilding that would take far
+      longer than the move itself, so the viewer simply draws the existing
+      index in its new position. You will not see a difference.
 
       The **erase brush** and the **label brush** still rebuild the index on
-      a rotated cloud before they apply, because they select points using the
-      view you drew them in. The first of those after a rotation shows an
+      a rotated or scaled cloud before they apply, because they select points
+      using the view you drew them in. The first of those afterward shows an
       **Updating display…** indicator while it catches up, then applies
       normally. Crop does not need to wait.
 
@@ -94,7 +138,8 @@ cloud's bounding box at (0, 0, 0) without rotating it.
 next to the command-search icon / **Tools → Pre-processing → Set Scene
 Origin**) moves the pivot point, like CloudCompare's. It's a scene control
 rather than an analysis tool, so it sits with the view controls. The origin
-is the **rotation center** for both the Transform tool and the camera: a
+is the **rotation (and scale) center** for the Transform tool and the rotation
+center for the camera: a
 left-drag in the viewport turns the whole view about it, so panning no longer
 changes what you rotate around. Zoom is *not* tied to it — the scroll wheel
 flies toward whatever is under your cursor — so the origin only decides what

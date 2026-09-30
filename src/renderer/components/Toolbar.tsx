@@ -60,7 +60,9 @@ export function Toolbar({ commands, selection, title = 'Tools', groups = TOOL_GR
                     : blocked
                       ? `${cmd.name} — ${blocked}`
                     : cmd.multiInput
-                      ? `${cmd.name} — import a point cloud first`
+                      ? cmd.multiInputKind === 'cloud-or-mesh'
+                        ? `${cmd.name} — import a point cloud or mesh first`
+                        : `${cmd.name} — import a point cloud first`
                       : `${cmd.name} — select ${requiresText(cmd.requires ?? null)} first`;
                 return (
                   <button

@@ -33,7 +33,7 @@ first non-numeric row as a header if present.
 
 | Operation | Workflow |
 |---|---|
-| Reposition / level | [Clean a point cloud](../workflows/clean-point-cloud.md#transform-translate-and-rotate) |
+| Reposition / level | [Clean a point cloud](../workflows/clean-point-cloud.md#transform-move-rotate-and-scale) |
 | Crop out ground or unwanted regions | [Clean a point cloud](../workflows/clean-point-cloud.md#crop) |
 | Classify ground vs plant points | [Segment ground points](../workflows/segment-ground.md) |
 | Segment individual trees | [Segment individual trees](../workflows/segment-trees.md) |

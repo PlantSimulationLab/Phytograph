@@ -173,6 +173,7 @@ export function cloneCloudEditState(state: CloudEditState): CloudEditState {
           rotation: { ...state.storedPose.rotation },
           pivot: { ...state.storedPose.pivot },
           cacheId: state.storedPose.cacheId,
+          ...(state.storedPose.matrix ? { matrix: [...state.storedPose.matrix] } : {}),
         }
       : undefined,
   };

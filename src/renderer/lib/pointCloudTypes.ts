@@ -312,6 +312,10 @@ export interface CloudEditState {
   // real geometry on OK (bakeCloudTransform) and reset to {0,0,0}. Optional so older
   // constructions default to no rotation; treat a missing value as {0,0,0}.
   rotation?: { x: number; y: number; z: number };
+  // Render-only draft SCALE (per world axis, about the same pivot, applied
+  // before the rotation — see `poseToMatrix`). Absent means (1, 1, 1). Baked on
+  // OK like the rest of the draft.
+  scale?: { x: number; y: number; z: number };
   erasedIndices: Set<number>;  // Set of erased point indices (flat clouds only)
   // Session-backed clouds (Family-1): the ordered stack of delete regions
   // applied this session but NOT yet baked. Each is the exact CropOctreeRegion
@@ -364,6 +368,13 @@ export interface CloudEditState {
     rotation: { x: number; y: number; z: number };  // Euler XYZ, DEGREES
     pivot: { x: number; y: number; z: number };     // WORLD, frozen at commit
     cacheId: string;
+    /**
+     * The full pose as a THREE column-major 4x4, present only when it is NOT
+     * rigid (a committed scale). An affine pose composed onto a rotation has no
+     * (translation, rotation, pivot) form, so when this is set it wins and the
+     * triple above is only the nearest rigid description.
+     */
+    matrix?: number[];
   };
 }
 

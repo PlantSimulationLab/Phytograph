@@ -24,6 +24,7 @@ const EMPTY: SelectionState = {
   cloudCount: 0,
   meshCount: 0,
   totalScanCount: 0,
+  totalCloudCount: 0,
   totalMeshCount: 0,
 };
 
@@ -61,17 +62,18 @@ describe('isCommandAvailable', () => {
     expect(isCommandAvailable(cmd({ requires: 'plant' }), { ...EMPTY, hasMesh: true })).toBe(false);
   });
 
-  it('cloud-or-mesh accepts EITHER selection', () => {
-    // The Transform button fronts two panels (cloud draft / mesh TransformPanel).
-    // It used to be `requires: 'cloud'`, which grayed it out for a mesh whose
-    // transform panel was fully built — reachable only from the mesh row.
-    const c = cmd({ requires: 'cloud-or-mesh' });
+  it('gates a cloud-or-mesh multi tool on either EXISTING, with nothing selected', () => {
+    // Transform lists every cloud and mesh in its own picker, so it must not
+    // depend on the pane selection at all — only on there being something to
+    // move. A param-only scanner marker has no points and does not count.
+    const c = cmd({ multiInput: true, multiInputKind: 'cloud-or-mesh' });
     expect(isCommandAvailable(c, EMPTY)).toBe(false);
-    expect(isCommandAvailable(c, { ...EMPTY, hasCloud: true })).toBe(true);
-    expect(isCommandAvailable(c, { ...EMPTY, hasMesh: true })).toBe(true);
-    expect(isCommandAvailable(c, { ...EMPTY, hasCloud: true, hasMesh: true })).toBe(true);
-    // A skeleton alone is NOT enough — it has no Transform panel of its own.
-    expect(isCommandAvailable(c, { ...EMPTY, hasSkeleton: true })).toBe(false);
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1 })).toBe(false);  // marker only
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1, totalCloudCount: 1 })).toBe(true);
+    expect(isCommandAvailable(c, { ...EMPTY, totalMeshCount: 1 })).toBe(true);
+    // A selection without anything in the scene is impossible, but a selection
+    // is also never REQUIRED:
+    expect(isCommandAvailable(c, { ...EMPTY, totalCloudCount: 2, hasCloud: false })).toBe(true);
   });
 
   it('requires 2+ for multiple-clouds / multiple-meshes', () => {
@@ -116,7 +118,6 @@ describe('requiresText', () => {
   it('returns a human phrase for each prerequisite', () => {
     expect(requiresText('cloud')).toBe('a point cloud');
     expect(requiresText('mesh')).toBe('a mesh');
-    expect(requiresText('cloud-or-mesh')).toBe('a point cloud or mesh');
     expect(requiresText('multiple-clouds')).toBe('2+ point clouds');
     expect(requiresText(null)).toBe('');
   });

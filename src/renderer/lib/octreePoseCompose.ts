@@ -42,15 +42,40 @@ export interface OctreePose {
   translation: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number };
   pivot: { x: number; y: number; z: number };
+  /**
+   * The full drawn matrix, present ONLY when the pose is not rigid (a scale is
+   * in play, from the draft or from a committed stored pose). A scale composed
+   * onto a rotation is not expressible as (translation, rotation, pivot), so
+   * whenever this is set it is authoritative and the triple above is just the
+   * nearest rigid description (kept for keys and readouts). Read it through
+   * `poseMatrixOf` rather than branching on it.
+   */
+  matrix?: THREE.Matrix4;
 }
+
+type Vec3 = { x: number; y: number; z: number };
 
 const ZERO = { x: 0, y: 0, z: 0 } as const;
 
-/** Build the world-frame 4x4 for one (rotation about pivot, then translation). */
-function poseToMatrix(
-  translation: { x: number; y: number; z: number },
-  rotationDeg: { x: number; y: number; z: number },
-  pivot: { x: number; y: number; z: number },
+/** True when `s` is absent or exactly (1, 1, 1). */
+export function isUnitScale(s: Vec3 | null | undefined): boolean {
+  return !s || (s.x === 1 && s.y === 1 && s.z === 1);
+}
+
+/**
+ * Build the world-frame 4x4 for one draft pose:
+ *
+ *     M = T(pivot + t) · R_xyz(r) · S(s) · T(−pivot)
+ *
+ * i.e. scale along the world axes about `pivot`, then rotate about `pivot`,
+ * then translate. With `scale` omitted (or unit) this is exactly the rigid
+ * "rotation about pivot, then translation" the tool has always drawn.
+ */
+export function poseToMatrix(
+  translation: Vec3,
+  rotationDeg: Vec3,
+  pivot: Vec3,
+  scale?: Vec3 | null,
 ): THREE.Matrix4 {
   const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(
     THREE.MathUtils.degToRad(rotationDeg.x),
@@ -59,18 +84,33 @@ function poseToMatrix(
     'XYZ',
   ));
   const m = new THREE.Matrix4().makeRotationFromQuaternion(q);
+  if (!isUnitScale(scale)) m.scale(new THREE.Vector3(scale!.x, scale!.y, scale!.z));
   const p = new THREE.Vector3(pivot.x, pivot.y, pivot.z);
-  const rp = p.clone().applyMatrix4(m);
-  // world_new = R·(world − pivot) + pivot + t, i.e. t_eff = pivot − R·pivot + t.
+  const lp = p.clone().applyMatrix4(m);
+  // world_new = L·(world − pivot) + pivot + t, i.e. t_eff = pivot − L·pivot + t.
   return m.setPosition(
-    p.x - rp.x + translation.x,
-    p.y - rp.y + translation.y,
-    p.z - rp.z + translation.z,
+    p.x - lp.x + translation.x,
+    p.y - lp.y + translation.y,
+    p.z - lp.z + translation.z,
   );
 }
 
 function isZeroRotation(r: { x: number; y: number; z: number } | null | undefined): boolean {
   return !r || (r.x === 0 && r.y === 0 && r.z === 0);
+}
+
+/** The matrix a resolved pose draws at — its affine `matrix` when it has one. */
+export function poseMatrixOf(pose: OctreePose): THREE.Matrix4 {
+  return pose.matrix
+    ? pose.matrix.clone()
+    : poseToMatrix(pose.translation, pose.rotation, pose.pivot);
+}
+
+/** A committed stored pose as a matrix (its affine `matrix` wins when present). */
+function storedPoseMatrix(stored: NonNullable<CloudEditState['storedPose']>): THREE.Matrix4 {
+  return stored.matrix
+    ? new THREE.Matrix4().fromArray(stored.matrix)
+    : poseToMatrix(stored.translation, stored.rotation, stored.pivot);
 }
 
 /**
@@ -88,12 +128,13 @@ export function transformPoint(
   translation: { x: number; y: number; z: number },
   rotationDeg: { x: number; y: number; z: number },
   pivot: { x: number; y: number; z: number },
+  scale?: Vec3 | null,
 ): [number, number, number] {
-  if (isZeroRotation(rotationDeg)) {
+  if (isZeroRotation(rotationDeg) && isUnitScale(scale)) {
     return [point[0] + translation.x, point[1] + translation.y, point[2] + translation.z];
   }
   const v = new THREE.Vector3(point[0], point[1], point[2])
-    .applyMatrix4(poseToMatrix(translation, rotationDeg, pivot));
+    .applyMatrix4(poseToMatrix(translation, rotationDeg, pivot, scale));
   return [v.x, v.y, v.z];
 }
 
@@ -117,11 +158,12 @@ export function unposePoint(
   translation: { x: number; y: number; z: number },
   rotationDeg: { x: number; y: number; z: number },
   pivot: { x: number; y: number; z: number },
+  scale?: Vec3 | null,
 ): [number, number, number] {
-  if (isZeroRotation(rotationDeg)) {
+  if (isZeroRotation(rotationDeg) && isUnitScale(scale)) {
     return [point[0] - translation.x, point[1] - translation.y, point[2] - translation.z];
   }
-  const inv = poseToMatrix(translation, rotationDeg, pivot).invert();
+  const inv = poseToMatrix(translation, rotationDeg, pivot, scale).invert();
   const v = new THREE.Vector3(point[0], point[1], point[2]).applyMatrix4(inv);
   return [v.x, v.y, v.z];
 }
@@ -137,21 +179,33 @@ export function unposePoint(
  * overwhelmingly common case costs nothing and behaves exactly as before.
  */
 export function composeCloudPose(
-  edit: Pick<CloudEditState, 'translation' | 'rotation' | 'storedPose'> | undefined,
+  edit: Pick<CloudEditState, 'translation' | 'rotation' | 'scale' | 'storedPose'> | undefined,
   cacheId: string | undefined,
   livePivot: { x: number; y: number; z: number },
 ): OctreePose {
   const draftT = edit?.translation ?? ZERO;
   const draftR = edit?.rotation ?? ZERO;
+  const draftS = edit?.scale;
   const stored = edit?.storedPose;
+  const storedApplies = !!stored && !!cacheId && stored.cacheId === cacheId;
+
+  // A SCALE anywhere (draft or committed) makes the pose affine, which the
+  // (translation, rotation, pivot) triple cannot describe — so compose as
+  // matrices and hand the renderer the matrix itself.
+  if (!isUnitScale(draftS) || (storedApplies && !!stored!.matrix)) {
+    const draftM = poseToMatrix(draftT, draftR, livePivot, draftS);
+    const composed = storedApplies ? draftM.multiply(storedPoseMatrix(stored!)) : draftM;
+    const p = poseFromMatrix(composed, livePivot);
+    return { translation: p.translation, rotation: p.rotation, pivot: livePivot, matrix: composed };
+  }
 
   // No stored pose, or it belongs to an octree this cloud no longer has (a
   // rebuild has since folded it into the geometry) → draft only.
-  if (!stored || !cacheId || stored.cacheId !== cacheId) {
+  if (!storedApplies) {
     return { translation: { ...draftT }, rotation: { ...draftR }, pivot: livePivot };
   }
 
-  const storedM = poseToMatrix(stored.translation, stored.rotation, stored.pivot);
+  const storedM = storedPoseMatrix(stored!);
 
   // Draft is identity → the stored pose is the whole answer, but it still has to
   // be re-expressed against the live pivot.
@@ -165,6 +219,27 @@ export function composeCloudPose(
 
   const p = poseFromMatrix(storedM, livePivot);
   return { translation: p.translation, rotation: p.rotation, pivot: livePivot };
+}
+
+/**
+ * The `storedPose` to record after committing a draft on top of whatever pose
+ * already stands in for the octree: the TOTAL displacement from the octree's
+ * frame. Rigid results keep the (translation, rotation, pivot) form every older
+ * reader understands; an affine one also carries its `matrix`, which then wins.
+ */
+export function commitStoredPose(
+  edit: Pick<CloudEditState, 'translation' | 'rotation' | 'scale' | 'storedPose'>,
+  cacheId: string,
+  pivot: { x: number; y: number; z: number },
+): NonNullable<CloudEditState['storedPose']> {
+  const pose = composeCloudPose(edit, cacheId, pivot);
+  return {
+    translation: pose.translation,
+    rotation: pose.rotation,
+    pivot: { ...pivot },
+    cacheId,
+    ...(pose.matrix ? { matrix: pose.matrix.toArray() } : {}),
+  };
 }
 
 /**
@@ -198,8 +273,9 @@ export function transformBoundsAabb(
   translation: { x: number; y: number; z: number },
   rotationDeg: { x: number; y: number; z: number },
   pivot: { x: number; y: number; z: number },
+  scale?: Vec3 | null,
 ): { min: THREE.Vector3; max: THREE.Vector3 } {
-  if (isZeroRotation(rotationDeg)) {
+  if (isZeroRotation(rotationDeg) && isUnitScale(scale)) {
     // Exact: a translated AABB is still an AABB.
     return {
       min: new THREE.Vector3(
@@ -208,7 +284,14 @@ export function transformBoundsAabb(
         bounds.max.x + translation.x, bounds.max.y + translation.y, bounds.max.z + translation.z),
     };
   }
-  const m = poseToMatrix(translation, rotationDeg, pivot);
+  return transformAabbByMatrix(bounds, poseToMatrix(translation, rotationDeg, pivot, scale));
+}
+
+/** The AABB of `bounds`' 8 corners pushed through an arbitrary affine `m`. */
+export function transformAabbByMatrix(
+  bounds: { min: THREE.Vector3; max: THREE.Vector3 },
+  m: THREE.Matrix4,
+): { min: THREE.Vector3; max: THREE.Vector3 } {
   const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
   const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
   const v = new THREE.Vector3();
@@ -243,8 +326,9 @@ export function transformGroundZ(
   translation: { x: number; y: number; z: number },
   rotationDeg: { x: number; y: number; z: number },
   pivot: { x: number; y: number; z: number },
+  scale?: Vec3 | null,
 ): number {
-  if (isZeroRotation(rotationDeg)) return groundZ + translation.z;
-  const m = poseToMatrix(translation, rotationDeg, pivot);
+  if (isZeroRotation(rotationDeg) && isUnitScale(scale)) return groundZ + translation.z;
+  const m = poseToMatrix(translation, rotationDeg, pivot, scale);
   return new THREE.Vector3(boundsCenter.x, boundsCenter.y, groundZ).applyMatrix4(m).z;
 }

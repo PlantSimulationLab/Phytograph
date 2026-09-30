@@ -43,7 +43,13 @@ export interface RigidPoseInput {
     rotation: { x: number; y: number; z: number };
     pivot: { x: number; y: number; z: number };
     cacheId: string;
+    matrix?: number[];
   } | null;
+  /**
+   * The full drawn matrix when the pose is affine (a scale is in play) — the
+   * triple above cannot describe it, so it is part of where the cloud is drawn.
+   */
+  matrix?: ArrayLike<number> | null;
 }
 
 export interface GeometryInput {
@@ -78,7 +84,8 @@ export function rigidPoseKey(edit: RigidPoseInput | undefined | null): string {
     xyz(edit?.translation),
     xyz(edit?.rotation),
     xyz(edit?.pivot),
-    sp ? `${xyz(sp.translation)}|${xyz(sp.rotation)}|${xyz(sp.pivot)}|${sp.cacheId}` : '',
+    sp ? `${xyz(sp.translation)}|${xyz(sp.rotation)}|${xyz(sp.pivot)}|${sp.cacheId}${sp.matrix ? `|${sp.matrix.join(',')}` : ''}` : '',
+    edit?.matrix ? Array.from(edit.matrix).join(',') : '',
   ].join('#');
 }
 

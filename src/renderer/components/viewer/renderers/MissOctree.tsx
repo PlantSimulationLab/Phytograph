@@ -35,6 +35,8 @@ export interface MissOctreeProps {
   translation?: { x: number; y: number; z: number } | null;
   rotation?: { x: number; y: number; z: number } | null;
   pivot?: { x: number; y: number; z: number } | null;
+  // The affine pose matrix, when the hits octree has one (see OctreePointCloud).
+  poseMatrix?: THREE.Matrix4 | null;
   displayOffset?: { x: number; y: number; z: number };
 }
 
@@ -49,6 +51,7 @@ export function MissOctree({
   translation = null,
   rotation = null,
   pivot = null,
+  poseMatrix = null,
   displayOffset,
 }: MissOctreeProps) {
   const { scene } = useThree();
@@ -64,6 +67,9 @@ export function MissOctree({
   rotationRef.current = rotation;
   const pivotRef = useRef(pivot);
   pivotRef.current = pivot;
+  const poseMatrixRef = useRef(poseMatrix);
+  poseMatrixRef.current = poseMatrix;
+  const poseMatrixKey = poseMatrix ? poseMatrix.elements.join(',') : '';
   const displayOffsetRef = useRef(displayOffset);
   displayOffsetRef.current = displayOffset;
 
@@ -89,6 +95,7 @@ export function MissOctree({
         applyOctreePose(
           pco, basePositionRef.current,
           translationRef.current, rotationRef.current, pivotRef.current, displayOffsetRef.current,
+          poseMatrixRef.current,
         );
 
         scene.add(pco);
@@ -154,8 +161,8 @@ export function MissOctree({
   // offset (it's on the scene root, so the parent group doesn't reach it).
   useEffect(() => {
     if (!octree) return;
-    applyOctreePose(octree, basePositionRef.current, translation, rotation, pivot, displayOffset);
-  }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+    applyOctreePose(octree, basePositionRef.current, translation, rotation, pivot, displayOffset, poseMatrixRef.current);
+  }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, poseMatrixKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
   // Per-frame LOD/budget streaming — the whole point of the octree path. The
   // potree update is driven by the viewer's single shared useFrame, not here:
