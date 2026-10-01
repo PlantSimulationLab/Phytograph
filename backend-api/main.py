@@ -44999,8 +44999,11 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         if progress is not None:
             progress(0.10, "Sampling meshes")
 
-        # Sample points from mesh surfaces for ICP
-        num_samples = min(50000, max(len(target_verts), len(source_verts)) * 10)
+        # Sample points from mesh surfaces for ICP. Floored, as in _do_c2m_icp:
+        # a surface is as large as it is however few vertices describe it, and
+        # an 8-vertex box sampled with 80 points left both ICP and the
+        # orientation search ranking poses on the draw rather than the shape.
+        num_samples = min(50000, max(max(len(target_verts), len(source_verts)) * 10, 5000))
         target_pcd = target_mesh.sample_points_uniformly(number_of_points=num_samples)
         source_pcd = source_mesh.sample_points_uniformly(number_of_points=num_samples)
 
@@ -45047,13 +45050,132 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         # fitness in the 0.69-0.88 band -- enough correspondences to be stable --
         # against 0.14-0.61 at 5x.
         if request.max_correspondence_distance is None:
+# How much better (in tight-inlier fraction) a rotated start must score than
+# the as-placed start before `_m2m_orientation_search` prefers it. A symmetric
+# object (a box, a cylinder, a sphere) fits equally well in several
+# orientations; without a margin the search would flip it between them on
+# sampling noise, turning a mesh that was already aligned by 90 or 180 degrees.
+_M2M_ORIENTATION_MARGIN = 0.05
+
+
+# The orientation search's ICP ladder: (correspondence window as a fraction of
+# the object's diagonal, iterations). The first rung has to be WIDE. A start
+# can be 45 degrees off, which displaces the surface by a large fraction of the
+# object, and ICP only moves a point whose partner is inside the window: with
+# the first rung at 6% a quarter-turned test shape never left its starting
+# pose. The narrower rungs then tighten the fit the wide one found.
+#
+# The ladder is point-to-POINT on purpose. Point-to-plane linearizes the
+# rotation, and fed the large residuals of a wide window it takes steps big
+# enough to throw the source clear of the target: every later rung then finds
+# no correspondences and hands the thrown pose back unchanged (the same test
+# shape scored fitness 0.0 from all 84 starts). Point-to-point solves the
+# rotation in closed form and has no such failure; the plane metric's accuracy
+# is only wanted in the final refinement, which starts close.
+_M2M_SEARCH_RUNGS = ((0.15, 30), (0.06, 30), (0.03, 20))
+
+
+def _m2m_orientation_starts() -> np.ndarray:
+    """Rotation matrices to start mesh-to-mesh ICP from, identity first.
+
+    The union of the octahedral (24) and icosahedral (60) rotation groups: no
+    orientation is more than ~45 degrees from one of them, which is inside the
+    basin ICP converges from on a coarse cloud. Deterministic,
+    so the same pair of meshes always searches the same starts.
+    """
+    from scipy.spatial.transform import Rotation
+    mats = [np.eye(3)]
+    for group in ("O", "I"):
+        for R in Rotation.create_group(group).as_matrix():
+            if not any(np.allclose(R, M, atol=1e-6) for M in mats):
+                mats.append(R)
+    return np.asarray(mats)
+
+
+def _m2m_orientation_search(source_pcd, target_pcd, diagonal: float,
+                            progress=None) -> np.ndarray:
+    """Pick the starting pose for mesh-to-mesh ICP by trying many orientations.
+
+    ICP is a LOCAL method: it only ever slides downhill from where it starts,
+    so two meshes that differ by a large rotation (the same object scanned at a
+    different turntable angle) converge onto whatever wrong pose is nearest.
+    Measured on two scans of the same pair of apples 90 degrees apart: the
+    single-start result stopped 8-50 degrees into the turn (a different angle
+    on every run), with a median surface residual of 1.58 against 0.41 at the
+    true pose.
+
+    Each start rotates the source about the shared centroid and is polished by
+    a short ICP ladder (`_M2M_SEARCH_RUNGS`) on voxel-thinned copies, which
+    costs milliseconds. The
+    candidates are then ranked on the FULL samples by the fraction of points
+    within a few point-spacings of the target. That tight window is the point:
+    at ICP's own correspondence distance every candidate here scored 0.91-0.92
+    and the ranking was noise, while the tight fraction separated the true pose
+    (0.62) from the best wrong one (0.51).
+
+    `source_pcd` must already be centroid-aligned to `target_pcd`. Returns a 4x4
+    initial transform in that frame; identity when no rotated start beats the
+    as-placed one by `_M2M_ORIENTATION_MARGIN`.
+    """
+    o3d = open3d_warmup.get_open3d()
+    reg = o3d.pipelines.registration
+
+    target_pts = np.asarray(target_pcd.points)
+    if len(target_pts) < 16 or not np.isfinite(diagonal) or diagonal <= 0:
+        return np.eye(4)
+
+    voxel = diagonal * 0.02
+    coarse_target = target_pcd.voxel_down_sample(voxel)
+    coarse_source = source_pcd.voxel_down_sample(voxel)
+
+    spacing = _median_point_spacing(target_pts)
+    tight = min(3.0 * spacing, voxel) if spacing is not None else voxel
+    center = np.asarray(target_pcd.get_center())
+    estimator = reg.TransformationEstimationPointToPoint()
+
+    starts = _m2m_orientation_starts()
+    scored = []
+    for i, R in enumerate(starts):
+        _cancel_checkpoint(progress)
+        if progress is not None and i % 12 == 0:
+            progress(0.10 + 0.05 * i / len(starts),
+                     f"Searching orientations ({i + 1}/{len(starts)})")
+        init = np.eye(4)
+        init[:3, :3] = R
+        init[:3, 3] = center - R @ center
+        try:
+            pose = init
+            for window, iters in _M2M_SEARCH_RUNGS:
+                window *= diagonal
+                pose = reg.registration_icp(
+                    coarse_source, coarse_target, window, pose, estimator,
+                    reg.ICPConvergenceCriteria(max_iteration=iters)).transformation
+            ev = reg.evaluate_registration(source_pcd, target_pcd, tight, pose)
+        except RuntimeError:
+            continue
+        scored.append((float(ev.fitness), float(ev.inlier_rmse), i, np.asarray(pose)))
+
+    if not scored:
+        return np.eye(4)
+    as_placed = next((s for s in scored if s[2] == 0), None)
+    best = max(scored, key=lambda s: (s[0], -s[1]))
+    if as_placed is not None and best[0] < as_placed[0] + _M2M_ORIENTATION_MARGIN:
+        best = as_placed
+    logger.debug("Mesh-to-mesh orientation search: start %d of %d, tight fitness %.3f "
+                 "(as placed: %s)", best[2], len(starts), best[0],
+                 f"{as_placed[0]:.3f}" if as_placed is not None else "n/a")
+    return best[3].copy()
+
+
             max_corr_dist = _auto_correspondence_distance(
                 np.asarray(target_pcd.points), diagonal)
         else:
             max_corr_dist = request.max_correspondence_distance
 
-        # --- STEP 2: Run ICP until convergence ---
-        init_transform = np.eye(4)
+        # --- STEP 2: Pick the starting orientation, then run ICP until convergence ---
+        # ICP alone cannot recover a large rotation; see _m2m_orientation_search.
+        init_transform = _m2m_orientation_search(
+            source_pcd, target_pcd, diagonal, progress=progress)
         reg_result, iterations = run_icp_until_convergence(
             source_pcd, target_pcd, max_corr_dist, init_transform,
             max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold,

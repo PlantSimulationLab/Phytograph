@@ -49,6 +49,35 @@ export function forEachWorldVertex(
 }
 
 /**
+ * A mesh's vertices in WORLD space as a packed Float32Array — what a backend
+ * tool that registers or measures the mesh must be sent. Sending
+ * `vertex + position` instead (as both ICP tools once did) drops the mesh's
+ * rotation and scale, so the backend aligns a shape that is not the one drawn
+ * and returns a matrix sized for it: on a scaled mesh the result landed the
+ * mesh far from its target.
+ */
+export function meshWorldVertices(vertices: ArrayLike<number>, vertexCount: number, m: THREE.Matrix4): Float32Array {
+  const out = new Float32Array(vertexCount * 3);
+  forEachWorldVertex(vertices, vertexCount, m, (x, y, z, i) => {
+    out[i * 3] = x; out[i * 3 + 1] = y; out[i * 3 + 2] = z;
+  });
+  return out;
+}
+
+/**
+ * A backend 4x4 (NumPy `flatten()`, row-major) as a THREE.Matrix4.
+ * `Matrix4.set` takes row-major arguments, so no transpose is needed.
+ */
+export function matrix4FromRowMajor(m: ArrayLike<number>): THREE.Matrix4 {
+  return new THREE.Matrix4().set(
+    m[0], m[1], m[2], m[3],
+    m[4], m[5], m[6], m[7],
+    m[8], m[9], m[10], m[11],
+    m[12], m[13], m[14], m[15],
+  );
+}
+
+/**
  * The result of composing a world-space delta D onto one mesh's transform.
  *
  *  - `trs`: D ∘ mesh is still position + Euler rotation + axis scale.

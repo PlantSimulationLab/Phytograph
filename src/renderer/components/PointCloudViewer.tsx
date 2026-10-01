@@ -9,7 +9,7 @@ import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
-import { bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, meshWorldMatrix } from '../lib/meshTransform';
+import { bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
@@ -16227,16 +16227,13 @@ export default function PointCloudViewer({
       // (octree). The cloud stays fixed; the mesh (SOURCE) is always inline.
       const ps = await buildPointSource(cloud);
 
-      // Get current mesh position
-      const currentPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
-
-      // Get mesh vertices and apply current position offset (SOURCE - to be moved)
-      const meshVertices: number[] = [];
-      for (let i = 0; i < mesh.data.vertexCount; i++) {
-        meshVertices.push(mesh.data.vertices[i * 3] + currentPos.x);
-        meshVertices.push(mesh.data.vertices[i * 3 + 1] + currentPos.y);
-        meshVertices.push(mesh.data.vertices[i * 3 + 2] + currentPos.z);
-      }
+      // The mesh (SOURCE - to be moved) as DRAWN: position, rotation and scale.
+      // `vertex + position` alone dropped rotation and scale, so the backend
+      // fitted a shape other than the one on screen (see meshWorldVertices).
+      const meshTransform = { ...meshDeltaInput(mesh), worldShift: null };
+      const meshVertices: number[] = Array.from(meshWorldVertices(
+        mesh.data.vertices, mesh.data.vertexCount,
+        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)));
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
       const response = await icpRegisterMeshToCloud(
@@ -16259,47 +16256,14 @@ export default function PointCloudViewer({
       }
 
       if (response.transformation_matrix && response.transformation_matrix.length === 16) {
-        // Apply the full transformation matrix (rotation + translation)
-        const m = response.transformation_matrix;
-
-        // Create THREE.Matrix4 from the flat array
-        // NumPy flatten() gives row-major data, THREE.Matrix4.set() takes row-major input
-        // So they match directly - NO transpose needed
-        const matrix = new THREE.Matrix4();
-        matrix.set(
-          m[0], m[1], m[2], m[3],
-          m[4], m[5], m[6], m[7],
-          m[8], m[9], m[10], m[11],
-          m[12], m[13], m[14], m[15]
-        );
-
-        // Extract rotation and translation
-        const position = new THREE.Vector3();
-        const quaternion = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
-        matrix.decompose(position, quaternion, scale);
-
-        // Convert quaternion to euler angles
-        const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
-
-        // The ICP transformation: T * (v + currentPos) = R*v + R*currentPos + t
-        // In rendering: R * v + newPos
-        // So: newPos = R * currentPos + t
-        const currentPosVec = new THREE.Vector3(currentPos.x, currentPos.y, currentPos.z);
-        currentPosVec.applyQuaternion(quaternion);  // R * currentPos
-
-        const newPos = {
-          x: currentPosVec.x + position.x,  // R*currentPos + t
-          y: currentPosVec.y + position.y,
-          z: currentPosVec.z + position.z,
-        };
-
-        // Convert radians to degrees since meshRotations stores degrees
-        const newRot = {
-          x: euler.x * 180 / Math.PI,
-          y: euler.y * 180 / Math.PI,
-          z: euler.z * 180 / Math.PI,
-        };
+        // The ICP matrix D is a world-space delta on the DRAWN mesh, so
+        // compose it onto the mesh's existing transform (W' = D·W) rather
+        // than overwriting the rotation with D's.
+        const res = composeMeshDelta(
+          matrix4FromRowMajor(response.transformation_matrix), meshTransform);
+        if (res.kind === 'blocked') throw new Error(res.reason);
+        const newPos = res.position;
+        const newRot = res.rotation;
 
         meshPositionsRef.current.set(meshId, newPos);
         setMeshPositions(prev => new Map(prev).set(meshId, newPos));
@@ -16328,7 +16292,7 @@ export default function PointCloudViewer({
       icpAbortRef.current = null;
       icpRunIdRef.current = null;
     }
-  }, [clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
+  }, [clouds, meshes, buildPointSource, meshDeltaInput, setMeshPositions, setMeshRotations]);
 
   // Handle Cloud-to-Cloud ICP alignment
   // Cloud-to-cloud registration, shared by the two entry points.
@@ -17289,31 +17253,26 @@ export default function PointCloudViewer({
     setIcpProgress(null);
 
     try {
-      // Get current positions for both meshes
-      const targetPos = meshPositions.get(targetMesh.id) || { x: 0, y: 0, z: 0 };
-      const sourcePos = meshPositions.get(sourceMesh.id) || { x: 0, y: 0, z: 0 };
-
-      // Apply positions to vertices for ICP, into TYPED arrays.
+      // Both meshes in the frame they are DRAWN in: position, rotation and
+      // scale (meshWorldMatrix), minus the source cloud's worldShift. Sending
+      // `vertex + position` dropped rotation and scale, so the backend aligned
+      // a shape other than the one on screen and its matrix, sized for that
+      // shape, threw a scaled mesh far from the target.
       //
-      // These were number[] built by push, then Array.from(indices), then
-      // JSON.stringify. The mesh picker offers Helios triangulations (millions
-      // of triangles), and four boxed arrays of that size exceed V8's max
-      // string length, so the request died before it was sent. Pre-sized
-      // Float32Array/Uint32Array ride the PHB1 binary frame instead.
-      const tv = targetMesh.data.vertices;
-      const sv = sourceMesh.data.vertices;
-      const targetVertices = new Float32Array(tv.length);
-      const sourceVertices = new Float32Array(sv.length);
-      for (let i = 0; i < tv.length; i += 3) {
-        targetVertices[i] = tv[i] + targetPos.x;
-        targetVertices[i + 1] = tv[i + 1] + targetPos.y;
-        targetVertices[i + 2] = tv[i + 2] + targetPos.z;
-      }
-      for (let i = 0; i < sv.length; i += 3) {
-        sourceVertices[i] = sv[i] + sourcePos.x;
-        sourceVertices[i + 1] = sv[i + 1] + sourcePos.y;
-        sourceVertices[i + 2] = sv[i + 2] + sourcePos.z;
-      }
+      // Typed arrays: the mesh picker offers Helios triangulations (millions
+      // of triangles), and boxed number[] of that size exceed V8's max string
+      // length in JSON.stringify, so they ride the PHB1 binary frame instead.
+      const drawnMatrix = (mesh: MeshEntry) => {
+        const t = meshDeltaInput(mesh);
+        const ws = t.worldShift ?? [0, 0, 0];
+        return meshWorldMatrix(
+          { x: t.position.x - ws[0], y: t.position.y - ws[1], z: t.position.z - ws[2] },
+          t.rotation, t.scale);
+      };
+      const targetVertices = meshWorldVertices(
+        targetMesh.data.vertices, targetMesh.data.vertexCount, drawnMatrix(targetMesh));
+      const sourceVertices = meshWorldVertices(
+        sourceMesh.data.vertices, sourceMesh.data.vertexCount, drawnMatrix(sourceMesh));
 
       const response = await icpRegisterMeshToMesh({},
         ctrl.signal,
@@ -17334,47 +17293,14 @@ export default function PointCloudViewer({
       }
 
       if (response.transformation_matrix && response.transformation_matrix.length === 16) {
-        // Apply the full transformation matrix (rotation + translation)
-        const m = response.transformation_matrix;
-
-        // Create THREE.Matrix4 from the flat array
-        // NumPy flatten() gives row-major data, THREE.Matrix4.set() takes row-major input
-        // So they match directly - NO transpose needed
-        const matrix = new THREE.Matrix4();
-        matrix.set(
-          m[0], m[1], m[2], m[3],
-          m[4], m[5], m[6], m[7],
-          m[8], m[9], m[10], m[11],
-          m[12], m[13], m[14], m[15]
-        );
-
-        // Extract rotation and translation
-        const position = new THREE.Vector3();
-        const quaternion = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
-        matrix.decompose(position, quaternion, scale);
-
-        // Convert quaternion to euler angles
-        const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
-
-        // The ICP transformation: T * (v + sourcePos) = R*v + R*sourcePos + t
-        // In rendering: R * v + newPos
-        // So: newPos = R * sourcePos + t
-        const sourcePosVec = new THREE.Vector3(sourcePos.x, sourcePos.y, sourcePos.z);
-        sourcePosVec.applyQuaternion(quaternion);  // R * sourcePos
-
-        const newPos = {
-          x: sourcePosVec.x + position.x,  // R*sourcePos + t
-          y: sourcePosVec.y + position.y,
-          z: sourcePosVec.z + position.z,
-        };
-
-        // Convert radians to degrees since meshRotations stores degrees
-        const newRot = {
-          x: euler.x * 180 / Math.PI,
-          y: euler.y * 180 / Math.PI,
-          z: euler.z * 180 / Math.PI,
-        };
+        // The ICP matrix D is a world-space delta on the DRAWN mesh, so
+        // compose it onto the mesh's existing transform (W' = D·W) rather
+        // than overwriting the rotation with D's.
+        const res = composeMeshDelta(
+          matrix4FromRowMajor(response.transformation_matrix), meshDeltaInput(sourceMesh));
+        if (res.kind === 'blocked') throw new Error(res.reason);
+        const newPos = res.position;
+        const newRot = res.rotation;
 
         meshPositionsRef.current.set(sourceMesh.id, newPos);
         setMeshPositions(prev => new Map(prev).set(sourceMesh.id, newPos));
@@ -17407,7 +17333,7 @@ export default function PointCloudViewer({
       icpAbortRef.current = null;
       icpRunIdRef.current = null;
     }
-  }, [meshes, meshPositions, setMeshPositions, setMeshRotations]);
+  }, [meshes, meshDeltaInput, setMeshPositions, setMeshRotations]);
 
 
   // Toggle mesh visibility

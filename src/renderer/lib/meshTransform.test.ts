@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 
 import {
-  bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, meshWorldMatrix, polarRotation,
+  bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix,
+  meshWorldVertices, polarRotation,
 } from './meshTransform';
 import { poseToMatrix } from './octreePoseCompose';
 import type { MeshData } from './pointCloudTypes';
@@ -135,5 +136,47 @@ describe('polarRotation / bakeResidualIntoMeshData', () => {
     // Stale geometric metadata is dropped rather than left wrong.
     expect(out.surfaceArea).toBeUndefined();
     expect(data.vertices[0]).toBe(1);  // input untouched
+  });
+});
+
+describe('applying a backend ICP matrix to a mesh', () => {
+  // The two ICP tools send the mesh as drawn and compose the returned matrix
+  // onto its transform. Both used to send `vertex + position` and overwrite the
+  // rotation, which is only right for an unscaled mesh.
+  const local = new Float32Array([1, 0, 0, 0, 2, 0, 0, 0, 3, -1, 1, 2]);
+  const transform = {
+    position: { x: 40, y: 30, z: -300 },
+    rotation: { x: 20, y: -35, z: 80 },
+    scale: { x: 0.5, y: 0.5, z: 2 },
+  };
+  // A rigid delta as NumPy would flatten it: 90° about Z, then a translation.
+  const rowMajor = [
+    0, -1, 0, 7,
+    1, 0, 0, -3,
+    0, 0, 1, 12,
+    0, 0, 0, 1,
+  ];
+
+  it('reads a row-major matrix without transposing it', () => {
+    const p = new THREE.Vector3(1, 0, 0).applyMatrix4(matrix4FromRowMajor(rowMajor));
+    close([p.x, p.y, p.z], [7, -2, 12]);
+  });
+
+  it('lands a rotated, scaled mesh exactly where the matrix sends its drawn vertices', () => {
+    const W = meshWorldMatrix(transform.position, transform.rotation, transform.scale);
+    const sent = meshWorldVertices(local, 4, W);
+    const D = matrix4FromRowMajor(rowMajor);
+    const res = composeMeshDelta(D, transform);
+    expect(res.kind).toBe('trs');
+    if (res.kind !== 'trs') return;
+    close([res.scale.x, res.scale.y, res.scale.z], [0.5, 0.5, 2]);
+
+    const redrawn = meshWorldVertices(local, 4, meshWorldMatrix(res.position, res.rotation, transform.scale));
+    const expected: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const v = new THREE.Vector3(sent[i * 3], sent[i * 3 + 1], sent[i * 3 + 2]).applyMatrix4(D);
+      expected.push(v.x, v.y, v.z);
+    }
+    close(redrawn, expected, 3);
   });
 });

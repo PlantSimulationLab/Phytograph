@@ -92,11 +92,8 @@ def test_c2c_worker_recovers_known_offset():
 
 def test_m2m_worker_recovers_known_offset():
     # Seed Open3D's RNG: the m2m worker samples the mesh surface with
-    # `sample_points_uniformly`, and on this deliberately coarse 8-vertex box it
-    # draws only 80 points (10x the vertex count). An unseeded draw that clumps
-    # leaves ICP a genuinely ambiguous correspondence, so this test failed ~30%
-    # of runs independent of any production change. Seeding pins the sample so a
-    # failure here means a real registration regression.
+    # `sample_points_uniformly`. Seeding pins the sample so a failure here
+    # means a real registration regression rather than an unlucky draw.
     _seed_open3d(0)
     verts, tris = _cube_mesh()
     offset = np.array([0.3, 0.2, -0.2])
@@ -121,6 +118,66 @@ def test_m2m_worker_recovers_known_offset():
     # (~0.06 here — floored by the random surface-sampling spacing on a coarse
     # 8-vertex box, not by a registration error).
     assert residual < 0.15, f"residual {residual:.4f} vs offset {np.linalg.norm(offset):.4f}"
+
+
+def _lumpy_mesh():
+    """A closed surface with NO rotational symmetry, as (vertices Nx3, tris Mx3):
+    a sphere stretched unequally along each axis with one off-axis bump. Away
+    from its own centroid and the origin, like a real scan."""
+    o3d = main.open3d_warmup.get_open3d()
+    sphere = o3d.geometry.TriangleMesh.create_sphere(radius=1.0, resolution=24)
+    v = np.asarray(sphere.vertices).copy()
+    bump = np.exp(-np.sum((v - np.array([0.6, 0.6, 0.5])) ** 2, axis=1) / 0.15)
+    v = v * (1.0 + 0.6 * bump)[:, None] * np.array([1.6, 1.0, 0.7])
+    return v + np.array([40.0, 30.0, -300.0]), np.asarray(sphere.triangles).copy()
+
+
+def _rotation_angle_deg(R: np.ndarray) -> float:
+    return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
+
+
+def test_m2m_worker_recovers_a_quarter_turn():
+    """Two scans of one object 90 degrees apart must come back together.
+
+    ICP alone cannot do this: from a single start it slides to the nearest
+    wrong pose and reports ~0.9 fitness for it. `_m2m_orientation_search` is
+    what recovers the turn, and this fails without it."""
+    from scipy.spatial.transform import Rotation
+    _seed_open3d(0)
+    verts, tris = _lumpy_mesh()
+    R = Rotation.from_rotvec(np.radians(90.0) * np.array([1.0, 2.0, 2.0]) / 3.0).as_matrix()
+    center = verts.mean(axis=0)
+    src = (verts - center) @ R.T + center + np.array([0.2, -0.1, 0.15])
+
+    req = main.MeshToMeshICPRequest(
+        target_vertices=verts.ravel().tolist(), target_indices=tris.ravel().tolist(),
+        source_vertices=src.ravel().tolist(), source_indices=tris.ravel().tolist(),
+    )
+    result = main._do_m2m_icp(req, progress=None)
+    assert result["success"] is True, result.get("error")
+    m = np.array(result["transformation_matrix"], dtype=np.float64).reshape(4, 4)
+    # The recovered rotation undoes the applied one...
+    assert _rotation_angle_deg(m[:3, :3] @ R) < 3.0
+    # ...and every vertex returns to where it started (the object is ~3 across).
+    back = src @ m[:3, :3].T + m[:3, 3]
+    assert np.abs(back - verts).max() < 0.1
+
+
+def test_m2m_orientation_search_leaves_an_aligned_symmetric_mesh_alone():
+    """A box fits itself equally well turned 180 degrees. The search must not
+    flip a mesh that already sits on its target just because a rotated start
+    scores the same -- that is what `_M2M_ORIENTATION_MARGIN` is for."""
+    _seed_open3d(0)
+    verts, tris = _cube_mesh()
+    src = (np.array(verts).reshape(-1, 3) + np.array([0.05, 0.0, 0.0])).ravel().tolist()
+    req = main.MeshToMeshICPRequest(
+        target_vertices=verts, target_indices=tris,
+        source_vertices=src, source_indices=tris,
+    )
+    result = main._do_m2m_icp(req, progress=None)
+    assert result["success"] is True, result.get("error")
+    m = np.array(result["transformation_matrix"], dtype=np.float64).reshape(4, 4)
+    assert _rotation_angle_deg(m[:3, :3]) < 20.0
 
 
 def test_c2m_worker_recovers_known_offset_from_a_sparse_cloud():

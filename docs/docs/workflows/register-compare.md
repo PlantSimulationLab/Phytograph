@@ -416,6 +416,19 @@ Mesh-to-mesh is typically more accurate than cloud-to-cloud because points
 are sampled uniformly off both surfaces, giving a denser and more even
 correspondence set than raw scan points.
 
+The two meshes do **not** need to start in the same orientation. Before
+refining, the tool brings their centers together and tries a fixed set of 84
+starting orientations, keeping the one whose surfaces agree best — so two
+scans of the same object taken a quarter turn apart align without a manual
+pre-rotation. A rotated start is only preferred when it fits clearly better
+than the mesh as placed, so a symmetric object (a box, a cylinder) that is
+already aligned is not flipped onto an equivalent face. The meshes do need to
+cover largely the same surface: the centers are matched first, so a mesh that
+is a small piece of the other may not be found.
+
+The source mesh's existing position, rotation and scale are respected: it is
+aligned as drawn, and the result is applied on top of its current transform.
+
 ## Cloud-to-mesh distance
 
 Measure how well a mesh fits a point cloud — e.g., comparing a real scan
