@@ -1018,6 +1018,38 @@ test.describe('translate cloud', () => {
     expect(z).toBeCloseTo(60, 1);
   });
 
+  // Regression: with the picker armed, a click on a MESH selected the mesh
+  // (its own click handler swallowed the event) and never placed the origin.
+  // The origin must land on the clicked face and the selection must not change.
+  test('Set Scene Origin — click-to-place snaps to a mesh surface without selecting it', async () => {
+    const { app, page } = session;
+    // Unit cube spanning [0, 1]^3.
+    await importFiles(app, page, 'import-mesh',
+      join(repoRoot, 'tests', 'e2e', 'fixtures', 'cube-mesh.ply'));
+    await expect(page.getByTestId('mesh-row')).toHaveCount(1, { timeout: 30_000 });
+    const selectedMeshes = page.locator('[data-testid="mesh-row"][data-selected="true"]');
+    // Start from a deselected mesh so a stray selection would be visible.
+    if (await selectedMeshes.count() > 0) {
+      const empty = await emptyViewportPoint();
+      await page.mouse.click(empty.x, empty.y);
+    }
+    await expect(selectedMeshes).toHaveCount(0);
+
+    const panel = await openSceneOriginPanel();
+    // Center of the top face; the default view looks down on the cube, so
+    // that face is the nearest surface under the cursor. The ground-plane
+    // fallback would report z = 0 instead.
+    const onTop = await worldToScreen([0.5, 0.5, 1]);
+    await page.mouse.click(onTop.x, onTop.y);
+    await expect(panel).toHaveAttribute('data-has-origin', 'true');
+    await expect(panel).toHaveAttribute('data-place-mode', 'false');
+    const [x, y, z] = await readOriginFields();
+    expect(x).toBeCloseTo(0.5, 1);
+    expect(y).toBeCloseTo(0.5, 1);
+    expect(z).toBeCloseTo(1, 2);
+    await expect(selectedMeshes).toHaveCount(0);
+  });
+
   // Open the Scene Origin panel. Opening AUTO-ARMS click-to-place (placing the
   // pivot by clicking is the common reason to open it), which mounts a
   // full-viewport picker plane that swallows every canvas click and makes the

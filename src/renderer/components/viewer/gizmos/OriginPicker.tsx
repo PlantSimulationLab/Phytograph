@@ -1,16 +1,18 @@
-import { useEffect } from 'react';
-import { useThree, ThreeEvent } from '@react-three/fiber';
+import { useEffect, useRef } from 'react';
+import { useFrame, useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
 import { pickAcrossOctrees } from '../../../lib/octreeMultiPick';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
+import { nearestSnapSurfaceHit } from '../../../lib/originSnapSurface';
 import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octreePickSplat';
 
 // Click target for placing the scene origin (the CloudCompare-style pivot).
 // While mounted (origin place-mode armed), a left-click prefers a SURFACE hit on
 // the nearest visible octree cloud (potree-core `Potree.pick`, so the origin
-// snaps to a real point like CloudCompare's point-pick), falling back to a
-// ground-plane intersection when the ray misses every cloud. The hit is
+// snaps to a real point like CloudCompare's point-pick) or on a mesh / QSM
+// surface, whichever is nearer the camera, falling back to a ground-plane
+// intersection when the ray misses both. The hit is
 // converted from DISPLAY space (the scene renders at world − displayOffset; the
 // octrees are attached to the scene root at that offset, so picks come back in
 // display coords) to WORLD and reported via onPick. Only mounted while placing —
@@ -44,8 +46,30 @@ export function OriginPicker({
     return () => { gl.domElement.style.cursor = 'auto'; };
   }, [gl]);
 
+  // The click target is a camera-facing plane held just in front of the
+  // camera, so EVERY viewport ray crosses it. A plane lying on the ground is
+  // missed by any ray at or above the horizon — exactly the rays that reach a
+  // canopy mesh seen from a low viewpoint.
+  const targetRef = useRef<THREE.Mesh>(null);
+  useFrame(() => {
+    const target = targetRef.current;
+    if (!target) return;
+    camera.getWorldDirection(target.position).add(camera.position);
+    target.quaternion.copy(camera.quaternion);
+  });
+
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
-    // Surface snap first: pick against the octrees along the event ray.
+    // Orbit-drag that ended over the viewport is not a pick.
+    if (e.delta > 4) return;
+    const report = (p: { x: number; y: number; z: number }) => {
+      e.stopPropagation();
+      onPick([p.x + displayOffset.x, p.y + displayOffset.y, p.z + displayOffset.z]);
+    };
+    // Mesh / QSM surface under the cursor. Their groups carry click handlers,
+    // so R3F already raycast them for this event (display space, like the
+    // octree picks).
+    const meshHit = nearestSnapSurfaceHit(e.intersections);
+    // Surface snap: pick against the octrees along the event ray.
     if (octrees.length > 0) {
       try {
         const hit = pickAcrossOctrees(octrees, gl, camera, e.ray, {
@@ -57,15 +81,17 @@ export function OriginPicker({
           onBeforePickRender: makeInflatePickSplat(gl.getPixelRatio()),
         }) as { position?: { x: number; y: number; z: number } } | null;
         if (hit?.position) {
-          e.stopPropagation();
-          onPick([
-            hit.position.x + displayOffset.x,
-            hit.position.y + displayOffset.y,
-            hit.position.z + displayOffset.z,
-          ]);
+          // A mesh in front of the cloud point is what the user clicked on.
+          const cloudDistance = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z)
+            .sub(e.ray.origin).dot(e.ray.direction);
+          report(meshHit && meshHit.distance < cloudDistance ? meshHit.point : hit.position);
           return;
         }
-      } catch { /* fall through to the ground plane */ }
+      } catch { /* fall through to the mesh hit / ground plane */ }
+    }
+    if (meshHit) {
+      report(meshHit.point);
+      return;
     }
     // Ground-plane fallback: intersect the ray with z = groundZ (display space).
     const ray = e.ray;
@@ -82,7 +108,7 @@ export function OriginPicker({
 
   return (
     // UI overlay, not content — see lib/sceneOverlay.ts.
-    <mesh {...SCENE_OVERLAY} position={[0, 0, groundZ]} onClick={handleClick} renderOrder={9999}>
+    <mesh ref={targetRef} {...SCENE_OVERLAY} onClick={handleClick} renderOrder={9999}>
       <planeGeometry args={[100000, 100000]} />
       <meshBasicMaterial transparent opacity={0} depthWrite={false} side={THREE.DoubleSide} />
     </mesh>

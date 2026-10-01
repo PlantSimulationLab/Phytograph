@@ -194,9 +194,10 @@ In the **Scene Origin** panel you can:
 
 - **Pick in viewport** — click-to-place. This is **already armed** when the
   panel opens, so you can just click a point straight away; it snaps to the
-  surface of whichever visible cloud you click (it doesn't need to be
-  selected), or drops onto the scene's ground level if you click past every
-  cloud. (The view does not move when you pick.) Placing a point
+  surface of whichever visible cloud, mesh or QSM you click (it doesn't need
+  to be selected, and clicking a mesh places the origin on it rather than
+  selecting it), or drops onto the scene's ground level if you click past
+  all of them. (The view does not move when you pick.) Placing a point
   disarms it, and the button toggles it off and on again by hand.
 - Type exact **X / Y / Z** world coordinates.
 - **Center on selection** — snap the origin to the middle of the selected

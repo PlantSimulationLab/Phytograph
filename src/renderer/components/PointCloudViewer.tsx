@@ -248,6 +248,7 @@ import { GIZMO_ARROW_PIXELS, GIZMO_RING_PIXELS } from './viewer/gizmos/ConstantS
 import { OriginPicker } from './viewer/gizmos/OriginPicker';
 import { SceneOriginMarker } from './viewer/gizmos/SceneOriginMarker';
 import type { PointCloudOctree } from 'potree-core';
+import { ORIGIN_SNAP_SURFACE } from '../lib/originSnapSurface';
 import { PointPicker, type PointPickHit } from './viewer/gizmos/PointPicker';
 import { PointPickerPanel, type PickerMode } from './viewer/panels/PointPickerPanel';
 import {
@@ -22264,9 +22265,10 @@ export default function PointCloudViewer({
   // Viewport mesh click-to-select is live only in the default viewport state —
   // when an edit tool owns the click (crop/erase/translate gizmo), tree-seed
   // placement is active, or a gizmo drag is in flight, those clicks belong to
-  // the tool, not selection.
+  // the tool, not selection. Likewise while the scene-origin picker is armed:
+  // a click on a mesh places the origin on it rather than selecting it.
   const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging
-    && !trajectoryEditor && !pointPickMode;
+    && !trajectoryEditor && !pointPickMode && !originPlaceMode;
 
   // Drop the scene-origin selection (and its gizmo) whenever the marker goes
   // away or a tool takes over the viewport — a gizmo the user can no longer see
@@ -23335,6 +23337,9 @@ export default function PointCloudViewer({
                   //  • voxel box (+1): always blend LAST over the surface mesh it
                   //    encloses, not camera-distance-sorted against it, so its
                   //    volume tint survives every view angle (the +X-view "full
+              // A surface the scene-origin picker snaps to — except a voxel
+              // grid, which is a volume you look through, not a surface.
+              {...(mesh.gridSubdivisions ? {} : ORIGIN_SNAP_SURFACE)}
                   //    green" fix).
                   //  • ground plane (-0.5): draw FIRST, just after the ground grid
                   //    (-1) and before all real geometry (0). The plane is coplanar
@@ -23537,6 +23542,7 @@ export default function PointCloudViewer({
           // so skip the passive one to avoid a double-render on pose 0.
           if (trajectoryEditor && trajectoryEditor.scanId === scan.id) return null;
           // Glow follows the Scans-pane selection — single source of truth, so
+              {...ORIGIN_SNAP_SURFACE}
           // the marker can never drift out of sync with the row highlight.
           const isMarkerSelected = selectedScanIds.has(scan.id);
           // params.origin / params.trajectory are WORLD-frame, but the cloud renders
@@ -23719,8 +23725,8 @@ export default function PointCloudViewer({
         )}
 
         {/* Scene-origin click-to-place target. Armed from the Scene Origin panel;
-            surface-snaps to the nearest VISIBLE cloud (selected or not — the
-            origin is scene-wide), else drops on the scene's ground plane.
+            surface-snaps to the nearest VISIBLE cloud or mesh/QSM (selected or
+            not — the origin is scene-wide), else drops on the scene's ground plane.
             Auto-disarms on a successful pick. */}
         {originPlaceMode && (
           <OriginPicker
