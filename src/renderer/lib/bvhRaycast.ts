@@ -25,7 +25,7 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-
 // computeBoundsTree / disposeBoundsTree are patched onto BufferGeometry.prototype
 // below; declared here for the type so callers don't reach for `any`.
 type WithBoundsTree = THREE.BufferGeometry & {
-  computeBoundsTree?: () => void;
+  computeBoundsTree?: (options?: { indirect?: boolean }) => void;
   disposeBoundsTree?: () => void;
 };
 
@@ -45,9 +45,18 @@ export function installBvhRaycast(): void {
 // O(triangles). One-time, runs on geometry (re)build — not per interaction.
 // Guarded in case installBvhRaycast hasn't run (e.g. unit tests) so the mesh
 // still renders. Pair with disposeBoundsTree() when the geometry is disposed.
+//
+// `indirect` is load-bearing. By default three-mesh-bvh sorts the geometry's
+// INDEX BUFFER in place so each tree leaf is a contiguous run — and the viewer
+// hands the geometry `MeshData.indices` itself, not a copy. So a default build
+// silently permuted the triangle order of the mesh's own data (measured: 195 of
+// 200 triangles changed slot), while everything stored per triangle beside it —
+// source scan, grid cell, organ code, edge metrics, material groups — kept the
+// old order. Indirect mode keeps the permutation in a side buffer owned by the
+// tree and leaves the index exactly as given.
 export function buildBoundsTree(geo: THREE.BufferGeometry): void {
   const g = geo as WithBoundsTree;
-  if (typeof g.computeBoundsTree === 'function') g.computeBoundsTree();
+  if (typeof g.computeBoundsTree === 'function') g.computeBoundsTree({ indirect: true });
 }
 
 // Free the BVH (a large typed-array index) before disposing the geometry buffers.

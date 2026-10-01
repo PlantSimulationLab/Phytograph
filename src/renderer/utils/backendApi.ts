@@ -4845,6 +4845,45 @@ export async function deleteCloudRegion(
   }
 }
 
+/** What `/resample` should keep: a random fraction, or one point per voxel. */
+export type ResampleSpec =
+  | { mode: 'random'; fraction: number; seed?: number }
+  | { mode: 'voxel'; voxel_size: number };
+
+export interface SessionResampleResult {
+  session_id: string;
+  /** Surviving hit points before / after the resample (misses never change). */
+  hits_before: number;
+  hits_after: number;
+  committed: boolean;
+  remaining_count?: number;
+  pending_deleted_count?: number;
+  total_count?: number;
+}
+
+/**
+ * Thin a cloud session: mark the points a resample drops as deleted. Instant —
+ * mask only; the caller bakes to rebuild the octree. `dryRun` reports the
+ * before/after counts without changing anything (the panel's estimate).
+ */
+export async function sessionResample(
+  sessionId: string,
+  spec: ResampleSpec,
+  dryRun = false,
+): Promise<SessionResampleResult> {
+  const baseUrl = getBackendUrl();
+  const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/resample`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...spec, dry_run: dryRun }),
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return (await response.json()) as SessionResampleResult;
+}
+
 /**
  * Undo: restore the deleted mask to an earlier snapshot, keeping the first
  * `editCount` committed deletes and discarding the rest. Omit `editCount` to

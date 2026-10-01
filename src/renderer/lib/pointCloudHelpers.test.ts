@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  voxelKeepIndices,
+  voxelResampleCloud,
   formatColorbarTick,
   filterValueKeeps,
   pointPassesFilters,
@@ -1973,5 +1975,51 @@ describe('hasEnabledFilter', () => {
     expect(hasEnabledFilter({
       ...base, scalarFields: { c: { min: 0, max: 1, enabled: true } },
     })).toBe(true);
+  });
+});
+
+describe('voxelKeepIndices / voxelResampleCloud', () => {
+  it('keeps the point nearest each occupied cell center, one per cell', () => {
+    // Cell size 1 anchored at the min corner (0,0,0): points 0 and 1 share cell
+    // (0,0,0) — 1 is nearer its center (0.5,0.5,0.5); point 2 is alone in (2,0,0).
+    const pos = new Float32Array([
+      0.0, 0.0, 0.0,
+      0.4, 0.6, 0.5,
+      2.2, 0.1, 0.1,
+    ]);
+    expect(voxelKeepIndices(pos, 3, 1)).toEqual([1, 2]);
+  });
+
+  it('thins a regular grid to one point per cube and keeps attributes aligned', () => {
+    const n = 4;  // 4x4x4 grid at spacing 1; cubes of 2 hold 2x2x2 points
+    const positions = new Float32Array(n * n * n * 3);
+    const scalar = new Float32Array(n * n * n);
+    let k = 0;
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) for (let l = 0; l < n; l++) {
+      positions.set([i, j, l], k * 3);
+      scalar[k] = k;
+      k++;
+    }
+    const cloud: PointCloudData = {
+      positions,
+      scalarFields: { id: { values: scalar, min: 0, max: k - 1 } },
+      pointCount: k,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(3, 3, 3),
+        center: new THREE.Vector3(1.5, 1.5, 1.5), size: new THREE.Vector3(3, 3, 3),
+      },
+    };
+    const out = voxelResampleCloud(cloud, 2);
+    expect(out.pointCount).toBe(8);
+    for (let i = 0; i < out.pointCount; i++) {
+      const src = out.scalarFields!.id.values[i];
+      expect(out.positions[i * 3]).toBe(positions[src * 3]);
+      expect(out.positions[i * 3 + 2]).toBe(positions[src * 3 + 2]);
+    }
+  });
+
+  it('refuses a streamed (octree) cloud, whose positions are empty', () => {
+    const cloud = { positions: new Float32Array(0), pointCount: 100 } as unknown as PointCloudData;
+    expect(() => voxelResampleCloud(cloud, 1)).toThrow(/flat cloud/);
   });
 });

@@ -10,10 +10,11 @@ import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseTo
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
 import { bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
+import { countMask, cropMeshEntry, meshCropBlockReason, meshTriangleRegionMask, meshWorldBounds, subsetMaterials, subsetMeshData } from '../lib/meshCrop';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, waitForBackendHealthy, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionResample, type ResampleSpec, type SessionResampleResult, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, waitForBackendHealthy, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -174,6 +175,8 @@ import {
   ladRange,
   roundCoord3,
   resampleCloud,
+  voxelResampleCloud,
+  voxelKeepIndices,
   cloneFlatPointCloudData,
   computeDisplayOffset,
   displayViewToWorldView,
@@ -246,9 +249,9 @@ import { TranslationGizmo } from './viewer/gizmos/TranslationGizmo';
 import { RotationGizmo } from './viewer/gizmos/RotationGizmo';
 import { GIZMO_ARROW_PIXELS, GIZMO_RING_PIXELS } from './viewer/gizmos/ConstantScreenScaler';
 import { OriginPicker } from './viewer/gizmos/OriginPicker';
+import { ORIGIN_SNAP_SURFACE } from '../lib/originSnapSurface';
 import { SceneOriginMarker } from './viewer/gizmos/SceneOriginMarker';
 import type { PointCloudOctree } from 'potree-core';
-import { ORIGIN_SNAP_SURFACE } from '../lib/originSnapSurface';
 import { PointPicker, type PointPickHit } from './viewer/gizmos/PointPicker';
 import { PointPickerPanel, type PickerMode } from './viewer/panels/PointPickerPanel';
 import {
@@ -312,7 +315,7 @@ import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
 import { TransformationPanel } from './viewer/panels/TransformationPanel';
 import { SceneOriginPanel, type ScannerPositionOption } from './viewer/panels/SceneOriginPanel';
-import { ResamplePanel } from './viewer/panels/ResamplePanel';
+import { ResamplePanel, type ResampleMode } from './viewer/panels/ResamplePanel';
 import { FilterPanel, FilterTargetsOnlyPanel } from './viewer/panels/FilterPanel';
 import { ErasePanel } from './viewer/panels/ErasePanel';
 import { CropPanel } from './viewer/panels/CropPanel';
@@ -990,11 +993,16 @@ export default function PointCloudViewer({
   const [filterPreviewShown, setFilterPreviewShown] = useState<number | null>(null);
   const [showResamplePanel, setShowResamplePanel] = useState(false);
   const [resampleFraction, setResampleFraction] = useState(0.5);
-  const [resamplePreview, setResamplePreview] = useState<{
-    cloudId: string;
-    previewData: PointCloudData;
-    originalPointCount: number;
-  } | null>(null);
+  // Resample: its picker's checked clouds (seeded from the Scans pane on open),
+  // the method, the even-spacing cube size (m), the before/after estimate the
+  // panel shows, and whether a commit is running.
+  const [resampleTargets, setResampleTargets] = useState<Set<string>>(() => new Set());
+  const [resampleMode, setResampleMode] = useState<ResampleMode>('random');
+  const [resampleVoxelSize, setResampleVoxelSize] = useState(0.01);
+  const [resampleEstimate, setResampleEstimate] = useState<{ before: number; after: number | null; estimating: boolean }>(
+    { before: 0, after: null, estimating: false },
+  );
+  const [resampleApplying, setResampleApplying] = useState(false);
   const [cloudFilters, setCloudFilters] = useState<Map<string, CloudFilters>>(new Map());
   const [selectedFilterField, setSelectedFilterField] = useState<string | null>(null);
   const [pendingFilterMin, setPendingFilterMin] = useState<string>('');
@@ -2548,6 +2556,12 @@ export default function PointCloudViewer({
   // reads it until finishUp swaps the cropped data in.
   const [cropTargets, setCropTargetsState] = useState<Set<string>>(() => new Set());
   const cropTargetsRef = useRef(cropTargets);
+  // The MESHES the Crop tool will cut — the panel's second checked list, seeded
+  // from the Meshes-pane selection the same way. Kept apart from `cropTargets`
+  // (rather than one kind-prefixed set, as Transform uses) because that set is
+  // read as bare cloud ids all through the cloud preview and apply paths.
+  const [cropMeshTargets, setCropMeshTargetsState] = useState<Set<string>>(() => new Set());
+  const cropMeshTargetsRef = useRef(cropMeshTargets);
   const [cropDrawState, setCropDrawState] = useState<CropDrawState>('idle');
   // In-progress polygon vertices while the user is clicking. Promoted to
   // cropPolygon when they press Enter.
@@ -3325,10 +3339,7 @@ export default function PointCloudViewer({
     // it instead of leaving two transform surfaces stacked on screen.
     if (except !== 'mesh-transform') setShowResizePanel(false);
     if (except !== 'filter') setShowFilterPanel(false);
-    if (except !== 'resample') {
-      setShowResamplePanel(false);
-      setResamplePreview(null); // Clear resample preview when closing resample panel
-    }
+    if (except !== 'resample') setShowResamplePanel(false);
     if (except !== 'triangulation') setShowTriangulationPopup(false);
     if (except !== 'compute-normals') setShowComputeNormalsPanel(false);
     if (except !== 'scalar-fields') setShowScalarFieldsPanel(false);
@@ -3401,6 +3412,44 @@ export default function PointCloudViewer({
   // the multi-cloud toolbar so the same Crop button is available to N≥1
   // selected scans. On entry the world-space cropBox is initialized to
   // the union of every selected scan's translated bounds.
+  // A mesh's local → crop-frame matrix: exactly the transform its <group> is
+  // drawn with (own position/rotation/scale, plus its source cloud's pending
+  // translation, minus that cloud's worldShift), without the render-only
+  // displayOffset. That is the frame the crop box and the frozen polygon camera
+  // are in, so a mesh is cut where it is SEEN.
+  const meshCropMatrixOf = useCallback((mesh: MeshEntry): THREE.Matrix4 => {
+    const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+    const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
+    const t = sourceCloud ? getEditState(sourceCloud.id).translation : { x: 0, y: 0, z: 0 };
+    const ws = mesh.method === 'dem' ? [0, 0, 0] : (sourceCloud?.data?.octree?.worldShift ?? [0, 0, 0]);
+    return meshWorldMatrix(
+      { x: p.x + t.x - ws[0], y: p.y + t.y - ws[1], z: p.z + t.z - ws[2] },
+      meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 },
+      meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 },
+    );
+  }, [meshPositions, meshRotations, meshScales, clouds, getEditState]);
+
+  // The world box around a set of checked clouds and meshes — what the crop
+  // box starts on, and what Reset Crop Box returns it to.
+  const cropBoxAround = useCallback((cloudIds: Iterable<string>, meshIds: Iterable<string>) => {
+    const cloudBoxes = Array.from(cloudIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c)
+      .map(c => ({
+        bounds: {
+          min: { x: c.data.bounds.min.x, y: c.data.bounds.min.y, z: c.data.bounds.min.z },
+          max: { x: c.data.bounds.max.x, y: c.data.bounds.max.y, z: c.data.bounds.max.z },
+        },
+        translation: getEditState(c.id).translation,
+      }));
+    const meshBoxes = Array.from(meshIds).flatMap(id => {
+      const mesh = meshes.find(m => m.id === id);
+      const bounds = mesh ? meshWorldBounds(mesh.data, meshCropMatrixOf(mesh)) : null;
+      return bounds ? [{ bounds, translation: { x: 0, y: 0, z: 0 } }] : [];
+    });
+    return worldBoundsUnion([...cloudBoxes, ...meshBoxes]);
+  }, [clouds, meshes, getEditState, meshCropMatrixOf]);
+
   const toggleCropMode = useCallback(() => {
     if (editMode === 'crop') {
       setEditMode('none');
@@ -3412,18 +3461,12 @@ export default function PointCloudViewer({
     const seeded = seedFromSelection(clouds.map(c => c.id), selectedIds);
     cropTargetsRef.current = seeded;
     setCropTargetsState(seeded);
-    const initial = worldBoundsUnion(
-      Array.from(seeded)
-        .map(id => clouds.find(c => c.id === id))
-        .filter((c): c is PointCloudEntry => !!c)
-        .map(c => ({
-          bounds: {
-            min: { x: c.data.bounds.min.x, y: c.data.bounds.min.y, z: c.data.bounds.min.z },
-            max: { x: c.data.bounds.max.x, y: c.data.bounds.max.y, z: c.data.bounds.max.z },
-          },
-          translation: getEditState(c.id).translation,
-        })),
+    const seededMeshes = seedFromSelection(
+      meshes.filter(m => !meshCropBlockReason(m)).map(m => m.id), selectedMeshIds,
     );
+    cropMeshTargetsRef.current = seededMeshes;
+    setCropMeshTargetsState(seededMeshes);
+    const initial = cropBoxAround(seeded, seededMeshes);
     // No box until something is checked (the box starts on the checked scans).
     setCropBox(initial ?? null);
     setCropPolygon(null);
@@ -3440,7 +3483,7 @@ export default function PointCloudViewer({
     setCropInvert(last.invert);
     setCropSegment(last.segment);
     setEditMode('crop');
-  }, [editMode, selectedIds, clouds, getEditState, closeAllToolPanels]);
+  }, [editMode, selectedIds, selectedMeshIds, clouds, meshes, cropBoxAround, closeAllToolPanels]);
 
 
   // Undo/redo now flows through the scene store. These wrappers keep their
@@ -4541,11 +4584,161 @@ export default function PointCloudViewer({
     onAddScan({ id: newId, label, visible: true, color, data, params });
   }, [onAddScan, scans, buildSessionOctreeData]);
 
+  // The mesh half of Apply. Unlike a cloud crop this is synchronous (the
+  // triangles are already in renderer memory) and fully UNDOABLE: the cut is
+  // one transaction of `replaceObject` / `add` actions, so a single Cmd+Z puts
+  // every checked mesh back. Cloud crops are a destructive boundary because a
+  // point array is too big to snapshot; a mesh entry is already held by
+  // reference, so its "before" costs nothing to keep.
+  const applyCropToMeshes = useCallback((predicate: (wx: number, wy: number, wz: number) => boolean) => {
+    const targets = meshes.filter(m => cropMeshTargetsRef.current.has(m.id) && !meshCropBlockReason(m));
+    if (targets.length === 0) return;
+    const segment = cropSegment;
+    const retain = cropRetainOriginal && !cropSegment;
+    const keepInside = !cropInvert;
+    const fileNameFor = (m: MeshEntry) => clouds.find(c => c.id === m.sourceCloudId)?.data.fileName;
+    const takenNames = meshes.map(m => meshDisplayNameFor(m, meshes, fileNameFor));
+
+    // Keep the provenance readout (candidates / dropped by Lmax / by aspect) in
+    // step with the cut candidate set, exactly as a filter edit does.
+    const withProvenance = (m: MeshEntry): MeshEntry => (m.unfilteredMesh && m.triangleFilter
+      ? {
+          ...m,
+          triangulationParams: {
+            ...m.triangulationParams,
+            ...buildHeliosTriParams(
+              m.unfilteredMesh.data, m.triangleFilter.lmax, m.triangleFilter.maxAspectRatio,
+              m.triangulationParams?.scanCount ?? 0,
+              m.triangulationParams?.droppedDegenerate ?? 0,
+              m.triangulationParams?.sourceScanIds ?? [],
+              m.triangulationParams?.gridMeshId),
+          },
+        }
+      : m);
+    const transformOf = (id: string): TransformState => ({
+      position: { ...(meshPositions.get(id) || { x: 0, y: 0, z: 0 }) },
+      rotation: { ...(meshRotations.get(id) || { x: 0, y: 0, z: 0 }) },
+      scale: { ...(meshScales.get(id) || { x: 1, y: 1, z: 1 }) },
+    });
+
+    const actions: SceneAction[] = [];
+    // New mesh id → the mesh it was cut from, for carrying display state over.
+    const derivedFrom = new Map<string, string>();
+    const emptied: string[] = [];
+    let croppedCount = 0, croppedTriangles = 0;
+    let retainedCount = 0, retainedTriangles = 0;
+    let segmentedCount = 0;
+
+    const addDerived = (source: MeshEntry, part: MeshEntry, suffix: 'cropped' | 'segment'): MeshEntry => {
+      const name = derivedScanName(meshDisplayNameFor(source, meshes, fileNameFor), takenNames, suffix);
+      takenNames.push(name);
+      const derived = withProvenance({ ...part, id: crypto.randomUUID(), name, visible: true });
+      derivedFrom.set(derived.id, source.id);
+      actions.push({ t: 'add', kind: 'mesh', id: derived.id, object: derived, transform: transformOf(source.id) });
+      return derived;
+    };
+
+    for (const mesh of targets) {
+      const r = cropMeshEntry(mesh, meshCropMatrixOf(mesh), predicate, {
+        inside: keepInside || segment,
+        outside: !keepInside || segment,
+      });
+      const kept = keepInside ? r.inside : r.outside;
+      const rest = keepInside ? r.outside : r.inside;
+
+      if (segment) {
+        // Nothing on one side → there is nothing to split off.
+        if (!kept || !rest) continue;
+        actions.push({ t: 'replaceObject', kind: 'mesh', id: mesh.id, before: mesh, after: withProvenance(kept) });
+        addDerived(mesh, rest, 'segment');
+        segmentedCount++;
+        continue;
+      }
+      if (!kept) {
+        // Never leave a zero-triangle mesh in the scene, and never delete one
+        // the user only asked to crop.
+        emptied.push(meshDisplayNameFor(mesh, meshes, fileNameFor));
+        continue;
+      }
+      if (retain) {
+        const derived = addDerived(mesh, kept, 'cropped');
+        actions.push({ t: 'replaceObject', kind: 'mesh', id: mesh.id, before: mesh, after: { ...mesh, visible: false } });
+        retainedCount++;
+        retainedTriangles += derived.data.triangleCount;
+        continue;
+      }
+      // The region enclosed the whole mesh: nothing to do, nothing to undo.
+      if (kept.data.triangleCount === mesh.data.triangleCount
+          && kept.unfilteredMesh?.data.triangleCount === mesh.unfilteredMesh?.data.triangleCount) continue;
+      actions.push({ t: 'replaceObject', kind: 'mesh', id: mesh.id, before: mesh, after: withProvenance(kept) });
+      croppedCount++;
+      croppedTriangles += kept.data.triangleCount;
+    }
+
+    if (actions.length > 0) {
+      scene.commit({ label: segment ? 'segment mesh' : 'crop mesh', actions });
+      // A derived mesh should look like the one it came from.
+      if (derivedFrom.size > 0) {
+        const carry = <V,>(prev: Map<string, V>): Map<string, V> => {
+          const next = new Map(prev);
+          for (const [id, from] of derivedFrom) {
+            const v = prev.get(from);
+            if (v !== undefined) next.set(id, v);
+          }
+          return next;
+        };
+        setMeshOpacities(carry);
+        setMeshColorModes(carry);
+      }
+    }
+
+    const meshWord = (n: number) => (n === 1 ? 'mesh' : 'meshes');
+    if (croppedCount > 0) {
+      showToast({
+        title: `Cropped ${croppedCount} ${meshWord(croppedCount)} to ${croppedTriangles.toLocaleString()} triangles`,
+        type: 'success',
+      });
+    }
+    if (retainedCount > 0) {
+      showToast({
+        title: `Cropped to ${retainedCount} new ${meshWord(retainedCount)} (${retainedTriangles.toLocaleString()} triangles)`,
+        message: `The original ${meshWord(retainedCount)} ${retainedCount === 1 ? 'was' : 'were'} kept and hidden.`,
+        type: 'success',
+      });
+      // Same reason as the cloud path: don't leave a hidden original selected.
+      setSelectedMeshIds(new Set(derivedFrom.keys()));
+    }
+    if (segmentedCount > 0) {
+      showToast({
+        title: `Segmented ${segmentedCount} new ${meshWord(segmentedCount)} from cropped-out triangles`,
+        type: 'success',
+      });
+    }
+    if (emptied.length > 0) {
+      showToast({
+        type: 'warning',
+        title: emptied.length === 1
+          ? `Nothing left of ${emptied[0]}`
+          : `Nothing left of ${emptied.length} meshes`,
+        message: 'The crop would remove every triangle, so the mesh was left unchanged. '
+          + 'Delete it from the Meshes pane if that is what you meant.',
+      });
+    }
+
+    cropMeshTargetsRef.current = new Set();
+    setCropMeshTargetsState(new Set());
+  }, [meshes, clouds, cropSegment, cropRetainOriginal, cropInvert, meshPositions, meshRotations, meshScales, meshCropMatrixOf, scene]);
+
   const handleApplyCrop = useCallback(() => {
-    if (editMode !== 'crop' || cropTargetsRef.current.size === 0) return;
+    if (editMode !== 'crop') return;
+    if (cropTargetsRef.current.size === 0 && cropMeshTargetsRef.current.size === 0) return;
     if (isApplyingCrop) return;
     const predicate = buildCropPredicate();
     if (!predicate) return;
+
+    // Meshes first: synchronous, and it leaves the cloud run below — which may
+    // be empty — to tear the crop UI down in one place (finishUp).
+    applyCropToMeshes(predicate);
 
     // Capture the inputs the apply needs BEFORE we tear down the crop UI.
     // After flushSync(setEditMode('none')) below, cropBox/cropInvert in
@@ -5216,7 +5409,7 @@ export default function PointCloudViewer({
       setTimeout(() => { void next(index + 1); }, 0);
     };
     void next(0);
-  }, [editMode, clouds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon, cropSegment, cropRetainOriginal, onAddScan, onAddCloud, onHideScan, onSetScanSelection, buildSessionOctreeData, scene]);
+  }, [editMode, clouds, isApplyingCrop, onUpdateCloud, buildCropPredicate, applyCropToMeshes, cropInvert, cropMode, cropBox, cropPolygon, cropSegment, cropRetainOriginal, onAddScan, onAddCloud, onHideScan, onSetScanSelection, buildSessionOctreeData, scene]);
 
   // Stop a multi-scan crop mid-run.
   //
@@ -7267,24 +7460,30 @@ export default function PointCloudViewer({
   // bake the cloud's deletions are real on disk, so the GPU clip preview is no
   // longer needed (pendingDeletes cleared) and downstream ops/export see the
   // reduced cloud whether or not they go through the session.
-  const handleBakeEdits = useCallback(async (cloudId: string) => {
-    const cloud = clouds.find(c => c.id === cloudId);
+  // `opts` lets a caller that deleted points for its own reason (Resample) word
+  // the progress pill and the success toast; resolves true when the bake landed.
+  const handleBakeEdits = useCallback(async (
+    cloudId: string,
+    opts?: { progressLabel?: string; successTitle?: (pointsLeft: number) => string },
+  ): Promise<boolean> => {
+    const cloud = cloudsRef.current.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
-    if (!cloud || !octreeInfo?.sessionId) return;
+    if (!cloud || !octreeInfo?.sessionId) return false;
     // Re-entry guard: the button is disabled while this runs, but a keyboard or
     // command-palette route must not slip a second full rebuild past it.
-    if (bakingCloudId) return;
+    if (bakingCloudId) return false;
+    const progressLabel = opts?.progressLabel ?? 'Applying deletions…';
     const sessionId = octreeInfo.sessionId;
     const abort = new AbortController();
     bakeAbortRef.current = abort;
     bakeRunIdRef.current = null;
     setBakingCloudId(cloud.id);
-    setBakeProgress({ label: 'Applying deletions…', value: null });
+    setBakeProgress({ label: progressLabel, value: null });
     try {
       const baked = await bakeCloudSession(sessionId, {
         signal: abort.signal,
         onProgress: (value, message) => setBakeProgress({
-          label: message || 'Applying deletions…',
+          label: message || progressLabel,
           value: value ?? null,
         }),
         onRunId: (runId) => { bakeRunIdRef.current = runId; },
@@ -7332,24 +7531,127 @@ export default function PointCloudViewer({
       });
       // Destructive boundary: baked deletions are now the ground truth.
       scene.boundary([cloud.id]);
-      showToast({ title: `Applied deletions — ${baked.point_count.toLocaleString()} points remain`, type: 'success' });
+      showToast({
+        title: opts?.successTitle?.(baked.point_count)
+          ?? `Applied deletions — ${baked.point_count.toLocaleString()} points remain`,
+        type: 'success',
+      });
+      return true;
     } catch (err) {
       // User canceled — not a failure. The session is untouched: bake does
       // every mutation AFTER the octree build returns, so a cancel mid-build
       // leaves the pending deletions exactly as they were.
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      if (err instanceof ScanCanceledError) return;
+      if (err instanceof DOMException && err.name === 'AbortError') return false;
+      if (err instanceof ScanCanceledError) return false;
       showToast({
         title: `Apply deletions failed: ${err instanceof Error ? err.message : String(err)}`,
         type: 'error',
       });
+      return false;
     } finally {
       setBakingCloudId(null);
       setBakeProgress(null);
       bakeAbortRef.current = null;
       bakeRunIdRef.current = null;
     }
-  }, [clouds, onUpdateCloud, bakingCloudId, beginMaskHandover]);
+  }, [onUpdateCloud, bakingCloudId, beginMaskHandover]);
+
+  // ── Resample ───────────────────────────────────────────────────────────
+  // What the current method keeps of one cloud. Streamed clouds ask the backend
+  // (a dry run of the same keep-mask the commit uses, so the estimate is exact
+  // and excludes sky/miss points, which resample never drops); in-memory clouds
+  // compute it here with the same rule.
+  const resampleSpec = useMemo((): ResampleSpec => (
+    resampleMode === 'random'
+      ? { mode: 'random', fraction: resampleFraction }
+      : { mode: 'voxel', voxel_size: resampleVoxelSize }
+  ), [resampleMode, resampleFraction, resampleVoxelSize]);
+
+  useEffect(() => {
+    if (!showResamplePanel) return;
+    const targets = clouds.filter(c => resampleTargets.has(c.id));
+    if (targets.length === 0) { setResampleEstimate({ before: 0, after: null, estimating: false }); return; }
+    let canceled = false;
+    setResampleEstimate(e => ({ ...e, estimating: true }));
+    const t = setTimeout(async () => {
+      let before = 0;
+      let after = 0;
+      try {
+        for (const c of targets) {
+          const sid = c.data.octree?.sessionId;
+          if (sid) {
+            const r = await sessionResample(sid, resampleSpec, true);
+            before += r.hits_before;
+            after += r.hits_after;
+          } else if (!c.data.octree) {
+            const n = c.data.pointCount;
+            before += n;
+            after += resampleSpec.mode === 'random'
+              ? Math.max(1, Math.round(n * resampleSpec.fraction))
+              : voxelKeepIndices(c.data.positions, n, resampleSpec.voxel_size).length;
+          }
+          if (canceled) return;
+        }
+        if (!canceled) setResampleEstimate({ before, after, estimating: false });
+      } catch {
+        if (!canceled) setResampleEstimate({ before, after: null, estimating: false });
+      }
+    }, 250);
+    return () => { canceled = true; clearTimeout(t); };
+  }, [showResamplePanel, resampleTargets, resampleSpec, clouds]);
+
+  // Commit: thin every checked cloud, one after another. A streamed cloud gets
+  // its dropped points masked on the backend (instant) and its display rebuilt
+  // by the same bake "Permanently apply deletions" runs — progress pill and
+  // cancel included; an in-memory cloud is rewritten here. Permanent: each
+  // cloud's undo history is cut, as for any destructive point edit.
+  const handleApplyResample = useCallback(async () => {
+    const targets = cloudsRef.current.filter(c => resampleTargets.has(c.id));
+    if (targets.length === 0 || resampleApplying) return;
+    setResampleApplying(true);
+    let done = 0;
+    try {
+      for (const cloud of targets) {
+        const sid = cloud.data.octree?.sessionId;
+        if (cloud.data.octree && !sid) {
+          showToast({ title: `Cannot resample ${cloud.data.fileName ?? 'cloud'}: no editable session.`, type: 'error' });
+          continue;
+        }
+        if (sid) {
+          if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) continue;
+          let r: SessionResampleResult;
+          try {
+            r = await sessionResample(sid, resampleSpec);
+          } catch (err) {
+            showToast({ title: `Resample failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
+            continue;
+          }
+          if (!r.committed) continue;  // nothing to drop
+          setEditStates(prev => {
+            const cur = prev.get(cloud.id);
+            if (!cur) return prev;
+            return new Map(prev).set(cloud.id, { ...cur, pendingDeletedCount: r.pending_deleted_count ?? cur.pendingDeletedCount });
+          });
+          const name = cloud.data.fileName ?? 'cloud';
+          if (await handleBakeEdits(cloud.id, {
+            progressLabel: `Resampling ${name}…`,
+            successTitle: (n) => `Resampled ${name} to ${n.toLocaleString()} points`,
+          })) done++;
+        } else {
+          const next = resampleSpec.mode === 'random'
+            ? resampleCloud(cloud.data, resampleSpec.fraction, cloud.data.pointCount)
+            : voxelResampleCloud(cloud.data, resampleSpec.voxel_size);
+          onUpdateCloud(cloud.id, next);
+          scene.boundary([cloud.id]);
+          showToast({ title: `Resampled ${cloud.data.fileName ?? 'cloud'} to ${next.pointCount.toLocaleString()} points`, type: 'success' });
+          done++;
+        }
+      }
+    } finally {
+      setResampleApplying(false);
+    }
+    if (done === targets.length) setShowResamplePanel(false);
+  }, [resampleTargets, resampleApplying, resampleSpec, handleBakeEdits, onUpdateCloud, scene, showToast]);
 
   const cancelBake = useCallback(() => {
     // Kill the PotreeConverter child first; aborting the fetch alone would only
@@ -9505,6 +9807,54 @@ export default function PointCloudViewer({
   // would freeze it with no way left to release it.
   const boxDrawing = editMode === 'crop'
     && (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2');
+
+  // Live crop preview for checked meshes: per mesh, which triangles Apply would
+  // KEEP. Built from the same predicate and the same per-triangle test Apply
+  // uses (lib/meshCrop), so what is drawn is what is cut. The plain renderer
+  // takes the mask and rebuilds only its index; the textured renderer has no
+  // index to swap, so it gets a pre-cut copy (`textured`, null when nothing
+  // survives). A mesh the region does not touch has no entry.
+  //
+  // Mirrors the cloud preview's gates: nothing is hidden in Segment mode (both
+  // halves survive) or while a new box is being drawn.
+  const meshCropPreview = useMemo(() => {
+    const out = new Map<string, {
+      mask: Uint8Array;
+      textured?: { data: MeshData; plantMaterials: NonNullable<MeshEntry['plantMaterials']> } | null;
+    }>();
+    if (!(editMode === 'crop' || isApplyingCrop) || cropSegment || boxDrawing) return out;
+    if (cropMeshTargets.size === 0) return out;
+    const predicate = buildCropPredicate();
+    if (!predicate) return out;
+    for (const mesh of meshes) {
+      if (!mesh.visible || !cropMeshTargets.has(mesh.id) || meshCropBlockReason(mesh)) continue;
+      const mask = meshTriangleRegionMask(mesh.data, meshCropMatrixOf(mesh), predicate);
+      if (cropInvert) for (let t = 0; t < mask.length; t++) mask[t] ^= 1;
+      if (countMask(mask, 0) === 0) continue;
+      const isTextured = !!(mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0
+        && mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData));
+      if (!isTextured) { out.set(mesh.id, { mask }); continue; }
+      const data = subsetMeshData(mesh.data, mask, 1);
+      out.set(mesh.id, {
+        mask,
+        textured: data ? { data, plantMaterials: subsetMaterials(mesh.plantMaterials, mask, 1) ?? [] } : null,
+      });
+    }
+    return out;
+  }, [editMode, isApplyingCrop, cropSegment, boxDrawing, cropMeshTargets, meshes, cropInvert, buildCropPredicate, meshCropMatrixOf]);
+  // Triangles the preview is drawing across the checked meshes ('' when no
+  // region is being previewed) — the crop panel's data-mesh-preview-kept.
+  const meshCropPreviewKeptStr = useMemo(() => {
+    if (editMode !== 'crop' || cropSegment || boxDrawing || cropMeshTargets.size === 0) return '';
+    if (!buildCropPredicate()) return '';
+    let kept = 0;
+    for (const mesh of meshes) {
+      if (!cropMeshTargets.has(mesh.id)) continue;
+      const preview = meshCropPreview.get(mesh.id);
+      kept += preview ? countMask(preview.mask, 1) : mesh.data.triangleCount;
+    }
+    return String(kept);
+  }, [editMode, cropSegment, boxDrawing, cropMeshTargets, meshes, meshCropPreview, buildCropPredicate]);
   // A COMMITTED rect region is on screen and the camera must not move.
   //
   // The region is frozen in canvas PIXELS against the draw-time camera — that
@@ -10040,26 +10390,6 @@ export default function PointCloudViewer({
   const hasAnySelection = hasCloudSelected || hasMeshSelected || hasSkeletonSelected
     || hasQSMSelected || hasParamsScanSelected;
 
-  // Resample is a RENDERER-SIDE decimation over `data.positions`, so it only
-  // works on a flat cloud. An octree-backed cloud (every normal import) carries
-  // an empty `positions` with a real `pointCount`, which used to produce all-NaN
-  // geometry, NaN bounds, and — because the returned object keeps the `octree`
-  // ref — a forced `divergedFromSource` that makes the cloud unrebuildable from
-  // its file. Refuse up front rather than corrupting it. `clouds` is read via a
-  // ref because the registry closure is built before later state is memoised.
-  const canResampleSelectedCloud = useCallback((): boolean => {
-    const cloud = cloudsRef.current.find(c => selectedIds.has(c.id));
-    if (cloud?.data.octree) {
-      showToast({
-        type: 'info',
-        title: 'Resample unavailable',
-        message: 'This cloud is octree-backed. Use Filter Points or a backend '
-          + 'downsample — renderer-side resampling only applies to flat clouds.',
-      });
-      return false;
-    }
-    return true;
-  }, [showToast]);
 
   // Command registry — the single source of truth for the static Toolbar, the
   // Cmd+K palette, and the native Tools menu (see lib/toolCommands.ts for the
@@ -10110,7 +10440,7 @@ export default function PointCloudViewer({
       // renders in the View Controls box beside Set Scene Origin, not the Tools
       // palette) — it inspects whatever is visible and needs no selection.
       { id: 'pick-point', name: 'Pick & Measure', keywords: ['point', 'inspect', 'identify', 'query', 'coordinates', 'attribute', 'scalar', 'label', 'probe', 'measure', 'distance', 'length', 'angle', 'ruler', 'polyline', 'path', 'span'], action: () => { const open = showPointPickerPanel; closeAllToolPanels('point-pick'); setShowPointPickerPanel(!open); setPointPickMode(!open); }, category: 'View', requires: null, icon: MousePointerClick, testId: 'tool-point-pick', isActive: () => showPointPickerPanel },
-      { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
+      { id: 'cloud-crop', name: 'Crop', keywords: ['cut', 'trim', 'box', 'point cloud', 'mesh', 'clip'], action: () => toggleCropMode(), category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud-or-mesh', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => {
         if (editMode === 'erase') { setEditMode('none'); return; }
         closeAllToolPanels('editMode');
@@ -10126,7 +10456,13 @@ export default function PointCloudViewer({
         setFilterTargetsState(seedFromSelection(clouds.map(c => c.id), selectedIds));
         setShowFilterPanel(true);
       }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
-      { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { if (!canResampleSelectedCloud()) return; closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
+      { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => {
+        if (showResamplePanel) { setShowResamplePanel(false); return; }
+        closeAllToolPanels('resample');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setResampleTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setShowResamplePanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', testId: 'tool-resample', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
       { id: 'cloud-scalar-fields', name: 'Scalar Fields', keywords: ['scalar', 'field', 'attribute', 'arithmetic', 'calculator', 'formula', 'expression', 'statistics', 'stats', 'histogram', 'mean', 'median', 'percentile', 'rename', 'sf'], action: () => { closeAllToolPanels('scalar-fields'); setShowScalarFieldsPanel(!showScalarFieldsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Calculator, testId: 'tool-scalar-fields', isActive: () => showScalarFieldsPanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
@@ -10237,7 +10573,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, openTransformTool, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, openTransformTool, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered,
       // Label Points' isActive and blockedReason read these.
       showLabelPanel, clouds]);
 
@@ -11442,6 +11778,14 @@ export default function PointCloudViewer({
     cropTargetsRef.current = pruned;
     setCropTargetsState(pruned);
   }, [clouds]);
+  useEffect(() => {
+    const live = new Set(meshes.map(m => m.id));
+    const cur = cropMeshTargetsRef.current;
+    if ([...cur].every(id => live.has(id))) return;
+    const pruned = new Set([...cur].filter(id => live.has(id)));
+    cropMeshTargetsRef.current = pruned;
+    setCropMeshTargetsState(pruned);
+  }, [meshes]);
 
   // An object deleted while the tool is open drops out of the checked set.
   useEffect(() => {
@@ -22140,12 +22484,6 @@ export default function PointCloudViewer({
     }
   }, [meshes, animationStartAge, animationEndAge, gifBackground, gifCameraView, lightIntensity]);
 
-  // Get first selected cloud for gizmo positioning
-  const firstSelectedCloud = useMemo(() => {
-    const id = Array.from(selectedIds)[0];
-    return clouds.find(c => c.id === id);
-  }, [selectedIds, clouds]);
-
   // Auto-size the erase brush to the selected cloud. The brush radius is a
   // world-space value, so a fixed default (e.g. 0.1m) is invisible on a
   // meter-to-tens-of-meters scan and far too big on a centimeter-scale one.
@@ -22768,8 +23106,8 @@ export default function PointCloudViewer({
         <PotreeFrameDriver />
 
         {/* Render all visible clouds.
-            We pass the source `cloud.data` (or the resample preview when
-            active) straight to <PointCloud> without copying. Crop preview
+            We pass the source `cloud.data` straight to <PointCloud> without
+            copying. Crop preview
             and erase produce a Uint32Array of visible indices that
             three.js uses as the geometry index — see getDisplayIndices
             for the rationale. Translation is applied to the parent group;
@@ -22813,11 +23151,8 @@ export default function PointCloudViewer({
           // crop panel) but sets isApplyingCrop, so the clip box / index
           // filter keep hiding the cropped points until the new data is live.
           const showCropPreview = cropTargets.has(cloud.id) && (editMode === 'crop' || isApplyingCrop);
-          const hasResamplePreview = resamplePreview?.cloudId === cloud.id;
 
-          // Resample preview replaces the source dataset entirely; crop
-          // and erase do not apply to it.
-          const sourceData = hasResamplePreview ? resamplePreview.previewData : cloud.data;
+          const sourceData = cloud.data;
           if (!sourceData || sourceData.pointCount === 0) return null;
           // Octree clouds don't have flat positions to filter against —
           // their LOD streaming handles everything, and getDisplayIndices
@@ -22829,7 +23164,7 @@ export default function PointCloudViewer({
           // crop via `clipBox`/`cropMask` and filters via `filters` below, both
           // composed onto the tile geometries by octreeCropMask.ts.
           const isOctreeCloud = !!cloud.data.octree;
-          const indices = hasResamplePreview || isOctreeCloud
+          const indices = isOctreeCloud
             ? null
             : getDisplayIndices(cloud, showCropPreview);
           if (indices && indices.length === 0) return null;
@@ -22843,15 +23178,12 @@ export default function PointCloudViewer({
               // world space — flat positions are already float32 so re-centering
               // the buffer can't recover precision, and this avoids a copy). The
               // octree branch ignores this group (it attaches to the scene root)
-              // and applies the offset on pco.position itself. The resample
-              // preview renders at the origin, so it gets no offset.
-              position={hasResamplePreview
-                ? [0, 0, 0]
-                : [
-                    editState.translation.x - displayOffset.x,
-                    editState.translation.y - displayOffset.y,
-                    editState.translation.z - displayOffset.z,
-                  ]}
+              // and applies the offset on pco.position itself.
+              position={[
+                editState.translation.x - displayOffset.x,
+                editState.translation.y - displayOffset.y,
+                editState.translation.z - displayOffset.z,
+              ]}
             >
               {sourceData.octree ? (
                 <OctreePointCloud
@@ -22887,23 +23219,20 @@ export default function PointCloudViewer({
                   // The octree attaches to the scene root, NOT inside the parent
                   // <group position> above, so the group's translation never
                   // reaches it. Pass the offset explicitly so the Translate tool
-                  // (gizmo + T-modal) actually moves an octree cloud. The resample
-                  // preview renders at the origin (group position [0,0,0]), so it
-                  // gets no offset either.
+                  // (gizmo + T-modal) actually moves an octree cloud.
                   // The DRAWN pose: the live draft composed over any committed
                   // transform whose octree has not been refreshed yet
                   // (`storedPose`). `getCloudPose` resolves both against the same
                   // pivot the renderer uses, so a stale octree lands exactly where
                   // the moved session geometry is. Zero rotation still costs
                   // nothing (applyOctreePose's position fast path).
-                  translation={hasResamplePreview ? undefined : cloudPose.translation}
-                  rotation={hasResamplePreview ? undefined : cloudPose.rotation}
-                  pivot={hasResamplePreview ? undefined : cloudPose.pivot}
-                  poseMatrix={hasResamplePreview ? null : cloudPose.matrix ?? null}
-                  // Render-only precision safety net: the resample preview lives
-                  // at the origin already (group [0,0,0]), so it gets no offset;
-                  // the live cloud renders at world − displayOffset.
-                  displayOffset={hasResamplePreview ? undefined : displayOffset}
+                  translation={cloudPose.translation}
+                  rotation={cloudPose.rotation}
+                  pivot={cloudPose.pivot}
+                  poseMatrix={cloudPose.matrix ?? null}
+                  // Render-only precision safety net: the cloud renders at
+                  // world − displayOffset.
+                  displayOffset={displayOffset}
                   onFirstTilesReady={
                     sourceData.octree
                       ? () => handleOctreeFirstTiles(sourceData.octree!.cacheId)
@@ -23060,10 +23389,8 @@ export default function PointCloudViewer({
                     data={sourceData}
                     indices={indices}
                     // Tag the THREE.Points so the point picker can distinguish a
-                    // real cloud from the scene's other Points objects. The
-                    // resample preview is a throwaway rendering at the origin,
-                    // so it stays untagged (and unpickable).
-                    cloudId={hasResamplePreview ? undefined : cloud.id}
+                    // real cloud from the scene's other Points objects.
+                    cloudId={cloud.id}
                     pointSize={pointSize}
                     // 'per-scan' is rendered as 'single' with the cloud's own
                     // swatch color — keeps PointCloud unaware of multi-cloud state.
@@ -23076,7 +23403,7 @@ export default function PointCloudViewer({
                     rangeMax={rangeForCloud(cloud)?.max}
                   />
                 );
-                if (!hasRot || hasResamplePreview) return cloudEl;
+                if (!hasRot) return cloudEl;
                 const P = { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] };
                 const euler: [number, number, number] = [
                   THREE.MathUtils.degToRad(rot.x),
@@ -23181,6 +23508,9 @@ export default function PointCloudViewer({
               onUpdate={(self) => { self.matrixWorldNeedsUpdate = true; }}
             >
             <group
+              // A surface the scene-origin picker snaps to — except a voxel
+              // grid, which is a volume you look through, not a surface.
+              {...(mesh.gridSubdivisions ? {} : ORIGIN_SNAP_SURFACE)}
               // Render-only precision safety net: subtract displayOffset so the
               // mesh renders near the origin (secondary fix — mesh vertices are a
               // packed Float32Array, like flat clouds). Rotation/scale unaffected.
@@ -23239,13 +23569,15 @@ export default function PointCloudViewer({
                   undisplaced position (the unit-cube geometry can't deform per
                   column), so suppress them — the displaced wireframe overlay below
                   is the visual. */}
-              {mesh.gridGroundSnap ? null :
+              {mesh.gridGroundSnap || meshCropPreview.get(mesh.id)?.textured === null ? null :
                mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
                mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData) ? (
                 <TexturedPlantMesh
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
-                  data={mesh.data}
-                  plantMaterials={mesh.plantMaterials}
+                  // Crop preview: the pre-cut copy while this mesh is a checked
+                  // crop target the region reaches (see meshCropPreview).
+                  data={meshCropPreview.get(mesh.id)?.textured?.data ?? mesh.data}
+                  plantMaterials={meshCropPreview.get(mesh.id)?.textured?.plantMaterials ?? mesh.plantMaterials}
                   opacity={1}
                   wireframe={meshWireframe}
                 />
@@ -23258,14 +23590,12 @@ export default function PointCloudViewer({
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
                   triangleColors={meshTriangleColors.get(mesh.id) ?? null}
+                  triangleMask={meshCropPreview.get(mesh.id)?.mask ?? null}
                   // Transparent-pass draw order (three.js sorts by renderOrder,
                   // then camera distance):
                   //  • voxel box (+1): always blend LAST over the surface mesh it
                   //    encloses, not camera-distance-sorted against it, so its
                   //    volume tint survives every view angle (the +X-view "full
-              // A surface the scene-origin picker snaps to — except a voxel
-              // grid, which is a volume you look through, not a surface.
-              {...(mesh.gridSubdivisions ? {} : ORIGIN_SNAP_SURFACE)}
                   //    green" fix).
                   //  • ground plane (-0.5): draw FIRST, just after the ground grid
                   //    (-1) and before all real geometry (0). The plane is coplanar
@@ -23386,6 +23716,7 @@ export default function PointCloudViewer({
           return (
             <group
               key={qsm.id}
+              {...ORIGIN_SNAP_SURFACE}
               position={[-qsmWs[0], -qsmWs[1], -qsmWs[2]]}
               // Viewport click-to-select, mirroring the mesh groups above
               // (drag guard via e.delta; stopPropagation keeps the click from
@@ -23468,7 +23799,6 @@ export default function PointCloudViewer({
           // so skip the passive one to avoid a double-render on pose 0.
           if (trajectoryEditor && trajectoryEditor.scanId === scan.id) return null;
           // Glow follows the Scans-pane selection — single source of truth, so
-              {...ORIGIN_SNAP_SURFACE}
           // the marker can never drift out of sync with the row highlight.
           const isMarkerSelected = selectedScanIds.has(scan.id);
           // params.origin / params.trajectory are WORLD-frame, but the cloud renders
@@ -26406,30 +26736,27 @@ export default function PointCloudViewer({
           rectDragCurrentRef.current = null;
           setCropRetainOriginal(false);
         };
-        const boxAround = (ids: Iterable<string>) => worldBoundsUnion(
-            Array.from(ids)
-              .map(id => clouds.find(c => c.id === id))
-              .filter((c): c is PointCloudEntry => !!c)
-              .map(c => ({
-                bounds: {
-                  min: { x: c.data.bounds.min.x, y: c.data.bounds.min.y, z: c.data.bounds.min.z },
-                  max: { x: c.data.bounds.max.x, y: c.data.bounds.max.y, z: c.data.bounds.max.z },
-                },
-                translation: getEditState(c.id).translation,
-              })),
-          );
         const resetWorldBox = () => {
-          const b = boxAround(cropTargets);
+          const b = cropBoxAround(cropTargets, cropMeshTargets);
           if (b) setCropBox(b);
         };
-        // Checking scans in the picker. A box already placed is the user's and
-        // stays put (Reset Box refits it to the checked scans); with no box yet
-        // — the tool opened with nothing checked — it starts on them.
+        // Checking scans or meshes in the pickers. A box already placed is the
+        // user's and stays put (Reset Box refits it to the checked objects);
+        // with no box yet — the tool opened with nothing checked — it starts
+        // on them.
         const onCropTargetsChange = (next: Set<string>) => {
           cropTargetsRef.current = next;
           setCropTargetsState(next);
           if (!cropBox) {
-            const b = boxAround(next);
+            const b = cropBoxAround(next, cropMeshTargets);
+            if (b) setCropBox(b);
+          }
+        };
+        const onCropMeshTargetsChange = (next: Set<string>) => {
+          cropMeshTargetsRef.current = next;
+          setCropMeshTargetsState(next);
+          if (!cropBox) {
+            const b = cropBoxAround(cropTargets, next);
             if (b) setCropBox(b);
           }
         };
@@ -26463,6 +26790,22 @@ export default function PointCloudViewer({
               selectedIds: cropTargets,
               onChange: onCropTargetsChange,
             }}
+            meshCount={cropMeshTargets.size}
+            meshPreviewKeptStr={meshCropPreviewKeptStr}
+            meshPicker={meshes.length > 0 ? {
+              items: meshes.map(m => {
+                const reason = meshCropBlockReason(m);
+                return {
+                  id: m.id,
+                  label: displayNameOfMesh(m),
+                  color: m.color,
+                  detail: `${m.data.triangleCount.toLocaleString()} triangles`,
+                  ...(reason ? { disabledReason: reason } : {}),
+                };
+              }),
+              selectedIds: cropMeshTargets,
+              onChange: onCropMeshTargetsChange,
+            } : undefined}
             cropMode={cropMode}
             cropDrawState={cropDrawState}
             cropBox={cropBox}
@@ -26986,49 +27329,35 @@ export default function PointCloudViewer({
       })()}
 
       {/* Resample Panel */}
-      {/* `!octree` mirrors canResampleSelectedCloud: renderer-side resampling
-          reads data.positions, which an octree-backed cloud does not populate. */}
-      {showResamplePanel && firstSelectedCloud && !firstSelectedCloud.data.octree && (() => {
-        const cloud = firstSelectedCloud;
-        // When a preview is active, resample against the pristine point total it
-        // captured; otherwise against the cloud's current count.
-        const isPreviewActive = resamplePreview?.cloudId === cloud.id;
-        const originalCount = isPreviewActive ? resamplePreview.originalPointCount : cloud.data.pointCount;
-
-        return (
-          <ResamplePanel
-            originalCount={originalCount}
-            fraction={resampleFraction}
-            isPreviewActive={isPreviewActive}
-            previewCount={isPreviewActive ? resamplePreview.previewData.pointCount : null}
-            onClose={() => { setResamplePreview(null); setShowResamplePanel(false); }}
-            onFractionChange={(f) => { setResampleFraction(f); setResamplePreview(null); }}
-            onPreview={() => {
-              if (resampleFraction >= 1.0) return;
-              const previewData = resampleCloud(cloud.data, resampleFraction, originalCount);
-              setResamplePreview({ cloudId: cloud.id, previewData, originalPointCount: originalCount });
-              showToast({
-                type: 'info',
-                title: 'Preview Active',
-                message: `Showing ${previewData.pointCount.toLocaleString()} points (temporary)`,
-              });
-            }}
-            onApply={() => {
-              if (resampleFraction >= 1.0) return;
-              const finalData = isPreviewActive ? resamplePreview.previewData : resampleCloud(cloud.data, resampleFraction, originalCount);
-              onUpdateCloud(cloud.id, finalData);
-              showToast({
-                type: 'success',
-                title: 'Resampled',
-                message: `Reduced from ${originalCount.toLocaleString()} to ${finalData.pointCount.toLocaleString()} points`,
-              });
-              setResamplePreview(null);
-              setShowResamplePanel(false);
-            }}
-            onCancelPreview={() => setResamplePreview(null)}
-          />
-        );
-      })()}
+      {showResamplePanel && (
+        <ResamplePanel
+          picker={{
+            items: clouds.map(c => {
+              const sc = scans.find(x => x.id === c.id);
+              return {
+                id: c.id,
+                label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+                color: c.color,
+                detail: `${c.data.pointCount.toLocaleString()} pts`,
+              };
+            }),
+            selectedIds: resampleTargets,
+            onChange: (next) => setResampleTargets(new Set(next)),
+          }}
+          mode={resampleMode}
+          fraction={resampleFraction}
+          voxelSize={resampleVoxelSize}
+          pointsBefore={resampleEstimate.before}
+          pointsAfter={resampleEstimate.after}
+          estimating={resampleEstimate.estimating}
+          applying={resampleApplying}
+          onModeChange={setResampleMode}
+          onFractionChange={(f) => setResampleFraction(Math.min(1, Math.max(0.001, f)))}
+          onVoxelSizeChange={(v) => { if (v > 0) setResampleVoxelSize(v); }}
+          onApply={() => { void handleApplyResample(); }}
+          onClose={() => setShowResamplePanel(false)}
+        />
+      )}
 
       {/* Unified Triangulation Setup modal (Open3D methods + Helios). */}
       <TriangulationPopup

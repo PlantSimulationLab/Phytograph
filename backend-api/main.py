@@ -42429,6 +42429,92 @@ def session_filter(session_id: str, request: SessionFilterRequest, http_request:
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
+class SessionResampleRequest(BaseModel):
+    """Thin a session cloud by DELETING the points a resample drops (sets the
+    deleted mask, instant — the caller bakes to rebuild the octree).
+
+    `mode`:
+      - "random": keep a uniformly random `fraction` of the surviving hits
+        (seeded, so the same request keeps the same points);
+      - "voxel": keep one point per occupied cube of edge `voxel_size` (meters,
+        stored-frame grid) — the point nearest the cube's center, so every kept
+        point is a REAL measured point with all its attributes, not an average.
+        Evens out density (dense near the scanner, sparse far away) where a
+        random thinning keeps the imbalance.
+
+    Sky/miss points are never dropped (LAD's transmission denominator depends
+    on them; see `_do_session_filter`). `dry_run` reports the counts without
+    changing anything, for the panel's result estimate."""
+    mode: Literal["random", "voxel"]
+    fraction: Optional[float] = None
+    voxel_size: Optional[float] = None
+    seed: int = 0
+    dry_run: bool = False
+
+
+def _resample_keep_mask(pos: np.ndarray, request: SessionResampleRequest) -> np.ndarray:
+    """Keep-mask over `pos` (N,3) for a resample request. Pure; unit-tested."""
+    n = len(pos)
+    keep = np.zeros(n, dtype=bool)
+    if n == 0:
+        return keep
+    if request.mode == "random":
+        f = float(request.fraction or 0.0)
+        if not (0.0 < f <= 1.0):
+            raise HTTPException(status_code=400, detail="random resample needs 0 < fraction <= 1.")
+        k = max(1, int(round(n * f)))
+        rng = np.random.default_rng(request.seed)
+        keep[rng.choice(n, size=min(k, n), replace=False)] = True
+        return keep
+    size = float(request.voxel_size or 0.0)
+    if not (size > 0.0) or not np.isfinite(size):
+        raise HTTPException(status_code=400, detail="voxel resample needs voxel_size > 0.")
+    p = pos.astype(np.float64, copy=False)
+    origin = p.min(axis=0)
+    cell = np.floor((p - origin) / size).astype(np.int64)
+    # Nearest-to-center per cell: sort by (cell, distance) and take each cell's
+    # first row. A cell key is the row-wise tuple, compared lexicographically.
+    center = origin + (cell + 0.5) * size
+    d2 = ((p - center) ** 2).sum(axis=1)
+    order = np.lexsort((d2, cell[:, 2], cell[:, 1], cell[:, 0]))
+    c_sorted = cell[order]
+    first = np.ones(n, dtype=bool)
+    first[1:] = np.any(c_sorted[1:] != c_sorted[:-1], axis=1)
+    keep[order[first]] = True
+    return keep
+
+
+@app.post("/api/cloud/session/{session_id}/resample")
+def session_resample(session_id: str, request: SessionResampleRequest):
+    """Thin a session cloud (see SessionResampleRequest). Mask-only and fast;
+    the caller rebuilds the octree with /bake. Returns the surviving hit count
+    before and after, plus the usual remaining/pending counts on a commit."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        surv = ~sess.deleted
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        hit = surv if miss_arr is None else (surv & (np.asarray(miss_arr) == 0))
+        idx_hit = np.where(hit)[0]
+        keep_hit = _resample_keep_mask(sess.positions[idx_hit], request)
+        hits_before = int(len(idx_hit))
+        hits_after = int(keep_hit.sum())
+        if request.dry_run or hits_after == hits_before:
+            return {"session_id": session_id, "hits_before": hits_before, "hits_after": hits_after,
+                    "committed": False}
+        sess.deleted[idx_hit[~keep_hit]] = True
+        _mark_normals_stale_locked(sess)
+        _commit_delete_history_locked(sess)
+        sess.label_history = {}   # label undo must not reach across this commit either
+        _mark_octree_stale_locked(sess)
+        sess.octree_pose = None    # see the invariant note in delete_cloud_region
+        remaining = int((~sess.deleted).sum())
+        pending = _pending_deleted_count_locked(sess)
+        total = int(len(sess.positions))
+    return {"session_id": session_id, "hits_before": hits_before, "hits_after": hits_after,
+            "committed": True, "remaining_count": remaining, "pending_deleted_count": pending,
+            "total_count": total}
+
+
 @app.delete("/api/cloud/session/{session_id}")
 def delete_cloud_session(session_id: str):
     """Free a cloud session's in-RAM arrays."""
@@ -44961,95 +45047,6 @@ class MeshToMeshICPRequest(BaseModel):
     rmse_threshold: float = 1e-6
 
 
-def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
-    """Worker for /api/m2m/icp-register. Returns the ICPRegistrationResponse dict.
-
-    See _do_c2m_distance for the streaming/cancel/error contract."""
-    try:
-        o3d = open3d_warmup.get_open3d()
-        import numpy as np
-
-        _cancel_checkpoint(progress)
-        if progress is not None:
-            progress(0.05, "Reading meshes")
-
-        # Convert flat arrays to numpy arrays
-        target_verts = np.array(request.target_vertices, dtype=np.float64).reshape(-1, 3)
-        target_tris = np.array(request.target_indices, dtype=np.int32).reshape(-1, 3)
-        source_verts = np.array(request.source_vertices, dtype=np.float64).reshape(-1, 3)
-        source_tris = np.array(request.source_indices, dtype=np.int32).reshape(-1, 3)
-
-        if len(target_verts) == 0 or len(target_tris) == 0:
-            return dict(success=False, error="No target mesh data provided")
-
-        if len(source_verts) == 0 or len(source_tris) == 0:
-            return dict(success=False, error="No source mesh data provided")
-
-        # Create target mesh and sample points
-        target_mesh = o3d.geometry.TriangleMesh()
-        target_mesh.vertices = o3d.utility.Vector3dVector(target_verts)
-        target_mesh.triangles = o3d.utility.Vector3iVector(target_tris)
-
-        # Create source mesh and sample points
-        source_mesh = o3d.geometry.TriangleMesh()
-        source_mesh.vertices = o3d.utility.Vector3dVector(source_verts)
-        source_mesh.triangles = o3d.utility.Vector3iVector(source_tris)
-
-        _cancel_checkpoint(progress)
-        if progress is not None:
-            progress(0.10, "Sampling meshes")
-
-        # Sample points from mesh surfaces for ICP. Floored, as in _do_c2m_icp:
-        # a surface is as large as it is however few vertices describe it, and
-        # an 8-vertex box sampled with 80 points left both ICP and the
-        # orientation search ranking poses on the draw rather than the shape.
-        num_samples = min(50000, max(max(len(target_verts), len(source_verts)) * 10, 5000))
-        target_pcd = target_mesh.sample_points_uniformly(number_of_points=num_samples)
-        source_pcd = source_mesh.sample_points_uniformly(number_of_points=num_samples)
-
-        # --- STEP 1: Center alignment (move source centroid to target centroid) ---
-        target_center = target_pcd.get_center()
-        source_center = source_pcd.get_center()
-        center_offset = target_center - source_center
-
-        # Apply center alignment to source
-        source_pcd.translate(center_offset)
-
-        logger.debug("Mesh-to-mesh center alignment: moved source by [%.4f, %.4f, %.4f]",
-                     center_offset[0], center_offset[1], center_offset[2])
-
-        _cancel_checkpoint(progress)
-        if progress is not None:
-            progress(0.15, "Estimating normals")
-
-        # Estimate normals for point-to-plane ICP (more robust). Robust extent,
-        # not the raw AABB diagonal — see `_robust_cloud_diagonal`.
-        diagonal = _robust_cloud_diagonal(np.asarray(target_pcd.points))
-        normal_radius = diagonal * 0.02
-
-        target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
-        source_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
-
-        # Determine max correspondence distance if not provided.
-        #
-        # Scaled from the cloud's own POINT SPACING, not its extent. The old rule
-        # (`diagonal * 0.05`) tied the correspondence window to how big the plot
-        # is, which is unrelated to how far a point should have to look for its
-        # true partner -- it worked out to ~100-120x the median nearest-neighbor
-        # spacing on every real dataset here, and that is far too wide.
-        #
-        # Too wide is not merely imprecise, it moves the minimum. On a real
-        # vineyard with 5.2 m rows, ICP started from the CORRECT pose and walked
-        # 2.87 m away at 100x spacing, because dense near-field foliage found
-        # partners in the neighboring row. Error grew monotonically with the
-        # multiplier on every pair measured across three orchards.
-        #
-        # 20x is the balance point. Tighter is slightly more accurate but loses
-        # pull-in range: at 5x, ICP failed to recover a 2 m starting offset at
-        # all (it sat still), while 10x/20x/40x all recovered it. 20x keeps ICP
-        # fitness in the 0.69-0.88 band -- enough correspondences to be stable --
-        # against 0.14-0.61 at 5x.
-        if request.max_correspondence_distance is None:
 # How much better (in tight-inlier fraction) a rotated start must score than
 # the as-placed start before `_m2m_orientation_search` prefers it. A symmetric
 # object (a box, a cylinder, a sphere) fits equally well in several
@@ -45167,6 +45164,95 @@ def _m2m_orientation_search(source_pcd, target_pcd, diagonal: float,
     return best[3].copy()
 
 
+def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
+    """Worker for /api/m2m/icp-register. Returns the ICPRegistrationResponse dict.
+
+    See _do_c2m_distance for the streaming/cancel/error contract."""
+    try:
+        o3d = open3d_warmup.get_open3d()
+        import numpy as np
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.05, "Reading meshes")
+
+        # Convert flat arrays to numpy arrays
+        target_verts = np.array(request.target_vertices, dtype=np.float64).reshape(-1, 3)
+        target_tris = np.array(request.target_indices, dtype=np.int32).reshape(-1, 3)
+        source_verts = np.array(request.source_vertices, dtype=np.float64).reshape(-1, 3)
+        source_tris = np.array(request.source_indices, dtype=np.int32).reshape(-1, 3)
+
+        if len(target_verts) == 0 or len(target_tris) == 0:
+            return dict(success=False, error="No target mesh data provided")
+
+        if len(source_verts) == 0 or len(source_tris) == 0:
+            return dict(success=False, error="No source mesh data provided")
+
+        # Create target mesh and sample points
+        target_mesh = o3d.geometry.TriangleMesh()
+        target_mesh.vertices = o3d.utility.Vector3dVector(target_verts)
+        target_mesh.triangles = o3d.utility.Vector3iVector(target_tris)
+
+        # Create source mesh and sample points
+        source_mesh = o3d.geometry.TriangleMesh()
+        source_mesh.vertices = o3d.utility.Vector3dVector(source_verts)
+        source_mesh.triangles = o3d.utility.Vector3iVector(source_tris)
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.10, "Sampling meshes")
+
+        # Sample points from mesh surfaces for ICP. Floored, as in _do_c2m_icp:
+        # a surface is as large as it is however few vertices describe it, and
+        # an 8-vertex box sampled with 80 points left both ICP and the
+        # orientation search ranking poses on the draw rather than the shape.
+        num_samples = min(50000, max(max(len(target_verts), len(source_verts)) * 10, 5000))
+        target_pcd = target_mesh.sample_points_uniformly(number_of_points=num_samples)
+        source_pcd = source_mesh.sample_points_uniformly(number_of_points=num_samples)
+
+        # --- STEP 1: Center alignment (move source centroid to target centroid) ---
+        target_center = target_pcd.get_center()
+        source_center = source_pcd.get_center()
+        center_offset = target_center - source_center
+
+        # Apply center alignment to source
+        source_pcd.translate(center_offset)
+
+        logger.debug("Mesh-to-mesh center alignment: moved source by [%.4f, %.4f, %.4f]",
+                     center_offset[0], center_offset[1], center_offset[2])
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.15, "Estimating normals")
+
+        # Estimate normals for point-to-plane ICP (more robust). Robust extent,
+        # not the raw AABB diagonal — see `_robust_cloud_diagonal`.
+        diagonal = _robust_cloud_diagonal(np.asarray(target_pcd.points))
+        normal_radius = diagonal * 0.02
+
+        target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
+        source_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
+
+        # Determine max correspondence distance if not provided.
+        #
+        # Scaled from the cloud's own POINT SPACING, not its extent. The old rule
+        # (`diagonal * 0.05`) tied the correspondence window to how big the plot
+        # is, which is unrelated to how far a point should have to look for its
+        # true partner -- it worked out to ~100-120x the median nearest-neighbor
+        # spacing on every real dataset here, and that is far too wide.
+        #
+        # Too wide is not merely imprecise, it moves the minimum. On a real
+        # vineyard with 5.2 m rows, ICP started from the CORRECT pose and walked
+        # 2.87 m away at 100x spacing, because dense near-field foliage found
+        # partners in the neighboring row. Error grew monotonically with the
+        # multiplier on every pair measured across three orchards.
+        #
+        # 20x is the balance point. Tighter is slightly more accurate but loses
+        # pull-in range: at 5x, ICP failed to recover a 2 m starting offset at
+        # all (it sat still), while 10x/20x/40x all recovered it. 20x keeps ICP
+        # fitness in the 0.69-0.88 band -- enough correspondences to be stable --
+        # against 0.14-0.61 at 5x.
+        if request.max_correspondence_distance is None:
             max_corr_dist = _auto_correspondence_distance(
                 np.asarray(target_pcd.points), diagonal)
         else:

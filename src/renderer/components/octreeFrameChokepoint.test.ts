@@ -282,8 +282,9 @@ describe('a committed transform keeps render pose and geometry in step', () => {
   it('renders hits octree and miss shell from ONE composed pose', async () => {
     const src = await viewerSource();
     // Two independent computations here is how the shell drifts off the tree.
-    expect(src).toMatch(/translation=\{hasResamplePreview \? undefined : cloudPose\.translation\}/);
-    expect(src).toMatch(/translation=\{cloudPose\.translation\}/);
+    // Both the hits octree and the miss shell take the same `cloudPose`.
+    expect(src.match(/translation=\{cloudPose\.translation\}/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(src.match(/poseMatrix=\{cloudPose\.matrix \?\? null\}/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(src).toMatch(/const cloudPose = getCloudPose\(cloud\);/);
   });
 

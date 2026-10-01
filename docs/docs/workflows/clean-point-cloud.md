@@ -223,7 +223,8 @@ sits with the other viewport toggles.
 Use **Crop** (scissors icon) to keep only points inside (or outside)
 a region. Three shapes are supported — a 3D **Box**, a screen-space
 **Rect**(angle), and a freeform **Polygon** lasso — and the same region
-applies to every scan you check in the panel.
+applies to every scan you check in the panel. The same tool, shapes and
+modes also cut **meshes** — see [Cropping meshes](#cropping-meshes).
 
 1. Click **Crop**. The panel lists every point cloud in the scene under
    **Scans**, each with a checkbox. The scans you had selected in the Scans
@@ -428,6 +429,58 @@ regions without re-importing.
     nothing — both halves become clouds — so it leaves the entire cloud on
     screen and draws only the region outline to show where the split will
     fall. Switching between the modes turns that culling on and off.
+
+### Cropping meshes
+
+When the scene holds a mesh, the Crop panel shows a second checked list,
+**Meshes**, under **Scans**. Tick the meshes to cut; the ones selected in the
+Meshes pane start checked. Scans and meshes can be checked together, and one
+region then cuts all of them — handy for trimming a cloud and the surface
+triangulated from it to the same plot. The button is available with only a
+mesh in the scene, and the Apply button names what it will cut ("Apply crop to
+1 scan + 2 meshes").
+
+Everything about the region works as it does for a cloud: **Box**, **Rect**
+and **Polygon**; **Keep Inside**, **Keep Outside** and **Segment** (the
+original mesh keeps the in-region triangles and a new **"… (segment)"** mesh
+gets the rest); and **Keep originals**, which leaves the source mesh whole and
+hidden and puts the result in a new **"… (cropped)"** mesh. A new mesh keeps
+its source's position, rotation, scale, color mode and opacity. The checked
+meshes preview the cut live, exactly as Apply will make it. A mesh is cropped
+where it is **drawn** — its position, rotation and scale are taken into
+account.
+
+Three things differ from a cloud:
+
+- **A mesh is cut along triangle edges.** Triangles are never split: each one
+  stays on the side its center falls on. On a triangulated scan, whose
+  triangles are a few millimeters across, the edge follows the region closely.
+  On a mesh built from a few large triangles (a ground plane, a low-polygon
+  import) the edge is visibly stepped, and a triangle can reach past the
+  region. Keeping triangles whole is what lets a cropped mesh keep everything
+  recorded per triangle — its source scan, voxel cell, and the edge lengths
+  behind the [triangle filter](../concepts/meshes.md) — so leaf-angle plots
+  and a leaf-area-density run that reuses the mesh still work on it.
+- **A mesh crop can be undone.** <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> restores every
+  mesh cut by that Apply, in one step, whichever mode was used. (A destructive
+  cloud crop cannot be undone; if scans and meshes were cropped together, undo
+  brings back the meshes only.)
+- **A crop never empties a mesh.** If the region would remove every triangle,
+  the mesh is left as it was and a message says so — delete it from the
+  Meshes pane if that is what you wanted.
+
+Some meshes are listed but can't be checked; hovering the row says why:
+
+| Mesh | Why it can't be cropped |
+|---|---|
+| Voxel grid | It is a box of cells, not a surface — resize it with its transform |
+| Generated plant | It is rebuilt from its parameters (age, morph), which would undo the crop |
+| DEM (DTM / DSM / CHM) | It keeps an elevation raster behind the surface — crop the point cloud and regenerate the DEM |
+| Fitted crown | Its metrics describe the whole shape |
+
+A cropped mesh that came from a triangulation keeps its **Filter** controls:
+the cut is made in the full candidate set, so loosening Lmax or the aspect
+limit afterwards cannot bring cropped-away triangles back.
 
 ### Keep original cloud
 
@@ -751,38 +804,37 @@ the red preview is for.
 
 ## Resample
 
-Use **Resample Point Cloud** (scatter icon) when a cloud is too large
-to work with interactively or
-when you want a uniformly sparser version for export.
+Use **Resample Point Cloud** (scatter icon) when a cloud is too dense to work
+with comfortably, or when you want a sparser version for export. It works on
+every point cloud, streamed or not.
 
-!!! note "Flat clouds only"
+1. Click **Resample Point Cloud**. The panel lists every point cloud under
+   **Clouds**; the ones you had selected in the Scans pane start checked, and
+   if nothing was selected **nothing is checked** — tick the clouds to thin.
+2. Pick a **Method**:
+    - **Random** keeps a random fraction of the points — type a **Keep
+      fraction** between `0.001` and `1.0`, or use the presets (50%, 25%, 10%,
+      5%, 1%). The density pattern is unchanged: near the scanner stays denser
+      than far away.
+    - **Even spacing** keeps one point per cube of the **Point spacing** you
+      give (in meters) — the measured point nearest each cube's center, never
+      an average, so every kept point carries its original attributes. This
+      evens out density, thinning the crowded areas near the scanner far more
+      than the sparse ones.
+3. The panel shows the result before you commit — *60,000 → 15,000 points*,
+   summed over the checked clouds.
+4. Click **Resample N clouds (permanent)**. Each cloud is thinned in turn and
+   its display rebuilt, with a progress indicator you can cancel.
 
-    Resample works in the renderer, over the point array held in the
-    browser process, so it is available only for **flat** clouds — small
-    clouds parsed directly rather than streamed from an octree. A normal
-    import of a LAS/LAZ/E57 (or any file large enough to be octree-backed)
-    draws its points from the octree on disk, and the tool reports
-    *"Resample unavailable"* rather than running. Use **Filter Points**
-    to thin an octree-backed cloud, or crop it to the region you need.
+Sky/miss points (the returns that hit nothing) are never dropped, so Leaf
+Area Density on a resampled scan still has its full transmission record. Like
+a filter or crop, a resample is a permanent edit to the working copy — it is
+not on the undo stack. Your source file on disk is never modified.
 
-1. Click **Resample Point Cloud**.
-2. Type a **Keep fraction** between `0.001` and `1.0` (it's a number field, not
-   a slider).
-3. Quick presets: **100%**, **50%**, **25%**, **10%**, **5%**, **1%**.
-4. Click **Preview** to see the resampled cloud. The preview isn't live —
-   changing the fraction clears it, so press **Refresh Preview** to update.
-   **Cancel Preview** discards it.
-5. Click **Permanently Resample Point Cloud** to commit.
-
-Both buttons are disabled at a fraction of `1.0`, since keeping everything is a
-no-op.
-
-Resampling is uniform-random, not voxel-based. For voxel *downsampling*
-(one point per occupied cell), export to `.ply` and use a tool like
-CloudCompare. Note that voxel downsampling is not a way to clean a cloud —
-it keeps one point per occupied cell, so it preserves isolated stray points
-at full weight while thinning dense structure. To remove noise, use
-[Remove noise](#remove-noise-stray-points) above.
+!!! note "Even spacing doesn't remove noise"
+    It keeps one point per occupied cube, so an isolated stray point survives
+    at full weight while dense structure is thinned. To remove noise, use
+    [Remove noise](#remove-noise-stray-points) above.
 
 ## A typical cleaning order
 

@@ -1687,7 +1687,55 @@ export function resampleCloud(
     [indices[i], indices[j]] = [indices[j], indices[i]];
   }
   const keptIndices = indices.slice(0, targetCount).sort((a, b) => a - b);
+  return subsetFlatCloud(data, keptIndices);
+}
 
+/**
+ * Indices (ascending) of one point per occupied cube of edge `voxelSize`: the
+ * point nearest the cube's center, so every kept point is a real measured
+ * point, not an average. Grid anchored at the points' minimum corner. Mirrors
+ * the backend's `_resample_keep_mask` voxel mode, so flat and streamed clouds
+ * thin identically.
+ */
+export function voxelKeepIndices(positions: ArrayLike<number>, count: number, voxelSize: number): number[] {
+  if (count === 0 || !(voxelSize > 0)) return [];
+  let mx = Infinity, my = Infinity, mz = Infinity;
+  for (let i = 0; i < count; i++) {
+    mx = Math.min(mx, positions[i * 3]);
+    my = Math.min(my, positions[i * 3 + 1]);
+    mz = Math.min(mz, positions[i * 3 + 2]);
+  }
+  const best = new Map<string, { i: number; d2: number }>();
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+    const cx = Math.floor((x - mx) / voxelSize);
+    const cy = Math.floor((y - my) / voxelSize);
+    const cz = Math.floor((z - mz) / voxelSize);
+    const dx = x - (mx + (cx + 0.5) * voxelSize);
+    const dy = y - (my + (cy + 0.5) * voxelSize);
+    const dz = z - (mz + (cz + 0.5) * voxelSize);
+    const d2 = dx * dx + dy * dy + dz * dz;
+    const key = `${cx},${cy},${cz}`;
+    const cur = best.get(key);
+    if (!cur || d2 < cur.d2) best.set(key, { i, d2 });
+  }
+  return [...best.values()].map(b => b.i).sort((a, b) => a - b);
+}
+
+/** Voxel-thin a FLAT cloud (see voxelKeepIndices). */
+export function voxelResampleCloud(data: PointCloudData, voxelSize: number): PointCloudData {
+  if (Math.floor(data.positions.length / 3) < data.pointCount) {
+    throw new Error('voxelResampleCloud requires a flat cloud; streamed clouds resample on the backend.');
+  }
+  return subsetFlatCloud(data, voxelKeepIndices(data.positions, data.pointCount, voxelSize));
+}
+
+/**
+ * A new flat cloud holding only `keptIndices` (ascending) of `data`, with
+ * colors / intensities / scalar fields carried along and bounds recomputed.
+ */
+export function subsetFlatCloud(data: PointCloudData, keptIndices: ArrayLike<number>): PointCloudData {
+  const targetCount = keptIndices.length;
   const newPositions = new Float32Array(targetCount * 3);
   const newColors = data.colors ? new Float32Array(targetCount * 3) : undefined;
   const newIntensities = data.intensities ? new Float32Array(targetCount) : undefined;

@@ -24,7 +24,8 @@ interface CropBox {
 // The data-* attributes (asserted by crop regression tests) are computed by the
 // parent and passed through. Parent gates on `editMode === 'crop'`; WHICH scans
 // the crop applies to is the `picker`'s checked set, seeded from the Scans-pane
-// selection when the tool opens.
+// selection when the tool opens. Meshes are a second checked list
+// (`meshPicker`, seeded from the Meshes pane) cut by the same region.
 interface CropPanelProps {
   /** Number of scans the crop will apply to (the picker's checked count). */
   selectionCount: number;
@@ -34,6 +35,19 @@ interface CropPanelProps {
     selectedIds: Set<string>;
     onChange: (next: Set<string>) => void;
   };
+  /** Number of meshes the crop will apply to. */
+  meshCount?: number;
+  /** Every mesh in the scene; ones that can't be cropped are shown disabled.
+   *  Omitted when the scene has no meshes, so the list doesn't take up room. */
+  meshPicker?: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
+  // data-* diagnostic: triangles of the checked meshes the live preview is
+  // DRAWING, i.e. what Apply will keep ('' when no region is previewed). Lets a
+  // spec hold the preview to the applied result.
+  meshPreviewKeptStr?: string;
   cropMode: CropMode;
   cropDrawState: CropDrawState;
   cropBox: CropBox | null;
@@ -77,9 +91,21 @@ interface CropPanelProps {
 
 const AXES = ['x', 'y', 'z'] as const;
 
+// "2 scans", "1 mesh", "2 scans + 1 mesh". With no mesh checked this is the
+// scan count alone, so a cloud-only crop reads exactly as it always has.
+function targetSummary(scans: number, meshes: number): string {
+  const scanPart = `${scans} scan${scans === 1 ? '' : 's'}`;
+  if (meshes === 0) return scanPart;
+  const meshPart = `${meshes} mesh${meshes === 1 ? '' : 'es'}`;
+  return scans === 0 ? meshPart : `${scanPart} + ${meshPart}`;
+}
+
 export function CropPanel({
   selectionCount,
   picker,
+  meshCount = 0,
+  meshPicker,
+  meshPreviewKeptStr = '',
   cropMode,
   cropDrawState,
   cropBox,
@@ -115,6 +141,8 @@ export function CropPanel({
     <div
       data-testid="crop-panel"
       data-selection-count={selectionCount}
+      data-mesh-count={meshCount}
+      data-mesh-preview-kept={meshPreviewKeptStr}
       data-crop-mode={cropMode}
       data-crop-min={cropBoxMinStr}
       data-crop-max={cropBoxMaxStr}
@@ -126,7 +154,7 @@ export function CropPanel({
       // Same width as before the picker: a wider panel hides more of the
       // viewport the user is drawing the region in.
       className={`absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg z-20 w-56 ${
-        picker ? 'max-h-[calc(100%-2rem)] overflow-y-auto' : ''
+        picker || meshPicker ? 'max-h-[calc(100%-2rem)] overflow-y-auto' : ''
       }`}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
@@ -156,9 +184,29 @@ export function CropPanel({
             rowTestId="crop-target-row"
             data-testid="crop-targets"
           />
-          {picker.selectedIds.size === 0 && picker.items.length > 0 && (
+          {picker.selectedIds.size === 0 && picker.items.length > 0 && meshCount === 0 && (
             <p className="mt-1 text-[10px] text-neutral-500" data-testid="crop-none-checked">
-              Check the scans to crop.
+              {meshPicker ? 'Check the scans or meshes to crop.' : 'Check the scans to crop.'}
+            </p>
+          )}
+        </div>
+      )}
+
+      {meshPicker && (
+        <div className="mb-3">
+          <ObjectPicker
+            items={meshPicker.items}
+            selectedIds={meshPicker.selectedIds}
+            onChange={meshPicker.onChange}
+            label="Meshes"
+            emptyMessage="No meshes in the scene."
+            rowTestId="crop-mesh-target-row"
+            data-testid="crop-mesh-targets"
+          />
+          {meshCount > 0 && (
+            <p className="mt-1 text-[10px] text-neutral-500 leading-tight" data-testid="crop-mesh-hint">
+              Meshes are cut along triangle edges: each triangle stays on the
+              side its center is on. Undo restores them.
             </p>
           )}
         </div>
@@ -231,11 +279,17 @@ export function CropPanel({
           </button>
         </div>
         <div className="text-[10px] text-neutral-500 mt-1.5 leading-tight">
-          {cropSegment
-            ? 'Splits in two: original keeps the in-region points, a new cloud gets the rest.'
-            : retainOriginal
-              ? 'Kept points go to a new cloud; the original is preserved and hidden.'
-              : 'Cropped-out points are discarded.'}
+          {meshCount === 0
+            ? (cropSegment
+              ? 'Splits in two: original keeps the in-region points, a new cloud gets the rest.'
+              : retainOriginal
+                ? 'Kept points go to a new cloud; the original is preserved and hidden.'
+                : 'Cropped-out points are discarded.')
+            : (cropSegment
+              ? 'Splits each object in two: the original keeps what is in the region, a new one gets the rest.'
+              : retainOriginal
+                ? 'What is kept goes to a new object; the original is preserved and hidden.'
+                : 'Everything cropped out is discarded.')}
         </div>
 
         {/* Non-destructive opt-out. Grayed in Segment mode, which already keeps
@@ -253,7 +307,7 @@ export function CropPanel({
             onChange={(e) => onToggleRetainOriginal(e.target.checked)}
             className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-blue-600"
           />
-          <span className="text-[10px] text-neutral-300">Keep original cloud</span>
+          <span className="text-[10px] text-neutral-300">{meshCount === 0 ? 'Keep original cloud' : 'Keep originals'}</span>
         </label>
         {!retainEnabled && (
           <div className="text-[10px] text-neutral-500 mt-1 leading-tight">
@@ -423,10 +477,10 @@ export function CropPanel({
       <button
         data-testid="crop-apply"
         onClick={onApply}
-        disabled={applyDisabled || selectionCount === 0}
+        disabled={applyDisabled || selectionCount + meshCount === 0}
         className="w-full px-2 py-1.5 mt-1 text-xs font-medium rounded bg-green-600 hover:bg-green-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white disabled:cursor-not-allowed transition-colors"
       >
-        {cropSegment ? 'Segment' : 'Apply crop to'} {selectionCount} scan{selectionCount === 1 ? '' : 's'}
+        {cropSegment ? 'Segment' : 'Apply crop to'} {targetSummary(selectionCount, meshCount)}
       </button>
     </div>
   );

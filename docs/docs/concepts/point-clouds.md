@@ -60,7 +60,7 @@ find rotation choppy:
 - **Reduce point size** in the Scene panel — smaller points cost less.
 - **Resample** to a working subset, then re-import the full cloud at
   the end. The [Resample workflow](../workflows/clean-point-cloud.md#resample)
-  has a live preview.
+  shows the resulting point count before you commit.
 
 ## Coordinate systems
 

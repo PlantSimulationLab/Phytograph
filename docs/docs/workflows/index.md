@@ -34,7 +34,7 @@ by the four stages of a typical processing pipeline.
 
 - :phytograph-transform: **[Transform](clean-point-cloud.md#transform-move-rotate-and-scale)** — move, rotate and scale clouds and meshes together, and set the scene origin.
 
-- :phytograph-crop: **[Crop](clean-point-cloud.md#crop)** — keep or discard a region with a box, rectangle, or freeform polygon.
+- :phytograph-crop: **[Crop](clean-point-cloud.md#crop)** — keep or discard a region of a cloud or a mesh with a box, rectangle, or freeform polygon.
 
 - :phytograph-erase: **[Erase](clean-point-cloud.md#erase)** — paint away stray points with a brush.
 

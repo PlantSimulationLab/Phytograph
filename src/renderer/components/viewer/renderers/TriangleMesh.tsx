@@ -35,9 +35,14 @@ export interface TriangleMeshProps {
   // the coplanar grid/scan points flicker even while the camera is static.
   // Default false = follow the opaque⇄translucent rule.
   forceDepthWrite?: boolean;
+  // Crop preview: one entry per triangle of `data`, 1 = draw it. Only the index
+  // is rebuilt — the geometry (positions, normals, colors, raycast BVH) is left
+  // alone — so dragging the crop box over a multi-million-triangle mesh costs
+  // an index upload per change rather than a full rebuild. Null = draw all.
+  triangleMask?: Uint8Array | null;
 }
 
-export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false, forceDepthWrite = false }: TriangleMeshProps) {
+export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false, forceDepthWrite = false, triangleMask = null }: TriangleMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const hasLoggedRef = useRef(false);
 
@@ -131,6 +136,41 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
     }
   }, [geometry, triangleColorBuffer]);
 
+  // The masked view: a second geometry that SHARES every attribute of the real
+  // one and differs only in its index. Sharing the BufferAttribute objects
+  // means no vertex data is copied or re-uploaded.
+  const maskedGeometry = useMemo(() => {
+    if (!triangleMask || triangleMask.length !== data.triangleCount) return null;
+    let kept = 0;
+    for (let t = 0; t < triangleMask.length; t++) kept += triangleMask[t];
+    const index = new Uint32Array(kept * 3);
+    // The pseudocolor geometry is non-indexed (triangle t owns vertices
+    // 3t..3t+2); the plain one draws through data.indices.
+    const src = trianglePositions ? null : data.indices;
+    let w = 0;
+    for (let t = 0; t < triangleMask.length; t++) {
+      if (!triangleMask[t]) continue;
+      index[w++] = src ? src[t * 3] : t * 3;
+      index[w++] = src ? src[t * 3 + 1] : t * 3 + 1;
+      index[w++] = src ? src[t * 3 + 2] : t * 3 + 2;
+    }
+    const geo = new THREE.BufferGeometry();
+    for (const name of Object.keys(geometry.attributes)) {
+      geo.setAttribute(name, geometry.attributes[name]);
+    }
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    return geo;
+  }, [geometry, triangleMask, data, trianglePositions]);
+  useEffect(() => {
+    if (!maskedGeometry) return;
+    return () => {
+      // Detach the shared attributes first: dispose() frees the GPU buffer of
+      // every attribute still on the geometry, and these belong to `geometry`.
+      for (const name of Object.keys(maskedGeometry.attributes)) maskedGeometry.deleteAttribute(name);
+      maskedGeometry.dispose();
+    };
+  }, [maskedGeometry]);
+
   const useColorAttr = hasTriangleColors || hasVertexColors;
 
   // A translucent surface must NOT write depth — otherwise a transparent mesh
@@ -203,5 +243,5 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
   }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);
 
-  return <mesh ref={meshRef} geometry={geometry} material={material} renderOrder={renderOrder} />;
+  return <mesh ref={meshRef} geometry={maskedGeometry ?? geometry} material={material} renderOrder={renderOrder} />;
 }
