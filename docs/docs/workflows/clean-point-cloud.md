@@ -222,11 +222,17 @@ sits with the other viewport toggles.
 Use **Crop** (scissors icon) to keep only points inside (or outside)
 a region. Three shapes are supported — a 3D **Box**, a screen-space
 **Rect**(angle), and a freeform **Polygon** lasso — and the same region
-applies to every scan you have selected.
+applies to every scan you check in the panel.
 
-1. Click **Crop**. The first time, a green box appears around the union
-   of the selected scans' bounding boxes (after that, Crop reopens in the
-   shape you last used — see below).
+1. Click **Crop**. The panel lists every point cloud in the scene under
+   **Scans**, each with a checkbox. The scans you had selected in the Scans
+   pane start checked; if nothing was selected, **nothing is checked** — tick
+   the scans to crop (the button works without a selection). Once the panel
+   is open only the checkboxes decide what gets cropped: clicking rows in the
+   Scans pane changes nothing. The first time, a green box appears around
+   the union of the checked scans' bounding boxes (or around the first scans
+   you check); after that, Crop reopens in the shape you last used — see
+   below.
 2. In the panel choose **Box**, **Rect**, or **Polygon** at the top, then a
    **Mode** below it: **Keep Inside** (default), **Keep Outside**, or
    **Segment**. The first two discard the points you don't keep;
@@ -242,12 +248,13 @@ Crop remembers the shape and mode you last picked. Reopen it after closing
 or applying and it comes back as you left it — Polygon with Keep Outside,
 say, with the lasso already armed — so a repeated crop across several
 clouds needs no re-picking. The region itself is not kept (a Box starts
-from the new selection's bounds, a Rect or Polygon is drawn fresh), nor is
+from the checked scans' bounds, a Rect or Polygon is drawn fresh), nor is
 **Keep original cloud**, which always starts unticked. **File → New**
 returns Crop to Box / Keep Inside.
 
-When more than one scan is selected, the panel shows "Applies to N scans"
-and each scan gets its own cropped result — identities are preserved. The
+When more than one scan is checked, the Apply button reads "Apply crop to N
+scans" and each scan gets its own cropped result — identities are preserved.
+**Reset Crop Box** fits the box to the checked scans. The
 scans are cropped one after another, so the indicator names the scan it is
 on and shows overall progress — *Cropping plot_north.laz (3 of 8)…* — rather
 than a bare **Cropping…** for the whole run. Its **×** cancels the whole
@@ -335,8 +342,9 @@ rectangle around the part of a plant you want, and get a clean axis-true cut.
 Polygon mode is a **screen-space lasso** — useful when the region you
 want isn't a tidy box.
 
-1. Pick **Polygon** in the panel; the camera locks so the lasso stays
-   anchored to the view. (It stays locked once the polygon is closed,
+1. Pick **Polygon** in the panel; the view switches to the same straight-on
+   (orthographic) projection as Rect, and the camera locks so the lasso
+   stays anchored to the view. (It stays locked once the polygon is closed,
    too — see below.)
 2. Click in the viewport to add vertices. Right-click or
    <kbd>Backspace</kbd> removes the last vertex.
@@ -358,6 +366,11 @@ it selected in another. The selection itself never shifts — it is fixed
 at the moment you closed the polygon — but the drawing would stop
 describing it. Redraw or <kbd>Esc</kbd> to release the lock and move the
 view again.
+
+As with Rect, the orthographic draw means the selection extrudes straight
+into the scene: the lasso cuts the same footprint from any viewing angle,
+not a cone that widens with distance. Rect and Polygon share the flattened
+view, so switching between them doesn't move the scene.
 
 Unlike Box mode, the polygon and rectangle previews keep the cloud at full
 detail — only the points the crop removes disappear. If the rest of the
@@ -395,7 +408,7 @@ cloud visibly thins out, that's a bug, not the crop.
 ### Segment mode (keep both halves)
 
 **Keep Inside** and **Keep Outside** discard the points you don't keep.
-**Segment** instead splits each selected scan in two: the original scan
+**Segment** instead splits each checked scan in two: the original scan
 keeps the in-region points (the same set **Keep Inside** would keep), and a
 new **"… (segment)"** cloud is added to the scene holding the cropped-out
 points. No points are lost. It works with all three shapes — **Box**,
@@ -473,9 +486,12 @@ your view direction — like the rectangle/polygon crop, but a pre-shaped
 square you paint freely. It shows a live preview of what it removes;
 nothing is deleted until you apply.
 
-1. Click **Erase Brush** to open the tool. The panel opens but the view
-   stays interactive — orbit/pan/zoom to frame the angle you want to erase
-   from.
+1. Click **Erase Brush** to open the tool. The panel lists every point
+   cloud in the scene under **Clouds**; the ones you had selected in the
+   Scans pane start checked, and if nothing was selected **nothing is
+   checked** — tick the clouds to erase (the button works without a
+   selection). The view stays interactive — orbit/pan/zoom to frame the
+   angle you want to erase from.
 2. Click **Start Erasing** in the panel (or press **`E`**) to turn erase
    mode on. This **freezes the viewport** so every stamp shares the same
    view, and a square brush follows your cursor (orange → red).
@@ -494,13 +510,25 @@ Adjust brush size (in screen pixels) with the slider; because the brush is
 screen-space, its size stays constant on screen regardless of the cloud's
 distance.
 
+**Several clouds at once.** Because each square cuts straight through the
+scene, one stroke erases from **every checked cloud** behind it — handy for
+clearing a region where overlapping scans of the same plot all carry the
+same noise. Unchecked clouds are never touched, even where they sit right
+behind the brush, and clicking rows in the Scans pane while the tool is open
+changes nothing. (A cloud held entirely in memory rather than streamed —
+rare, e.g. some stitched results — uses a different, per-point brush and can
+only be erased on its own; checking it unchecks the others. Its row is
+marked *alone*.)
+
 Erase composes: each apply removes the painted union from the current point
 set, so you can apply, reorient, and stamp again to clear points hidden
 behind a surface. Because deletes are masked (not yet written to a new
 octree), they're cheap and reversible:
 
-- **Undo last deletion** restores the most recent erase.
-- **Permanently apply deletions** bakes the survivors into a fresh octree —
+- **Undo last deletion** restores the most recent erase (on each checked
+  cloud that has one).
+- **Permanently apply deletions** bakes the survivors of every checked cloud
+  into a fresh octree, one cloud after another —
   the one slower step, and the point at which the deletions become permanent
   (no longer undoable). While it runs the button reads *Applying deletions…*
   and a progress pill appears at the top of the viewer; canceling it leaves

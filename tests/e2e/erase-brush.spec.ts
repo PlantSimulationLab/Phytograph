@@ -269,3 +269,86 @@ test('erase brush: toggling mode off and on accumulates stamps (no reset)', asyn
     .poll(async () => Number(await panel.getAttribute('data-stamp-count')), { timeout: 5_000 })
     .toBe(2);
 });
+
+// Erase is a PICKER tool: it lists every cloud and erases the CHECKED ones —
+// the Scans-pane selection only seeds that set when the tool opens (nothing
+// selected → nothing checked). A painted square extrudes straight through the
+// scene, so it cuts every checked cloud behind it and leaves unchecked ones
+// alone. Viewed down +X, tiny (x≈0) and tiny-offset (x≈1) project onto the SAME
+// screen footprint, so one stroke lies over both.
+const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
+
+test('erase brush: one stroke cuts every CHECKED cloud behind it, and only those', async () => {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+  const tiny = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  await expect(tiny).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await importFiles(app, page, 'import-auto', TINY_OFFSET);
+  await completeImportWizard(page);
+  const offset = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
+  await expect(offset).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 1, y: 0, z: 0 }));
+
+  // Available with nothing selected; opens with nothing checked.
+  await expect(page.getByTestId('tool-erase')).toBeEnabled();
+  await page.getByTestId('tool-erase').click();
+  const panel = page.getByTestId('erase-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-target-count', '0');
+  await expect(page.getByTestId('erase-none-checked')).toBeVisible();
+  await expect(page.getByTestId('erase-mode-toggle')).toHaveCount(0);
+
+  const row = (label: string) =>
+    page.locator(`[data-testid="erase-target-row"][data-label="${label}"]`);
+
+  async function strokeAndApply() {
+    await page.getByTestId('erase-mode-toggle').click();
+    await expect(panel).toHaveAttribute('data-erase-active', 'true');
+    await page.waitForTimeout(300);
+    const slider = panel.locator('input[type="range"]');
+    const maxPx = await slider.getAttribute('max');
+    await slider.evaluate((el, v) => {
+      const input = el as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(input, v);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, maxPx ?? '150');
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    const cx = box.x + box.width * 0.5;
+    const cy = box.y + box.height * 0.5;
+    const pts = [{ x: cx - box.width * 0.05, y: cy }, { x: cx, y: cy }, { x: cx + box.width * 0.05, y: cy }];
+    await dismissToasts(page);
+    await expectPointsHitCanvas(page, pts, 'erase stroke');
+    await page.mouse.move(pts[0].x, pts[0].y);
+    await page.mouse.down();
+    await page.mouse.move(pts[1].x, pts[1].y);
+    await page.mouse.move(pts[2].x, pts[2].y);
+    await page.mouse.up();
+    await expect.poll(async () => Number(await panel.getAttribute('data-stamp-count'))).toBeGreaterThan(0);
+    await page.getByTestId('erase-apply').click();
+    await expect(panel).toHaveAttribute('data-stamp-count', '0', { timeout: 30_000 });
+  }
+
+  // 1) Only tiny-offset checked: the stroke lies over BOTH, cuts only it.
+  await row('tiny-offset').click();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  await strokeAndApply();
+  await expect.poll(async () => Number(await offset.getAttribute('data-point-count')), { timeout: 30_000 })
+    .toBeLessThan(60);
+  await expect(tiny).toHaveAttribute('data-point-count', '60');
+  const offsetAfterFirst = Number(await offset.getAttribute('data-point-count'));
+
+  // 2) Check tiny as well: one stroke now cuts both.
+  await row('tiny').click();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  await strokeAndApply();
+  await expect.poll(async () => Number(await tiny.getAttribute('data-point-count')), { timeout: 30_000 })
+    .toBeLessThan(60);
+  expect(Number(await tiny.getAttribute('data-point-count'))).toBeGreaterThan(0);
+  // The same strip again removes nothing new from tiny-offset (already cut), so
+  // its count must not have grown back either.
+  expect(Number(await offset.getAttribute('data-point-count'))).toBeLessThanOrEqual(offsetAfterFirst);
+});

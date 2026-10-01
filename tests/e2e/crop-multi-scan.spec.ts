@@ -76,12 +76,13 @@ test('multi-scan crop applies one world-space box across two selected scans', as
   await expect(cropBtn).toBeVisible();
   await cropBtn.click();
 
-  // Crop panel appears and shows the multi-scan hint with the right count.
+  // Crop panel appears with both selected scans checked in its picker.
   const panel = page.getByTestId('crop-panel');
   await expect(panel).toBeVisible();
   await expect(panel).toHaveAttribute('data-selection-count', '2');
   await expect(panel).toHaveAttribute('data-crop-mode', 'box');
-  await expect(page.getByTestId('crop-multi-hint')).toContainText('Applies to 2 scans');
+  await expect(page.locator('[data-testid="crop-target-row"][data-checked="true"]')).toHaveCount(2);
+  await expect(page.getByTestId('crop-apply')).toContainText('2 scans');
 
   // Initial cropBox is the union of both scans' bounds in world space:
   // tiny x∈[-0.3,0.3], tiny-offset x∈[0.7,1.3] → union x∈[-0.3,1.3].
@@ -323,4 +324,71 @@ test('two sequentially imported scans get different palette colors', async () =>
     .evaluateAll((rows) => rows.map((r) => r.getAttribute('data-scan-color') ?? ''));
   expect(swatches).toHaveLength(2);
   expect([...swatches].sort(), `swatches: ${swatches.join(', ')}`).toEqual(['#22c55e', '#3b82f6']);
+});
+
+// Crop is a PICKER tool: it lists every scan and cuts the checked ones. The
+// Scans-pane selection only seeds the checked set when the tool opens — with
+// nothing selected nothing is checked (a crop is destructive) — and clicking
+// rows in the pane while it is open changes nothing it will cut.
+test('crop picks its own scans: nothing selected → nothing checked; only the checked scan is cut', async () => {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  await expect(tinyRow).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await importFiles(app, page, 'import-auto', TINY_OFFSET);
+  await completeImportWizard(page);
+  const offsetRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
+  await expect(offsetRow).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await expect(tinyRow).toHaveAttribute('data-selected', 'false');
+  await expect(offsetRow).toHaveAttribute('data-selected', 'false');
+
+  // Available with nothing selected.
+  const cropBtn = page.getByTestId('tool-crop');
+  await expect(cropBtn).toBeEnabled();
+  await cropBtn.click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toBeVisible();
+  const rows = page.getByTestId('crop-target-row');
+  await expect(rows).toHaveCount(2);
+  await expect(page.locator('[data-testid="crop-target-row"][data-checked="true"]')).toHaveCount(0);
+  await expect(panel).toHaveAttribute('data-selection-count', '0');
+  await expect(page.getByTestId('crop-apply')).toBeDisabled();
+
+  // Check tiny-offset only: the box starts on IT (x ∈ [0.7, 1.3]).
+  const offsetTarget = page.locator('[data-testid="crop-target-row"][data-label="tiny-offset"]');
+  await offsetTarget.click();
+  await expect(offsetTarget).toHaveAttribute('data-checked', 'true');
+  await expect(panel).toHaveAttribute('data-crop-min', '0.700,-0.300,0.000');
+  await expect(panel).toHaveAttribute('data-crop-max', '1.300,0.300,1.500');
+
+  // Selecting the OTHER scan in the pane does not re-target the crop.
+  await tinyRow.click();
+  await expect(tinyRow).toHaveAttribute('data-selected', 'true');
+  await expect(panel).toHaveAttribute('data-selection-count', '1');
+
+  // Keep z ∈ [0.3, 1.0] (2 of 5 layers) with a box wide in X/Y.
+  const setNumber = async (testId: string, value: number) => {
+    const input = page.getByTestId(testId);
+    await input.click();
+    await input.fill(String(value));
+    await input.press('Tab');
+  };
+  await setNumber('crop-dim-z', 0.7);
+  await setNumber('crop-center-z', 0.65);
+  await setNumber('crop-dim-x', 4.0);
+  await setNumber('crop-center-x', 0.5);
+  await setNumber('crop-dim-y', 1.0);
+  await setNumber('crop-center-y', 0);
+  await expect(panel).toHaveAttribute('data-crop-min', '-1.500,-0.500,0.300');
+
+  await expect(page.getByTestId('crop-apply')).toContainText('1 scan');
+  await page.getByTestId('crop-apply').click();
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+
+  // Only the checked scan was cut — although the box covers both.
+  await expect(offsetRow).toHaveAttribute('data-point-count', '24', { timeout: 10_000 });
+  await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 });

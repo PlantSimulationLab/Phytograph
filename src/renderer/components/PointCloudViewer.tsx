@@ -8,7 +8,7 @@ import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner 
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
-import { diffTargets, idsOfKind, parseTargetKey, pruneTargets, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
+import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
 import { bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, meshWorldMatrix } from '../lib/meshTransform';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
@@ -2540,6 +2540,13 @@ export default function PointCloudViewer({
   // NOT persisted — a destructive default is safer, so this resets to false on
   // every entry into crop mode.
   const [cropRetainOriginal, setCropRetainOriginal] = useState(false);
+  // The scans the Crop tool will cut: its picker's checked set, seeded from
+  // the Scans-pane selection when the tool opens (nothing selected → nothing
+  // checked) and independent of the pane afterwards. Kept after the panel
+  // closes for an apply in flight: the preview of the to-be-cropped points
+  // reads it until finishUp swaps the cropped data in.
+  const [cropTargets, setCropTargetsState] = useState<Set<string>>(() => new Set());
+  const cropTargetsRef = useRef(cropTargets);
   const [cropDrawState, setCropDrawState] = useState<CropDrawState>('idle');
   // In-progress polygon vertices while the user is clicking. Promoted to
   // cropPolygon when they press Enter.
@@ -2618,6 +2625,27 @@ export default function PointCloudViewer({
   const [erasePreviewBoxes, setErasePreviewBoxes] = useState<THREE.Matrix4[]>([]);
   // Camera-facing square indicator transform that follows the cursor.
   const [eraseBrushMatrix, setEraseBrushMatrix] = useState<THREE.Matrix4 | null>(null);
+  // The clouds the Erase tool works on: its picker's checked set, seeded from
+  // the Scans-pane selection when the tool opens (nothing selected → nothing
+  // checked) and independent of the pane afterwards. Streamed clouds can be
+  // checked together — a painted square cuts every one of them behind it — but
+  // an in-memory (flat) cloud uses a per-point brush tied to that cloud, so it
+  // is only ever the sole target (see exclusiveFlatTargets).
+  const [eraseTargets, setEraseTargetsState] = useState<Set<string>>(() => new Set());
+  const eraseTargetsRef = useRef(eraseTargets);
+  const eraseTargetClouds = useMemo(
+    () => clouds.filter(c => eraseTargets.has(c.id)),
+    [clouds, eraseTargets],
+  );
+  // The first checked cloud: the flat brush's cloud, and the octree the square
+  // brush surface-picks against for its preview depth.
+  const erasePrimary: PointCloudEntry | null = eraseTargetClouds[0] ?? null;
+  const setEraseTargets = useCallback((next: Set<string>) => {
+    const flat = (id: string) => !clouds.find(c => c.id === id)?.data.octree;
+    const n = exclusiveFlatTargets(eraseTargetsRef.current, next, flat);
+    eraseTargetsRef.current = n;
+    setEraseTargetsState(n);
+  }, [clouds]);
 
   // ── Manual labeling ──────────────────────────────────────────────────────
   // The tool paints a per-point class column. Phase 1 reuses the EXISTING
@@ -2940,16 +2968,12 @@ export default function PointCloudViewer({
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
   //
-  // The erase brush only ever wants the SELECTED cloud — see selectedOctree()
-  // below — but the point and scene-origin pickers pick across every visible
-  // cloud, which is why this is a registry rather than the
+  // The erase brush picks against its first CHECKED cloud, but the point and
+  // scene-origin pickers pick across every visible cloud, which is why this is
+  // a registry rather than the
   // single slot it used to be. The projected-miss octrees are never registered,
   // which is what keeps sky/miss points unpickable for free.
   const octreeRegistryRef = useRef<Map<string, PointCloudOctree>>(new Map());
-  const selectedOctree = (): PointCloudOctree | null => {
-    const id = firstSelectedCloud?.id;
-    return (id ? octreeRegistryRef.current.get(id) : null) ?? null;
-  };
 
   // Depth probe for zoom-to-cursor. DepthProbe (inside the Canvas, where the
   // live camera/renderer are) fills this in; CameraController calls it on every
@@ -3384,8 +3408,11 @@ export default function PointCloudViewer({
       return;
     }
     closeAllToolPanels('editMode');
+    const seeded = seedFromSelection(clouds.map(c => c.id), selectedIds);
+    cropTargetsRef.current = seeded;
+    setCropTargetsState(seeded);
     const initial = worldBoundsUnion(
-      Array.from(selectedIds)
+      Array.from(seeded)
         .map(id => clouds.find(c => c.id === id))
         .filter((c): c is PointCloudEntry => !!c)
         .map(c => ({
@@ -3396,7 +3423,8 @@ export default function PointCloudViewer({
           translation: getEditState(c.id).translation,
         })),
     );
-    if (initial) setCropBox(initial);
+    // No box until something is checked (the box starts on the checked scans).
+    setCropBox(initial ?? null);
     setCropPolygon(null);
     setPolygonInProgress([]);
     setRectDragStart(null);
@@ -3413,19 +3441,6 @@ export default function PointCloudViewer({
     setEditMode('crop');
   }, [editMode, selectedIds, clouds, getEditState, closeAllToolPanels]);
 
-  // Update edit state for selected clouds
-  const updateSelectedEditStates = useCallback((updater: (state: CloudEditState) => CloudEditState) => {
-    setEditStates(prev => {
-      const next = new Map(prev);
-      for (const id of selectedIds) {
-        const current = next.get(id);
-        if (current) {
-          next.set(id, updater(current));
-        }
-      }
-      return next;
-    });
-  }, [selectedIds]);
 
   // Undo/redo now flows through the scene store. These wrappers keep their
   // original names + signatures so the ~15 drag/gizmo/keyboard call sites are
@@ -3473,23 +3488,6 @@ export default function PointCloudViewer({
     pendingHistoryRef.current = null;
   }, [captureTransform, scene]);
 
-  // Save to history in one step (for immediate operations like move-to-origin).
-  // Captures BEFORE; the caller mutates then calls commitHistoryEntry. For a
-  // multi-cloud move this records only the FIRST selected cloud (pre-existing
-  // limitation; full multi-object batching arrives with the store's transactions
-  // in a later phase).
-  const saveToHistory = useCallback((overrideType?: 'cloud' | 'mesh' | 'skeleton', overrideId?: string) => {
-    if (isUndoingRef.current) return;
-    if (overrideType && overrideId) {
-      startHistoryEntry(overrideType, overrideId);
-    } else if (selectedIds.size > 0) {
-      // Only one pendingHistoryRef exists, so the last write wins — matching the
-      // pre-store behavior where each startHistoryEntry overwrote the pending entry.
-      for (const id of selectedIds) {
-        startHistoryEntry('cloud', id);
-      }
-    }
-  }, [selectedIds, startHistoryEntry]);
 
   // Commit ONE undoable mesh transform edit from the Transform panel (a numeric
   // entry, a reset, or fit-to-scans). The panel's setters are non-history
@@ -4543,7 +4541,7 @@ export default function PointCloudViewer({
   }, [onAddScan, scans, buildSessionOctreeData]);
 
   const handleApplyCrop = useCallback(() => {
-    if (editMode !== 'crop' || selectedIds.size === 0) return;
+    if (editMode !== 'crop' || cropTargetsRef.current.size === 0) return;
     if (isApplyingCrop) return;
     const predicate = buildCropPredicate();
     if (!predicate) return;
@@ -4584,7 +4582,8 @@ export default function PointCloudViewer({
     cropAbortRef.current = abort;
     cropRunIdRef.current = null;
 
-    const cloudIdsToProcess = Array.from(selectedIds);
+    // The picker's checked scans, in scene order — never the pane selection.
+    const cloudIdsToProcess = clouds.map(c => c.id).filter(id => cropTargetsRef.current.has(id));
     const emptied: { id: string; name: string }[] = [];
     const touchedCloudIds: string[] = [];
     // Clouds whose crop is being rendered by a per-tile mask until their
@@ -5216,7 +5215,7 @@ export default function PointCloudViewer({
       setTimeout(() => { void next(index + 1); }, 0);
     };
     void next(0);
-  }, [editMode, selectedIds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon, cropSegment, cropRetainOriginal, onAddScan, onAddCloud, onHideScan, onSetScanSelection, buildSessionOctreeData, scene]);
+  }, [editMode, clouds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon, cropSegment, cropRetainOriginal, onAddScan, onAddCloud, onHideScan, onSetScanSelection, buildSessionOctreeData, scene]);
 
   // Stop a multi-scan crop mid-run.
   //
@@ -5234,28 +5233,20 @@ export default function PointCloudViewer({
 
   // Apply erased points permanently - removes erased points and bakes in translation
   const handleApplyErase = useCallback(async () => {
-    if (editMode !== 'erase' || selectedIds.size !== 1) return;
+    if (editMode !== 'erase') return;
+    const targets = clouds.filter(c => eraseTargetsRef.current.has(c.id));
+    if (targets.length === 0) return;
 
-    const cloudId = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === cloudId);
-    const state = editStates.get(cloudId);
-
-    if (!cloud || !state) return;
-
-    // Octree (session) clouds: erase deletes points inside the union of painted
-    // screen-space SQUARE stamps. The session flow makes this instant — set the
+    // Streamed (session) clouds: erase deletes points inside the union of
+    // painted screen-space SQUARE stamps, from EVERY checked cloud — the squares
+    // extrude straight through the scene, so one painted frame describes the
+    // same cut for each of them. The session flow makes this instant — set the
     // mask via delete_region (squares_union, invert=false → delete INSIDE the
     // squares) and accumulate the region so the GPU clip-volume preview keeps
     // the points hidden and undo can pop it. No octree rebuild.
-    if (cloud.data.octree) {
+    if (targets[0].data.octree) {
       const frame = eraseFrame;
       if (!frame || frame.centers.length === 0) return;
-      const octreeInfo = cloud.data.octree;
-      if (!octreeInfo.sessionId) {
-        showToast({ title: 'Cannot erase: cloud has no editable session.', type: 'error' });
-        return;
-      }
-      const sessionId = octreeInfo.sessionId;
       // The frame's `view` is the DISPLAY-space camera (world − displayOffset),
       // but the backend reprojects TRUE WORLD positions. Convert to the world
       // view V_world = V_disp · T(−offset) before sending (no-op when offset 0).
@@ -5276,45 +5267,52 @@ export default function PointCloudViewer({
         canvas: frame.canvas,
         invert: false, // delete points INSIDE the painted squares
       };
-      // The frozen camera below was looking at the POSED octree; the backend
-      // replays it against session positions. Bring the two frames together
-      // first — see ensureOctreeFrameCurrent.
-      if (!(await ensureOctreeFrameCurrentRef.current(cloudId))) return;
-      let deletedCount = 0;
-      try {
-        const result = await deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion);
-        if (result.remaining_count === 0) {
-          // Every point erased → offer to delete the cloud, like the flat path.
-          setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
-          setEditMode('none');
-          return;
+      const emptied: PointCloudEntry[] = [];
+      const failures: string[] = [];
+      for (const cloud of targets) {
+        const sessionId = cloud.data.octree?.sessionId;
+        if (!sessionId) { failures.push(cloud.data.fileName || cloud.id); continue; }
+        // The frozen camera below was looking at the POSED octree; the backend
+        // replays it against session positions. Bring the two frames together
+        // first — see ensureOctreeFrameCurrent.
+        if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) { failures.push(cloud.data.fileName || cloud.id); continue; }
+        let deletedCount = 0;
+        try {
+          const result = await deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion);
+          if (result.remaining_count === 0) emptied.push(cloud);
+          deletedCount = result.pending_deleted_count ?? result.deleted_count;
+        } catch (err) {
+          failures.push(`${cloud.data.fileName || cloud.id} (${err instanceof Error ? err.message : String(err)})`);
+          continue;
         }
-        deletedCount = result.pending_deleted_count ?? result.deleted_count;
-      } catch (err) {
-        showToast({
-          title: `Erase failed: ${err instanceof Error ? err.message : String(err)}`,
-          type: 'error',
+        // KEEP the committed delete in edit-state so the persistent clip-volume
+        // preview hides the erased points (finishUp / undo manage the stack),
+        // and record the backend-reported count so the scan row drops now.
+        setEditStates(prev => {
+          const next = new Map(prev);
+          const cur = next.get(cloud.id) ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+          next.set(cloud.id, {
+            translation: { x: 0, y: 0, z: 0 },
+            erasedIndices: new Set<number>(),
+            pendingDeletes: [...(cur.pendingDeletes ?? []), deleteRegion],
+            pendingDeletedCount: deletedCount,
+          });
+          return next;
         });
-        return;
       }
-      // Clear the painted squares / live preview, but KEEP the committed delete
-      // in edit-state so the persistent clip-volume preview hides the erased
-      // points. (finishUp / undo manage the accumulated stack.) Record the
-      // backend-reported deleted count so the scan row's point count drops now.
+      if (failures.length > 0) {
+        showToast({ title: `Erase failed for ${failures.join(', ')}`, type: 'error' });
+      }
+      // Clear the painted squares / live preview.
       setEraseFrame(null);
       setErasePreviewBoxes([]);
       setEraseBrushMatrix(null);
-      setEditStates(prev => {
-        const next = new Map(prev);
-        const cur = next.get(cloud.id) ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
-        next.set(cloud.id, {
-          translation: { x: 0, y: 0, z: 0 },
-          erasedIndices: new Set<number>(),
-          pendingDeletes: [...(cur.pendingDeletes ?? []), deleteRegion],
-          pendingDeletedCount: deletedCount,
-        });
-        return next;
-      });
+      if (emptied.length > 0) {
+        // Every point of a cloud erased → offer to delete it, like the flat path.
+        setDeleteConfirm({ type: 'cloud', ids: emptied.map(c => c.id), label: emptied[0].data.fileName || 'Unnamed' });
+        setEditMode('none');
+        return;
+      }
       // Keep the Erase tool OPEN (so "Permanently apply deletions" / "Undo last
       // deletion" stay reachable and further stamps can accumulate), but turn
       // erase MODE off so the view is interactive again.
@@ -5322,6 +5320,10 @@ export default function PointCloudViewer({
       return;
     }
 
+    // In-memory (flat) cloud: always the sole target (exclusiveFlatTargets).
+    const cloud = targets[0];
+    const state = editStates.get(cloud.id);
+    if (!state) return;
     if (state.erasedIndices.size === 0) return;
 
     // Filter out erased points and apply translation. Two-pass over typed
@@ -5443,7 +5445,7 @@ export default function PointCloudViewer({
     scene.boundary([cloud.id]);
 
     setEditMode('none');
-  }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
+  }, [editMode, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
 
   // ── Cross-section derived state ───────────────────────────────────────────
 
@@ -10106,8 +10108,15 @@ export default function PointCloudViewer({
       // renders in the View Controls box beside Set Scene Origin, not the Tools
       // palette) — it inspects whatever is visible and needs no selection.
       { id: 'pick-point', name: 'Pick & Measure', keywords: ['point', 'inspect', 'identify', 'query', 'coordinates', 'attribute', 'scalar', 'label', 'probe', 'measure', 'distance', 'length', 'angle', 'ruler', 'polyline', 'path', 'span'], action: () => { const open = showPointPickerPanel; closeAllToolPanels('point-pick'); setShowPointPickerPanel(!open); setPointPickMode(!open); }, category: 'View', requires: null, icon: MousePointerClick, testId: 'tool-point-pick', isActive: () => showPointPickerPanel },
-      { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
-      { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
+      { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
+      { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => {
+        if (editMode === 'erase') { setEditMode('none'); return; }
+        closeAllToolPanels('editMode');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        eraseTargetsRef.current = new Set();
+        setEraseTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setEditMode('erase');
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { if (!canResampleSelectedCloud()) return; closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
@@ -11415,6 +11424,16 @@ export default function PointCloudViewer({
       transformSeededRef.current = false;
     }
   }, [editMode, selectedSkeletonId, revertTranslateDraftToBaseline]);
+
+  // Same for Crop: a scan deleted while it is open drops out of its checked set.
+  useEffect(() => {
+    const live = new Set(clouds.map(c => c.id));
+    const cur = cropTargetsRef.current;
+    if ([...cur].every(id => live.has(id))) return;
+    const pruned = new Set([...cur].filter(id => live.has(id)));
+    cropTargetsRef.current = pruned;
+    setCropTargetsState(pruned);
+  }, [clouds]);
 
   // An object deleted while the tool is open drops out of the checked set.
   useEffect(() => {
@@ -22202,7 +22221,7 @@ export default function PointCloudViewer({
   // it once per (cloud, activation) so user slider adjustments aren't clobbered.
   const eraseBrushInitKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (editMode !== 'erase' || !firstSelectedCloud) {
+    if (editMode !== 'erase' || !erasePrimary) {
       eraseBrushInitKeyRef.current = null;
       // Drop the live brush indicator + painted preview and turn erase mode off
       // when the tool closes so nothing lingers into the next mode.
@@ -22214,22 +22233,26 @@ export default function PointCloudViewer({
       setEraseActive(false);
       return;
     }
-    if (eraseBrushInitKeyRef.current === firstSelectedCloud.id) return;
-    eraseBrushInitKeyRef.current = firstSelectedCloud.id;
+    // Keyed on the flat cloud, or on "streamed" as a whole: checking another
+    // streamed cloud must not wipe the squares already painted (they are
+    // screen-space and apply to every checked cloud alike).
+    const key = erasePrimary.data.octree ? 'octree' : erasePrimary.id;
+    if (eraseBrushInitKeyRef.current === key) return;
+    eraseBrushInitKeyRef.current = key;
     // Flat clouds use a world-space brush; seed it to a fraction of the cloud
     // diagonal. Octree clouds use a screen-pixel brush (no cloud-scaling needed).
     // Hits-only extent: a miss sits ~1 km out, and flat clouds are exactly the
     // ones exposed (robustExtent exists only on session clouds), so bounds.size
     // would seed a brush ~1000x too big — and the slider's own min/max below are
     // derived from the same diagonal, so the user could not dial it back either.
-    const diag = eraseDiagonal(firstSelectedCloud.data);
+    const diag = eraseDiagonal(erasePrimary.data);
     if (diag > 0) setEraseBrushSize(diag / 50);
     // Start each activation with a clean preview and erase mode OFF, so the user
     // can frame the view before toggling erase on.
     setEraseFrame(null);
     setErasePreviewBoxes([]);
     setEraseActive(false);
-  }, [editMode, firstSelectedCloud]);
+  }, [editMode, erasePrimary]);
 
   // Viewport mesh click-to-select is live only in the default viewport state —
   // when an edit tool owns the click (crop/erase/translate gizmo), tree-seed
@@ -22822,7 +22845,6 @@ export default function PointCloudViewer({
           // Draft composed over any committed-but-unrefreshed transform. Used by
           // the octree and its miss shell so the two stay locked to each other.
           const cloudPose = getCloudPose(cloud);
-          const isSelected = selectedIds.has(cloud.id);
           // This cloud's OWN color mode (its override, else the scene default).
           // Every color decision below reads these, not the global state, so
           // two clouds can sit in different modes at once.
@@ -22855,7 +22877,7 @@ export default function PointCloudViewer({
           // flips editMode to 'none' immediately (to hide the box handles +
           // crop panel) but sets isApplyingCrop, so the clip box / index
           // filter keep hiding the cropped points until the new data is live.
-          const showCropPreview = isSelected && (editMode === 'crop' || isApplyingCrop);
+          const showCropPreview = cropTargets.has(cloud.id) && (editMode === 'crop' || isApplyingCrop);
           const hasResamplePreview = resamplePreview?.cloudId === cloud.id;
 
           // Resample preview replaces the source dataset entirely; crop
@@ -23005,7 +23027,7 @@ export default function PointCloudViewer({
                     // two agree on the split.
                     deleteSplitFor(
                       cloud.id,
-                      isSelected && editMode === 'erase' ? erasePreviewBoxes.length : 0,
+                      eraseTargets.has(cloud.id) && editMode === 'erase' ? erasePreviewBoxes.length : 0,
                     ).cpu,
                   )}
                   // Live filter preview. Passed for EVERY selected cloud the
@@ -23052,7 +23074,7 @@ export default function PointCloudViewer({
                     // T(−offset) into the display frame. The live erase preview
                     // boxes already come from the display-positioned octree pick,
                     // so they need no shift.
-                    const live = isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
+                    const live = eraseTargets.has(cloud.id) && editMode === 'erase' && erasePreviewBoxes.length > 0
                       ? erasePreviewBoxes
                       : [];
                     // Reserve the live stamps' boxes before splitting the
@@ -23666,9 +23688,12 @@ export default function PointCloudViewer({
           />
         )}
 
-        {/* Project orthographically for the WHOLE of Rect mode, so the screen
-            rectangle extrudes as a straight prism (true rectangle footprint)
-            instead of a perspective trapezoid.
+        {/* Project orthographically for the WHOLE of Rect AND Polygon mode, so
+            the screen region extrudes as a straight prism (its true footprint)
+            instead of a perspective frustum — a trapezoid for a rectangle, a
+            cone for a lasso. Polygon used to stay perspective; flattening both
+            means switching between the two screen-space shapes no longer
+            changes the view, and a lasso cuts the same footprint from any view.
 
             Deliberately NOT scoped to `drawing-rect`, though the snapshot is
             only taken on mouse-up. Mounting it at the drag's start meant the
@@ -23682,7 +23707,7 @@ export default function PointCloudViewer({
             flattening BEFORE the user aims and holding it until they leave
             Rect mode, which is what keeps drawn rectangle and cropped region
             showing the same thing throughout. */}
-        {editMode === 'crop' && cropMode === 'rect' && (
+        {editMode === 'crop' && (cropMode === 'rect' || cropMode === 'polygon') && (
           <OrthoProjectionOverride />
         )}
 
@@ -24026,14 +24051,14 @@ export default function PointCloudViewer({
             // corner refs + cropBox below store WORLD coords (offset added back),
             // since cropBox is sent to the backend in world space.
             groundZ={combinedBounds.groundZ - displayOffset.z}
-            // Surface-pick across every SELECTED, visible octree cloud — crop
-            // applies to the whole selection, so `selectedOctree()` (first
-            // cloud only) would be the wrong helper. Projected-miss octrees are
+            // Surface-pick across every CHECKED, visible octree cloud — crop
+            // applies to all of them, so `selectedOctree()` (first cloud
+            // only) would be the wrong helper. Projected-miss octrees are
             // never entered into the registry, so a sky point ~1 km out can
             // never win a corner pick without any filtering here. Flat clouds
             // have no octree and fall through to the ground plane.
             octrees={clouds.flatMap((c) => {
-              if (!c.visible || !selectedIds.has(c.id)) return [];
+              if (!c.visible || !cropTargets.has(c.id)) return [];
               const oct = octreeRegistryRef.current.get(c.id);
               return oct ? [oct] : [];
             })}
@@ -24169,28 +24194,29 @@ export default function PointCloudViewer({
         {/* Erase Brush (flat clouds) — iterates data.positions directly, so it
             only applies to the rare non-octree (Blob/no-path) cloud. Octree
             clouds use the sphere-paint brush below instead. */}
-        {editMode === 'erase' && firstSelectedCloud && !firstSelectedCloud.data.octree && (() => {
-          const editState = getEditState(firstSelectedCloud.id);
+        {editMode === 'erase' && erasePrimary && !erasePrimary.data.octree && (() => {
+          const flatCloud = erasePrimary;
+          const editState = getEditState(flatCloud.id);
           return (
             <EraseBrush
               brushSize={eraseBrushSize}
               brushPosition={eraseBrushPosition}
               isErasing={isErasing}
-              cloudData={firstSelectedCloud.data}
+              cloudData={flatCloud.data}
               cloudTranslation={editState.translation}
               displayOffset={displayOffset}
               alreadyErasedIndices={editState.erasedIndices}
               onErase={(indicesToErase) => {
                 setEditStates(prev => {
                   const next = new Map(prev);
-                  const state = next.get(firstSelectedCloud.id);
+                  const state = next.get(flatCloud.id);
                   if (state) {
                     const newErased = new Set(state.erasedIndices);
                     indicesToErase.forEach(i => newErased.add(i));
-                    next.set(firstSelectedCloud.id, { ...state, erasedIndices: newErased });
+                    next.set(flatCloud.id, { ...state, erasedIndices: newErased });
 
                     // Check if all points are now erased - trigger delete confirmation
-                    const remainingPoints = firstSelectedCloud.data.pointCount - newErased.size;
+                    const remainingPoints = flatCloud.data.pointCount - newErased.size;
                     if (remainingPoints <= 0) {
                       // Use setTimeout to avoid state update during render
                       setTimeout(() => {
@@ -24199,8 +24225,8 @@ export default function PointCloudViewer({
                         setGizmoDragging(false);
                         setDeleteConfirm({
                           type: 'cloud',
-                          ids: [firstSelectedCloud.id],
-                          label: firstSelectedCloud.data.fileName || 'Unnamed'
+                          ids: [flatCloud.id],
+                          label: flatCloud.data.fileName || 'Unnamed'
                         });
                         setEditMode('none');
                       }, 0);
@@ -24211,7 +24237,7 @@ export default function PointCloudViewer({
               }}
               onBrushPositionChange={setEraseBrushPosition}
               onEraseStart={() => {
-                startHistoryEntry('cloud', firstSelectedCloud.id);
+                startHistoryEntry('cloud', flatCloud.id);
                 setGizmoDragging(true);
               }}
               onEraseEnd={() => {
@@ -24241,15 +24267,26 @@ export default function PointCloudViewer({
             as a straight prism, so the cleared region matches the brush exactly.
             EraseBrushOctree builds its pick ray from the (now ortho) projection
             matrix directly, so surface picking keeps working under the override. */}
-        {editMode === 'erase' && eraseActive && firstSelectedCloud?.data.octree && (
+        {editMode === 'erase' && eraseActive && erasePrimary?.data.octree && (
           <OrthoProjectionOverride />
         )}
 
-        {editMode === 'erase' && eraseActive && firstSelectedCloud && firstSelectedCloud.data.octree && (() => {
-          const b = firstSelectedCloud.data.bounds;
+        {editMode === 'erase' && eraseActive && erasePrimary && erasePrimary.data.octree && (() => {
+          // The preview boxes' depth and fallback anchor span EVERY checked
+          // streamed cloud, so a square previews its cut through all of them.
+          const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
+          const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+          for (const c of eraseTargetClouds) {
+            lo.min(c.data.bounds.min);
+            hi.max(c.data.bounds.max);
+          }
+          const b = {
+            center: lo.clone().add(hi).multiplyScalar(0.5),
+            size: hi.clone().sub(lo),
+          };
           return (
             <EraseBrushOctree
-              octree={selectedOctree()}
+              octree={octreeRegistryRef.current.get(erasePrimary.id) ?? null}
               brushHalfPx={eraseBrushPx}
               // cloudCenter in DISPLAY space: it's the fallback anchor plane for
               // anchorAt(), which runs against the display-positioned octree and
@@ -24357,7 +24394,7 @@ export default function PointCloudViewer({
         {/* Erase brush indicator (octree path): a camera-facing square outline
             at the cursor (the cross-section of the view-extruded erase volume),
             red while actively erasing. Shown only while erase mode is active. */}
-        {editMode === 'erase' && eraseActive && firstSelectedCloud?.data.octree && eraseBrushMatrix && (
+        {editMode === 'erase' && eraseActive && erasePrimary?.data.octree && eraseBrushMatrix && (
           <group {...SCENE_OVERLAY} matrixAutoUpdate={false} matrix={eraseBrushMatrix}>
             {/* Unit plane (the box matrix already scales X/Y to the square). A
                 thin box edge reads as a square ring facing the camera. */}
@@ -26417,7 +26454,7 @@ export default function PointCloudViewer({
       {/* The label tool borrows crop's polygon draw state for its lasso, so
           suppress crop's OWN panel while labeling — otherwise two panels stack
           at the same position and the top one swallows the other's clicks. */}
-      {editMode === 'crop' && selectedIds.size > 0 && !labelTargetCloud && (() => {
+      {editMode === 'crop' && !labelTargetCloud && (() => {
         const closeCropPanel = () => {
           setEditMode('none');
           setCropDrawState('idle');
@@ -26430,9 +26467,8 @@ export default function PointCloudViewer({
           rectDragCurrentRef.current = null;
           setCropRetainOriginal(false);
         };
-        const resetWorldBox = () => {
-          const initial = worldBoundsUnion(
-            Array.from(selectedIds)
+        const boxAround = (ids: Iterable<string>) => worldBoundsUnion(
+            Array.from(ids)
               .map(id => clouds.find(c => c.id === id))
               .filter((c): c is PointCloudEntry => !!c)
               .map(c => ({
@@ -26443,7 +26479,20 @@ export default function PointCloudViewer({
                 translation: getEditState(c.id).translation,
               })),
           );
-          if (initial) setCropBox(initial);
+        const resetWorldBox = () => {
+          const b = boxAround(cropTargets);
+          if (b) setCropBox(b);
+        };
+        // Checking scans in the picker. A box already placed is the user's and
+        // stays put (Reset Box refits it to the checked scans); with no box yet
+        // — the tool opened with nothing checked — it starts on them.
+        const onCropTargetsChange = (next: Set<string>) => {
+          cropTargetsRef.current = next;
+          setCropTargetsState(next);
+          if (!cropBox) {
+            const b = boxAround(next);
+            if (b) setCropBox(b);
+          }
         };
 
         const cropBoxMinStr = cropBox
@@ -26461,7 +26510,20 @@ export default function PointCloudViewer({
 
         return (
           <CropPanel
-            selectionCount={selectedIds.size}
+            selectionCount={cropTargets.size}
+            picker={{
+              items: clouds.map(c => {
+                const sc = scans.find(x => x.id === c.id);
+                return {
+                  id: c.id,
+                  label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+                  color: c.color,
+                  detail: `${c.data.pointCount.toLocaleString()} pts`,
+                };
+              }),
+              selectedIds: cropTargets,
+              onChange: onCropTargetsChange,
+            }}
             cropMode={cropMode}
             cropDrawState={cropDrawState}
             cropBox={cropBox}
@@ -26542,9 +26604,51 @@ export default function PointCloudViewer({
       })()}
 
       {/* Erase Brush Panel */}
-      {editMode === 'erase' && firstSelectedCloud && (() => {
-        const editState = getEditState(firstSelectedCloud.id);
-        const isOctree = !!firstSelectedCloud.data.octree;
+      {editMode === 'erase' && (() => {
+        const pickerProp = {
+          items: clouds.map(c => {
+            const sc = scans.find(x => x.id === c.id);
+            return {
+              id: c.id,
+              label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+              color: c.color,
+              detail: `${c.data.pointCount.toLocaleString()} pts${c.data.octree ? '' : ' · alone'}`,
+            };
+          }),
+          selectedIds: eraseTargets,
+          onChange: setEraseTargets,
+        };
+        if (!erasePrimary) {
+          return (
+            <ErasePanel
+              picker={pickerProp}
+              targetCount={0}
+              isOctree
+              eraseActive={false}
+              erasedCount={0}
+              stampCount={0}
+              pendingCount={0}
+              eraseBrushPx={eraseBrushPx}
+              eraseBrushSize={eraseBrushSize}
+              flatMin={0}
+              flatMax={1}
+              flatStep={0.01}
+              eraseProjectionKind=""
+              hasPendingDeletes={false}
+              baking={false}
+              onToggleEraseActive={() => {}}
+              onBrushPxChange={setEraseBrushPx}
+              onBrushSizeChange={setEraseBrushSize}
+              onApply={() => {}}
+              onRestore={() => {}}
+              onBake={() => {}}
+              onUndoPending={() => {}}
+              onClose={() => setEditMode('none')}
+            />
+          );
+        }
+        const editState = getEditState(erasePrimary.id);
+        const isOctree = !!erasePrimary.data.octree;
         const erasedCount = editState.erasedIndices?.size || 0;
         const stampCount = eraseFrame?.centers.length ?? 0;
         // What the panel shows as "pending erase" and whether Apply is enabled:
@@ -26556,7 +26660,7 @@ export default function PointCloudViewer({
         // brush is screen-space pixels (constant on-screen, independent of scale).
         // Hits-only diagonal, matching the seed above — these bounds must agree
         // with it or the seeded value lands outside its own slider range.
-        const diag = eraseDiagonal(firstSelectedCloud.data);
+        const diag = eraseDiagonal(erasePrimary.data);
         const flatMin = diag > 0 ? diag / 500 : 0.01;
         const flatMax = diag > 0 ? diag / 5 : 1;
         const flatStep = (flatMax - flatMin) / 100;
@@ -26568,10 +26672,17 @@ export default function PointCloudViewer({
         const eraseProjectionKind = eraseFrame
           ? projectionKindOf(eraseFrame.projection)
           : '' as const;
-        const cloud = firstSelectedCloud;
+        const cloud = erasePrimary;
+        // "Permanently apply" / "Undo last deletion" act on every checked
+        // streamed cloud that has unbaked deletions.
+        const pendingTargets = isOctree
+          ? eraseTargetClouds.filter(c => (getEditState(c.id).pendingDeletes?.length ?? 0) > 0)
+          : [];
 
         return (
           <ErasePanel
+            picker={pickerProp}
+            targetCount={eraseTargetClouds.length}
             isOctree={isOctree}
             eraseActive={eraseActive}
             erasedCount={erasedCount}
@@ -26583,7 +26694,7 @@ export default function PointCloudViewer({
             flatMax={flatMax}
             flatStep={flatStep}
             eraseProjectionKind={eraseProjectionKind}
-            hasPendingDeletes={(getEditState(cloud.id).pendingDeletes?.length ?? 0) > 0}
+            hasPendingDeletes={pendingTargets.length > 0}
             onToggleEraseActive={() => setEraseActive(a => !a)}
             onBrushPxChange={setEraseBrushPx}
             onBrushSizeChange={setEraseBrushSize}
@@ -26595,35 +26706,44 @@ export default function PointCloudViewer({
                 setEraseFrame(null);
                 setErasePreviewBoxes([]);
               } else {
-                saveToHistory();
-                updateSelectedEditStates(s => ({ ...s, erasedIndices: new Set<number>() }));
-                setTimeout(saveToHistory, 0);
+                startHistoryEntry('cloud', cloud.id);
+                setEditStates(prev => {
+                  const cur = prev.get(cloud.id);
+                  if (!cur) return prev;
+                  return new Map(prev).set(cloud.id, { ...cur, erasedIndices: new Set<number>() });
+                });
+                setTimeout(commitHistoryEntry, 0);
               }
             }}
-            baking={bakingCloudId === cloud.id}
-            onBake={() => handleBakeEdits(cloud.id)}
+            baking={bakingCloudId !== null && eraseTargets.has(bakingCloudId)}
+            onBake={async () => {
+              // One octree rebuild at a time (each is a full reconvert).
+              for (const c of pendingTargets) await handleBakeEdits(c.id);
+            }}
             onUndoPending={async () => {
-              const oct = cloud.data.octree;
-              if (!oct?.sessionId) return;
-              const stack = getEditState(cloud.id).pendingDeletes ?? [];
-              if (stack.length === 0) return;
-              // Undo the most recent committed delete: recompute the backend mask
-              // from the shortened stack, and drop it from the local stack so the
-              // GPU preview updates.
-              try {
-                const r = await resetCloudEdits(oct.sessionId, stack.length - 1);
-                setEditStates(prev => {
-                  const next = new Map(prev);
-                  const cur = next.get(cloud.id);
-                  if (cur) next.set(cloud.id, {
-                    ...cur,
-                    pendingDeletes: stack.slice(0, -1),
-                    pendingDeletedCount: r.pending_deleted_count ?? r.deleted_count,
+              // Undo the most recent committed delete on each checked cloud:
+              // recompute the backend mask from the shortened stack, and drop it
+              // from the local stack so the GPU preview updates.
+              for (const c of pendingTargets) {
+                const oct = c.data.octree;
+                if (!oct?.sessionId) continue;
+                const stack = getEditState(c.id).pendingDeletes ?? [];
+                if (stack.length === 0) continue;
+                try {
+                  const r = await resetCloudEdits(oct.sessionId, stack.length - 1);
+                  setEditStates(prev => {
+                    const next = new Map(prev);
+                    const cur = next.get(c.id);
+                    if (cur) next.set(c.id, {
+                      ...cur,
+                      pendingDeletes: stack.slice(0, -1),
+                      pendingDeletedCount: r.pending_deleted_count ?? r.deleted_count,
+                    });
+                    return next;
                   });
-                  return next;
-                });
-              } catch (err) {
-                showToast({ title: `Undo failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
+                } catch (err) {
+                  showToast({ title: `Undo failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
+                }
               }
             }}
             onClose={() => setEditMode('none')}

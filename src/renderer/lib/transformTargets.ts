@@ -56,6 +56,44 @@ export function seedTransformTargets(args: {
   return out;
 }
 
+/**
+ * The generic picker-tool seed: the selected ids a tool can act on, in the
+ * tool's own list order. Nothing selected → nothing checked (the tool never
+ * arms objects the user didn't pick). Shared by the single-kind picker tools
+ * (Crop, …); Transform's two-kind version is `seedTransformTargets`.
+ */
+export function seedFromSelection(eligibleIds: Iterable<string>, selectedIds: Iterable<string>): Set<string> {
+  const selected = new Set(selectedIds);
+  const out = new Set<string>();
+  for (const id of eligibleIds) if (selected.has(id)) out.add(id);
+  return out;
+}
+
+/**
+ * Erase's checked set when some clouds can only be erased ALONE.
+ *
+ * A streamed (octree) cloud is erased by screen-space square stamps, which cut
+ * every checked cloud behind them, so any number may be checked together. An
+ * in-memory (flat) cloud uses a per-point world brush tied to that one cloud,
+ * so it can only be the sole target:
+ *  - newly checking a flat cloud makes it the only target;
+ *  - checking a streamed cloud while a flat one is checked drops the flat one;
+ *  - a seed (prev empty) with streamed clouds keeps those, else the first flat.
+ */
+export function exclusiveFlatTargets(
+  prev: ReadonlySet<string>,
+  next: ReadonlySet<string>,
+  isFlat: (id: string) => boolean,
+): Set<string> {
+  const ids = [...next];
+  const newlyFlat = ids.find(id => isFlat(id) && !prev.has(id));
+  if (newlyFlat && prev.size > 0) return new Set([newlyFlat]);
+  const streamed = ids.filter(id => !isFlat(id));
+  if (streamed.length > 0) return new Set(streamed);
+  const firstFlat = ids.find(isFlat);
+  return firstFlat ? new Set([firstFlat]) : new Set();
+}
+
 /** Keys present in `next` but not `prev` (added) and vice versa (removed). */
 export function diffTargets(
   prev: ReadonlySet<string>,

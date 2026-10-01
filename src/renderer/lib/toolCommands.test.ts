@@ -62,6 +62,16 @@ describe('isCommandAvailable', () => {
     expect(isCommandAvailable(cmd({ requires: 'plant' }), { ...EMPTY, hasMesh: true })).toBe(false);
   });
 
+  it('gates a cloud multi tool on a data-bearing cloud existing, not on a selection', () => {
+    // Crop picks its scans in its own panel. A param-only scanner marker has
+    // nothing to cut, so it does not count.
+    const c = cmd({ multiInput: true, multiInputKind: 'cloud' });
+    expect(isCommandAvailable(c, EMPTY)).toBe(false);
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1 })).toBe(false);
+    expect(isCommandAvailable(c, { ...EMPTY, totalMeshCount: 3 })).toBe(false);
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1, totalCloudCount: 1 })).toBe(true);
+  });
+
   it('gates a cloud-or-mesh multi tool on either EXISTING, with nothing selected', () => {
     // Transform lists every cloud and mesh in its own picker, so it must not
     // depend on the pane selection at all — only on there being something to

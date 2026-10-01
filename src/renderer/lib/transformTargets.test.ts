@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
-  diffTargets, idsOfKind, parseTargetKey, pruneTargets, seedTransformTargets, targetKey, transformPickerItems,
+  exclusiveFlatTargets, seedFromSelection, diffTargets, idsOfKind, parseTargetKey, pruneTargets, seedTransformTargets, targetKey, transformPickerItems,
 } from './transformTargets';
 
 describe('seedTransformTargets', () => {
@@ -54,5 +54,32 @@ describe('transformPickerItems', () => {
     expect(items[0].detail).toBe(`cloud · ${(1234).toLocaleString()} pts`);
     expect(items[1].detail).toBe('mesh');
     expect(items[1].disabledReason).toBe('nope');
+  });
+});
+
+describe('seedFromSelection', () => {
+  it('checks the selected eligible ids in list order, and nothing for an empty selection', () => {
+    expect([...seedFromSelection(['a', 'b', 'c'], ['c', 'a', 'marker'])]).toEqual(['a', 'c']);
+    expect(seedFromSelection(['a', 'b'], []).size).toBe(0);
+  });
+});
+
+describe('exclusiveFlatTargets', () => {
+  const flat = (id: string) => id.startsWith('f');
+  const set = (...ids: string[]) => new Set(ids);
+
+  it('lets any number of streamed clouds be checked together', () => {
+    expect([...exclusiveFlatTargets(set('a'), set('a', 'b', 'c'), flat)]).toEqual(['a', 'b', 'c']);
+  });
+  it('makes a newly checked flat cloud the only target', () => {
+    expect([...exclusiveFlatTargets(set('a', 'b'), set('a', 'b', 'f1'), flat)]).toEqual(['f1']);
+  });
+  it('drops a checked flat cloud when a streamed one is checked', () => {
+    expect([...exclusiveFlatTargets(set('f1'), set('f1', 'a'), flat)]).toEqual(['a']);
+  });
+  it('seeds streamed clouds over flat ones, else the first flat one', () => {
+    expect([...exclusiveFlatTargets(set(), set('f1', 'a', 'f2', 'b'), flat)]).toEqual(['a', 'b']);
+    expect([...exclusiveFlatTargets(set(), set('f2', 'f1'), flat)]).toEqual(['f2']);
+    expect(exclusiveFlatTargets(set(), set(), flat).size).toBe(0);
   });
 });

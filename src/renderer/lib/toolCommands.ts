@@ -45,10 +45,11 @@ export interface ToolCommand {
    * to pick. 'scan' (default) → gated on a scan existing (stitch, triangulate,
    * align-clouds …). 'mesh' → a mesh existing (mesh-to-mesh align). 'mesh-and-cloud'
    * → both (cloud↔mesh distance / ICP). 'cloud-or-mesh' → either a point cloud
-   * (with data) or a mesh (Transform, whose picker lists both). Ignored when
-   * `multiInput` is false.
+   * (with data) or a mesh (Transform, whose picker lists both). 'cloud' → a
+   * point cloud with data (Crop; a param-only scanner marker has nothing to
+   * cut). Ignored when `multiInput` is false.
    */
-  multiInputKind?: 'scan' | 'mesh' | 'mesh-and-cloud' | 'cloud-or-mesh';
+  multiInputKind?: 'scan' | 'mesh' | 'mesh-and-cloud' | 'cloud-or-mesh' | 'cloud';
   /** Toggled-state predicate so the toolbar can highlight an open panel/mode. */
   isActive?: () => boolean;
   /**
@@ -118,6 +119,7 @@ export function isCommandAvailable(cmd: ToolCommand, sel: SelectionState): boole
       case 'mesh': return sel.totalMeshCount >= 1;
       case 'mesh-and-cloud': return sel.totalScanCount >= 1 && sel.totalMeshCount >= 1;
       case 'cloud-or-mesh': return sel.totalCloudCount + sel.totalMeshCount >= 1;
+      case 'cloud': return sel.totalCloudCount >= 1;
       default: return sel.totalScanCount >= 1;  // 'scan'
     }
   }

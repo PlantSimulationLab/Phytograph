@@ -334,9 +334,9 @@ test('polygon lasso crop: double-click closes the polygon, matching Enter', asyn
 // Fixed by `screenRegionLive` in PointCloudViewer, which locks the camera for
 // BOTH screen-space shapes while a region is committed.
 //
-// Unlike Rect there is no projection half to this: the lasso stays perspective
-// on purpose (the honest reading of a freeform outline is the cone it sweeps),
-// so only the camera-lock bug applies here.
+// The lasso also draws under the same orthographic projection as Rect (see
+// crop-rect.spec.ts), so it extrudes as a prism; this file covers the
+// camera-lock half.
 
 type PolyCameraState = { position: number[]; target: number[] | null };
 

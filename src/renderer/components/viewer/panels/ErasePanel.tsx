@@ -1,10 +1,21 @@
 import { Eraser, X } from 'lucide-react';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 
 // Presentational erase-brush panel for flat and octree clouds. The brush math,
 // preview frame, and all apply/restore/bake logic live in PointCloudViewer; this
 // component renders the brush-size control, status text, and action buttons from
-// derived props. Parent gates on `editMode === 'erase' && firstSelectedCloud`.
+// derived props. Parent gates on `editMode === 'erase'`; WHICH clouds are
+// erased is the `picker`'s checked set (streamed clouds together, or one
+// in-memory cloud alone), seeded from the Scans-pane selection on open.
 interface ErasePanelProps {
+  /** Every point cloud in the scene, with the ones to erase checked. */
+  picker?: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
+  /** How many clouds are checked; with none, only the picker is shown. */
+  targetCount?: number;
   isOctree: boolean;
   // Octree clouds erase via on-screen pixel stamps; flat clouds via world-space
   // brush radius. Both sizing inputs are present; the active one is chosen by
@@ -38,6 +49,8 @@ interface ErasePanelProps {
 }
 
 export function ErasePanel({
+  picker,
+  targetCount = 1,
   isOctree,
   eraseActive,
   erasedCount,
@@ -67,7 +80,10 @@ export function ErasePanel({
       data-stamp-count={stampCount}
       data-erase-active={eraseActive ? 'true' : 'false'}
       data-erase-projection-kind={eraseProjectionKind}
-      className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+      data-target-count={targetCount}
+      className={`absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56 ${
+        picker ? 'max-h-[calc(100%-2rem)] overflow-y-auto' : ''
+      }`}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">
@@ -83,6 +99,25 @@ export function ErasePanel({
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+      {picker && (
+        <div className="mb-3">
+          <ObjectPicker
+            items={picker.items}
+            selectedIds={picker.selectedIds}
+            onChange={picker.onChange}
+            label="Clouds"
+            emptyMessage="No point clouds in the scene."
+            rowTestId="erase-target-row"
+            data-testid="erase-targets"
+          />
+          {targetCount === 0 && picker.items.length > 0 && (
+            <p className="mt-1 text-[10px] text-neutral-500" data-testid="erase-none-checked">
+              Check the clouds to erase.
+            </p>
+          )}
+        </div>
+      )}
+      {targetCount > 0 && (<>
       {isOctree && (
         // Erase-mode toggle: ON freezes the view and makes clicks stamp; OFF lets
         // the user orbit to reframe without leaving the tool. The 'e' key toggles
@@ -196,6 +231,7 @@ export function ErasePanel({
           </button>
         </div>
       )}
+      </>)}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { Crop, X } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 
 type CropMode = 'box' | 'rect' | 'polygon';
 // Crop interaction state machine (subset relevant to the panel).
@@ -21,9 +22,18 @@ interface CropBox {
 // The crop predicate, world-box reset, draw-state machine, and apply logic live
 // in PointCloudViewer; this component renders the controls and forwards intent.
 // The data-* attributes (asserted by crop regression tests) are computed by the
-// parent and passed through. Parent gates on `editMode === 'crop' && selectedIds.size > 0`.
+// parent and passed through. Parent gates on `editMode === 'crop'`; WHICH scans
+// the crop applies to is the `picker`'s checked set, seeded from the Scans-pane
+// selection when the tool opens.
 interface CropPanelProps {
+  /** Number of scans the crop will apply to (the picker's checked count). */
   selectionCount: number;
+  /** Every point cloud in the scene, with the ones to crop checked. */
+  picker?: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
   cropMode: CropMode;
   cropDrawState: CropDrawState;
   cropBox: CropBox | null;
@@ -69,6 +79,7 @@ const AXES = ['x', 'y', 'z'] as const;
 
 export function CropPanel({
   selectionCount,
+  picker,
   cropMode,
   cropDrawState,
   cropBox,
@@ -112,7 +123,11 @@ export function CropPanel({
       // z-20 keeps the panel above the polygon lasso overlay (z-10), which fills
       // the whole viewport while drawing — without this the transparent SVG would
       // swallow clicks on the panel's controls.
-      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56 z-20"
+      // Same width as before the picker: a wider panel hides more of the
+      // viewport the user is drawing the region in.
+      className={`absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg z-20 w-56 ${
+        picker ? 'max-h-[calc(100%-2rem)] overflow-y-auto' : ''
+      }`}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">
@@ -130,7 +145,26 @@ export function CropPanel({
         </button>
       </div>
 
-      {selectionCount > 1 && (
+      {picker && (
+        <div className="mb-3">
+          <ObjectPicker
+            items={picker.items}
+            selectedIds={picker.selectedIds}
+            onChange={picker.onChange}
+            label="Scans"
+            emptyMessage="No point clouds in the scene."
+            rowTestId="crop-target-row"
+            data-testid="crop-targets"
+          />
+          {picker.selectedIds.size === 0 && picker.items.length > 0 && (
+            <p className="mt-1 text-[10px] text-neutral-500" data-testid="crop-none-checked">
+              Check the scans to crop.
+            </p>
+          )}
+        </div>
+      )}
+
+      {!picker && selectionCount > 1 && (
         <div data-testid="crop-multi-hint" className="text-[10px] text-blue-300 text-center mb-2 py-1 bg-blue-900/20 rounded">
           Applies to {selectionCount} scans
         </div>
@@ -389,7 +423,7 @@ export function CropPanel({
       <button
         data-testid="crop-apply"
         onClick={onApply}
-        disabled={applyDisabled}
+        disabled={applyDisabled || selectionCount === 0}
         className="w-full px-2 py-1.5 mt-1 text-xs font-medium rounded bg-green-600 hover:bg-green-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white disabled:cursor-not-allowed transition-colors"
       >
         {cropSegment ? 'Segment' : 'Apply crop to'} {selectionCount} scan{selectionCount === 1 ? '' : 's'}

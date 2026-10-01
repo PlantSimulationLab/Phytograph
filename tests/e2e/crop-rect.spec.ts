@@ -107,9 +107,10 @@ test('rect crop: full-viewport drag keeps all enclosed points', async () => {
 // straight prism (true rectangle footprint from any view) instead of a
 // perspective frustum (trapezoid footprint). The crop freezes the projection
 // matrix into the saved region, so the deterministic signature of the fix is:
-// a committed Rect region carries an orthographic projection, while a Polygon
-// (unchanged, still perspective) carries a perspective one. The panel exposes
-// this via data-crop-projection-kind, derived from the frozen matrix.
+// a committed Rect region carries an orthographic projection — and so does a
+// Polygon, which shares the flattening (switching between the two shapes must
+// not change the view). The panel exposes this via data-crop-projection-kind,
+// derived from the frozen matrix; leaving Crop must restore perspective.
 //
 // This is asserted directly rather than via surviving point counts: with only
 // 12 discrete points per ring the count near a boundary is too coarse to
@@ -153,11 +154,13 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
   // signature of the fix. A perspective projection here is the bug.
   await expect(panel).toHaveAttribute('data-crop-projection-kind', 'orthographic');
 
-  // ── Polygon control: still PERSPECTIVE ─────────────────────────────────
-  // Proves the ortho override is scoped to Rect (and that the attribute
-  // genuinely discriminates rather than always reporting 'orthographic').
+  // ── Polygon: ALSO orthographic ─────────────────────────────────────────
+  // Rect and Polygon share the flattened view, so swapping shapes does not
+  // move the scene under the user.
   await page.getByTestId('crop-shape-polygon').click();
   await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
+  await expect.poll(() => page.evaluate(() => (window as any).__getCameraState?.().projectionKind))
+    .toBe('orthographic');
   await expect(panel).toHaveAttribute('data-crop-projection-kind', '');
 
   const polyOverlay = page.getByTestId('crop-polygon-overlay');
@@ -173,7 +176,14 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
     await expect(polyOverlay.locator('circle')).toHaveCount(i + 1);
   }
   await page.keyboard.press('Enter');
-  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'perspective');
+  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'orthographic');
+
+  // Leaving Crop restores the perspective view (the override is scoped to the
+  // tool, not left behind on the camera).
+  await page.getByTestId('crop-close').click();
+  await expect(panel).toBeHidden();
+  await expect.poll(() => page.evaluate(() => (window as any).__getCameraState?.().projectionKind))
+    .toBe('perspective');
 });
 
 // The strong one: a rectangle over only the LEFT half of the viewport must
