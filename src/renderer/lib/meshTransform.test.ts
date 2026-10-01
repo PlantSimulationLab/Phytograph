@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 
 import {
-  bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix,
+  bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix,
   meshWorldVertices, polarRotation,
 } from './meshTransform';
 import { poseToMatrix } from './octreePoseCompose';
@@ -178,5 +178,30 @@ describe('applying a backend ICP matrix to a mesh', () => {
       expected.push(v.x, v.y, v.z);
     }
     close(redrawn, expected, 3);
+  });
+});
+
+describe('bakeTransformIntoMeshData', () => {
+  const data = {
+    vertices: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    indices: new Uint32Array([0, 1, 2]),
+    normals: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    vertexCount: 3,
+    triangleCount: 1,
+  } as unknown as MeshData;
+
+  it('returns the same data for an untransformed mesh', () => {
+    const m = meshWorldMatrix({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 });
+    expect(bakeTransformIntoMeshData(data, m)).toBe(data);
+  });
+
+  it('writes vertices where the mesh is drawn and turns the normals with it', () => {
+    // 90° about Z, doubled along the mesh's own X, then moved.
+    const m = meshWorldMatrix({ x: 10, y: 20, z: 30 }, { x: 0, y: 0, z: 90 }, { x: 2, y: 1, z: 1 });
+    const out = bakeTransformIntoMeshData(data, m);
+    close(out.vertices, [10, 22, 30, 9, 20, 30, 10, 20, 31]);
+    close(out.normals!, [0, 1, 0, -1, 0, 0, 0, 0, 1]);
+    // The source mesh is untouched.
+    close(data.vertices, [1, 0, 0, 0, 1, 0, 0, 0, 1]);
   });
 });

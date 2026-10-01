@@ -9,7 +9,7 @@ import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
-import { bakeResidualIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
+import { bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
 import { countMask, cropMeshEntry, meshCropBlockReason, meshTriangleRegionMask, meshWorldBounds, subsetMaterials, subsetMeshData } from '../lib/meshCrop';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
@@ -12697,8 +12697,17 @@ export default function PointCloudViewer({
       const chosenFile = savePath ? savePath.slice(slash + 1) : suggestedName;
       const baseName = chosenFile.replace(/\.[^.]+$/, '') || sanitizeMeshName(defaultBase);
 
+      // Write the mesh where it is DRAWN. `mesh.data` holds local vertices;
+      // serializing it as-is dropped the mesh's position / rotation / scale,
+      // so a transformed or ICP-aligned mesh exported at its old pose.
+      const exportData = bakeTransformIntoMeshData(mesh.data, meshWorldMatrix(
+        meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 },
+        meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 },
+        meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 },
+      ));
+
       if (format === 'obj') {
-        const files = serializeMeshObj(mesh.data, {
+        const files = serializeMeshObj(exportData, {
           baseName,
           materials: mesh.plantMaterials,
           comments,
@@ -12731,8 +12740,8 @@ export default function PointCloudViewer({
         });
       } else {
         const content = format === 'ply'
-          ? serializeMeshPly(mesh.data, { comments })
-          : serializeMeshStl(mesh.data);
+          ? serializeMeshPly(exportData, { comments })
+          : serializeMeshStl(exportData);
         if (window.electronAPI && savePath) {
           await window.electronAPI.fs.writeText(savePath, content);
         } else {
@@ -12764,7 +12773,7 @@ export default function PointCloudViewer({
     }
 
     setShowExportPanel(false);
-  }, [meshes, clouds, downloadFile, showToast]);
+  }, [meshes, clouds, meshPositions, meshRotations, meshScales, downloadFile, showToast]);
 
   // Export a DEM surface's raster LAYERS as GIS files (.asc / GeoTIFF). A DTM
   // carries several bands (elevation / density / intensity / hillshade / slope /

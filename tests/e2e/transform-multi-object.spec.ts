@@ -262,9 +262,9 @@ test.describe('Transform tool: clouds and meshes together', () => {
     await ok();
     await expect(cube).toHaveAttribute('data-mesh-scale', '1.00,1.00,1.00');
 
-    // The exported OBJ holds the LOCAL vertices. Its rotation has moved to the
-    // transform, so local pairwise distances are world distances: they must be
-    // those of S(2,1,1)·Rz(45°)·v for the fixture's unit cube.
+    // The exported OBJ holds the mesh as DRAWN (its transform is baked into the
+    // written vertices), so pairwise distances must be those of
+    // S(2,1,1)·Rz(45°)·v for the fixture's unit cube.
     const dir = mkdtempSync(join(tmpdir(), 'transform-shear-'));
     try {
       const objPath = join(dir, 'sheared.obj');

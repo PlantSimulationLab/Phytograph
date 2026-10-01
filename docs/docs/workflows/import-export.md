@@ -721,6 +721,11 @@ when you confirm, and a toast reports what was saved.
 | `.ply` | Vertices, faces and per-vertex color |
 | `.stl` | Triangles only (no color or topology metadata) |
 
+A mesh is written **where it is drawn**: its position, rotation and scale — set
+by the Transform tool, or by an ICP alignment — are applied to the exported
+vertices, so two aligned meshes stay aligned when you open the files elsewhere
+or import them back.
+
 A textured mesh — a generated plant, or an OBJ you imported with its materials —
 exports to `.obj` as a **bundle**: the `.obj`, a `.mtl` material library, and one
 image per textured material, all written together in the folder you chose. That

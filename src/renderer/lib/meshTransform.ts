@@ -228,3 +228,36 @@ export function bakeResidualIntoMeshData(data: MeshData, K: THREE.Matrix3): Mesh
   const { surfaceArea: _a, triEdgeMax: _e, triAspect: _r, ...rest } = data;
   return { ...rest, vertices, ...(normals ? { normals } : {}) };
 }
+
+/**
+ * Bake a mesh's drawn transform `m` (see `meshWorldMatrix`) into its geometry:
+ * vertices v ← m·v, normals n ← normalize(N·n) with N the inverse-transpose of
+ * m's linear part. Returns the input itself when `m` is the identity.
+ *
+ * This is what an EXPORT must write. The serializers once took `mesh.data`
+ * as-is, i.e. the local vertices, so a mesh moved by the Transform tool or by
+ * an ICP alignment was written where it had been before the move.
+ *
+ * Backend-computed per-triangle metadata is dropped for the same reason as in
+ * `bakeResidualIntoMeshData`: a scale would leave it stale.
+ */
+export function bakeTransformIntoMeshData(data: MeshData, m: THREE.Matrix4): MeshData {
+  if (m.equals(new THREE.Matrix4())) return data;
+  const vertices = meshWorldVertices(data.vertices, data.vertexCount, m);
+  let normals: Float32Array | undefined;
+  if (data.normals) {
+    const n = new THREE.Matrix3().getNormalMatrix(m).elements;  // column-major
+    normals = new Float32Array(data.normals.length);
+    for (let i = 0; i < data.normals.length; i += 3) {
+      const x = data.normals[i], y = data.normals[i + 1], z = data.normals[i + 2];
+      let tx = n[0] * x + n[3] * y + n[6] * z;
+      let ty = n[1] * x + n[4] * y + n[7] * z;
+      let tz = n[2] * x + n[5] * y + n[8] * z;
+      const l = Math.hypot(tx, ty, tz);
+      if (l > 0) { tx /= l; ty /= l; tz /= l; }
+      normals[i] = tx; normals[i + 1] = ty; normals[i + 2] = tz;
+    }
+  }
+  const { surfaceArea: _a, triEdgeMax: _e, triAspect: _r, ...rest } = data;
+  return { ...rest, vertices, ...(normals ? { normals } : {}) };
+}

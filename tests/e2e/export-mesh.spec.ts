@@ -188,6 +188,44 @@ test('exports PLY and STL to the chosen path', async () => {
     .toBe(expectedTriangles);
 });
 
+// A mesh's position / rotation / scale live on its transform, not in its
+// vertices. Export once wrote the vertices alone, so a mesh moved in the app —
+// by its Transform editor or an ICP alignment — came out where it had been
+// before the move, and two meshes aligned on screen were misaligned on disk.
+test('exports a moved mesh where it is drawn, not where it was built', async () => {
+  const { app, page } = session;
+  await buildAndSelectMesh();
+
+  const plyXs = async (name: string): Promise<number[]> => {
+    const path = join(outDir, name);
+    await stubSaveDialog(app, path);
+    await openExportModal();
+    await page.getByTestId('export-mesh-ply').click();
+    await expect.poll(() => existsSync(path), { timeout: 20_000 }).toBe(true);
+    const lines = readFileSync(path, 'utf8').split('\n');
+    const count = Number(lines.find(l => l.startsWith('element vertex'))!.split(' ')[2]);
+    const start = lines.indexOf('end_header') + 1;
+    return lines.slice(start, start + count).map(l => Number(l.split(' ')[0]));
+  };
+
+  const before = await plyXs('before.ply');
+  expect(before.length).toBeGreaterThan(0);
+
+  // Move the mesh +5 in X through its own Transform editor.
+  const meshRow = page.getByTestId('mesh-row').first();
+  await meshRow.getByTestId('mesh-transform-toggle').click();
+  const posX = page.getByTestId('mesh-pos-x');
+  await posX.fill('5');
+  await posX.press('Enter');
+  await expect.poll(async () => Number((await meshRow.getAttribute('data-mesh-position'))?.split(',')[0]))
+    .toBeCloseTo(5, 2);
+
+  const after = await plyXs('after.ply');
+  expect(after).toHaveLength(before.length);
+  // Every vertex moved by exactly the offset (PLY prints 6 decimals).
+  for (let i = 0; i < before.length; i++) expect(after[i]).toBeCloseTo(before[i] + 5, 4);
+});
+
 test('exports a textured plant as an OBJ + MTL + textures bundle that re-imports', async () => {
   const { app, page } = session;
 
