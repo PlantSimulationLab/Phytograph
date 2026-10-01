@@ -167,24 +167,29 @@ test('detects noise on every selected scan, not just the first', async () => {
   await expect(page.getByTestId('filter-noise-detect')).toContainText('2 scans');
   await detect();
 
-  // Each scan carries its OWN detection, not a copy of the primary's. Selecting
-  // one alone re-renders the result box against that cloud's stats, and the two
-  // fixtures differ in flyer count precisely so this can tell them apart.
-  await rowA.click();
-  await expect(rowA).toHaveAttribute('data-selected', 'true');
-  await expect(rowB).toHaveAttribute('data-selected', 'false');
+  // Each scan carries its OWN detection, not a copy of the primary's. Checking
+  // one alone in the panel's picker re-renders the result box against that
+  // cloud's stats, and the two fixtures differ in flyer count precisely so this
+  // can tell them apart. (The picker, not the Scans pane, decides what the open
+  // panel acts on.)
+  const target = (label: string) =>
+    page.locator(`[data-testid="filter-target-row"][data-label="${label}"]`);
+  await target('noisy-tree-b').click();
+  await expect(target('noisy-tree-b')).toHaveAttribute('data-checked', 'false');
   await expect(page.getByTestId('filter-noise-result'))
     .toHaveAttribute('data-flagged', String(FLYERS));
 
-  await rowB.click();
+  await target('noisy-tree-b').click();
+  await target('noisy-tree').click();
+  await expect(target('noisy-tree')).toHaveAttribute('data-checked', 'false');
   await expect(page.getByTestId('filter-noise-result'))
     .toHaveAttribute('data-flagged', String(FLYERS_B));
 
-  // And the arming is real on both: re-select the pair and Remove, which is the
+  // And the arming is real on both: re-check the pair and Remove, which is the
   // panel's own button acting through the noise_class criterion Detect set.
   // Each scan loses exactly its own flyers — nothing else, and nothing from the
   // scan that was not the primary.
-  await rowA.click({ modifiers: ['ControlOrMeta'] });
+  await target('noisy-tree').click();
   await expect(page.getByTestId('filter-field-select')).toHaveValue('scalar:noise_class');
   await page.getByTestId('filter-remove').click();
   await expect(async () => {

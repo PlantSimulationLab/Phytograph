@@ -11,6 +11,71 @@ import {
 import { formatFilterBound } from '../../../lib/filterFields';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { SelectAllHeader } from '../../SelectAllHeader';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
+
+/** The Filter tool's target picker: every point cloud, the checked ones filtered. */
+export interface FilterTargetPickerProps {
+  items: PickerItem[];
+  selectedIds: Set<string>;
+  onChange: (next: Set<string>) => void;
+}
+
+function FilterTargetPicker({ items, selectedIds, onChange }: FilterTargetPickerProps) {
+  return (
+    <div className="mb-3">
+      <ObjectPicker
+        items={items}
+        selectedIds={selectedIds}
+        onChange={onChange}
+        label="Scans"
+        emptyMessage="No point clouds in the scene."
+        rowTestId="filter-target-row"
+        data-testid="filter-targets"
+      />
+      {selectedIds.size === 0 && items.length > 0 && (
+        <p className="mt-1 text-[10px] text-neutral-500" data-testid="filter-none-checked">
+          Check the scans to filter.
+        </p>
+      )}
+    </div>
+  );
+}
+
+const PANEL_CLASS =
+  'absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto';
+
+function PanelHeader({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="flex items-center justify-between mb-3">
+      <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
+        <Filter className="w-3 h-3" />
+        Filter Points
+      </div>
+      <button
+        data-testid="filter-close"
+        onClick={onClose}
+        aria-label="Close"
+        className="p-1 hover:bg-neutral-700 rounded"
+      >
+        <X className="w-3 h-3 text-neutral-400" />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The Filter panel with nothing checked: just the picker. Kept separate from
+ * FilterPanel, whose every control describes the PRIMARY (first checked) scan
+ * and so has nothing to show until there is one.
+ */
+export function FilterTargetsOnlyPanel({ picker, onClose }: { picker: FilterTargetPickerProps; onClose: () => void }) {
+  return (
+    <div data-testid="filter-panel" data-target-count={0} className={PANEL_CLASS}>
+      <PanelHeader onClose={onClose} />
+      <FilterTargetPicker {...picker} />
+    </div>
+  );
+}
 
 interface FieldOption {
   value: string;
@@ -31,8 +96,9 @@ interface CategoricalScheme {
 
 // Presentational point-filter panel. All filter state, the field-encoding logic,
 // and the commit/remove/segment handlers live in PointCloudViewer's wrapping IIFE
-// and are passed in as derived values + callbacks. Parent gates on
-// `showFilterPanel && filterTargetClouds.length > 0`.
+// and are passed in as derived values + callbacks. Parent renders this when
+// `showFilterPanel` and at least one scan is checked in the picker, else
+// FilterTargetsOnlyPanel.
 interface FilterPanelProps {
   availableFields: FieldOption[];
   selectedFilterField: string | null;
@@ -73,6 +139,8 @@ interface FilterPanelProps {
   // and pluralises the commit buttons; the fields shown are those COMMON to
   // every selected cloud.
   targetCloudCount: number;
+  /** Every point cloud in the scene, with the ones to filter checked. */
+  picker?: FilterTargetPickerProps;
   onClose: () => void;
   onFieldChange: (fieldValue: string) => void;
   onCommitClasses: (classes: number[]) => void;
@@ -147,6 +215,7 @@ export function FilterPanel({
   getFieldFilter,
   fieldNarrows,
   targetCloudCount,
+  picker,
   onClose,
   onFieldChange,
   onCommitClasses,
@@ -175,19 +244,9 @@ export function FilterPanel({
 }: FilterPanelProps) {
   const methodOption = NOISE_METHOD_OPTIONS.find(o => o.value === noiseMethod);
   return (
-    <div className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-          <Filter className="w-3 h-3" />
-          Filter Points
-        </div>
-        <button
-          onClick={onClose}
-          className="p-1 hover:bg-neutral-700 rounded"
-        >
-          <X className="w-3 h-3 text-neutral-400" />
-        </button>
-      </div>
+    <div data-testid="filter-panel" data-target-count={targetCloudCount} className={PANEL_CLASS}>
+      <PanelHeader onClose={onClose} />
+      {picker && <FilterTargetPicker {...picker} />}
 
       {/* Multi-scan notice. The commit buttons act on every selected scan, so
           say so up front — and say that the field list is the INTERSECTION,
@@ -198,7 +257,7 @@ export function FilterPanel({
           className="mb-3 text-[10px] text-neutral-300 bg-neutral-900/50 rounded px-2 py-1.5"
         >
           Filtering <span className="font-medium">{targetCloudCount} scans</span>. Fields
-          shown are those every selected scan has.
+          shown are those every checked scan has.
         </div>
       )}
 

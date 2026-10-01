@@ -312,7 +312,7 @@ import { TransformPanel } from './viewer/panels/TransformPanel';
 import { TransformationPanel } from './viewer/panels/TransformationPanel';
 import { SceneOriginPanel, type ScannerPositionOption } from './viewer/panels/SceneOriginPanel';
 import { ResamplePanel } from './viewer/panels/ResamplePanel';
-import { FilterPanel } from './viewer/panels/FilterPanel';
+import { FilterPanel, FilterTargetsOnlyPanel } from './viewer/panels/FilterPanel';
 import { ErasePanel } from './viewer/panels/ErasePanel';
 import { CropPanel } from './viewer/panels/CropPanel';
 import { SkeletonsListPanel } from './viewer/panels/SkeletonsListPanel';
@@ -7646,17 +7646,18 @@ export default function PointCloudViewer({
     return fields;
   }, []);
 
-  // Every selected cloud, in selection order. The Filter tool acts on ALL of
-  // them (like Crop does) rather than on `firstSelectedCloud` alone: the panel
-  // used to render for the first selection while the commit handlers bailed on
-  // `selectedIds.size !== 1`, so with two scans selected the buttons were
-  // silently dead. Declared up here rather than beside the other selection
-  // memos because handleDetectNoise — far above them — reads it too.
-  const filterTargetClouds = useMemo(() => {
-    return Array.from(selectedIds)
-      .map(id => clouds.find(c => c.id === id))
-      .filter((c): c is PointCloudEntry => !!c);
-  }, [selectedIds, clouds]);
+  // The clouds the Filter tool acts on: its picker's checked set, in scene
+  // order, seeded from the Scans-pane selection when the panel opens (nothing
+  // selected → nothing checked) and independent of the pane afterwards. The
+  // tool acts on ALL of them (like Crop does): the first is the PRIMARY, whose
+  // criteria the panel edits, and the commits project those criteria onto the
+  // rest (see resolveFilterTargets). Declared up here rather than beside the
+  // other tool memos because handleDetectNoise — far above them — reads it too.
+  const [filterTargets, setFilterTargetsState] = useState<Set<string>>(() => new Set());
+  const filterTargetClouds = useMemo(
+    () => clouds.filter(c => filterTargets.has(c.id)),
+    [filterTargets, clouds],
+  );
 
   // Sample the live preview's kept-fraction while the Filter panel is open.
   //
@@ -7940,7 +7941,7 @@ export default function PointCloudViewer({
   // Returns [] when nothing is selected or the primary has no narrowing filter,
   // which is exactly when the commit buttons must do nothing.
   const resolveFilterTargets = useCallback((): { cloud: PointCloudEntry; filters: CloudFilters }[] => {
-    const ids = Array.from(selectedIds);
+    const ids = cloudsRef.current.filter(c => filterTargets.has(c.id)).map(c => c.id);
     if (ids.length === 0) return [];
     const primaryId = ids[0];
     const primaryFilters = cloudFiltersRef.current.get(primaryId);
@@ -7977,7 +7978,7 @@ export default function PointCloudViewer({
       out.push({ cloud, filters: projected });
     }
     return out;
-  }, [selectedIds, anyFilterNarrows, defaultFiltersFor, filterFieldsFor, fieldNarrowsFor]);
+  }, [filterTargets, anyFilterNarrows, defaultFiltersFor, filterFieldsFor, fieldNarrowsFor]);
 
   // What the live preview draws on each cloud: exactly what the commit buttons
   // would apply to it. The panel only ever writes the PRIMARY cloud's entry in
@@ -10117,7 +10118,13 @@ export default function PointCloudViewer({
         setEraseTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
         setEditMode('erase');
       }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
-      { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
+      { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => {
+        if (showFilterPanel) { setShowFilterPanel(false); return; }
+        closeAllToolPanels('filter');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setFilterTargetsState(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setShowFilterPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { if (!canResampleSelectedCloud()) return; closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
       { id: 'cloud-scalar-fields', name: 'Scalar Fields', keywords: ['scalar', 'field', 'attribute', 'arithmetic', 'calculator', 'formula', 'expression', 'statistics', 'stats', 'histogram', 'mean', 'median', 'percentile', 'rename', 'sf'], action: () => { closeAllToolPanels('scalar-fields'); setShowScalarFieldsPanel(!showScalarFieldsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Calculator, testId: 'tool-scalar-fields', isActive: () => showScalarFieldsPanel },
@@ -26752,9 +26759,26 @@ export default function PointCloudViewer({
       })()}
 
       {/* Filter Panel */}
-      {showFilterPanel && filterTargetClouds.length > 0 && (() => {
-        // The PRIMARY cloud: the one whose criteria the panel edits. The commit
-        // buttons project those criteria onto every other selected scan (see
+      {showFilterPanel && (() => {
+        const filterPicker = {
+          items: clouds.map(c => {
+            const sc = scans.find(x => x.id === c.id);
+            return {
+              id: c.id,
+              label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+              color: c.color,
+              detail: `${c.data.pointCount.toLocaleString()} pts`,
+            };
+          }),
+          selectedIds: filterTargets,
+          onChange: (next: Set<string>) => setFilterTargetsState(new Set(next)),
+        };
+        if (filterTargetClouds.length === 0) {
+          return <FilterTargetsOnlyPanel picker={filterPicker} onClose={() => setShowFilterPanel(false)} />;
+        }
+        // The PRIMARY cloud: the first checked one, whose criteria the panel
+        // edits. The commit buttons project those criteria onto every other
+        // checked scan (see
         // resolveFilterTargets), so this is the shape the panel presents, not
         // the only cloud it acts on.
         const cloud = filterTargetClouds[0];
@@ -26990,6 +27014,7 @@ export default function PointCloudViewer({
             getFieldFilter={getFieldFilter}
             fieldNarrows={fieldNarrows}
             targetCloudCount={filterTargetClouds.length}
+            picker={filterPicker}
             onClose={() => setShowFilterPanel(false)}
             onFieldChange={handleFieldChange}
             onCommitClasses={commitClasses}

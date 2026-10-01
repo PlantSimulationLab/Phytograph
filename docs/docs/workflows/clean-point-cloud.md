@@ -561,6 +561,12 @@ clouds too: their imported scalar attributes (the same ones offered in
 the **Color by** picker) appear in the filter field list alongside
 X, Y, and Z.
 
+The panel opens with a **Scans** list of every point cloud in the scene. The
+scans you had selected in the Scans pane start checked; if nothing was
+selected, **nothing is checked** — tick the scans to filter (the button works
+without a selection). Once the panel is open only the checkboxes decide what
+gets filtered: clicking rows in the Scans pane changes nothing.
+
 To set a filter:
 
 1. Pick a **field** from the dropdown (X, Y, Z, intensity, or any scalar).
@@ -606,13 +612,13 @@ If a filter excludes every point, you're offered the chance to delete the
 cloud instead.
 
 !!! tip "Filtering several scans at once"
-    Select more than one scan and both commits act on **all of them**. The
+    Check more than one scan and both commits act on **all of them**. The
     panel says how many scans it will filter, and the field list narrows to
-    the fields **every** selected scan has — so a criterion you set can never
+    the fields **every** checked scan has — so a criterion you set can never
     quietly apply to only some of them. The criteria you enter for the first
-    scan are reused for the rest; a scan the criteria wouldn't change is
+    checked scan are reused for the rest; a scan the criteria wouldn't change is
     skipped rather than needlessly rebuilt. The live preview draws on every
-    selected scan the commit will filter, not just the first.
+    checked scan the commit will filter, not just the first.
 
 !!! info "Live preview"
     The viewport previews the filter **as you type**, for small (in-memory)
@@ -665,7 +671,7 @@ Detect only writes a label, so re-running it with different settings simply
 overwrites the previous result — there's nothing to undo.
 
 !!! tip "Detecting noise on several scans at once"
-    Like the commit buttons, **Detect noise** acts on **every selected scan** —
+    Like the commit buttons, **Detect noise** acts on **every checked scan** —
     the button says how many, and each scan gets its own `noise_class` column.
     In **Auto** mode the parameters are derived from each scan's own point
     spacing, so scans of differing density are each judged on their own terms.

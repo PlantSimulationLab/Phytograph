@@ -840,3 +840,42 @@ test('preview and commit agree on which points survive', async () => {
     expect(n).toBe(previewed);
   }).toPass({ timeout: 30_000 });
 }); 
+// Filter is a PICKER tool: it lists every scan and filters the CHECKED ones —
+// the Scans-pane selection only seeds that set when the panel opens (nothing
+// selected → nothing checked), and clicking pane rows while it is open changes
+// nothing it will filter.
+test('filters the scans checked in its picker, not the pane selection', async () => {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b"]');
+  await expect(rowA).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await expect(rowB).toHaveAttribute('data-point-count', '40', { timeout: 20_000 });
+
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await expect(page.getByTestId('tool-filter')).toBeEnabled();
+  await page.getByTestId('tool-filter').click();
+  const panel = page.getByTestId('filter-panel');
+  await expect(panel).toHaveAttribute('data-target-count', '0');
+  await expect(page.getByTestId('filter-none-checked')).toBeVisible();
+  await expect(page.getByTestId('filter-field-select')).toHaveCount(0);
+
+  // Check only scalars-b.
+  await page.locator('[data-testid="filter-target-row"][data-label="scalars-b"]').click();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  // Selecting the OTHER scan in the pane does not re-target the filter.
+  await rowA.getByTestId('scan-row-name').click();
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+
+  // Deviation in [0,2] keeps 3/5 of a scan: 24 of scalars-b's 40.
+  await page.getByTestId('filter-field-select').selectOption('scalar:Deviation');
+  await page.getByTestId('filter-min-input').fill('0');
+  await page.getByTestId('filter-max-input').fill('2');
+  await page.getByTestId('filter-remove').click();
+  await expect(rowB).toHaveAttribute('data-point-count', '24', { timeout: 60_000 });
+  await expect(rowA).toHaveAttribute('data-point-count', '60');
+});
