@@ -429,12 +429,22 @@ function serializeMtl(materials: ResolvedMaterial[], includeDefault: boolean): s
   return lines.join('\n');
 }
 
-/** Serialize a mesh to ASCII PLY (geometry only — PLY carries no materials). */
+/**
+ * Serialize a mesh to ASCII PLY: vertices, faces, and — when the mesh carries
+ * them — per-vertex normals and color. PLY has no materials or textures.
+ *
+ * Color is written as `uchar red/green/blue`, the spelling every reader
+ * (open3d, MeshLab, Blender, CloudCompare) recognizes, and encoded linear ->
+ * sRGB for the same reason `Kd` is: `vertexColors` is held linear, the file
+ * means display color, and the importer decodes it back.
+ */
 export function serializeMeshPly(
   data: MeshData,
   opts: { comments?: string[] } = {},
 ): string {
-  const { vertices, indices, vertexCount, triangleCount } = data;
+  const { vertices, indices, normals, vertexColors, vertexCount, triangleCount } = data;
+  const hasNormals = !!normals && normals.length >= vertexCount * 3;
+  const hasColors = !!vertexColors && vertexColors.length >= vertexCount * 3;
   const lines: string[] = [
     'ply',
     'format ascii 1.0',
@@ -444,12 +454,25 @@ export function serializeMeshPly(
     'property float x',
     'property float y',
     'property float z',
+    ...(hasNormals ? ['property float nx', 'property float ny', 'property float nz'] : []),
+    ...(hasColors ? ['property uchar red', 'property uchar green', 'property uchar blue'] : []),
     `element face ${triangleCount}`,
     'property list uchar int vertex_indices',
     'end_header',
   ];
+  const u8 = (c: number): number => {
+    const s = linearChannelToSrgb(Number.isFinite(c) ? Math.min(1, Math.max(0, c)) : 0);
+    return Math.round(s * 255);
+  };
   for (let i = 0; i < vertexCount; i++) {
-    lines.push(`${f6(vertices[i * 3])} ${f6(vertices[i * 3 + 1])} ${f6(vertices[i * 3 + 2])}`);
+    let line = `${f6(vertices[i * 3])} ${f6(vertices[i * 3 + 1])} ${f6(vertices[i * 3 + 2])}`;
+    if (hasNormals) {
+      line += ` ${f6(normals![i * 3])} ${f6(normals![i * 3 + 1])} ${f6(normals![i * 3 + 2])}`;
+    }
+    if (hasColors) {
+      line += ` ${u8(vertexColors![i * 3])} ${u8(vertexColors![i * 3 + 1])} ${u8(vertexColors![i * 3 + 2])}`;
+    }
+    lines.push(line);
   }
   for (let i = 0; i < triangleCount; i++) {
     lines.push(`3 ${indices[i * 3]} ${indices[i * 3 + 1]} ${indices[i * 3 + 2]}`);

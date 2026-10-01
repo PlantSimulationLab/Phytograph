@@ -505,6 +505,37 @@ describe('serializeMeshPly', () => {
     expect(serializeMeshPly(quad(), { comments: ['Helios Plant: bean, Age: 30 days'] }))
       .toContain('comment Helios Plant: bean, Age: 30 days');
   });
+
+  it('omits color and normal properties for a bare mesh', () => {
+    const ply = serializeMeshPly(quad());
+    expect(ply).not.toContain('property uchar red');
+    expect(ply).not.toContain('property float nx');
+  });
+
+  it('writes per-vertex color as sRGB-encoded uchar, after the normals', () => {
+    const linear: [number, number, number] = [0.2, 0.5, 1.0];
+    const data = coloredStrip([linear]);
+    data.normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const ply = serializeMeshPly(data);
+    const all = lines(ply);
+    const header = all.slice(0, all.indexOf('end_header'));
+    const props = header.filter(l => l.startsWith('property ') && !l.includes('list'));
+    expect(props).toEqual([
+      'property float x', 'property float y', 'property float z',
+      'property float nx', 'property float ny', 'property float nz',
+      'property uchar red', 'property uchar green', 'property uchar blue',
+    ]);
+    const body = all.slice(all.indexOf('end_header') + 1);
+    const expected = linear.map(c => Math.round(linearToSrgb(c) * 255));
+    // 0.2 linear is 124 in sRGB, not 51 — the encode must happen.
+    expect(expected).toEqual([124, 188, 255]);
+    for (const row of body.slice(0, 3)) {
+      const cols = row.split(' ');
+      expect(cols).toHaveLength(9);
+      expect(cols.slice(3, 6).map(Number)).toEqual([0, 0, 1]);
+      expect(cols.slice(6).map(Number)).toEqual(expected);
+    }
+  });
 });
 
 describe('serializeMeshStl', () => {
