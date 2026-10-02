@@ -72,8 +72,14 @@ test('ball-pivoting triangulation shows a per-stage progress pill', async () => 
 
     await modal.getByTestId('triangulation-run-button').click();
 
-    // The pill must appear for this non-Helios method.
-    await expect(page.getByTestId('triangulation-running')).toBeVisible({ timeout: 10_000 });
+    // The pill must appear for this non-Helios method. Read from the recorder
+    // installed above, not from the live DOM: a click costs ~1 s on the Linux
+    // runner and the whole run can finish inside it, so a pill that was painted
+    // and removed during the click is invisible to a locator checked afterwards.
+    await expect.poll(
+      () => page.evaluate(() => (window as unknown as { __triLabels: string[] }).__triLabels.length),
+      { timeout: 10_000, message: 'the triangulation pill was never painted' },
+    ).toBeGreaterThan(0);
 
     // Wait for the mesh to land, then read the captured label sequence.
     const meshRow = page.getByTestId('mesh-row').first();

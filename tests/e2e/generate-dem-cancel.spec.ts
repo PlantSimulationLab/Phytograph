@@ -81,17 +81,34 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // failure here is far more likely to be something eating the click than the
     // op genuinely running long.
     //
-    // Both halves of the running state are sampled in ONE in-page frame. As two
-    // separate Playwright assertions this raced the op itself: Cancel was seen,
-    // the run then finished and the panel auto-closed on success, and the
-    // follow-up "run button is disabled" waited 15 s on an element that no
-    // longer existed. That is the "finished first" outcome this spec allows.
+    // The running state is RECORDED in-page, by an observer installed BEFORE the
+    // click, and both halves are sampled in one frame. Looking for it after the
+    // click raced the op itself: a click costs ~1 s on the Linux runner and the
+    // whole run can start and finish inside it (the trace showed a 1.15 s click
+    // followed by 30 s of waiting for a state that had already come and gone,
+    // the panel having auto-closed on success). That is the "finished first"
+    // outcome this spec allows, so it must not fail the running-state check.
+    await page.evaluate(() => {
+      const w = window as unknown as { __demRunningSeen: boolean };
+      w.__demRunningSeen = false;
+      const record = () => {
+        const run = document.querySelector<HTMLButtonElement>('[data-testid="dem-run-button"]');
+        const cancel = document.querySelector<HTMLElement>('[data-testid="dem-cancel-button"]');
+        if (run && cancel && run.disabled && cancel.getClientRects().length > 0) {
+          w.__demRunningSeen = true;
+        }
+      };
+      new MutationObserver(record).observe(document.body, {
+        subtree: true, childList: true, attributes: true,
+      });
+      const tick = () => { record(); requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    });
     await runButton.click();
-    await page.waitForFunction(() => {
-      const run = document.querySelector<HTMLButtonElement>('[data-testid="dem-run-button"]');
-      const cancel = document.querySelector<HTMLElement>('[data-testid="dem-cancel-button"]');
-      return !!run && !!cancel && run.disabled && cancel.getClientRects().length > 0;
-    }, undefined, { timeout: 30_000 });
+    await page.waitForFunction(
+      () => (window as unknown as { __demRunningSeen: boolean }).__demRunningSeen,
+      undefined, { timeout: 30_000 },
+    );
 
     // Cancel it. (Best-effort — on a fast machine the tiny grid may finish first;
     // either way the UI must end up idle.)
