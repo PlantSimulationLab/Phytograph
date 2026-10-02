@@ -1096,8 +1096,8 @@ export function CameraController({
       position: [camera.position.x, camera.position.y, camera.position.z],
       up: [camera.up.x, camera.up.y, camera.up.z],
       // Which projection the camera is CURRENTLY rendering with. Read from the
-      // live matrix, not from the camera class: OrthoProjectionOverride (crop
-      // Rect, erase) rewrites `projectionMatrix` in place on a
+      // live matrix, not from the camera class: OrthoProjectionOverride (the
+      // erase brush) rewrites `projectionMatrix` in place on a
       // PerspectiveCamera, so `isPerspectiveCamera` stays true throughout. Same
       // probe as lib/cameraRay.ts — ortho keeps the bottom row (0,0,0,1).
       projectionKind:

@@ -129,6 +129,7 @@ import {
   type SlabRegion, type SlabStepMode,
 } from '../lib/crossSection';
 import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
+import { ScreenRegionOutline } from './viewer/gizmos/ScreenRegionOutline';
 import { SlabCenterlinePreview } from './viewer/gizmos/SlabCenterlinePreview';
 import { SlabDragPreview } from './viewer/gizmos/SlabDragPreview';
 import { LabelBrushOctree } from './viewer/gizmos/LabelBrushOctree';
@@ -8894,12 +8895,10 @@ export default function PointCloudViewer({
           setCropDrawState('idle');
           return;
         }
-        // A committed screen-space region locks the camera (see
-        // `screenRegionLive`), so Escape clears the region and hands the view
-        // back rather than closing the tool — innermost first, as above.
-        // Without this the only way out of the lock would be Redraw/Apply or
-        // leaving Crop entirely, and Escape would skip straight past the thing
-        // it most obviously ought to undo.
+        // With a committed screen-space region, Escape clears the region
+        // rather than closing the tool — innermost first, as above. Otherwise
+        // Escape would skip straight past the thing it most obviously ought to
+        // undo.
         //
         // Each shape rearms into its own RESTING state, which differs because
         // the two tools arm differently. Rect returns to 'drawing-rect': a drag
@@ -9856,50 +9855,33 @@ export default function PointCloudViewer({
     }
     return String(kept);
   }, [editMode, cropSegment, boxDrawing, cropMeshTargets, meshes, meshCropPreview, buildCropPredicate]);
-  // A COMMITTED rect region is on screen and the camera must not move.
+  // A committed screen-space region (Rect or polygon lasso) does NOT hold the
+  // camera, and is not drawn in screen pixels.
   //
-  // The region is frozen in canvas PIXELS against the draw-time camera — that
-  // is what makes the apply stable, and the masked preview correctly stays
-  // pinned to the same world points however the view turns. The outline,
-  // though, is redrawn at those same fixed pixels forever, so any camera move
-  // slides the points out from under it: the rectangle and the region it
-  // selected visibly disagree, which reads as the crop having grabbed the
-  // wrong area. (It hasn't — the apply was always right and the DISPLAY was
-  // lying, which is the more dangerous of the two failures.)
+  // The region is frozen against the draw-time camera — that is what makes the
+  // apply stable, and the masked preview stays pinned to the same world points
+  // however the view turns. Its outline used to be redrawn at the draw-time
+  // PIXELS, which is only true from the draw pose, so the camera was locked for
+  // as long as a region was set (and Rect additionally flattened the view to
+  // orthographic so its footprint would be a true rectangle). Both are gone:
+  // the flattening moved or rescaled whatever the user had just lined up, since
+  // a parallel projection can match the perspective view at one depth only, and
+  // the lock existed purely to protect a drawing that could not follow the
+  // camera. The region is now drawn in the scene as the volume it selects
+  // (ScreenRegionOutline) — the cone swept from the draw-time eye — which is
+  // true from every angle, so the view stays free. The camera is still held
+  // while a region is being DRAWN (`cropDrawFreezesCamera`): those are screen
+  // pixels until the shape commits.
   //
-  // Locking the camera is the fix rather than tracking the region through the
-  // move, because none of the three gestures can be tracked honestly here:
-  // ROTATION changes the view direction, and the frozen prism only projects to
-  // a rectangle from the direction it was drawn along (from anywhere else its
-  // silhouette is a hexagon, so re-projecting four corners would draw a shape
-  // that is not the region). ZOOM is zoom-to-cursor, which flies the camera
-  // along camera→anchor and re-seats the target — an off-axis anchor turns the
-  // view too, so it is a rotation in disguise. Only PAN is a pure screen
-  // translation, which is not worth a special case on its own.
-  //
-  // Scoped to a live region, so it never blocks ordinary navigation: the view
-  // is free while the user frames the shot, free again the moment they Redraw,
-  // Apply, switch shape or close the tool. Esc clears the region (see the key
-  // handler), which is the explicit way out.
-  //
-  // BOTH screen-space shapes, not just Rect. The polygon lasso is the identical
-  // mechanism — `closePolygonFrom` freezes the same draw-time projection/view
-  // into the same `cropPolygon` state, and the overlay redraws the committed
-  // ring at its fixed draw-time pixels (see the `closedPoints` branch) exactly
-  // as the rectangle does. So every word of the reasoning above transfers, and
-  // the lasso is if anything the worse case: an n-gon traced around a specific
-  // branch reads far more like a promise about WHICH points were caught than a
-  // rectangle does, so seeing it slide off them is more alarming. Only the
-  // projection differs (polygon stays perspective, deliberately — a freeform
-  // lasso's honest interpretation is the cone it sweeps), and the projection is
-  // not what this lock is about.
-  //
-  // `cropPolygon` is only ever set by the two screen-space shapes, but the
-  // cropMode test stays explicit: Box must never lock (its wireframe is real
-  // world-space geometry that tracks the camera correctly), and relying on
-  // "Box leaves cropPolygon null" would be an invisible coupling.
-  const screenRegionLive =
-    editMode === 'crop' && (cropMode === 'rect' || cropMode === 'polygon') && !!cropPolygon;
+  // This is the depth extent for that outline: the world box around what is
+  // being cropped. Null when no screen-space region is live. The cropMode test
+  // is explicit — Box has its own world-space wireframe.
+  const screenRegionOutlineBounds = useMemo(
+    () => (editMode === 'crop' && (cropMode === 'rect' || cropMode === 'polygon') && cropPolygon
+      ? cropBoxAround(cropTargets, cropMeshTargets)
+      : null),
+    [editMode, cropMode, cropPolygon, cropTargets, cropMeshTargets, cropBoxAround],
+  );
   // Every reason the camera is currently frozen by a CROP/LABEL draw, in one
   // place — and every one of them gated on the owning tool still being open.
   //
@@ -9914,8 +9896,8 @@ export default function PointCloudViewer({
   const cropDrawFreezesCamera =
     (editMode === 'crop' || editMode === 'label') &&
     (cropDrawState === 'drawing-polygon' || cropDrawState === 'drawing-rect');
-  // `boxDrawing` and `screenRegionLive` carry their own editMode gate.
-  const cameraFrozenByCropDraw = cropDrawFreezesCamera || boxDrawing || screenRegionLive;
+  // `boxDrawing` carries its own editMode gate.
+  const cameraFrozenByCropDraw = cropDrawFreezesCamera || boxDrawing;
   // Keep the ref the raycaster's onPick reads in step with the state. See the
   // declaration for why that handler cannot read `cropDrawState` directly.
   boxDrawStateRef.current = boxDrawing
@@ -24098,27 +24080,20 @@ export default function PointCloudViewer({
           />
         )}
 
-        {/* Project orthographically for the WHOLE of Rect AND Polygon mode, so
-            the screen region extrudes as a straight prism (its true footprint)
-            instead of a perspective frustum — a trapezoid for a rectangle, a
-            cone for a lasso. Polygon used to stay perspective; flattening both
-            means switching between the two screen-space shapes no longer
-            changes the view, and a lasso cuts the same footprint from any view.
-
-            Deliberately NOT scoped to `drawing-rect`, though the snapshot is
-            only taken on mouse-up. Mounting it at the drag's start meant the
-            view visibly flattened the instant the user began to draw — the
-            data slid under a rectangle they had already started aiming, and
-            the more oblique the view the further it slid. Unmounting it on
-            commit was the same jump in reverse, and worse: the frozen region
-            is orthographic while the viewport snapped back to perspective, so
-            the committed outline and the points it had just selected no longer
-            agreed even with the camera untouched. Both ends are fixed by
-            flattening BEFORE the user aims and holding it until they leave
-            Rect mode, which is what keeps drawn rectangle and cropped region
-            showing the same thing throughout. */}
-        {editMode === 'crop' && (cropMode === 'rect' || cropMode === 'polygon') && (
-          <OrthoProjectionOverride />
+        {/* The committed Rect / polygon region, as the volume it selects. Real
+            scene geometry, so it follows the camera and the view stays free
+            once a region is set; from the pose it was drawn at it is the
+            traced outline. Both shapes are aimed and frozen under the ordinary
+            perspective view — the crop cuts exactly what was on screen. (Rect
+            used to flatten the view to orthographic for a constant-section
+            cut; entering the tool then shifted whatever had been lined up.) */}
+        {screenRegionOutlineBounds && cropPolygon && (
+          <ScreenRegionOutline
+            region={cropPolygon}
+            bounds={screenRegionOutlineBounds}
+            displayOffset={displayOffset}
+            color={cropInvert ? '#ef4444' : '#22c55e'}
+          />
         )}
 
         {/* Scene-origin click-to-place target. Armed from the Scene Origin panel;
@@ -24673,7 +24648,7 @@ export default function PointCloudViewer({
             removes the screen-space squares on the backend (squares_union). The
             square indicator is rendered below. */}
         {/* While erase mode is active, flatten the projection to orthographic
-            (the trick the Rect crop uses). Under perspective a screen-space
+            (the erase brush is the one tool that does). Under perspective a screen-space
             square clips a frustum — its footprint is a center-biased trapezoid
             that doesn't match the square outline. Ortho makes the square extrude
             as a straight prism, so the cleared region matches the brush exactly.
@@ -24997,7 +24972,12 @@ export default function PointCloudViewer({
         const cursorBlocked = isDrawing && cropZone.blocked;
 
         const polylinePoints = points.map(p => `${p.x},${p.y}`).join(' ');
-        const closedPoints = !isDrawing && points.length >= 3 ? polylinePoints : null;
+        // A CLOSED lasso is not drawn here at all. These are draw-time pixels,
+        // true only from the draw pose, and the view is free once the polygon
+        // closes — the region is shown by ScreenRegionOutline, in the scene,
+        // instead. This overlay stays mounted (inert) and reports the committed
+        // vertex count for the tests.
+        const closed = !isDrawing && points.length >= 3;
 
         return (
           <svg
@@ -25020,15 +25000,9 @@ export default function PointCloudViewer({
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}
+            data-crop-polygon-closed={closed ? 'true' : 'false'}
+            data-crop-polygon-closed-vertices={closed ? points.length : 0}
           >
-            {closedPoints && (
-              <polygon
-                points={closedPoints}
-                fill={cropInvert ? 'rgba(239,68,68,0.12)' : 'rgba(34,197,94,0.12)'}
-                stroke={cropInvert ? '#ef4444' : '#22c55e'}
-                strokeWidth={2}
-              />
-            )}
             {isDrawing && points.length > 0 && (
               <>
                 <polyline
@@ -25066,13 +25040,13 @@ export default function PointCloudViewer({
                 )}
               </>
             )}
-            {points.map((p, i) => (
+            {isDrawing && points.map((p, i) => (
               <circle
                 key={i}
                 cx={p.x}
                 cy={p.y}
                 r={4}
-                fill={isDrawing ? '#22c55e' : (cropInvert ? '#ef4444' : '#22c55e')}
+                fill="#22c55e"
                 stroke="#0a0a0a"
                 strokeWidth={1.5}
               />
@@ -25092,12 +25066,18 @@ export default function PointCloudViewer({
         // Read the tick so the rubber-band re-renders as the cursor moves.
         void rectDragTick;
 
+        // Only the rubber band is drawn here. A COMMITTED rectangle is not:
+        // these are draw-time pixels, true only from the draw pose, and the
+        // view is free once the drag commits — the region is shown in the
+        // scene by ScreenRegionOutline instead. The overlay stays mounted
+        // (inert) and reports the committed corners for the tests.
         let corners: { x: number; y: number }[] | null = null;
         if (isDrawing && rectDragStart && rectDragCurrentRef.current) {
           corners = rectCornersOf(rectDragStart, rectDragCurrentRef.current);
-        } else if (!isDrawing && cropPolygon && cropPolygon.points.length >= 3) {
-          corners = cropPolygon.points;
         }
+        const committed = !isDrawing && cropPolygon && cropPolygon.points.length >= 3
+          ? cropPolygon.points
+          : null;
 
         // Only mousedown lives here: the drag's move and release are tracked on
         // the window (see the crop pointer-tracking effect) so a drag that runs
@@ -25128,6 +25108,8 @@ export default function PointCloudViewer({
               cursor: isDrawing ? 'crosshair' : 'default',
             }}
             onMouseDown={handleMouseDown}
+            data-crop-rect-committed={committed ? 'true' : 'false'}
+            data-crop-rect-corners={committed ? committed.map(p => `${p.x},${p.y}`).join(' ') : ''}
           >
             {corners && (
               <polygon
@@ -25135,20 +25117,9 @@ export default function PointCloudViewer({
                 fill={fillColor}
                 stroke={strokeColor}
                 strokeWidth={2}
-                strokeDasharray={isDrawing ? '6 4' : undefined}
+                strokeDasharray="6 4"
               />
             )}
-            {corners && !isDrawing && corners.map((p, i) => (
-              <circle
-                key={i}
-                cx={p.x}
-                cy={p.y}
-                r={4}
-                fill={strokeColor}
-                stroke="#0a0a0a"
-                strokeWidth={1.5}
-              />
-            ))}
           </svg>
         );
       })()}
@@ -26966,7 +26937,6 @@ export default function PointCloudViewer({
             cropBoxMinStr={cropBoxMinStr}
             cropBoxMaxStr={cropBoxMaxStr}
             cropProjectionKind={cropProjectionKind}
-            cameraLocked={screenRegionLive}
             onClose={closeCropPanel}
             onSelectShape={(mode) => {
               lastCropChoiceRef.current = { ...lastCropChoiceRef.current, mode };

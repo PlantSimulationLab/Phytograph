@@ -7,7 +7,7 @@ import { slabOrthoFrustum, type SlabRegion } from '../../../lib/crossSection';
 //
 // Deliberately NOT a reuse of OrthoProjectionOverride. That one derives its
 // half-height from the distance to the orbit target, which is correct for a
-// two-second crop-rect drag but wrong for a section: the custom zoom-to-cursor
+// short erase stroke but wrong for a section: the custom zoom-to-cursor
 // handler re-seats the orbit target from the depth probe, so the frustum — and
 // therefore the on-screen scale of the section — would drift with whatever the
 // probe happened to return. A section's zoom should mean "this slab, framed",

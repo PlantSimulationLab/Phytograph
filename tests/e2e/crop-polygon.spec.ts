@@ -301,7 +301,9 @@ test('polygon lasso crop: double-click closes the polygon, matching Enter', asyn
   // Closed without Enter: the panel now reports a committed region.
   await expect(panel).toContainText('Polygon (4 vertices)');
   // Exactly four — the dblclick's duplicate vertex must have been dropped.
-  await expect(overlay.locator('circle')).toHaveCount(4);
+  // (A closed lasso draws nothing in this overlay — the region is shown in the
+  // scene — so the committed count is read from its data attribute.)
+  await expect(overlay).toHaveAttribute('data-crop-polygon-closed-vertices', '4');
 
   const applyBtn = page.getByTestId('crop-apply');
   await expect(applyBtn).toBeEnabled();
@@ -321,22 +323,20 @@ test('polygon lasso crop: double-click closes the polygon, matching Enter', asyn
   expect(kept).toBeLessThan(60);
 });
 
-// ── The drawn lasso must keep sitting over the points it selected ──────────
+// ── A committed lasso leaves the view FREE, and stays pinned to the world ──
 //
-// The same display bug that was fixed for the Rect crop, in the immediately
-// adjacent shape. `closePolygonFrom` freezes the draw-time projection/view
-// into `cropPolygon`, and the overlay then redraws the committed ring at those
-// fixed draw-time PIXELS forever — so a camera left live slides the points out
-// from under an outline that never moves. The apply is unaffected (it runs
-// against the frozen matrices and was always right), which is what makes this
-// dangerous: a correct crop that looks like it grabbed the wrong area.
+// The lasso is drawn and cut under the ordinary PERSPECTIVE view: it selects
+// exactly what was on screen, i.e. the cone swept from the draw-time eye. (It
+// was orthographic for a while, like Rect; flattening the view on entry moved
+// or rescaled whatever the user had just lined up, so it was reverted.)
 //
-// Fixed by `screenRegionLive` in PointCloudViewer, which locks the camera for
-// BOTH screen-space shapes while a region is committed.
-//
-// The lasso also draws under the same orthographic projection as Rect (see
-// crop-rect.spec.ts), so it extrudes as a prism; this file covers the
-// camera-lock half.
+// `closePolygonFrom` freezes the draw-time projection/view into `cropPolygon`.
+// The committed region used to be redrawn as a 2-D ring at its draw-time
+// PIXELS, which is only true from the draw pose, so the camera had to be locked
+// while a region was set. It is now drawn in the scene as the cone itself
+// (ScreenRegionOutline), which is true from every angle — so there is no lock,
+// and what these tests pin is the other half: moving the view must not move
+// the REGION.
 
 type PolyCameraState = { position: number[]; target: number[] | null };
 
@@ -384,92 +384,114 @@ async function drawQuadLasso(page: Page, box: { x: number; y: number; width: num
   await page.keyboard.press('Enter');
 }
 
-test('polygon crop: the view is locked while a lasso is committed, so the outline keeps matching the region', async () => {
-  const { page, panel, overlay } = await openCropPolygon();
+test('polygon crop: the view stays free while a lasso is committed, and the region stays where it was drawn', async () => {
+  const { page, row, panel, overlay } = await openCropPolygon();
 
-  // Free BEFORE anything is committed — the lock must be scoped to a live
-  // region, not to the whole tool, or the user could never frame the shot.
-  // (Asserted first so an always-on lock cannot pass this test.)
-  await expect(panel).toHaveAttribute('data-crop-camera-locked', 'false');
+  // No flattening: the lasso is aimed through the same perspective view the
+  // user was already looking through.
+  const liveKind = () => page.evaluate(
+    () => (window as unknown as { __getCameraState: () => { projectionKind: string } }).__getCameraState().projectionKind,
+  );
+  expect(await liveKind()).toBe('perspective');
 
   const box = await overlay.boundingBox();
   if (!box) throw new Error('crop-polygon-overlay has no bounding box');
+  // The left half of the viewport: splits the cylinder, which straddles center.
   await drawQuadLasso(page, box);
 
-  // Committed → locked.
+  // Committed, and frozen as PERSPECTIVE.
   await expect(panel).toContainText('Polygon (4 vertices)');
-  await expect(panel).toHaveAttribute('data-crop-camera-locked', 'true');
+  await expect(overlay).toHaveAttribute('data-crop-polygon-closed', 'true');
+  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'perspective');
+  await expect(page.getByTestId('crop-polygon-view-hint')).toBeVisible();
 
-  const ringBefore = await overlay.locator('polygon').evaluate(
-    (el) => (el as SVGPolygonElement).getAttribute('points') ?? '',
-  );
+  // Orbit hard with the region set — the gesture the old lock refused.
   const camBefore = await readPolyCamera(page);
-
-  // Try hard to orbit: a left-drag across the middle of the viewport is exactly
-  // the gesture that used to turn the view under the frozen outline.
   await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.6);
   await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.35, { steps: 10 });
+  await page.mouse.move(box.x + box.width * 0.75, box.y + box.height * 0.3, { steps: 12 });
   await page.mouse.up();
+  // Then pan the cloud well off to the right (right-drag). The orbit alone
+  // cannot tell a frozen region from a live one here — the cylinder is
+  // symmetric about its axis, so "the left half" is ~30 points from any angle.
+  // After the pan the cylinder sits wholly right of the viewport's center line,
+  // so the same pixels re-read against the LIVE camera would enclose nothing.
+  await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.5);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.5, { steps: 12 });
+  await page.mouse.up({ button: 'right' });
   await page.waitForTimeout(300);
-
   const camAfter = await readPolyCamera(page);
-  const ringAfter = await overlay.locator('polygon').evaluate(
-    (el) => (el as SVGPolygonElement).getAttribute('points') ?? '',
+  const moved = Math.max(
+    ...[0, 1, 2].map((i) => Math.abs(camAfter.position[i] - camBefore.position[i])),
   );
+  expect(moved).toBeGreaterThan(0.2);
 
-  // The camera did not move — the assertion the old code fails. The outline is
-  // checked too: it must be the SAME pixels, i.e. the alignment held because
-  // nothing moved, not because both drifted together.
-  for (let i = 0; i < 3; i++) {
-    expect(Math.abs(camAfter.position[i] - camBefore.position[i])).toBeLessThan(1e-6);
-  }
-  expect(ringAfter).toBe(ringBefore);
+  // The region survived the move…
+  await expect(panel).toContainText('Polygon (4 vertices)');
 
-  // The lock is escapable and says so, or a frozen view reads as a hang.
-  await expect(page.getByTestId('crop-polygon-lock-hint')).toBeVisible();
+  // …and still cuts what it cut when it was drawn. From the DRAW pose the
+  // left-half lasso keeps exactly the points left of the view's center plane;
+  // which points those are is a fact about the world, fixed at close time. If
+  // the apply followed the live camera instead of the frozen one, the same
+  // pixels would enclose a different set from the new angle.
+  const expected = await page.evaluate(async (cam) => {
+    // tiny.xyz: 5 z-layers x 12 points on a r=0.3 circle, layers 0..1.5.
+    const fwd = cam.target!.map((t, i) => t - cam.position[i]);
+    // Screen-right for a z-up camera: forward x up.
+    const right = [fwd[1] * 1 - fwd[2] * 0, fwd[2] * 0 - fwd[0] * 1, 0];
+    let left = 0;
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * 2 * Math.PI;
+      const p = [0.3 * Math.cos(a), 0.3 * Math.sin(a)];
+      const side = (p[0] - cam.position[0]) * right[0] + (p[1] - cam.position[1]) * right[1];
+      if (side < 0) left++;
+    }
+    return left * 5;
+  }, camBefore);
 
-  // Escape clears the region and leaves Crop OPEN, re-armed for another lasso.
+  await page.getByTestId('crop-apply').click();
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+  await expect
+    .poll(async () => ((await row.count()) === 0 ? -1 : Number(await row.getAttribute('data-point-count'))), { timeout: 8_000 })
+    .toBeLessThan(60);
+  const kept = Number(await row.getAttribute('data-point-count'));
+  // Points lying on the center plane itself can fall either way by a pixel.
+  expect(Math.abs(kept - expected), `kept ${kept}, expected ~${expected}`).toBeLessThanOrEqual(10);
+  expect(kept).toBeGreaterThan(0);
+});
+
+test('polygon crop: Escape clears a committed lasso and leaves Crop open', async () => {
+  const { page, panel, overlay } = await openCropPolygon();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-polygon-overlay has no bounding box');
+  await drawQuadLasso(page, box);
+  await expect(panel).toContainText('Polygon (4 vertices)');
+
   await page.keyboard.press('Escape');
   await expect(panel).toBeVisible();
   await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
-  await expect(panel).toHaveAttribute('data-crop-camera-locked', 'false');
   await expect(page.getByTestId('crop-apply')).toBeDisabled();
-  // Back to Polygon's resting state, offering a fresh lasso. (Rect re-arms
-  // straight into its drag instead — a rectangle has no other way in, whereas
-  // an armed-but-empty lasso is a state the user sits in, so Polygon rests at
-  // idle and one more Escape closes the tool.)
+  // Back to Polygon's resting state, offering a fresh lasso; one more Escape
+  // closes the tool.
   await expect(panel).toContainText('No polygon yet');
   await expect(page.getByTestId('crop-start-polygon')).toBeVisible();
-
-  // The region-lock really is released, and here it is directly observable:
-  // at rest the lasso holds no camera gate at all, so an orbit must work
-  // WITHOUT leaving Polygon mode.
-  await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.6);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.35, { steps: 10 });
-  await page.mouse.up();
-  await page.waitForTimeout(300);
-
-  const camUnlocked = await readPolyCamera(page);
-  const moved = Math.max(
-    ...[0, 1, 2].map((i) => Math.abs(camUnlocked.position[i] - camBefore.position[i])),
-  );
-  expect(moved).toBeGreaterThan(1e-3);
+  await page.keyboard.press('Escape');
+  await expect(panel).toHaveCount(0);
 });
 
-// The lock must never outlive the Crop tool — the same stranded-camera failure
-// the Rect lock had to guard against, through both of crop's exits.
+// The camera gate held while vertices are being placed must never outlive the
+// Crop tool — the stranded-camera failure the Rect lock had to guard against,
+// through both of crop's exits.
 for (const exit of ['close-button', 'escape'] as const) {
-  test(`polygon crop: the view unlocks after leaving Crop via the ${exit}`, async () => {
+  test(`polygon crop: the view responds after leaving Crop via the ${exit}`, async () => {
     const { page, panel, overlay } = await openCropPolygon();
 
     const box = await overlay.boundingBox();
     if (!box) throw new Error('crop-polygon-overlay has no bounding box');
 
-    // Commit a lasso, so the lock is genuinely engaged before we leave.
     await drawQuadLasso(page, box);
-    await expect(panel).toHaveAttribute('data-crop-camera-locked', 'true');
+    await expect(panel).toContainText('Polygon (4 vertices)');
 
     if (exit === 'close-button') {
       await page.getByTestId('crop-close').click();
@@ -477,7 +499,7 @@ for (const exit of ['close-button', 'escape'] as const) {
       // Escape clears the region first (re-arming Polygon), so this takes two:
       // one for the lasso, one to close the tool.
       await page.keyboard.press('Escape');
-      await expect(panel).toHaveAttribute('data-crop-camera-locked', 'false');
+      await expect(panel).toContainText('No polygon yet');
       await page.keyboard.press('Escape');
     }
     await expect(panel).toHaveCount(0);

@@ -319,68 +319,62 @@ Box mode is axis-aligned. For a region that isn't square to the axes, use
 Rect mode is a **screen-space rectangle** — the quick, any-view counterpart
 to Box. Unlike the world-space box, it works from any camera angle.
 
-1. Pick **Rect** in the panel; the view switches to a straight-on
-   (orthographic) projection and the camera locks so the rectangle stays
-   anchored to the view.
+1. Pick **Rect** in the panel. The view does **not** change: you aim the
+   rectangle through the same perspective view you were already looking
+   through. The camera is held while you drag.
 2. **Click-drag** in the viewport from one corner to the opposite corner.
    A dashed preview rectangle follows the cursor; release to commit it.
    (The floating panels can't take the pointer — see the note under
    [Polygon mode](#polygon-mode).)
-3. On release the cloud redraws with the cropped-away points hidden, the
-   same live preview described under [Polygon mode](#polygon-mode).
-4. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
+3. On release an outline of the region appears and the cloud redraws with
+   the cropped-away points hidden, the same live preview described under
+   [Polygon mode](#polygon-mode).
+4. Orbit, pan and zoom freely to check the selection from other angles.
+5. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
    <kbd>Esc</kbd> clears the rectangle and leaves Crop open, ready for
    another one; a second <kbd>Esc</kbd> (with nothing drawn) exits Crop.
 
-Like the polygon, the rectangle lives in screen space, so the in/out test
-uses the camera as it was when you released the drag. The view stays locked
-for as long as a rectangle is set, which is what keeps the outline you drew
-sitting over the points it selected — the outline is drawn in the pixels you
-dragged, so a view that moved underneath it would show the rectangle in one
-place and the highlighted points in another. Redraw or <kbd>Esc</kbd> to
-release the lock and move the view again.
+The rectangle cuts **exactly what was on screen** when you released the
+drag: everything that appeared inside it from that viewpoint. In 3D that
+region is a wedge that starts at the camera and widens with distance — its
+cross-section is a rectangle that grows with depth, not a constant slab. For
+a cut with a fixed footprint, use **Box**.
 
-Because the draw is orthographic, the selection extrudes straight into the
-scene: the cropped region is a true rectangular slab from **any** viewing
-angle, not a perspective wedge. The flattening happens when you *pick* Rect,
-before you start dragging, so nothing shifts under a rectangle you're already
-aiming. So you can, for example, orbit to a side view, pick Rect, drag a
-rectangle around the part of a plant you want, and get a clean axis-true cut.
+Once the rectangle is set, the view is free. The outline is drawn in the
+scene as that wedge, clipped to the depth of the scans being cropped: from
+the angle you drew it, it is the rectangle you dragged; from any other angle
+you see the volume that will be cut. The selection is fixed at the moment
+you released the drag and does not follow the camera.
 
 ### Polygon mode
 
 Polygon mode is a **screen-space lasso** — useful when the region you
 want isn't a tidy box.
 
-1. Pick **Polygon** in the panel; the view switches to the same straight-on
-   (orthographic) projection as Rect, and the camera locks so the lasso
-   stays anchored to the view. (It stays locked once the polygon is closed,
-   too — see below.)
+1. Pick **Polygon** in the panel. The view does **not** change: you aim
+   the lasso through the same perspective view you were already looking
+   through. The camera is held while you place vertices.
 2. Click in the viewport to add vertices. Right-click or
    <kbd>Backspace</kbd> removes the last vertex.
 3. **Double-click** the last vertex, or press <kbd>Enter</kbd>, to close
-   the polygon. A filled preview shows
-   what will be kept (green) or removed (red), and the cloud itself
-   redraws with the cropped-away points hidden — so you see the actual
-   result before committing to it.
-4. Click **Apply** in the panel, or use **Redraw polygon** to start over.
+   the polygon. An outline of the region appears (green for keep, red for
+   remove), and the cloud itself redraws with the cropped-away points
+   hidden — so you see the actual result before committing to it.
+4. Orbit, pan and zoom freely to check the selection from other angles.
+5. Click **Apply** in the panel, or use **Redraw polygon** to start over.
    <kbd>Esc</kbd> clears the polygon and leaves Crop open, ready for
    another one; a second <kbd>Esc</kbd> (with nothing drawn) exits Crop.
 
-Because the polygon lives in screen space, the in/out test uses the
-camera as it was when you closed the polygon. The view stays locked for
-as long as a closed polygon is set, exactly as in Rect mode, and for the
-same reason: the outline is drawn in the pixels you clicked, so a view
-that moved underneath it would show the lasso in one place and the points
-it selected in another. The selection itself never shifts — it is fixed
-at the moment you closed the polygon — but the drawing would stop
-describing it. Redraw or <kbd>Esc</kbd> to release the lock and move the
-view again.
+The lasso cuts **exactly what was on screen** when you closed it: everything
+that appeared inside the outline from that viewpoint. In 3D that region is a
+cone that starts at the camera and widens with distance: a lasso that hugs
+a near branch takes in a wider patch of whatever lies far behind it.
 
-As with Rect, the orthographic draw means the selection extrudes straight
-into the scene: the lasso cuts the same footprint from any viewing angle,
-not a cone that widens with distance. Rect and Polygon share the flattened
-view, so switching between them doesn't move the scene.
+Once the polygon is closed, the view is free. The outline is drawn in the
+scene as that cone, clipped to the depth of the scans being cropped: from the
+angle you drew it, it is the ring you traced; from any other angle you see the
+volume that will be cut. The selection is fixed at the moment you closed the
+polygon and does not follow the camera.
 
 Unlike Box mode, the polygon and rectangle previews keep the cloud at full
 detail — only the points the crop removes disappear. If the rest of the
@@ -609,7 +603,7 @@ octree), they're cheap and reversible:
     Erase is **instant** because it sets a per-point visibility mask on the
     in-memory cloud rather than rebuilding anything — the deleted points
     vanish on the GPU the moment you apply. While erase mode is on, the view
-    is projected orthographically (as the Rect crop does) so the square
+    is projected orthographically so the square
     extrudes as a straight prism and the cleared region matches the brush
     outline exactly rather than flaring into a perspective trapezoid. Since
     the test is in screen space the stamp is depth-independent: it removes

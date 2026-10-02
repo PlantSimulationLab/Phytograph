@@ -5,6 +5,7 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { clickCanvasAt, dismissToasts, expectPointsHitCanvas } from './helpers/canvasClick';
+import { wheelNotches } from './helpers/wheel';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -351,4 +352,90 @@ test('erase brush: one stroke cuts every CHECKED cloud behind it, and only those
   // The same strip again removes nothing new from tiny-offset (already cut), so
   // its count must not have grown back either.
   expect(Number(await offset.getAttribute('data-point-count'))).toBeLessThanOrEqual(offsetAfterFirst);
+});
+
+// ── Turning erase mode on must not throw the view ────────────────────────
+//
+// Erase flattens the view to orthographic (OrthoProjectionOverride) so a
+// painted square cuts a straight prism. A parallel projection can agree with
+// the perspective view it replaces at one depth only; content at any other
+// depth slides toward or away from the screen center by the ratio of the two.
+// The override sizes its frustum from the distance to the ORBIT TARGET, so the
+// target has to sit at the depth of what is on screen — and after an ordinary
+// zoom it does not. The zoom handler re-seats the target at the distance of its
+// ANCHOR, measured along the cursor ray, so a scroll with the pointer away from
+// the middle of the viewport leaves the target well beyond the content. The
+// override therefore re-seats the target, along the view axis, at the depth of
+// the visible content when it mounts (lib/visibleDepth.ts).
+//
+// tiny.xyz is a cylinder r=0.3 h=1.5 standing on the origin, so its depth along
+// the view axis is known from the camera alone: (center − eye) · forward, give
+// or take its 0.81 half-diagonal.
+test('erase brush: turning erase on re-seats the orbit target at the depth of the visible cloud, without moving the camera', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-selected', 'true');
+
+  type Cam = { position: number[]; target: number[] | null; projectionKind: string };
+  const readCamera = () => page.evaluate(() => {
+    const s = (window as unknown as { __getCameraState: () => Cam }).__getCameraState();
+    return { position: s.position, target: s.target, projectionKind: s.projectionKind };
+  });
+  const CENTER = [0, 0, 0.75];
+  const HALF_DIAGONAL = Math.hypot(0.3, 0.75);
+  const depthState = (cam: Cam) => {
+    if (!cam.target) throw new Error('camera has no orbit target');
+    const toTarget = cam.target.map((t, i) => t - cam.position[i]);
+    const targetDistance = Math.hypot(...toTarget);
+    const forward = toTarget.map((c) => c / targetDistance);
+    const cloudDepth = CENTER.reduce((acc, c, i) => acc + (c - cam.position[i]) * forward[i], 0);
+    return { targetDistance, cloudDepth, forward };
+  };
+
+  const canvas = page.locator('canvas').first();
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error('viewer canvas has no bounding box');
+
+  // Zoom out with the pointer off to one side of the viewport — the everyday
+  // gesture that leaves the target off the content's depth (see above).
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.8);
+  await wheelNotches(page, 12);
+
+  // The precondition, asserted so this test cannot pass vacuously: the orbit
+  // target is NOT at the cloud's depth going in. Polled, since the wheel is
+  // applied on a later frame than the one that acknowledges it.
+  await expect
+    .poll(async () => {
+      const st = depthState(await readCamera());
+      return Math.abs(st.targetDistance - st.cloudDepth);
+    }, { message: "setup must leave the orbit target off the cloud's depth" })
+    .toBeGreaterThan(1.5 * HALF_DIAGONAL);
+  await page.waitForTimeout(600); // let the zoom gesture end
+  const before = await readCamera();
+  const b = depthState(before);
+
+  await page.getByTestId('tool-erase').click();
+  const panel = page.getByTestId('erase-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('erase-mode-toggle').click();
+  await expect(panel).toHaveAttribute('data-erase-active', 'true');
+  await expect.poll(async () => (await readCamera()).projectionKind).toBe('orthographic');
+
+  const after = await readCamera();
+  const a = depthState(after);
+  const diag = JSON.stringify({ before, after, b, a });
+
+  // The eye did not move and did not turn: nothing changes on screen until the
+  // projection flattens.
+  for (let i = 0; i < 3; i++) {
+    expect(Math.abs(after.position[i] - before.position[i]), diag).toBeLessThan(1e-6);
+    expect(Math.abs(a.forward[i] - b.forward[i]), diag).toBeLessThan(1e-6);
+  }
+  // The frustum is now sized for the cloud, not for the stale target.
+  expect(Math.abs(a.targetDistance - a.cloudDepth), diag).toBeLessThan(HALF_DIAGONAL);
 });

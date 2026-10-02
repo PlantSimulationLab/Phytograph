@@ -67,11 +67,6 @@ interface CropPanelProps {
   cropBoxMinStr: string;
   cropBoxMaxStr: string;
   cropProjectionKind: 'orthographic' | 'perspective' | '';
-  // True while a committed screen-space region (Rect OR polygon lasso) is
-  // holding the camera still. The region is frozen in draw-time pixels, so any
-  // camera move would slide the points out from under the outline — see
-  // `screenRegionLive` in PointCloudViewer.
-  cameraLocked: boolean;
   onClose: () => void;
   onSelectShape: (mode: CropMode) => void;
   onKeepInside: () => void;
@@ -120,7 +115,6 @@ export function CropPanel({
   cropBoxMinStr,
   cropBoxMaxStr,
   cropProjectionKind,
-  cameraLocked,
   onClose,
   onSelectShape,
   onKeepInside,
@@ -147,7 +141,6 @@ export function CropPanel({
       data-crop-min={cropBoxMinStr}
       data-crop-max={cropBoxMaxStr}
       data-crop-projection-kind={cropProjectionKind}
-      data-crop-camera-locked={cameraLocked ? 'true' : 'false'}
       // z-20 keeps the panel above the polygon lasso overlay (z-10), which fills
       // the whole viewport while drawing — without this the transparent SVG would
       // swallow clicks on the panel's controls.
@@ -398,15 +391,14 @@ export function CropPanel({
             <>
               <div className="font-medium text-neutral-200 mb-1">Polygon ({cropPolygonPointCount} vertices)</div>
               Preview shown above. Press Enter to apply, or click below to redraw.
-              {/* Same lock, same reason, as the rectangle below: the committed
-                  lasso is redrawn at its draw-time pixels, so a moving view
-                  would slide the points out from under it. Saying so matters
-                  more here — a traced outline looks like a promise about which
-                  points it caught. */}
-              <div data-testid="crop-polygon-lock-hint" className="mt-2 text-amber-400/90 leading-tight">
-                🔒 View locked while the polygon is set — it&apos;s pinned to
-                the angle you drew it from. Redraw or press Esc to move the
-                view again.
+              {/* No lock: the committed lasso is drawn in the scene as the
+                  cone it selects, so it stays true from any angle. Worth
+                  saying, because from a new angle the outline stops looking
+                  like the ring that was traced. */}
+              <div data-testid="crop-polygon-view-hint" className="mt-2 text-neutral-400 leading-tight">
+                The lasso cuts what you saw when you drew it: a cone widening
+                away from that viewpoint. Orbit to inspect it — the outline
+                shows the region from any angle.
               </div>
               <button
                 onClick={onRedrawPolygon}
@@ -446,12 +438,12 @@ export function CropPanel({
             <>
               <div className="font-medium text-neutral-200 mb-1">Rectangle ready</div>
               Preview shown above. Press Apply, or click below to redraw.
-              {/* The camera lock is deliberate and needs saying, or a frozen
-                  view reads as the app having hung. */}
-              <div data-testid="crop-rect-lock-hint" className="mt-2 text-amber-400/90 leading-tight">
-                🔒 View locked while the rectangle is set — it&apos;s pinned to
-                the angle you drew it from. Redraw or press Esc to move the
-                view again.
+              {/* Same as the lasso above: no lock, and the outline is the
+                  volume the rectangle selects. */}
+              <div data-testid="crop-rect-view-hint" className="mt-2 text-neutral-400 leading-tight">
+                The rectangle cuts what you saw when you drew it: a wedge
+                widening away from that viewpoint. Orbit to inspect it — the
+                outline shows the region from any angle.
               </div>
               <button
                 onClick={onRedrawRect}

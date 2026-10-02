@@ -89,7 +89,7 @@ test('rect crop: full-viewport drag keeps all enclosed points', async () => {
 
   // Committing the rectangle enables Apply and draws the 4 corner markers.
   await expect(applyBtn).toBeEnabled();
-  await expect(overlay.locator('circle')).toHaveCount(4);
+  await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'true');
 
   // ── Apply (Keep Inside) ────────────────────────────────────────────────
   // The rectangle covers the whole viewport, so every projected point is
@@ -102,21 +102,17 @@ test('rect crop: full-viewport drag keeps all enclosed points', async () => {
   await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 5_000 });
 });
 
-// The regression guard for the perspective-trapezoid bug. The fix draws the
-// Rect under an ORTHOGRAPHIC projection so the screen rectangle extrudes as a
-// straight prism (true rectangle footprint from any view) instead of a
-// perspective frustum (trapezoid footprint). The crop freezes the projection
-// matrix into the saved region, so the deterministic signature of the fix is:
-// a committed Rect region carries an orthographic projection — and so does a
-// Polygon, which shares the flattening (switching between the two shapes must
-// not change the view). The panel exposes this via data-crop-projection-kind,
-// derived from the frozen matrix; leaving Crop must restore perspective.
+// Rect and Polygon are both aimed and frozen under the ordinary PERSPECTIVE
+// view: the crop cuts exactly what was on screen, a wedge / cone from the eye.
 //
-// This is asserted directly rather than via surviving point counts: with only
-// 12 discrete points per ring the count near a boundary is too coarse to
-// separate trapezoid from rectangle reliably, but the projection matrix is
-// exact.
-test('rect crop: committed region uses an orthographic projection (no perspective trapezoid)', async () => {
+// Rect used to flatten the view to orthographic so its footprint would be a
+// true rectangle at every depth. That was reverted: a parallel projection can
+// agree with the perspective view it replaces at one depth only, so entering
+// the tool moved or rescaled whatever the user had just lined up. The crop
+// freezes the projection matrix into the saved region and the panel exposes
+// its kind via data-crop-projection-kind, so both halves — the live view never
+// flattens, and the frozen region is perspective — are asserted directly.
+test('rect + polygon crop: the view is never flattened, and the committed region is perspective', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-auto', TINY);
@@ -124,22 +120,25 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
 
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
-
-  // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(row).toHaveAttribute('data-selected', 'true');
   await page.getByTestId('tool-crop').click();
   const panel = page.getByTestId('crop-panel');
   await expect(panel).toBeVisible();
 
-  // Look down the +X axis — the view under which the trapezoid was visible.
-  await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
-  await page.evaluate(() => (window as any).__orientToAxis({ x: 1, y: 0, z: 0 }));
-
-  // ── Rect: must commit an ORTHOGRAPHIC region ───────────────────────────
+  // ── Rect ───────────────────────────────────────────────────────────────
+  const camBox = await readRectCamera(page);
   await page.getByTestId('crop-shape-rect').click();
   await expect(panel).toHaveAttribute('data-crop-mode', 'rect');
-  // Nothing committed yet → kind is empty.
   await expect(panel).toHaveAttribute('data-crop-projection-kind', '');
+  // Selecting the shape changes nothing about the view: same projection, same
+  // eye, same orbit target.
+  await page.waitForTimeout(300);
+  const camRect = await readRectCamera(page);
+  expect(camRect.projectionKind).toBe('perspective');
+  for (let i = 0; i < 3; i++) {
+    expect(Math.abs(camRect.position[i] - camBox.position[i])).toBeLessThan(1e-9);
+    expect(Math.abs(camRect.target![i] - camBox.target![i])).toBeLessThan(1e-9);
+  }
 
   const rectOverlay = page.getByTestId('crop-rect-overlay');
   const rbox = await rectOverlay.boundingBox();
@@ -147,21 +146,17 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
   const inset = 8;
   await page.mouse.move(rbox.x + inset, rbox.y + inset);
   await page.mouse.down();
+  await page.mouse.move(rbox.x + rbox.width / 2, rbox.y + rbox.height / 2);
   await page.mouse.move(rbox.x + rbox.width - inset, rbox.y + rbox.height - inset);
   await page.mouse.up();
+  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'perspective');
+  expect(await readProjectionKind(page)).toBe('perspective');
 
-  // The committed rect's frozen projection is orthographic — the direct
-  // signature of the fix. A perspective projection here is the bug.
-  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'orthographic');
-
-  // ── Polygon: ALSO orthographic ─────────────────────────────────────────
-  // Rect and Polygon share the flattened view, so swapping shapes does not
-  // move the scene under the user.
+  // ── Polygon ────────────────────────────────────────────────────────────
   await page.getByTestId('crop-shape-polygon').click();
   await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
-  await expect.poll(() => page.evaluate(() => (window as any).__getCameraState?.().projectionKind))
-    .toBe('orthographic');
   await expect(panel).toHaveAttribute('data-crop-projection-kind', '');
+  expect(await readProjectionKind(page)).toBe('perspective');
 
   const polyOverlay = page.getByTestId('crop-polygon-overlay');
   const pbox = await polyOverlay.boundingBox();
@@ -176,14 +171,7 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
     await expect(polyOverlay.locator('circle')).toHaveCount(i + 1);
   }
   await page.keyboard.press('Enter');
-  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'orthographic');
-
-  // Leaving Crop restores the perspective view (the override is scoped to the
-  // tool, not left behind on the camera).
-  await page.getByTestId('crop-close').click();
-  await expect(panel).toBeHidden();
-  await expect.poll(() => page.evaluate(() => (window as any).__getCameraState?.().projectionKind))
-    .toBe('perspective');
+  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'perspective');
 });
 
 // The strong one: a rectangle over only the LEFT half of the viewport must
@@ -227,7 +215,7 @@ test('rect crop: half-viewport drag keeps a strict subset of points', async () =
 
   const applyBtn = page.getByTestId('crop-apply');
   await expect(applyBtn).toBeEnabled();
-  await expect(overlay.locator('circle')).toHaveCount(4);
+  await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'true');
   await applyBtn.click();
 
   await expect(panel).toHaveCount(0, { timeout: 10_000 });
@@ -246,22 +234,14 @@ test('rect crop: half-viewport drag keeps a strict subset of points', async () =
   expect(kept).toBeLessThan(60);
 });
 
-// ── The two ways a drawn rectangle used to stop matching what it cropped ──
+// ── A committed rectangle leaves the view FREE, and stays pinned to the world ──
 //
-// Both bugs were purely in the DISPLAY, which is what made them dangerous: the
-// committed region is frozen against the draw-time camera and the apply was
-// always right, while the outline on screen drifted away from the points it
-// had selected. The user reads that as the crop having grabbed the wrong area.
-//
-//   1. ROTATION AFTER COMMIT. The camera stayed live once the drag committed,
-//      but the outline is redrawn at fixed draw-time pixels forever, so any
-//      orbit slid the points out from under it. Fixed by locking the camera
-//      while a region is live (`rectRegionLive`).
-//   2. THE PROJECTION FLIP. The orthographic override used to mount only for
-//      the duration of the drag, so the view flattened the instant the user
-//      began drawing (data sliding under a rectangle already being aimed) and
-//      snapped back to perspective on commit (frozen ortho region vs a
-//      perspective viewport). Fixed by holding ortho across all of Rect mode.
+// The committed region used to be redrawn as a 2-D outline at its draw-time
+// PIXELS, which is only true from the draw pose, so the camera was locked for
+// as long as a rectangle was set. It is now drawn in the scene as the volume it
+// selects (ScreenRegionOutline), which is true from every angle — so there is
+// no lock, and what these tests pin is the other half: moving the view must
+// not move the REGION.
 
 type RectCameraState = {
   position: number[];
@@ -311,121 +291,99 @@ async function openCropRect() {
   return { page, row, panel, overlay: page.getByTestId('crop-rect-overlay') };
 }
 
-test('rect crop: the view is locked while a rectangle is committed, so the outline keeps matching the region', async () => {
-  const { page, panel, overlay } = await openCropRect();
-
-  // Orbit is live BEFORE anything is drawn — the lock must be scoped to a
-  // committed region, not to the whole tool, or framing the shot is impossible.
-  // (Asserted first so a lock that is simply always-on can't pass this test.)
-  await expect(panel).toHaveAttribute('data-crop-camera-locked', 'false');
+test('rect crop: the view stays free while a rectangle is committed, and the region stays where it was drawn', async () => {
+  const { page, row, panel, overlay } = await openCropRect();
 
   const box = await overlay.boundingBox();
   if (!box) throw new Error('crop-rect-overlay has no bounding box');
+  // The left half of the viewport: splits the cylinder, which straddles center.
   const inset = 8;
+  const midX = box.x + box.width / 2;
   await page.mouse.move(box.x + inset, box.y + inset);
+  await page.mouse.down();
+  await page.mouse.move(midX, box.y + box.height / 2);
+  await page.mouse.move(midX, box.y + box.height - inset);
+  await page.mouse.up();
+
+  await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'true');
+  await expect(panel.getByText('Rectangle ready')).toBeVisible();
+  await expect(page.getByTestId('crop-rect-view-hint')).toBeVisible();
+
+  // Orbit with the region set — the gesture the old lock refused.
+  const camBefore = await readRectCamera(page);
+  await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.6);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.75, box.y + box.height * 0.3, { steps: 12 });
+  await page.mouse.up();
+  // Then pan the cloud well off to the right (right-drag). The orbit alone
+  // cannot tell a frozen region from a live one here — the cylinder is
+  // symmetric about its axis, so "the left half" is ~30 points from any angle.
+  // After the pan the cylinder sits wholly right of the viewport's center line,
+  // so the same pixels re-read against the LIVE camera would enclose nothing.
+  await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.5);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.5, { steps: 12 });
+  await page.mouse.up({ button: 'right' });
+  await page.waitForTimeout(300);
+  const camAfter = await readRectCamera(page);
+  const moved = Math.max(
+    ...[0, 1, 2].map((i) => Math.abs(camAfter.position[i] - camBefore.position[i])),
+  );
+  expect(moved).toBeGreaterThan(0.2);
+
+  // The region survived the move, still frozen at the same draw-time corners.
+  await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'true');
+
+  // …and still cuts what it cut when it was drawn: the points left of the
+  // DRAW-time view's center plane (tiny.xyz: 5 z-layers x 12 points on a
+  // r=0.3 circle about the origin).
+  const fwd = camBefore.target!.map((t, i) => t - camBefore.position[i]);
+  const right = [fwd[1], -fwd[0]]; // forward x up, for a z-up camera
+  let left = 0;
+  for (let k = 0; k < 12; k++) {
+    const a = (k / 12) * 2 * Math.PI;
+    const side =
+      (0.3 * Math.cos(a) - camBefore.position[0]) * right[0] +
+      (0.3 * Math.sin(a) - camBefore.position[1]) * right[1];
+    if (side < 0) left++;
+  }
+  const expected = left * 5;
+
+  await page.getByTestId('crop-apply').click();
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+  await expect
+    .poll(async () => ((await row.count()) === 0 ? -1 : Number(await row.getAttribute('data-point-count'))), { timeout: 8_000 })
+    .toBeLessThan(60);
+  const kept = Number(await row.getAttribute('data-point-count'));
+  // Points lying on the center plane itself can fall either way by a pixel.
+  expect(Math.abs(kept - expected), `kept ${kept}, expected ~${expected}`).toBeLessThanOrEqual(10);
+  expect(kept).toBeGreaterThan(0);
+});
+
+test('rect crop: Escape clears a committed rectangle and re-arms the drag', async () => {
+  const { page, panel, overlay } = await openCropRect();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-rect-overlay has no bounding box');
+  await page.mouse.move(box.x + 8, box.y + 8);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
   await page.mouse.up();
-
-  // Committed → locked.
-  await expect(overlay.locator('circle')).toHaveCount(4);
-  await expect(panel).toHaveAttribute('data-crop-camera-locked', 'true');
-
-  // The outline's four corners, and the camera, as committed.
-  const cornersBefore = await overlay.locator('polygon').evaluate(
-    (el) => (el as SVGPolygonElement).getAttribute('points') ?? '',
-  );
-  const camBefore = await readRectCamera(page);
-
-  // Now try hard to orbit: a left-drag across the middle of the viewport is
-  // exactly the gesture that used to turn the view under the frozen outline.
-  await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.6);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.35, { steps: 10 });
-  await page.mouse.up();
-  await page.waitForTimeout(300);
-
-  const camAfter = await readRectCamera(page);
-  const cornersAfter = await overlay.locator('polygon').evaluate(
-    (el) => (el as SVGPolygonElement).getAttribute('points') ?? '',
-  );
-
-  // The camera did not move — this is the assertion the old code fails. The
-  // outline is checked too: it must be the SAME pixels, i.e. the alignment
-  // held because nothing moved, not because both drifted together.
-  for (let i = 0; i < 3; i++) {
-    expect(Math.abs(camAfter.position[i] - camBefore.position[i])).toBeLessThan(1e-6);
-  }
-  expect(cornersAfter).toBe(cornersBefore);
-
-  // The lock is escapable and says so, or a frozen view reads as a hang.
-  await expect(page.getByTestId('crop-rect-lock-hint')).toBeVisible();
+  await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'true');
 
   // Escape clears the region and leaves Crop OPEN, re-armed for another
   // rectangle, so re-aiming costs one keystroke instead of the whole tool.
   await page.keyboard.press('Escape');
   await expect(panel).toBeVisible();
   await expect(panel).toHaveAttribute('data-crop-mode', 'rect');
-  await expect(panel).toHaveAttribute('data-crop-camera-locked', 'false');
-  // Re-armed, not idle: the overlay takes pointer events again and there is no
-  // committed region left to apply.
   await expect(page.getByTestId('crop-apply')).toBeDisabled();
-  await expect(overlay.locator('circle')).toHaveCount(0);
-
-  // The region-lock really is released. The camera stays under the DRAWING
-  // gate here (a left-drag is the rectangle gesture, not an orbit, for as long
-  // as Rect is armed), so the release is shown by leaving Rect: the view moves
-  // freely again and the ortho override is gone with it.
-  await page.getByTestId('crop-shape-box').click();
-  await expect(panel).toHaveAttribute('data-crop-mode', 'box');
-  await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.6);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.35, { steps: 10 });
-  await page.mouse.up();
-  await page.waitForTimeout(300);
-
-  const camUnlocked = await readRectCamera(page);
-  const moved = Math.max(
-    ...[0, 1, 2].map((i) => Math.abs(camUnlocked.position[i] - camBefore.position[i])),
-  );
-  expect(moved).toBeGreaterThan(1e-3);
+  await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'false');
+  await expect(overlay).toHaveCSS('pointer-events', 'auto');
 });
 
-test('rect crop: the projection is already orthographic before the drag starts', async () => {
-  const { page, panel, overlay } = await openCropRect();
-
-  // The signature of bug 2. Selecting Rect must flatten the view immediately,
-  // so the data does not shift under a rectangle the user has begun aiming.
-  // Read from the LIVE camera (nothing is committed yet, so the panel's
-  // frozen-matrix attribute is still empty).
-  await expect(panel).toHaveAttribute('data-crop-projection-kind', '');
-  expect(await readProjectionKind(page)).toBe('orthographic');
-
-  // It also stays ortho AFTER the commit: the frozen region is orthographic,
-  // so a viewport that snapped back to perspective would disagree with the
-  // outline it is drawing even with the camera untouched.
-  const box = await overlay.boundingBox();
-  if (!box) throw new Error('crop-rect-overlay has no bounding box');
-  const inset = 8;
-  await page.mouse.move(box.x + inset, box.y + inset);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
-  await page.mouse.up();
-  await expect(panel).toHaveAttribute('data-crop-projection-kind', 'orthographic');
-
-  expect(await readProjectionKind(page)).toBe('orthographic');
-
-  // Leaving Rect restores perspective — the override must not leak into the
-  // rest of the app.
-  await page.getByTestId('crop-shape-box').click();
-  await expect(panel).toHaveAttribute('data-crop-mode', 'box');
-  await page.waitForTimeout(200);
-  expect(await readProjectionKind(page)).toBe('perspective');
-});
-
-// The camera lock must never outlive the Crop tool.
+// The camera gate held while a rectangle is being DRAWN must never outlive the
+// Crop tool.
 //
-// Regression for a bug the lock itself introduced: `cropDrawState` is shared
+// Regression: `cropDrawState` is shared
 // with the label lasso and was NOT reset on all of crop's exits — the
 // Escape-while-drawing path closed the tool with the state still at
 // 'drawing-rect'. The camera gate read that state directly, so the view stayed
@@ -435,19 +393,18 @@ test('rect crop: the projection is already orthographic before the drag starts',
 // Exercised through BOTH exits (the panel's × and Escape), since they are
 // separate code paths and it was the Escape one that broke.
 for (const exit of ['close-button', 'escape'] as const) {
-  test(`rect crop: the view unlocks after leaving Crop via the ${exit}`, async () => {
+  test(`rect crop: the view responds after leaving Crop via the ${exit}`, async () => {
     const { page, panel, overlay } = await openCropRect();
 
     const box = await overlay.boundingBox();
     if (!box) throw new Error('crop-rect-overlay has no bounding box');
 
-    // Commit a rectangle, so the lock is genuinely engaged before we leave.
     const inset = 8;
     await page.mouse.move(box.x + inset, box.y + inset);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
     await page.mouse.up();
-    await expect(panel).toHaveAttribute('data-crop-camera-locked', 'true');
+    await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'true');
 
     // Leave Crop entirely.
     if (exit === 'close-button') {
@@ -457,7 +414,7 @@ for (const exit of ['close-button', 'escape'] as const) {
       // one for the rectangle, one to close the tool. The second is the path
       // that used to strand the camera.
       await page.keyboard.press('Escape');
-      await expect(panel).toHaveAttribute('data-crop-camera-locked', 'false');
+      await expect(overlay).toHaveAttribute('data-crop-rect-committed', 'false');
       await page.keyboard.press('Escape');
     }
     await expect(panel).toHaveCount(0);
@@ -478,8 +435,6 @@ for (const exit of ['close-button', 'escape'] as const) {
     );
     expect(moved).toBeGreaterThan(1e-3);
 
-    // And the orthographic override went with the tool — a viewport left flat
-    // after Crop closed would be the same class of leak.
     expect(await readProjectionKind(page)).toBe('perspective');
   });
 }

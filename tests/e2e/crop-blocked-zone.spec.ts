@@ -249,8 +249,10 @@ test('rect drag released over a panel still commits (clamped) instead of hanging
   // blocked rect — not the raw pointer position buried in the panel. (The
   // rectangle's interior may still span under a panel; that's intended. It's the
   // pointer that can't go there, not the crop region.)
-  const corners = await page.getByTestId('crop-rect-overlay').locator('polygon').evaluate(
-    el => (el.getAttribute('points') ?? '').split(' ')
+  // (A committed rectangle is drawn in the scene, not in this overlay, which
+  // reports the frozen corners as a data attribute.)
+  const corners = await page.getByTestId('crop-rect-overlay').evaluate(
+    el => (el.getAttribute('data-crop-rect-corners') ?? '').split(' ').filter(Boolean)
       .map(p => ({ x: Number(p.split(',')[0]), y: Number(p.split(',')[1]) })));
   expect(corners).toHaveLength(4);
   // The far corner is the clamped release point: the stack's left edge at the

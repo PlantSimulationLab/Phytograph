@@ -206,3 +206,85 @@ export function polygonRegionFromCamera(
     invert,
   };
 }
+
+// The 3-D outline of a frozen screen-space region, as line segments.
+//
+// A lasso drawn under a perspective camera selects a CONE: each vertex is a ray
+// from the draw-time eye, and the region is everything between those rays. The
+// 2-D ring the user traced is only that cone seen end-on, so once the camera
+// moves the ring no longer describes it. Drawing the cone itself is what lets
+// the view stay free after a region is committed — from the draw pose every ray
+// collapses onto its vertex and the outline reads as the traced ring; from
+// anywhere else it shows the volume that will actually be cut.
+//
+// The cone is clipped to the view-depth range of `bounds` (the world AABB of
+// what is being cropped), since an unbounded cone has no drawable far end.
+// Each vertex contributes its ray segment, and consecutive vertices are joined
+// at the near and far ends. Works for an orthographic region too (parallel
+// rays — a prism).
+//
+// Returned as [x,y,z, x,y,z, ...] segment endpoints, relative to `origin` (the
+// viewer's display offset), computed in doubles before the float32 narrowing
+// so UTM-scale coordinates keep their precision.
+export function screenRegionOutline(
+  region: { points: Vec2[]; projection: number[]; view: number[]; canvasSize: CanvasSize },
+  bounds: { min: Vec3; max: Vec3 },
+  origin: Vec3 = { x: 0, y: 0, z: 0 },
+): Float32Array {
+  const { points, projection, view, canvasSize } = region;
+  const n = points.length;
+  if (n < 2 || canvasSize.width <= 0 || canvasSize.height <= 0) return new Float32Array(0);
+
+  // View-depth range of the bounds' eight corners.
+  let near = Infinity;
+  let far = -Infinity;
+  for (let i = 0; i < 8; i++) {
+    const x = i & 1 ? bounds.max.x : bounds.min.x;
+    const y = i & 2 ? bounds.max.y : bounds.min.y;
+    const z = i & 4 ? bounds.max.z : bounds.min.z;
+    const d = -(view[2] * x + view[6] * y + view[10] * z + view[14]);
+    if (d < near) near = d;
+    if (d > far) far = d;
+  }
+  if (!Number.isFinite(far)) return new Float32Array(0);
+  const ortho = projection[15] === 1 && projection[11] === 0;
+  // A perspective cone cannot start at or behind the eye.
+  if (!ortho) {
+    if (far <= 0) return new Float32Array(0);
+    near = Math.max(near, far * 1e-3);
+  }
+
+  const invProjection = new THREE.Matrix4().fromArray(projection).invert();
+  const invView = new THREE.Matrix4().fromArray(view).invert();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const ends: Array<[THREE.Vector3, THREE.Vector3]> = points.map((p) => {
+    const nx = (p.x / canvasSize.width) * 2 - 1;
+    const ny = 1 - (p.y / canvasSize.height) * 2;
+    // Two view-space points on the vertex's ray, then slide along it to the
+    // near and far depths (view depth is −z).
+    a.set(nx, ny, -1).applyMatrix4(invProjection);
+    b.set(nx, ny, 0).applyMatrix4(invProjection);
+    const dz = b.z - a.z;
+    const at = (depth: number) => {
+      const t = Math.abs(dz) > 1e-30 ? (-depth - a.z) / dz : 0;
+      return new THREE.Vector3().lerpVectors(a, b, t).applyMatrix4(invView);
+    };
+    return [at(near), at(far)];
+  });
+
+  const out = new Float32Array(n * 3 * 6);
+  let k = 0;
+  const push = (p: THREE.Vector3, q: THREE.Vector3) => {
+    out[k++] = p.x - origin.x; out[k++] = p.y - origin.y; out[k++] = p.z - origin.z;
+    out[k++] = q.x - origin.x; out[k++] = q.y - origin.y; out[k++] = q.z - origin.z;
+  };
+  for (let i = 0; i < n; i++) {
+    const [n0, f0] = ends[i];
+    const [n1, f1] = ends[(i + 1) % n];
+    push(n0, f0);
+    push(n0, n1);
+    push(f0, f1);
+  }
+  return out;
+}
