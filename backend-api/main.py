@@ -23020,6 +23020,13 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                     yield f"event: error\ndata: {json.dumps({'detail': item[1]})}\n\n"
                     break
         finally:
+            # Torn down with the build still running (client gone): cancel it
+            # before the run leaves the registry, or a cancel POST that loses the
+            # race to the fetch abort finds nothing to cancel. See the same block
+            # in `_bin_frame_streaming_response`.
+            if not task.done():
+                cancel_event.set()
+                cancel_flag.value = 1
             _clear_run(run_id)
 
     return StreamingResponse(
@@ -27179,6 +27186,18 @@ def _bin_frame_streaming_response(
                 traceback.print_exc()
                 yield _pack_progress_marker(None, "", error=str(e) or e.__class__.__name__)
         finally:
+            # The stream is ending while the worker is still running: the client
+            # went away (Starlette cancels this generator on disconnect, usually
+            # before the `is_disconnected()` poll above gets its turn). Set the
+            # event BEFORE dropping the run from the registry. The renderer's
+            # cancel is a POST /api/cancel/{run_id} followed at once by a fetch
+            # abort, and when the abort is processed first the POST finds no such
+            # run — so clearing without canceling left the worker to finish an
+            # import the user had abandoned (import-cancel.spec.ts saw the octree
+            # install 29 s after the dialog closed).
+            if cancel_event is not None and not fut.done():
+                cancel_event.set()
+                reporter.propagate_cancel()
             if run_id is not None:
                 _clear_run(run_id)
 

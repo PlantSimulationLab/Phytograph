@@ -200,6 +200,62 @@ def test_stream_emits_run_id_then_canceled_marker(client):
     assert main._cancel_run(run_id) is False
 
 
+def test_stream_torn_down_mid_run_cancels_the_worker():
+    """A stream closed while its worker is still running must CANCEL the worker,
+    not just forget the run.
+
+    The renderer cancels with a POST /api/cancel/{run_id} followed at once by a
+    fetch abort. Starlette closes the body generator on that disconnect, and the
+    wrapper's `finally` drops the run from the registry — so when the abort is
+    processed before the POST, the POST finds no such run. With the `finally`
+    only clearing the registry, the worker then ran to completion: a canceled
+    import installed its octree 29 s after the dialog closed.
+
+    Driven the way the disconnect arrives: read until the worker has started,
+    then `aclose()` the body iterator. No cancel is ever requested by run_id."""
+    import asyncio
+
+    run_id, event = main._new_cancel_token()
+    started = threading.Event()
+    outcome = {}
+
+    def build(progress):
+        started.set()
+        # A marker, so the reader below gets a chunk WHILE the worker is running
+        # (the wrapper is otherwise silent until its 5 s keepalive).
+        progress(0.1, "working")
+        for _ in range(300):  # ~3s cap; an uncanceled worker falls through
+            if progress.should_cancel():
+                outcome["canceled"] = True
+                raise main.ScanCanceled()
+            threading.Event().wait(0.01)
+        outcome["canceled"] = False
+        return b"PHB1unused"
+
+    resp = main._bin_frame_streaming_response(
+        build, request=None, cancel_event=event, run_id=run_id)
+
+    async def read_then_disconnect():
+        it = resp.body_iterator
+        async for _ in it:
+            if started.is_set():
+                break
+        await it.aclose()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(read_then_disconnect())
+        # The registry entry is gone, so a late cancel POST cannot reach the run…
+        assert main._cancel_run(run_id) is False
+        # …which is why the teardown itself has to have canceled it.
+        assert event.is_set(), "stream teardown left the worker's cancel event unset"
+        # Closing the loop joins its default executor, i.e. the worker thread.
+        loop.run_until_complete(loop.shutdown_default_executor())
+    finally:
+        loop.close()
+    assert outcome.get("canceled") is True, "the worker ran on after the stream was torn down"
+
+
 # ---- Plant build cancellation (SSE path) -----------------------------------
 # Plant generation uses an SSE event stream, not _bin_frame_streaming_response.
 # The cancel mechanism is the same registry + a ctypes flag the C++ canopy /
