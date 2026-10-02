@@ -148,8 +148,29 @@ export function CameraController({
   const framingBoundsRef = useRef(framingBounds);
   framingBoundsRef.current = framingBounds;
 
+  // Put the camera at the default pose (iso view of the origin, distance ~20)
+  // exactly once per mount, BEFORE anything else moves it.
+  //
+  // The mount effect below can only do this on a deferred tick, since
+  // OrbitControls is not mounted until then. Every imperative camera move
+  // therefore calls this first, so a move that lands ahead of that tick starts
+  // from the default pose instead of being overwritten by it. That ordering is
+  // real: a mesh's deferred frame (a 50 ms timer in the viewer) that comes due
+  // while the scene is still mounting runs before the mount tick, and the tick
+  // then threw the framing away — leaving the camera aimed at the origin with
+  // the auto-frame latch already spent, so nothing ever corrected it.
+  const ensureDefaultPose = useCallback(() => {
+    if (initializedRef.current || !controlsRef.current) return;
+    camera.up.set(0, 0, 1);
+    camera.position.set(12, -12, 10);
+    controlsRef.current.target.set(0, 0, 0);
+    controlsRef.current.update();
+    initializedRef.current = true;
+  }, [camera]);
+
   const snapToView = useCallback((direction: ViewDirection, target?: { center: THREE.Vector3, size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
+    ensureDefaultPose();
 
     // Use provided target or fall back to global bounds. Both are WORLD-space;
     // convert the center to DISPLAY space (world − offset) since the camera and
@@ -207,7 +228,7 @@ export function CameraController({
     camera.position.copy(newPos);
     controlsRef.current.target.copy(center);
     controlsRef.current.update();
-  }, [camera, displayCenter]);
+  }, [camera, displayCenter, ensureDefaultPose]);
 
   // Rotate the view to look straight down a world axis WITHOUT reframing.
   // Unlike snapToView (which recomputes distance from bounds and re-zooms),
@@ -237,6 +258,7 @@ export function CameraController({
 
   const orientToAxis = useCallback((axis: { x: number; y: number; z: number }) => {
     if (!controlsRef.current) return;
+    ensureDefaultPose();
     noteUserCamera();
     const controls = controlsRef.current;
     const target: THREE.Vector3 = controls.target;
@@ -252,7 +274,7 @@ export function CameraController({
       camera.up.set(0, 0, 1);
     }
     controls.update();
-  }, [camera]);
+  }, [camera, ensureDefaultPose]);
 
   const resetCamera = useCallback(() => {
     snapToView('iso');
@@ -267,6 +289,7 @@ export function CameraController({
   // falls back to the global bounds (i.e. "fit everything from here").
   const frameSelection = useCallback((target?: { center: THREE.Vector3; size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
+    ensureDefaultPose();
     noteUserCamera();
     const controls = controlsRef.current;
     // As in snapToView: the no-target "fit everything" form fits the CONTENT.
@@ -284,7 +307,7 @@ export function CameraController({
     camera.position.copy(center).addScaledVector(dir, distance);
     controls.target.copy(center);
     controls.update();
-  }, [camera, displayCenter]);
+  }, [camera, displayCenter, ensureDefaultPose]);
 
   // Frame the scene origin explicitly: keep the current viewing angle, but
   // re-center on the origin at a comfortable distance. This is the deliberate
@@ -776,16 +799,8 @@ export function CameraController({
 
   // Initialize camera once on mount - fixed position, not dependent on bounds
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (!initializedRef.current && controlsRef.current) {
-        // Set a fixed reasonable camera position (iso view of origin, distance ~20)
-        camera.up.set(0, 0, 1);
-        camera.position.set(12, -12, 10);
-        controlsRef.current.target.set(0, 0, 0);
-        controlsRef.current.update();
-        initializedRef.current = true;
-      }
-    }, 0);
+    // No-op if an earlier camera move already claimed it (see ensureDefaultPose).
+    const timer = setTimeout(ensureDefaultPose, 0);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty deps - truly only run once on mount
@@ -1058,6 +1073,7 @@ export function CameraController({
       eye: { x: number; y: number; z: number },
       target: { x: number; y: number; z: number },
     ) => {
+      ensureDefaultPose();
       camera.position.set(eye.x, eye.y, eye.z);
       camera.up.set(0, 0, 1);
       if (controlsRef.current) {
@@ -1075,6 +1091,7 @@ export function CameraController({
     (window as any).__setCameraPose = (
       position: [number, number, number], target: [number, number, number], up?: [number, number, number],
     ) => {
+      ensureDefaultPose();
       camera.position.set(position[0], position[1], position[2]);
       if (up) camera.up.set(up[0], up[1], up[2]);
       if (controlsRef.current) {
@@ -1224,7 +1241,7 @@ export function CameraController({
       delete (window as any).__worldToScreen;
       delete (window as any).__hitInfoAt;
     };
-  }, [resetCamera, snapToView, orientToAxis, frameSelection, frameSceneOrigin, camera, gl, scene]);
+  }, [resetCamera, snapToView, orientToAxis, frameSelection, frameSceneOrigin, ensureDefaultPose, camera, gl, scene]);
 
   return (
     <OrbitControls

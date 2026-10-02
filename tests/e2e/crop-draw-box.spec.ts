@@ -37,6 +37,8 @@ const DEPTH_LAYERS = join(repoRoot, 'tests', 'e2e', 'fixtures', 'depth-layers.xy
 const NEAR_Y = 0;
 const FAR_Y = 8;
 const TOTAL_POINTS = '1706';
+// Center of the fixture's bounds — where the import's auto-frame aims the camera.
+const DEPTH_LAYERS_CENTER: [number, number, number] = [0, 4, 0];
 
 // Canvas fractions that land on the FAR plane under the oblique camera set by
 // `orientOblique` below. Measured against the running app (the shipped point
@@ -103,8 +105,17 @@ async function openCropBox() {
  * Off-axis the old code does place a corner, just in the wrong place, which is
  * the comparison worth making.
  */
-async function orientOblique(page: Page) {
-  await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+async function orientOblique(page: Page, contentCenter: [number, number, number]) {
+  // Wait for the import's auto-frame BEFORE turning the camera. The turn keeps
+  // the current target and distance and counts as the user taking the camera,
+  // which cancels any framing still pending — so a turn that lands first leaves
+  // the camera aimed wherever it was, and the fixed click fractions below then
+  // miss the geometry. Nothing orders the two but timing; a mesh imports in
+  // ~100 ms, which is fast enough to lose that race.
+  await expect.poll(async () => {
+    const s = await page.evaluate(() => (window as any).__getCameraState?.() ?? null);
+    return s?.framedContent ? (s.target as number[]).map((v) => +v.toFixed(3)) : `not framed: ${JSON.stringify(s)}`;
+  }, { message: 'camera never framed the imported content', timeout: 20_000 }).toEqual(contentCenter);
   await page.evaluate(() => (window as any).__orientToAxis({ x: 0.15, y: -1, z: 0.5 }));
   // Let the camera settle before any pixel is computed from it.
   await page.waitForTimeout(500);
@@ -201,7 +212,7 @@ test('draw box: the box being replaced stops clipping the cloud while you aim', 
   // Same oblique camera and the same on-the-far-plane pixels as test 2, so the
   // ONLY difference between the two tests is that here the far plane starts out
   // clipped away.
-  await orientOblique(page);
+  await orientOblique(page, DEPTH_LAYERS_CENTER);
   await drawBoxAt(page, ON_FAR_PLANE_A, ON_FAR_PLANE_B);
 
   const redrawn = await cropBounds(page);
@@ -234,7 +245,7 @@ test('draw box: a corner lands on the surface under the cursor, not on the groun
   const { page } = await openCropBox();
 
   const full = await cropBounds(page);
-  await orientOblique(page);
+  await orientOblique(page, DEPTH_LAYERS_CENTER);
 
   await drawBoxAt(page, ON_FAR_PLANE_A, ON_FAR_PLANE_B);
 
@@ -262,7 +273,7 @@ test('draw box: a corner lands on the surface under the cursor, not on the groun
 // corner placement, and the box lands somewhere the user never clicked.
 test('draw box: dragging the viewport while placing corners does not orbit', async () => {
   const { page } = await openCropBox();
-  await orientOblique(page);
+  await orientOblique(page, DEPTH_LAYERS_CENTER);
 
   const button = page.getByTestId('crop-draw-box');
   await button.click();
@@ -323,7 +334,7 @@ test('draw box: corners land on the mesh surface under the cursor', async () => 
   await expect(panel).toHaveAttribute('data-mesh-count', '1');
   await expect(panel).toHaveAttribute('data-crop-max', '3.000,1.000,6.000');
 
-  await orientOblique(page);
+  await orientOblique(page, [1.5, 0.5, 3]);
   await drawBoxAt(page, { fx: 0.47, fy: 0.42 }, { fx: 0.53, fy: 0.58 });
 
   const drawn = await cropBounds(page);

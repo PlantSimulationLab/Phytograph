@@ -366,3 +366,74 @@ test('rotation still pivots about the scene origin after a pan', async () => {
   expect(camToOriginAfter).toBeCloseTo(camToOriginBefore, 2);
   expect(radiusBefore).toBeGreaterThan(0);
 });
+
+// ── A camera move that beats the controller's mount tick is not overwritten ──
+//
+// The controller can only apply its default pose on a deferred tick (it needs
+// OrbitControls mounted). A camera move landing before that tick used to be
+// thrown away by it. The path that bit: a mesh imports in ~100 ms, its deferred
+// frame comes due while the scene is still mounting after File → New, runs
+// first, and the mount tick then resets the camera to the default pose — aimed
+// at the origin, with the auto-frame latch already spent, so nothing corrects
+// it. crop-draw-box's mesh test failed exactly that way, about once per full
+// suite run and never in isolation.
+//
+// The order is forced here rather than left to load: a setter on
+// Window.prototype sees the instant the remounted controller registers
+// `__orientToAxis` (the controller's own cleanup `delete`s the own property, so
+// the assignment falls through to the prototype) and turns the camera right
+// there — synchronously inside the registering effect, which is before any tick.
+// The snapshot is taken from a timer queued behind the mount tick, so it reads
+// the pose the tick left behind.
+test('a camera move ahead of the mount tick survives it', async () => {
+  const { app, page } = session;
+
+  await page.evaluate(() => {
+    const w = window as any;
+    let stored: unknown;
+    w.__earlyMove = { fired: false, snapshot: null };
+    Object.defineProperty(Window.prototype, '__orientToAxis', {
+      configurable: true,
+      get: () => stored,
+      set: (fn: (axis: { x: number; y: number; z: number }) => void) => {
+        stored = fn;
+        if (w.__earlyMove.fired) return;
+        w.__earlyMove.fired = true;
+        fn({ x: 0, y: 0, z: 1 }); // top view
+        setTimeout(() => { w.__earlyMove.snapshot = w.__getCameraState?.() ?? null; }, 0);
+      },
+    });
+  });
+
+  try {
+    // File → New remounts the controller, which is what registers the hook.
+    await resetToFreshScene(app, page);
+    await expect.poll(
+      () => page.evaluate(() => (window as any).__earlyMove.snapshot !== null),
+      { message: 'the remounted controller never registered __orientToAxis', timeout: 20_000 },
+    ).toBe(true);
+
+    const snap = await page.evaluate(() => {
+      const s = (window as any).__earlyMove.snapshot;
+      return { position: s.position as number[], target: s.target as number[], up: s.up as number[] };
+    });
+    const where = `camera ${JSON.stringify(snap)}`;
+    // Straight above the origin, at the default pose's own distance
+    // (|(12, -12, 10)| = 19.698): the top view was applied ON TOP of the
+    // default pose. Overwritten, the camera reads (12, -12, 10) instead.
+    expect(snap.position[0], where).toBeCloseTo(0, 3);
+    expect(snap.position[1], where).toBeCloseTo(0, 3);
+    expect(snap.position[2], where).toBeCloseTo(Math.hypot(12, 12, 10), 3);
+    expect(snap.target, where).toEqual([0, 0, 0]);
+    expect(snap.up, where).toEqual([0, 1, 0]);
+  } finally {
+    // Hand the hook back as an ordinary own property for the tests that follow.
+    await page.evaluate(() => {
+      const w = window as any;
+      const fn = w.__orientToAxis;
+      delete (Window.prototype as any).__orientToAxis;
+      if (fn) w.__orientToAxis = fn;
+      delete w.__earlyMove;
+    });
+  }
+});
