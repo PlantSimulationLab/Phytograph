@@ -13044,7 +13044,7 @@ export default function PointCloudViewer({
   // Vertices are baked relative to the first source's position, which the
   // merged mesh then takes as its own — a mesh placed far from the origin keeps
   // its Float32 vertex precision that way.
-  const handleMergeMeshes = useCallback((ids: string[], opts?: { retainOriginals?: boolean }) => {
+  const handleMergeMeshes = useCallback((ids: string[], opts?: { retainOriginals?: boolean; matchColors?: boolean; removeOverlap?: boolean }) => {
     const sources = meshes.filter(m => ids.includes(m.id) && !meshMergeBlockReason(m, isTriangulatedMesh(m)));
     if (sources.length < 2) return;
     const setBlock = meshMergeSetBlockReason(sources);
@@ -13057,12 +13057,27 @@ export default function PointCloudViewer({
     const matrices = sources.map(meshCropMatrixOf);
     const pivot = new THREE.Vector3().setFromMatrixPosition(matrices[0]);
     const toPivot = new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z);
-    const { data, materials } = mergeMeshData(sources.map((m, i) => ({
+    const { data, materials, overlap } = mergeMeshData(sources.map((m, i) => ({
       data: m.data,
       matrix: toPivot.clone().multiply(matrices[i]),
       color: m.color,
       materials: m.plantMaterials,
-    })));
+    })), { matchColors: opts?.matchColors === true, removeOverlap: opts?.removeOverlap === true });
+    // Say what the overlap options did — including nothing, since "no overlap
+    // found" (meshes not aligned, or facing opposite ways) otherwise looks
+    // exactly like a plain merge.
+    const overlapNotes: string[] = [];
+    if (overlap && overlap.overlapVertices === 0) {
+      overlapNotes.push(`no overlapping surface found within ${overlap.tolerance.toPrecision(2)}`);
+    } else if (overlap) {
+      if (opts?.matchColors) {
+        overlapNotes.push(overlap.colorMatchedParts > 0
+          ? `colors matched across ${overlap.colorMatchedParts} meshes`
+          : 'colors not matched (needs two or more untextured meshes with vertex colors)');
+      }
+      overlapNotes.unshift(`surfaces within ${overlap.tolerance.toPrecision(2)} treated as one`);
+      if (opts?.removeOverlap) overlapNotes.push(`${overlap.removedTriangles.toLocaleString()} overlapping triangles removed`);
+    }
 
     const first = sources[0];
     const merged: MeshEntry = {
@@ -13105,7 +13120,7 @@ export default function PointCloudViewer({
     showToast({
       type: 'success',
       title: 'Meshes Merged',
-      message: `Combined ${sources.length} meshes into ${data.triangleCount.toLocaleString()} triangles${retain ? ' — originals kept and hidden' : ''}`,
+      message: `Combined ${sources.length} meshes into ${data.triangleCount.toLocaleString()} triangles${overlapNotes.length ? ` — ${overlapNotes.join(', ')}` : ''}${retain ? ' — originals kept and hidden' : ''}`,
     });
   }, [meshes, isTriangulatedMesh, meshCropMatrixOf, displayNameOfMesh, meshPositions, meshRotations, meshScales, meshOpacities, meshColorModes, scene]);
 

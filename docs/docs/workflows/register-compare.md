@@ -92,7 +92,8 @@ selected in the scene, or when the scene has no point clouds.
 1. Open **Stitch** and switch the toggle to **Meshes**.
 2. Check the meshes to merge.
 3. Optionally tick **Keep original meshes** to keep the sources, hidden.
-4. Click **Merge**.
+4. Optionally tick either [overlap option](#where-the-meshes-overlap).
+5. Click **Merge**.
 
 Each mesh is merged **where it is drawn**: a mesh you moved, rotated, or
 scaled with its Transform editor contributes its geometry at that placement.
@@ -108,6 +109,52 @@ What carries over:
   one solid color stay a solid-colored mesh.
 - **Normals** — kept only when every source has them.
 - **Textures and materials** — kept when every source is textured.
+
+#### Where the meshes overlap
+
+Scans of one object taken from different angles cover some of the same
+surface, each under its own lighting. A plain merge changes nothing there:
+both surfaces stay, each with its own colors, so the overlap shows two
+slightly different shades interleaved and a hard step where one scan's
+coverage ends. Two options, both off by default, deal with that:
+
+- **Match colors where meshes overlap** — first scales each mesh's color by
+  one brightness factor per color channel so the meshes agree, on average,
+  across their overlaps (no mesh is the reference; each moves part of the way).
+  Then, inside each overlap, it blends the surfaces toward one color, giving
+  more say to whichever is farther from the edge of its own coverage, so a
+  scan fades out toward its border instead of stopping at a step. The
+  correction is smooth, so each mesh keeps its own fine detail. It applies to
+  meshes that have **per-vertex colors**; a mesh with only a solid display
+  color is left alone (it is a different-colored object, not a lighting
+  difference), and so are textured meshes, whose color lives in the texture
+  image.
+- **Remove overlapping surface** — where two meshes cover the same surface,
+  keeps the copy that is farther from the edge of its own coverage and deletes
+  the other's triangles. Two registered scans never sit exactly on each other,
+  so cutting one away would leave its cut edge hanging over the other; to
+  avoid that, the surfaces are first drawn together across the overlap, each
+  vertex moving along its own surface normal by at most the gap between the
+  scans, so they meet where the seam falls. **This changes vertex positions
+  inside the overlap.** The meshes are trimmed, not sewn together: along the
+  seam a strip about one triangle wide stays doubled, so there are no gaps but
+  the result is not a single watertight surface.
+
+Both options only act where the meshes are **already aligned** — register
+them first. Registration is never exact, so the distance within which two
+surfaces count as the same is measured from the meshes themselves: about 2.5
+times the typical gap between them, and never less than three quarters of a
+typical triangle edge. Scans tend to agree in the middle of their shared
+surface and peel apart toward a scan's edge, so from wherever the surfaces do
+agree the overlap is followed outward into such a flap, up to four times that
+distance. Meshes that agree nowhere are treated as separate surfaces and left
+alone. Surfaces must also face the same way, so
+the two sides of a thin leaf are never treated as one surface. The
+confirmation message reports the distance used and what was done, including
+when no overlapping surface was found.
+
+Both options run in the app window, which is unresponsive while they work —
+several seconds for two meshes of 800,000 triangles each.
 
 The merged mesh is an ordinary mesh: it keeps the first source's color and
 opacity, but a merged **plane** no longer shows a plane's center/size readout

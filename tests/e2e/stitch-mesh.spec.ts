@@ -15,6 +15,10 @@ import { stubSaveDialog } from './helpers/stubSaveDialog';
 //                       per-vertex RGB (vertex 0 is pure red).
 //   big-cube-mesh.ply — 10 m cube spanning 20..30 on every axis, 8 vertices /
 //                       12 triangles, NO vertex colors.
+//   overlap-sheet-a/b.ply — two flat sheets on one unit grid, 45 vertices /
+//                       64 triangles each: A spans x 0..8 in gray 200, B spans
+//                       x 4..12 in gray 100. They are the SAME surface over
+//                       x 4..8, lit differently — two scans from two angles.
 //
 // The pair is chosen so the merge has to reconcile attributes: one mesh has
 // vertex colors and the other only a solid display color. The result is
@@ -25,6 +29,8 @@ import { stubSaveDialog } from './helpers/stubSaveDialog';
 // scene between tests (see helpers/resetApp.ts).
 const CUBE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'cube-mesh.ply');
 const BIG_CUBE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'big-cube-mesh.ply');
+const SHEET_A = join(repoRoot, 'tests', 'e2e', 'fixtures', 'overlap-sheet-a.ply');
+const SHEET_B = join(repoRoot, 'tests', 'e2e', 'fixtures', 'overlap-sheet-b.ply');
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
 let session: LaunchedApp;
@@ -257,6 +263,82 @@ test('keeping originals leaves the sources hidden beside the merge, and undo bri
   await expect(meshRows()).toHaveCount(2, { timeout: 15_000 });
   await expect(row('cube-mesh')).toHaveAttribute('data-visible', 'true');
   await expect(row('big-cube-mesh')).toHaveAttribute('data-visible', 'true');
+});
+
+async function importSheets() {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', [SHEET_A, SHEET_B]);
+  await expect(meshRows()).toHaveCount(2, { timeout: 30_000 });
+  await expect(row('overlap-sheet-a')).toHaveAttribute('data-triangle-count', '64');
+  await expect(row('overlap-sheet-b')).toHaveAttribute('data-triangle-count', '64');
+}
+
+// The control for the two tests below: with neither box ticked, the shared
+// surface stays doubled and each sheet keeps the gray it was imported with.
+test('a plain merge of overlapping meshes keeps both surfaces and both colors', async () => {
+  await importSheets();
+  const { dialog } = await openMeshMerge();
+  await expect(dialog.getByTestId('stitch-mesh-match-colors').locator('input')).not.toBeChecked();
+  await expect(dialog.getByTestId('stitch-mesh-remove-overlap').locator('input')).not.toBeChecked();
+  await dialog.getByTestId('stitch-run').click();
+  await expect(mergedRow()).toHaveAttribute('data-triangle-count', '128', { timeout: 15_000 });
+
+  const { vertices, faces } = await exportSelectedPly('plain.ply');
+  expect(faces).toBe(128);
+  expect(vertices).toHaveLength(90);
+  const reds = vertices.map(v => v.red!);
+  expect(Math.max(...reds) - Math.min(...reds)).toBeGreaterThanOrEqual(98);
+});
+
+test('matching colors evens out two differently lit meshes without touching geometry', async () => {
+  await importSheets();
+  const { dialog } = await openMeshMerge();
+  await dialog.getByTestId('stitch-mesh-match-colors').locator('input').check();
+  await dialog.getByTestId('stitch-run').click();
+  await expect(mergedRow()).toHaveAttribute('data-triangle-count', '128', { timeout: 15_000 });
+  await expect(session.page.getByText(/colors matched across 2 meshes/)).toBeVisible();
+
+  const { vertices, faces } = await exportSelectedPly('matched.ply');
+  expect(faces).toBe(128);
+  expect(vertices).toHaveLength(90);
+  // Gray 200 and gray 100 meet between the two, and the whole mesh — not just
+  // the overlap — is now one shade: both sheets were uniformly lit.
+  const reds = vertices.map(v => v.red!);
+  expect(Math.max(...reds) - Math.min(...reds)).toBeLessThanOrEqual(3);
+  expect(Math.min(...reds)).toBeGreaterThan(110);
+  expect(Math.max(...reds)).toBeLessThan(190);
+  for (const v of vertices) expect([v.green, v.blue]).toEqual([v.red, v.red]);
+});
+
+test('removing the overlapping surface leaves one copy that still covers both meshes', async () => {
+  await importSheets();
+  const { dialog } = await openMeshMerge();
+  await dialog.getByTestId('stitch-mesh-match-colors').locator('input').check();
+  await dialog.getByTestId('stitch-mesh-remove-overlap').locator('input').check();
+  await dialog.getByTestId('stitch-run').click();
+  await expect(meshRows()).toHaveCount(1, { timeout: 15_000 });
+  await expect(session.page.getByText(/overlapping triangles removed/)).toBeVisible();
+
+  const { vertices, faces } = await exportSelectedPly('fused.ply');
+  // The union is 12 × 4 unit quads = 96 triangles against 128 unmerged. A
+  // triangle goes only when all its vertices lose, so the trim leaves a doubled
+  // strip along the seam: never fewer than the union, at most two quad columns over.
+  expect(faces).toBeGreaterThanOrEqual(96);
+  expect(faces).toBeLessThanOrEqual(96 + 16);
+  await expect(mergedRow()).toHaveAttribute('data-triangle-count', String(faces));
+  // Nothing was lost: every grid point of the 13 × 5 union is still a vertex.
+  const points = new Set(vertices.map(v => `${Math.round(v.x)},${Math.round(v.y)}`));
+  expect(points.size).toBe(13 * 5);
+  for (const v of vertices) expect(Math.abs(v.z)).toBeLessThan(1e-6);
+  expect(vertices.length).toBeLessThan(90);
+  const reds = vertices.map(v => v.red!);
+  expect(Math.max(...reds) - Math.min(...reds)).toBeLessThanOrEqual(3);
+
+  // Still one undo step, restoring both untouched sources.
+  await session.page.keyboard.press('ControlOrMeta+z');
+  await expect(meshRows()).toHaveCount(2, { timeout: 15_000 });
+  await expect(row('overlap-sheet-a')).toHaveAttribute('data-triangle-count', '64');
+  await expect(row('overlap-sheet-b')).toHaveAttribute('data-triangle-count', '64');
 });
 
 test('a triangulation is listed but cannot be picked for a merge', async () => {

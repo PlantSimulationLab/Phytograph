@@ -192,9 +192,29 @@ describe('StitchDialog mesh mode', () => {
     const { onStitch, onMergeMeshes, onClose } = openMeshes({ initialSelectedMeshIds: new Set(['m1', 'm2']) });
     fireEvent.click(retainBox());
     fireEvent.click(runButton());
-    expect(onMergeMeshes).toHaveBeenCalledWith(['m1', 'm2'], { retainOriginals: true });
+    expect(onMergeMeshes).toHaveBeenCalledWith(['m1', 'm2'], { retainOriginals: true, matchColors: false, removeOverlap: false });
     expect(onStitch).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('passes each overlap option only once its own box is ticked', () => {
+    const { onMergeMeshes } = openMeshes({ initialSelectedMeshIds: new Set(['m1', 'm2']) });
+    fireEvent.click(screen.getByTestId('stitch-mesh-remove-overlap').querySelector('input')!);
+    fireEvent.click(runButton());
+    expect(onMergeMeshes).toHaveBeenLastCalledWith(['m1', 'm2'], { retainOriginals: false, matchColors: false, removeOverlap: true });
+    fireEvent.click(screen.getByTestId('stitch-mesh-match-colors').querySelector('input')!);
+    fireEvent.click(screen.getByTestId('stitch-mesh-remove-overlap').querySelector('input')!);
+    fireEvent.click(runButton());
+    expect(onMergeMeshes).toHaveBeenLastCalledWith(['m1', 'm2'], { retainOriginals: false, matchColors: true, removeOverlap: false });
+  });
+
+  it('offers the overlap options for meshes only', () => {
+    openMeshes();
+    expect(screen.queryByTestId('stitch-mesh-match-colors')).toBeNull();
+    expect(screen.queryByTestId('stitch-mesh-remove-overlap')).toBeNull();
+    fireEvent.click(modeButton('meshes'));
+    expect(screen.getByTestId('stitch-mesh-match-colors')).toBeTruthy();
+    expect(screen.getByTestId('stitch-mesh-remove-overlap')).toBeTruthy();
   });
 
   it('does not seed a refused mesh from the selection', () => {

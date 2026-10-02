@@ -39,7 +39,7 @@ interface StitchDialogProps {
   onStitch: (ids: string[], opts: { retainOriginals: boolean }) => void;
   meshes?: StitchMeshOption[];
   initialSelectedMeshIds?: Set<string>;
-  onMergeMeshes?: (ids: string[], opts: { retainOriginals: boolean }) => void;
+  onMergeMeshes?: (ids: string[], opts: { retainOriginals: boolean; matchColors: boolean; removeOverlap: boolean }) => void;
   // Why the picked meshes cannot be merged TOGETHER although each is mergeable
   // on its own (textured with untextured), or undefined when they can.
   meshSetBlockReason?: (ids: string[]) => string | undefined;
@@ -59,6 +59,10 @@ export function StitchDialog({
   // removed from the scene. Deliberately not persisted — resets on every open,
   // so the destructive default is always an explicit choice.
   const [retainOriginals, setRetainOriginals] = useState(false);
+  // What a mesh merge does where its sources cover the same surface. Both off
+  // by default (and on every open): a plain merge changes no color or triangle.
+  const [matchColors, setMatchColors] = useState(false);
+  const [removeOverlap, setRemoveOverlap] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -79,6 +83,8 @@ export function StitchDialog({
     const meshSelected = !!initialSelectedMeshIds && meshes.some(m => initialSelectedMeshIds.has(m.id));
     setMode((meshSelected && seed.size === 0) || (clouds.length === 0 && meshes.length > 0) ? 'meshes' : 'clouds');
     setRetainOriginals(false);
+    setMatchColors(false);
+    setRemoveOverlap(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
@@ -205,6 +211,45 @@ export function StitchDialog({
             </span>
           </label>
 
+          {meshMode && (
+            <>
+              <label
+                data-testid="stitch-mesh-match-colors"
+                className="flex items-center gap-2 select-none cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={matchColors}
+                  onChange={(e) => setMatchColors(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-green-600"
+                />
+                <span className="flex flex-col">
+                  <span className="text-xs text-neutral-300">Match colors where meshes overlap</span>
+                  <span className="text-[10px] text-neutral-500">
+                    Evens out lighting differences between vertex-colored meshes and blends them across the overlap.
+                  </span>
+                </span>
+              </label>
+              <label
+                data-testid="stitch-mesh-remove-overlap"
+                className="flex items-center gap-2 select-none cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={removeOverlap}
+                  onChange={(e) => setRemoveOverlap(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-green-600"
+                />
+                <span className="flex flex-col">
+                  <span className="text-xs text-neutral-300">Remove overlapping surface</span>
+                  <span className="text-[10px] text-neutral-500">
+                    Where two meshes cover the same surface, draws them together, keeps one copy and deletes the duplicate triangles.
+                  </span>
+                </span>
+              </label>
+            </>
+          )}
+
           {setBlock && (
             <div
               data-testid="stitch-mesh-block"
@@ -248,7 +293,7 @@ export function StitchDialog({
           <button
             data-testid="stitch-run"
             onClick={() => {
-              if (meshMode) onMergeMeshes?.(Array.from(picked), { retainOriginals });
+              if (meshMode) onMergeMeshes?.(Array.from(picked), { retainOriginals, matchColors, removeOverlap });
               else onStitch(Array.from(picked), { retainOriginals });
               onClose();
             }}
