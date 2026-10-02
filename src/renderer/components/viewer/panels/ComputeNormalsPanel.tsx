@@ -2,13 +2,23 @@ import { AlertTriangle, Loader2, X } from 'lucide-react';
 import { NormalsIcon } from '../../icons/NormalsIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 
 // Presentational tool panel for per-point normal estimation. The `onCompute`
-// handler and all state live in PointCloudViewer; the parent gates rendering on
-// `showComputeNormalsPanel && selectedIds.size === 1`.
+// handler and all state live in PointCloudViewer, including the picker's
+// checked set: the run covers every CHECKED cloud, one after another.
 export type NormalOrientation = 'origin' | 'up' | 'viewpoint' | 'none';
 
 interface ComputeNormalsPanelProps {
+  /** Every point cloud in the scene, with the ones to compute checked. Flat
+   *  clouds carry a `disabledReason`: normals are stored on a session. */
+  picker: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
+  /** "scan-b (2/3)" while a multi-cloud run is on that cloud, else null. */
+  progress: string | null;
   neighbors: number;
   useRadius: boolean;
   radius: number;
@@ -20,10 +30,11 @@ interface ComputeNormalsPanelProps {
   // button turns into "Compute Anyway" and the next click re-sends with
   // `acknowledge_cost`. Mirrors GroundSegmentPanel.
   costWarning: string | null;
-  // True when this cloud already carries normals that predate a later edit. A
+  // True when a checked cloud already carries normals that predate a later edit. A
   // normal is a neighborhood statistic, so a crop or delete changes the right
   // answer for every surviving point beside the cut.
   stale: boolean;
+  /** True when every checked cloud already carries normals. */
   hasNormals: boolean;
   onClose: () => void;
   onNeighborsChange: (n: number) => void;
@@ -35,6 +46,8 @@ interface ComputeNormalsPanelProps {
 }
 
 export function ComputeNormalsPanel({
+  picker,
+  progress,
   neighbors,
   useRadius,
   radius,
@@ -52,23 +65,46 @@ export function ComputeNormalsPanel({
   onCompute,
   onCancel,
 }: ComputeNormalsPanelProps) {
+  const targetCount = picker.selectedIds.size;
   return (
-    <div data-testid="compute-normals-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
+    <div
+      data-testid="compute-normals-panel"
+      data-target-count={targetCount}
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto"
+    >
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <NormalsIcon className="w-3 h-3" />
           Compute Normals
         </div>
-        <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
+        <button data-testid="compute-normals-close" onClick={onClose} aria-label="Close" className="p-1 hover:bg-neutral-700 rounded">
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
         Fits a plane to each point's neighborhood to estimate its surface
-        direction, and stores the result on the cloud. Also writes curvature
+        direction, and stores the result on each checked cloud. Also writes curvature
         (surface variation) and verticality, which color foliage, bark and
         ground differently. Exported with the cloud as nx/ny/nz.
+      </div>
+
+      {/* The targets are fixed for the length of a run. */}
+      <div className={`mb-3 ${inProgress ? 'pointer-events-none opacity-60' : ''}`}>
+        <ObjectPicker
+          items={picker.items}
+          selectedIds={picker.selectedIds}
+          onChange={picker.onChange}
+          label="Clouds"
+          emptyMessage="No point clouds in the scene."
+          rowTestId="compute-normals-target-row"
+          data-testid="compute-normals-targets"
+        />
+        {targetCount === 0 && picker.items.length > 0 && (
+          <p className="mt-1 text-[10px] text-neutral-500" data-testid="compute-normals-none-checked">
+            Check the clouds to compute normals on.
+          </p>
+        )}
       </div>
 
       {/* Staleness advisory: the columns are still there and still correctly
@@ -79,7 +115,11 @@ export function ComputeNormalsPanel({
           className="mb-3 p-2 bg-amber-900/30 border border-amber-600/50 rounded text-[10px] text-amber-200 flex gap-1.5"
         >
           <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
-          <span>Normals may be out of date — this cloud was edited after they were computed. Recompute to refresh them.</span>
+          <span>
+            {targetCount > 1
+              ? 'Normals may be out of date — a checked cloud was edited after they were computed. Recompute to refresh them.'
+              : 'Normals may be out of date — this cloud was edited after they were computed. Recompute to refresh them.'}
+          </span>
         </div>
       )}
 
@@ -167,7 +207,7 @@ export function ComputeNormalsPanel({
       </div>
 
       {error && (
-        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300 whitespace-pre-line">
           {error}
         </div>
       )}
@@ -181,6 +221,12 @@ export function ComputeNormalsPanel({
         >
           <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
           <span>{costWarning}</span>
+        </div>
+      )}
+
+      {inProgress && progress && (
+        <div data-testid="compute-normals-progress" className="mb-2 text-[10px] text-neutral-400 truncate" title={progress}>
+          {progress}
         </div>
       )}
 
@@ -207,7 +253,8 @@ export function ComputeNormalsPanel({
         <button
           data-testid="compute-normals-run-button"
           onClick={onCompute}
-          className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 text-white ${
+          disabled={targetCount === 0}
+          className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 text-white disabled:bg-neutral-700 disabled:text-neutral-500 disabled:cursor-not-allowed ${
             costWarning ? 'bg-amber-600 hover:bg-amber-500' : 'bg-green-600 hover:bg-green-500'
           }`}
         >

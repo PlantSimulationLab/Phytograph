@@ -11,12 +11,22 @@ recomputing anything.
 
 ## Run it
 
-1. Select one imported cloud.
-2. Open **Compute Normals** (tool column, or Tools → Pre-processing →
+1. Open **Compute Normals** (tool column, or Tools → Pre-processing →
    Compute Normals).
+2. Under **Clouds**, check the clouds to compute normals on. The list
+   opens with whatever is selected in the Scans pane already checked; the
+   box beside the **Clouds** label checks or clears them all. A cloud
+   that was not imported from a file is listed but can't be checked,
+   because normals are stored with the imported cloud.
 3. Set the options below, then click **Compute Normals**.
 
-The cloud is recolored by **curvature** when the run finishes, which is
+The checked clouds are processed one after another, all with the same
+options, and the panel names the cloud it is on. **Cancel** stops the
+run; clouds that already finished keep their normals. Checking a hidden
+cloud shows it while it stays checked, and hides it again when you
+uncheck it or the panel closes.
+
+Each cloud is recolored by **curvature** when the run finishes, which is
 usually the most informative first look: smooth bark and ground go dark,
 foliage and edges light up.
 

@@ -6,8 +6,10 @@ covers the five operations you'll reach for most often: **transform**,
 roughly that order.
 
 !!! note "Checking a hidden object shows it"
-    Transform, Crop, Erase and Filter act on the objects **checked** in their
-    panel, not on what happens to be visible. So that you always see what a
+    Transform, Crop, Erase, Filter, Resample, Compute Normals and
+    Cross-section act on the
+    objects **checked** in their panel, not on what happens to be visible. So
+    that you always see what a
     tool is about to change, checking a hidden scan or mesh shows it for as
     long as it stays checked. It is hidden again when you uncheck it or the
     tool closes (applying included). Objects that were already visible are

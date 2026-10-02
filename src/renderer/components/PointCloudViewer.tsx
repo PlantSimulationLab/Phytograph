@@ -1105,6 +1105,11 @@ export default function PointCloudViewer({
   const groundCostAcknowledgedRef = useRef(false);
   // --- Compute Normals -------------------------------------------------------
   const [showComputeNormalsPanel, setShowComputeNormalsPanel] = useState(false);
+  // Its picker's checked clouds (seeded from the Scans pane on open). Normals
+  // are session COLUMNS, so only session-backed clouds can be checked.
+  const [normalsTargets, setNormalsTargets] = useState<Set<string>>(() => new Set());
+  // "scan-b (2/3)" while a multi-cloud run is on that cloud, else null.
+  const [normalsProgress, setNormalsProgress] = useState<string | null>(null);
   const [normalsNeighbors, setNormalsNeighbors] = useState(30);
   // A plain neighbor COUNT is the default, and the radius is opt-in, because a
   // terrestrial scan's return density falls as 1/r^2: a fixed radius that is
@@ -1122,7 +1127,15 @@ export default function PointCloudViewer({
   const [normalsStatus, setNormalsStatus] =
     useState<{ hasNormals: boolean; stale: boolean }>({ hasNormals: false, stale: false });
   const normalsAbortRef = useRef<AbortController | null>(null);
-  const normalsAckCostRef = useRef(false);
+  // A cost advisory stops a multi-cloud run part-way. `ack` arms the "Compute
+  // Anyway" re-send; `done` holds the clouds that already finished, so the
+  // re-send picks up where it stopped instead of recomputing them.
+  const normalsResumeRef = useRef<{ ack: boolean; done: Set<string> }>({ ack: false, done: new Set() });
+  // `done` describes a run with the parameters it was started with: change one
+  // and those clouds are no longer finished.
+  useEffect(() => {
+    normalsResumeRef.current.done = new Set();
+  }, [normalsNeighbors, normalsUseRadius, normalsRadius, normalsOrientation]);
 
   // --- Scalar Fields ---------------------------------------------------------
   const [showScalarFieldsPanel, setShowScalarFieldsPanel] = useState(false);
@@ -1249,22 +1262,33 @@ export default function PointCloudViewer({
       normalsStatusKey.current = null;
       return;
     }
-    const sel = clouds.find((c) => selectedIds.has(c.id));
-    const sessionId = sel?.data.octree?.sessionId ?? null;
-    if (normalsStatusKey.current === sessionId) return;
-    normalsStatusKey.current = sessionId;
+    // Every CHECKED cloud's session, order-insensitive. "Recompute" only when
+    // all of them carry normals; the staleness advisory when any one is stale.
+    const sessionIds = clouds
+      .filter((c) => normalsTargets.has(c.id) && c.data.octree?.sessionId)
+      .map((c) => c.data.octree!.sessionId!)
+      .sort();
+    const key = sessionIds.join('|');
+    if (normalsStatusKey.current === key) return;
+    normalsStatusKey.current = key;
 
     setNormalsStatus({ hasNormals: false, stale: false });
     setNormalsError(null);
     setNormalsCostWarning(null);
-    if (!sessionId) return;
+    normalsResumeRef.current = { ack: false, done: new Set() };
+    if (sessionIds.length === 0) return;
 
     let canceled = false;
     let settled = false;
-    void sessionNormalsStatus(sessionId)
-      .then((s) => {
+    void Promise.all(sessionIds.map((sid) => sessionNormalsStatus(sid)))
+      .then((all) => {
         settled = true;
-        if (!canceled) setNormalsStatus({ hasNormals: s.has_normals, stale: s.stale });
+        if (!canceled) {
+          setNormalsStatus({
+            hasNormals: all.every((s) => s.has_normals),
+            stale: all.some((s) => s.stale),
+          });
+        }
       })
       .catch(() => {
         // Advisory only — but clear the key so a transient failure retries on
@@ -1280,7 +1304,7 @@ export default function PointCloudViewer({
       // the panel silently keeps its "no normals" default.
       if (!settled) normalsStatusKey.current = null;
     };
-  }, [showComputeNormalsPanel, clouds, selectedIds]);
+  }, [showComputeNormalsPanel, clouds, normalsTargets]);
   // DEM (Digital Elevation Model) generation state. Like CSF, the cell size is an
   // absolute distance, so seed it from the selected cloud's horizontal extent
   // each time the DEM panel opens (guarded by a ref so it only fires on the open
@@ -2674,6 +2698,10 @@ export default function PointCloudViewer({
   // (see lib/crossSection.ts), which is why — unlike crop and erase — the camera
   // never has to be frozen here.
   const [showSectionPanel, setShowSectionPanel] = useState(false);
+  // The clouds the section cuts: its picker's checked set, seeded from the
+  // Scans pane when the panel opens with no section yet. Like the slab it
+  // outlives the panel — the section is a view state, not a mode.
+  const [sectionTargets, setSectionTargets] = useState<Set<string>>(() => new Set());
   const [slab, setSlab] = useState<SlabRegion | null>(null);
   // Two-click centerline placement, reusing BoxDrawRaycaster's ground picks.
   const [slabDrawState, setSlabDrawState] = useState<'idle' | 'awaiting-a' | 'awaiting-b'>('idle');
@@ -5645,9 +5673,8 @@ export default function PointCloudViewer({
 
   // ── Cross-section derived state ───────────────────────────────────────────
 
-  /** The cloud the section applies to (single selection, session-backed). */
-  /** Cloud whose SECTION is in effect — clip, wireframe, stroke bound. */
-  const sectionTargetCloud = useMemo(() => {
+  /** Clouds whose SECTION is in effect — clip, wireframe, stroke bound. */
+  const sectionTargetClouds = useMemo(() => {
     // Gated on a SLAB EXISTING, not on the panel being open.
     //
     // Tying this to `showSectionPanel` meant opening the Label tool (which
@@ -5659,22 +5686,41 @@ export default function PointCloudViewer({
     // The section is a VIEWING CONTEXT, not a modal tool: it stays in effect
     // until explicitly cleared, which is what makes "set up a section, then
     // label inside it" work at all.
-    if (selectedIds.size !== 1) return null;
-    if (!showSectionPanel && !slab) return null;
-    return clouds.find(c => selectedIds.has(c.id)) ?? null;
-  }, [showSectionPanel, slab, selectedIds, clouds]);
+    //
+    // The targets are the panel's CHECKED clouds, not the Scans-pane selection.
+    // It used to be "the one selected cloud", so with two scans selected there
+    // was no target, the panel never mounted, and the toolbar button was a
+    // silent dead click. Streamed clouds only: the clip lives in the octree
+    // renderer, so a flat cloud could be "sectioned" and drawn whole.
+    if (!showSectionPanel && !slab) return [];
+    return clouds.filter(c => sectionTargets.has(c.id) && c.data.octree);
+  }, [showSectionPanel, slab, sectionTargets, clouds]);
+  const sectionActive = sectionTargetClouds.length > 0;
+  const sectionTargetIds = useMemo(
+    () => new Set(sectionTargetClouds.map(c => c.id)), [sectionTargetClouds]);
 
-  /** World bounds of that cloud, for seeding and for the coverage readout. */
+  /** World bounds of those clouds together, for seeding and the coverage readout. */
   const sectionBounds = useMemo(() => {
-    const b = sectionTargetCloud?.data.bounds;
-    if (!b) return null;
-    const t = getEditState(sectionTargetCloud!.id).translation;
-    return {
-      min: new THREE.Vector3(b.min.x + t.x, b.min.y + t.y, b.min.z + t.z),
-      max: new THREE.Vector3(b.max.x + t.x, b.max.y + t.y, b.max.z + t.z),
-    };
+    let box: { min: THREE.Vector3; max: THREE.Vector3 } | null = null;
+    for (const cloud of sectionTargetClouds) {
+      const b = cloud.data.bounds;
+      if (!b) continue;
+      const t = getEditState(cloud.id).translation;
+      const min = new THREE.Vector3(b.min.x + t.x, b.min.y + t.y, b.min.z + t.z);
+      const max = new THREE.Vector3(b.max.x + t.x, b.max.y + t.y, b.max.z + t.z);
+      if (!box) box = { min, max };
+      else { box.min.min(min); box.max.max(max); }
+    }
+    return box;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sectionTargetCloud, editStates]);
+  }, [sectionTargetClouds, editStates]);
+  /** Height the centerline is picked on: the lowest ground among the targets. */
+  const sectionGroundZ = useMemo(() => {
+    const grounds = sectionTargetClouds
+      .map(c => c.data.groundZ)
+      .filter((z): z is number => typeof z === 'number');
+    return grounds.length > 0 ? Math.min(...grounds) : (sectionBounds?.min.z ?? 0);
+  }, [sectionTargetClouds, sectionBounds]);
 
   /**
    * Oriented clip-box transform for the active slab. Null when no section, or
@@ -5687,8 +5733,8 @@ export default function PointCloudViewer({
    * viewport looked like there was no section at all.
    */
   const slabBoxMatrix = useMemo(
-    () => (sectionTargetCloud && slab && !slabSuspended ? slabToBox(slab).matrix : null),
-    [sectionTargetCloud, slab, slabSuspended],
+    () => (sectionActive && slab && !slabSuspended ? slabToBox(slab).matrix : null),
+    [sectionActive, slab, slabSuspended],
   );
   /**
    * The suspended section, drawn as a ghost: the whole cloud is visible, with
@@ -5698,9 +5744,9 @@ export default function PointCloudViewer({
    * replaced, and highlighting it would point at the wrong place.
    */
   const slabGhostMatrix = useMemo(
-    () => (sectionTargetCloud && slab && slabSuspended && slabDrawState === 'idle'
+    () => (sectionActive && slab && slabSuspended && slabDrawState === 'idle'
       ? slabToBox(slab).matrix : null),
-    [sectionTargetCloud, slab, slabSuspended, slabDrawState],
+    [sectionActive, slab, slabSuspended, slabDrawState],
   );
 
   const slabCoverageInfo = useMemo(
@@ -5783,7 +5829,7 @@ export default function PointCloudViewer({
   // is open — the Label tool shares that slot, and paging through the cloud
   // while painting is the workflow. Not while typing, and not with a modifier
   // (those belong to the app's own shortcuts).
-  const hasSection = !!(slab && sectionTargetCloud);
+  const hasSection = !!(slab && sectionActive);
   useEffect(() => {
     if (!hasSection) return;
     const onKey = (e: KeyboardEvent) => {
@@ -5800,28 +5846,39 @@ export default function PointCloudViewer({
     return () => window.removeEventListener('keydown', onKey);
   }, [hasSection, handleSlabStep]);
 
-  // Top-down footprint of the sectioned cloud, for the inset map. Read from the
+  // Top-down footprint of the sectioned clouds, for the inset map. Read from the
   // octree's always-resident coarse levels; retried briefly because the section
   // can exist before the root tile has landed. Re-sampled when the cloud is
   // moved (a committed transform moves every point on the map).
   const [sectionFootprint, setSectionFootprint] = useState<Float32Array>(() => new Float32Array(0));
-  const sectionTargetId = hasSection ? sectionTargetCloud!.id : null;
-  const sectionEditKey = sectionTargetId ? JSON.stringify(getEditState(sectionTargetId)) : '';
+  const sectionFootprintIds = hasSection ? sectionTargetClouds.map(c => c.id).join('\n') : '';
+  const sectionEditKey = hasSection
+    ? sectionTargetClouds.map(c => JSON.stringify(getEditState(c.id))).join('|') : '';
   useEffect(() => {
     setSectionFootprint(new Float32Array(0));
-    if (!sectionTargetId) return;
+    if (!sectionFootprintIds) return;
+    const ids = sectionFootprintIds.split('\n');
     let tries = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const attempt = () => {
-      const oct = octreeRegistryRef.current.get(sectionTargetId);
-      const sample = oct ? sampleOctreeFootprint((oct as any).root, displayOffsetRef.current) : null;
-      if (sample && sample.length) setSectionFootprint(sample);
-      else if (++tries < 40) timer = setTimeout(attempt, 250);
+      const samples = ids.map(id => {
+        const oct = octreeRegistryRef.current.get(id);
+        return oct ? sampleOctreeFootprint((oct as any).root, displayOffsetRef.current) : null;
+      });
+      const got = samples.filter((x): x is Float32Array => !!x && x.length > 0);
+      if (got.length > 0) {
+        const merged = new Float32Array(got.reduce((n, x) => n + x.length, 0));
+        let at = 0;
+        for (const x of got) { merged.set(x, at); at += x.length; }
+        setSectionFootprint(merged);
+      }
+      // Keep trying until every cloud's root tile has landed.
+      if (got.length < ids.length && ++tries < 40) timer = setTimeout(attempt, 250);
     };
     // After a frame, so matrixWorld reflects the transform just committed.
     timer = setTimeout(attempt, 50);
     return () => clearTimeout(timer);
-  }, [sectionTargetId, sectionEditKey]);
+  }, [sectionFootprintIds, sectionEditKey]);
 
   // ── Manual labeling ──────────────────────────────────────────────────────
 
@@ -5832,7 +5889,7 @@ export default function PointCloudViewer({
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
   // The line tool draws in a section, so it needs one on the cloud being labeled.
-  const labelLineAvailable = !!labelTargetCloud && !!slab && sectionTargetCloud?.id === labelTargetCloud.id;
+  const labelLineAvailable = !!labelTargetCloud && !!slab && sectionTargetIds.has(labelTargetCloud.id);
   // World Z extent of the labeled cloud: the limiting box spans it by default.
   const labelTargetZ = useMemo(() => {
     const b = labelTargetCloud?.data.bounds;
@@ -6482,7 +6539,7 @@ export default function PointCloudViewer({
     // A stroke drawn inside a cross-section is bounded by it. Captured on the
     // stroke (not read live) so undo/redo replays the section the user actually
     // painted in, even after they have stepped the slab on.
-    const activeSlab = !override && sectionTargetCloud?.id === cloud.id ? slab : null;
+    const activeSlab = !override && sectionTargetIds.has(cloud.id) ? slab : null;
     // Never repaint what the user cannot see: a hidden class is protected, so
     // "any visible class" means exactly that (the eye used to do nothing). A
     // LOCKED class is protected whether shown or not.
@@ -6649,14 +6706,14 @@ export default function PointCloudViewer({
   }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
       labelVisibleClasses, labelLockedClasses, labelDirty, scene, showToast, updateLabelPending,
       labelQueue,
-      // `slab`/`sectionTargetCloud` are READ in the body (activeSlab), so they
+      // `slab`/`sectionTargetIds` are READ in the body (activeSlab), so they
       // must be dependencies. Omitting them froze `slab` at its first-render
       // value — null — so every stroke drawn inside a section shipped WITHOUT
       // its slab. The overlay reads the live slab, so the preview showed the
       // section-bounded paint while the backend labeled unbounded (or, with
       // the polygon covering the viewport, everything). Preview and truth
       // silently disagreed, which is the exact failure C1-R warns about.
-      slab, sectionTargetCloud,
+      slab, sectionTargetIds,
       labelDepthMode, labelLimitBox, labelDepthTolerance]);
 
   // ── Pre-label from another column (F8) ────────────────────────────────────
@@ -10446,7 +10503,15 @@ export default function PointCloudViewer({
         setResampleTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
         setShowResamplePanel(true);
       }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', testId: 'tool-resample', icon: ChartScatter, isActive: () => showResamplePanel },
-      { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
+      { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => {
+        if (showComputeNormalsPanel) { setShowComputeNormalsPanel(false); return; }
+        closeAllToolPanels('compute-normals');
+        // Seed the picker from the Scans pane (nothing selected → nothing
+        // checked). Session-backed clouds only: a flat one cannot store normals.
+        setNormalsTargets(seedFromSelection(
+          clouds.filter(c => c.data.octree?.sessionId).map(c => c.id), selectedIds));
+        setShowComputeNormalsPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
       { id: 'cloud-scalar-fields', name: 'Scalar Fields', keywords: ['scalar', 'field', 'attribute', 'arithmetic', 'calculator', 'formula', 'expression', 'statistics', 'stats', 'histogram', 'mean', 'median', 'percentile', 'rename', 'sf'], action: () => { closeAllToolPanels('scalar-fields'); setShowScalarFieldsPanel(!showScalarFieldsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Calculator, testId: 'tool-scalar-fields', isActive: () => showScalarFieldsPanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
       { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
@@ -10476,7 +10541,17 @@ export default function PointCloudViewer({
       }, category: 'Point Cloud', requires: null, isDisabled: () => !anyScanRegistered },
 
       // ── Segmentation ────────────────────────────────────────────────
-      { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => setShowSectionPanel(v => !v), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
+      { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => {
+        if (showSectionPanel) { setShowSectionPanel(false); return; }
+        // Seed the picker from the Scans pane (nothing selected → nothing
+        // checked) — but only when no section exists. A section outlives its
+        // panel, and reopening the panel must not change what it cuts.
+        if (!slab) {
+          setSectionTargets(seedFromSelection(
+            clouds.filter(c => c.data.octree).map(c => c.id), selectedIds));
+        }
+        setShowSectionPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
       { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel,
         // The panel paints ONE cloud's session. Never blocks while open, so the
         // button can still close it.
@@ -11770,8 +11845,28 @@ export default function PointCloudViewer({
     setCropMeshTargetsState(pruned);
   }, [meshes]);
 
-  // A CHECKED tool target is always on screen. Crop, Erase, Filter and the
-  // Transformation tool all act on their picker's checkboxes, visible or not,
+  // Same for Resample, Compute Normals and Cross-section. A stale id there is harmless to the
+  // commit (both resolve targets against the live clouds) but would keep the
+  // panel's "N clouds" count wrong.
+  useEffect(() => {
+    const live = new Set(clouds.map(c => c.id));
+    const prune = (prev: Set<string>) =>
+      [...prev].every(id => live.has(id)) ? prev : new Set([...prev].filter(id => live.has(id)));
+    setResampleTargets(prune);
+    setNormalsTargets(prune);
+    setSectionTargets(prune);
+    // Nothing left to act on: close, or File → New leaves an empty panel open
+    // with its toolbar button toggled ON.
+    if (clouds.length === 0) {
+      setShowComputeNormalsPanel(false);
+      setShowSectionPanel(false);
+      clearSlabSection();
+    }
+  }, [clouds, clearSlabSection]);
+
+  // A CHECKED tool target is always on screen. Crop, Erase, Filter, Resample,
+  // Compute Normals, Cross-section and the Transformation tool all act on their picker's
+  // checkboxes, visible or not,
   // while their previews can only be drawn on what is visible — so a hidden
   // checked object was edited blind while the tool appeared to do nothing to
   // the visible one beside it. Checking a hidden scan or mesh shows it for as
@@ -11783,6 +11878,10 @@ export default function PointCloudViewer({
     if (editMode === 'crop') for (const id of cropTargets) ids.add(id);
     if (editMode === 'erase') for (const id of eraseTargets) ids.add(id);
     if (showFilterPanel) for (const id of filterTargets) ids.add(id);
+    if (showResamplePanel) for (const id of resampleTargets) ids.add(id);
+    if (showComputeNormalsPanel) for (const id of normalsTargets) ids.add(id);
+    // A section outlives its panel, so its clouds stay shown while it exists.
+    if (showSectionPanel || slab) for (const id of sectionTargets) ids.add(id);
     if (editMode === 'translate') {
       for (const key of transformTargets) {
         const t = parseTargetKey(key);
@@ -11790,7 +11889,8 @@ export default function PointCloudViewer({
       }
     }
     return ids;
-  }, [editMode, showFilterPanel, cropTargets, eraseTargets, filterTargets, transformTargets]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, slab,
+      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, transformTargets]);
   const toolCheckedMeshes = useMemo(() => {
     const ids = new Set<string>();
     if (editMode === 'crop') for (const id of cropMeshTargets) ids.add(id);
@@ -14402,11 +14502,14 @@ export default function PointCloudViewer({
     for (const id of cloudIds) setCloudColorMode(id, { mode: 'height' });
   }, [setCloudColorMode]);
 
+  // Compute normals on every checked cloud, one after another. Clouds are read
+  // through `cloudsRef` each iteration: the callback is not re-created while it
+  // runs, so a closed-over `clouds` would be the array from before the loop.
   const handleComputeNormals = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    const targetIds = cloudsRef.current
+      .filter(c => normalsTargets.has(c.id) && c.data.octree?.sessionId)
+      .map(c => c.id);
+    if (targetIds.length === 0) return;
 
     setNormalsInProgress(true);
     setNormalsError(null);
@@ -14415,8 +14518,8 @@ export default function PointCloudViewer({
 
     // Consume any pending "Compute Anyway" confirmation, so a later run on a
     // different cloud has to earn its own acknowledgment.
-    const acknowledgeCost = normalsAckCostRef.current;
-    normalsAckCostRef.current = false;
+    const { ack: acknowledgeCost, done } = normalsResumeRef.current;
+    normalsResumeRef.current = { ack: false, done: new Set() };
     setNormalsCostWarning(null);
 
     const params = {
@@ -14425,78 +14528,117 @@ export default function PointCloudViewer({
       orientation: normalsOrientation,
       acknowledge_cost: acknowledgeCost,
     };
+    const multi = targetIds.length > 1;
+    const failures: Array<{ name: string; message: string }> = [];
+    let computed = 0;
+    let totalPoints = 0;
+    let orientNote = '';
 
     try {
-      const ps = await buildPointSource(cloud);
+      for (const [i, id] of targetIds.entries()) {
+        if (abort.signal.aborted) return;
+        if (done.has(id)) { computed++; continue; }
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        if (!cloud) continue;
+        const baseName = cloud.data.fileName ?? id;
+        setNormalsProgress(multi ? `${baseName} (${i + 1}/${targetIds.length})` : null);
 
-      // Session-backed only. Unlike the segmentations there is no inline
-      // branch: normals are stored as session COLUMNS, and a flat cloud has no
-      // session to store them on. `buildPointSource` is still the right gate —
-      // it settles any pending bake first, so the compute never reads a cloud
-      // whose rebuild is mid-flight.
-      if (ps.kind !== 'source') {
-        throw new Error(
-          'Compute Normals needs an imported (session-backed) cloud. This cloud has no backend session to store the result on.');
-      }
-      const octreeInfo = cloud.data.octree;
-      if (!octreeInfo?.sessionId) {
-        throw new Error('Octree cloud is missing its editable session.');
-      }
-      const baseName = cloud.data.fileName ?? id;
-      const sessionId = octreeInfo.sessionId;
+        try {
+          const ps = await buildPointSource(cloud);
 
-      // Defer the octree rebuild on a big cloud: the columns land (so export,
-      // meshing and any later reuse can see them) while the COLORING catches
-      // up on the background refresh queue. Same trade the ground split makes.
-      const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
-      const meta = await sessionComputeNormals(
-        sessionId, { ...params, defer_octree: willDefer }, abort.signal);
-      for (const slug of NORMAL_ATTRIBUTES) retireLabelColumn(id, slug);
+          // Session-backed only. Unlike the segmentations there is no inline
+          // branch: normals are stored as session COLUMNS, and a flat cloud has
+          // no session to store them on. `buildPointSource` is still the right
+          // gate — it settles any pending bake first, so the compute never
+          // reads a cloud whose rebuild is mid-flight.
+          if (ps.kind !== 'source') {
+            throw new Error(
+              'Compute Normals needs an imported (session-backed) cloud. This cloud has no backend session to store the result on.');
+          }
+          const octreeInfo = cloud.data.octree;
+          if (!octreeInfo?.sessionId) {
+            throw new Error('Octree cloud is missing its editable session.');
+          }
+          const sessionId = octreeInfo.sessionId;
 
-      if (!meta.octree_deferred) {
-        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-      }
-      // Every normals column is continuous — a gradient with a numeric
-      // colorbar, never a class list.
-      for (const slug of NORMAL_ATTRIBUTES) registerContinuousSlug(slug);
-      // Curvature is the most legible default: ~0 on smooth bark and ground,
-      // high on foliage and edges. The components are in the same dropdown.
-      setCloudColorMode(id, { mode: 'scalar', field: CURVATURE_ATTRIBUTE });
-      setNormalsStatus({ hasNormals: true, stale: false });
-      setShowComputeNormalsPanel(false);
+          // Defer the octree rebuild on a big cloud: the columns land (so
+          // export, meshing and any later reuse can see them) while the
+          // COLORING catches up on the background refresh queue. Same trade the
+          // ground split makes.
+          const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
+          const meta = await sessionComputeNormals(
+            sessionId, { ...params, defer_octree: willDefer }, abort.signal);
+          for (const slug of NORMAL_ATTRIBUTES) retireLabelColumn(id, slug);
 
-      if (willDefer) {
-        octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+          if (!meta.octree_deferred) {
+            onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+          }
+          // Every normals column is continuous — a gradient with a numeric
+          // colorbar, never a class list.
+          for (const slug of NORMAL_ATTRIBUTES) registerContinuousSlug(slug);
+          // Curvature is the most legible default: ~0 on smooth bark and
+          // ground, high on foliage and edges. The components are in the same
+          // dropdown.
+          setCloudColorMode(id, { mode: 'scalar', field: CURVATURE_ATTRIBUTE });
+
+          if (willDefer) {
+            octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+          }
+          done.add(id);
+          computed++;
+          totalPoints += meta.analyzed_points ?? 0;
+          orientNote = meta.orientation_source === 'beam_origins'
+            ? ' Oriented using per-point beam origins.'
+            : meta.orientation_source === 'scan_origin'
+              ? ' Oriented toward the scan origin.'
+              : meta.orientation_source === 'centroid'
+                ? ' No sensor position known — oriented toward the cloud center.'
+                : '';
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          if (error instanceof ScanCanceledError) return;
+          if (error instanceof CostWarningError) {
+            // Stop here and ask. "Compute Anyway" resumes from this cloud; the
+            // ones already finished are not recomputed.
+            normalsResumeRef.current = { ack: true, done };
+            setNormalsCostWarning(multi ? `${baseName}: ${error.costWarning.message}` : error.costWarning.message);
+            return;
+          }
+          console.error('Compute normals error:', error);
+          failures.push({
+            name: baseName,
+            message: error instanceof Error ? error.message : 'Normal estimation failed',
+          });
+        }
       }
-      const orientNote = meta.orientation_source === 'beam_origins'
-        ? ' Oriented using per-point beam origins.'
-        : meta.orientation_source === 'scan_origin'
-          ? ' Oriented toward the scan origin.'
-          : meta.orientation_source === 'centroid'
-            ? ' No sensor position known — oriented toward the cloud center.'
-            : '';
-      showToast({
-        type: 'success',
-        title: 'Normals Computed',
-        message: `${(meta.analyzed_points ?? 0).toLocaleString()} points.${orientNote}`,
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (error instanceof ScanCanceledError) return;
-      if (error instanceof CostWarningError) {
-        normalsAckCostRef.current = true;
-        setNormalsCostWarning(error.costWarning.message);
-        return;
+
+      if (failures.length > 0) {
+        // Say which clouds failed, and leave the panel open on them.
+        const errorMessage = multi
+          ? failures.map(f => `${f.name}: ${f.message}`).join('\n')
+          : failures[0].message;
+        setNormalsError(errorMessage);
+        showToast({ type: 'error', title: 'Compute Normals Failed', message: errorMessage });
+      } else {
+        setNormalsStatus({ hasNormals: true, stale: false });
+        setShowComputeNormalsPanel(false);
       }
-      console.error('Compute normals error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Normal estimation failed';
-      setNormalsError(errorMessage);
-      showToast({ type: 'error', title: 'Compute Normals Failed', message: errorMessage });
+      if (computed > 0) {
+        showToast({
+          type: 'success',
+          title: 'Normals Computed',
+          // The orientation source is per cloud, so it is only stated for one.
+          message: multi
+            ? `${computed} cloud${computed === 1 ? '' : 's'}, ${totalPoints.toLocaleString()} points.`
+            : `${totalPoints.toLocaleString()} points.${orientNote}`,
+        });
+      }
     } finally {
       setNormalsInProgress(false);
+      setNormalsProgress(null);
       normalsAbortRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, setCloudColorMode,
+  }, [normalsTargets, buildPointSource, onUpdateCloud, setCloudColorMode, showToast,
       normalsNeighbors, normalsUseRadius, normalsRadius, normalsOrientation]);
 
   const cancelComputeNormals = useCallback(() => {
@@ -23460,8 +23602,8 @@ export default function PointCloudViewer({
                     labelOverlayByCloud.get(cloud.id)?.slug
                     ?? labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE
                   }
-                  slabBoxMatrix={sectionTargetCloud?.id === cloud.id ? slabBoxMatrix : null}
-                  slabGhostMatrix={sectionTargetCloud?.id === cloud.id ? slabGhostMatrix : null}
+                  slabBoxMatrix={sectionTargetIds.has(cloud.id) ? slabBoxMatrix : null}
+                  slabGhostMatrix={sectionTargetIds.has(cloud.id) ? slabGhostMatrix : null}
                   labelIndexScheme={labelOverlayByCloud.get(cloud.id)?.scheme ?? null}
                   // GPU clip-volume union (CLIP_INSIDE) combining:
                   //  - committed but unbaked deletes for THIS cloud (the
@@ -24140,15 +24282,13 @@ export default function PointCloudViewer({
             the crop tool's raycaster rather than a new gizmo. The wireframe
             shows where the slab sits; the projection override flattens the view
             so a 2-D lasso selects what it visually encloses. */}
-        {sectionTargetCloud && slabDrawState !== 'idle' && (
+        {sectionActive && slabDrawState !== 'idle' && (
           <BoxDrawRaycaster
             // Pick on the GROUND, not the mid-height of the cloud. Raycasting a
             // plane floating in mid-canopy put the clicks meters away from the
             // geometry the user was aiming at, so the section landed somewhere
             // unrelated to what they clicked on.
-            groundZ={sectionBounds
-              ? (sectionTargetCloud?.data.groundZ ?? sectionBounds.min.z)
-              : 0}
+            groundZ={sectionGroundZ}
             onPick={(x, y) => {
               // Read the draw state through a REF. The two clicks land on the
               // same mounted raycaster, and a state read from this closure is
@@ -24190,7 +24330,7 @@ export default function PointCloudViewer({
           />
         )}
         {/* The volume the second click will create. Gated on sectionBounds,
-            which is derived from sectionTargetCloud and additionally requires
+            which is derived from the section's clouds and additionally requires
             real bounds to size the box against — the same condition the
             raycaster above needs to place a point at all. */}
         {sectionBounds && slabDrawState === 'awaiting-b' && slabFirstPointState && (
@@ -24202,15 +24342,15 @@ export default function PointCloudViewer({
             displayOffset={displayOffset}
           />
         )}
-        {sectionTargetCloud && slabDrawState === 'awaiting-b' && slabFirstPointState && (
+        {sectionActive && slabDrawState === 'awaiting-b' && slabFirstPointState && (
           <SlabCenterlinePreview
             first={slabFirstPointState}
             cursor={slabCursor}
-            z={sectionTargetCloud.data.groundZ ?? sectionBounds?.min.z ?? 0}
+            z={sectionGroundZ}
             displayOffset={displayOffset}
           />
         )}
-        {sectionTargetCloud && slab && (
+        {sectionActive && slab && (
           <SlabWireframe
             slab={slab}
             displayOffset={displayOffset}
@@ -24220,7 +24360,7 @@ export default function PointCloudViewer({
         {/* Not while suspended: the override pins an ortho frustum sized for the
             slab, so "show the whole cloud" would still be seen through a
             section-shaped lens — face-on, and cropped to the slab's extent. */}
-        {sectionTargetCloud && slab && slabLocked && !slabSuspended && (
+        {sectionActive && slab && slabLocked && !slabSuspended && (
           <SectionProjectionOverride slab={slab} />
         )}
         {pointPickMode && (
@@ -25432,7 +25572,7 @@ export default function PointCloudViewer({
 
           So: always visible while a section is in effect, and it carries its own
           way out rather than only naming the tool to go back to. */}
-      {slab && sectionTargetCloud && sectionBounds && (
+      {slab && sectionActive && sectionBounds && (
         <SectionInset
           slab={slab}
           bounds={{ minX: sectionBounds.min.x, minY: sectionBounds.min.y, maxX: sectionBounds.max.x, maxY: sectionBounds.max.y }}
@@ -25440,7 +25580,7 @@ export default function PointCloudViewer({
           suspended={slabSuspended}
         />
       )}
-      {slab && sectionTargetCloud && (
+      {slab && sectionActive && (
         <div
           data-testid="section-hud"
           data-suspended={slabSuspended ? 'true' : 'false'}
@@ -27503,8 +27643,24 @@ export default function PointCloudViewer({
       {/* The PANEL follows its own flag. The section itself (clip, wireframe,
           stroke bound) outlives it — conflating the two made the close button
           appear dead once a slab existed. */}
-      {showSectionPanel && sectionTargetCloud && (
+      {showSectionPanel && (
         <CrossSectionPanel
+          picker={{
+            items: clouds.map(c => {
+              const sc = scans.find(x => x.id === c.id);
+              return {
+                id: c.id,
+                label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+                color: c.color,
+                detail: `${c.data.pointCount.toLocaleString()} pts`,
+                disabledReason: c.data.octree
+                  ? undefined
+                  : 'A section clips imported (streamed) clouds only.',
+              };
+            }),
+            selectedIds: sectionTargets,
+            onChange: (next) => setSectionTargets(new Set(next)),
+          }}
           stacked={!!labelTargetCloud}
           hasSlab={!!slab}
           drawing={slabDrawState !== 'idle'}
@@ -27705,13 +27861,31 @@ export default function PointCloudViewer({
           brushPx={labelBrushPx}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
-          sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}
+          sectionActive={!!slab && sectionTargetIds.has(labelTargetCloud.id)}
           onClearSection={clearSlabSection}
           onClose={() => setShowLabelPanel(false)}
         />
       )}
-      {showComputeNormalsPanel && selectedIds.size === 1 && (
+      {/* No selection-size gate: the panel owns its own cloud picker. */}
+      {showComputeNormalsPanel && (
         <ComputeNormalsPanel
+          picker={{
+            items: clouds.map(c => {
+              const sc = scans.find(x => x.id === c.id);
+              return {
+                id: c.id,
+                label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+                color: c.color,
+                detail: `${c.data.pointCount.toLocaleString()} pts`,
+                disabledReason: c.data.octree?.sessionId
+                  ? undefined
+                  : 'Normals are stored in an imported cloud’s session; this cloud has none.',
+              };
+            }),
+            selectedIds: normalsTargets,
+            onChange: (next) => setNormalsTargets(new Set(next)),
+          }}
+          progress={normalsProgress}
           neighbors={normalsNeighbors}
           useRadius={normalsUseRadius}
           radius={normalsRadius}

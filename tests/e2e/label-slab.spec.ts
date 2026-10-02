@@ -813,3 +813,62 @@ test('Box depth paints only inside the limiting box', async () => {
   await expect.poll(async () => Number(await label.getAttribute('data-labeled-count')),
     { timeout: 20_000 }).toBe(17 * 41 + 5);
 });
+
+test('with two scans selected, the section cuts both — and only the checked ones', async () => {
+  // The section used to be tied to "the ONE selected scan": with two selected
+  // it had no target, the panel never mounted, and the toolbar button did
+  // nothing at all. It now cuts the clouds checked in its own picker.
+  //
+  // Fixtures: the two planes of depth-layers.xyz as SEPARATE clouds — 25 points
+  // at y=0 (depth-near) and 1681 at y=8 (depth-far) — so a slab on the near
+  // plane must leave exactly the near cloud's 25 points drawn.
+  const { app, page } = session;
+  const NEAR = join(repoRoot, 'tests', 'e2e', 'fixtures', 'depth-near.xyz');
+  const FAR = join(repoRoot, 'tests', 'e2e', 'fixtures', 'depth-far.xyz');
+  const nearRow = page.locator('[data-testid="scan-row"][data-scan-name="depth-near"]');
+  const farRow = page.locator('[data-testid="scan-row"][data-scan-name="depth-far"]');
+  await importFiles(app, page, 'import-auto', NEAR);
+  await completeImportWizard(page);
+  await expect(nearRow).toHaveAttribute('data-point-count', String(NEAR_PLANE), { timeout: 30_000 });
+  await importFiles(app, page, 'import-auto', FAR);
+  await completeImportWizard(page);
+  await expect(farRow).toHaveAttribute('data-point-count', String(FAR_PLANE), { timeout: 30_000 });
+
+  // Select BOTH in the Scans pane.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await nearRow.click();
+  await farRow.click({ modifiers: ['ControlOrMeta'] });
+  await expect(nearRow).toHaveAttribute('data-selected', 'true');
+  await expect(farRow).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+
+  /** Points drawn across every cloud, from the renderer's per-cloud stats. */
+  const drawnTotal = () => page.evaluate(() => {
+    const by = (window as any).__octreeMaskByCloud ?? {};
+    return Object.values(by).reduce((n: number, s: any) => n + s.drawn, 0);
+  });
+  // The per-cloud stats outlive a File → New, and a cloud only publishes them
+  // once a mask pass runs on it; start from this scene's alone.
+  await page.evaluate(() => { (window as any).__octreeMaskByCloud = {}; });
+
+  // A 1-thick slab on the near plane: the far cloud, 8 away, is cut entirely.
+  await setSlab(page, 0, 1);
+  await expect(panel).toHaveAttribute('data-has-slab', 'true');
+  await expect(page.getByTestId('section-hud')).toBeVisible();
+  await expect.poll(drawnTotal, { timeout: 20_000 }).toBe(NEAR_PLANE);
+
+  // Unchecking the far cloud takes it out of the section: it draws whole
+  // again, while the near cloud stays cut to the slab it sits in.
+  await panel.locator('[data-testid="section-target-row"][data-label="depth-far"]').locator('input').uncheck();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  await expect.poll(drawnTotal, { timeout: 20_000 }).toBe(TOTAL);
+
+  // Unchecking the last one leaves nothing to section.
+  await panel.locator('[data-testid="section-target-row"][data-label="depth-near"]').locator('input').uncheck();
+  await expect(page.getByTestId('section-hud')).toHaveCount(0);
+  await expect(page.getByTestId('section-draw')).toBeDisabled();
+});

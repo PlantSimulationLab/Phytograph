@@ -392,7 +392,9 @@ A lasso is drawn on screen, so on its own it selects every point inside it at
 **cross-section** is the fix, and it is how professional LiDAR classification is
 normally done.
 
-1. Open **Tools › Pre-processing › Cross-section** and click **Draw section**.
+1. Open **Tools › Pre-processing › Cross-section**. Under **Clouds**, check
+   the clouds the section should cut — the ones selected in the Scans pane
+   start checked — then click **Draw section**.
 2. Click two points in the view to set the line the section runs along. As you
    move toward the second point, the slab you are about to create is drawn so
    you can see the volume before committing to it.
@@ -410,6 +412,15 @@ normally done.
 The section is drawn as a thin, vertical-walled box: bounded by your two clicks
 along the line, half the thickness either side of it, and spanning the full
 height of the cloud.
+
+One section can cut **several clouds at once**: every cloud checked in the
+panel is clipped to the same slab, and the slab is sized to all of them
+together. A cloud you leave unchecked is drawn whole. You can check or
+uncheck clouds after the section is drawn, and the set is kept while the
+section exists, even with the panel closed. Checking a hidden cloud shows it
+until you uncheck it or the section ends. Painting still labels one cloud at
+a time — the one selected for **Label Points** — and it must be one of the
+checked clouds for the section to bound the stroke.
 
 A small **map** in the lower-left corner of the viewport shows the cloud from
 above with the section as a blue band, so you can tell where you are while every

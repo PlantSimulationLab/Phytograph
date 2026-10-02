@@ -1,5 +1,6 @@
 import { Layers3, X, ChevronLeft, ChevronRight, Home, Pencil, Lock, LockOpen, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 import type { SlabStepMode } from '../../../lib/crossSection';
 
 // Presentational cross-section panel. All slab geometry and camera work lives
@@ -20,6 +21,13 @@ const STEP_MODES: Array<{ id: SlabStepMode; label: string; hint: string }> = [
 ];
 
 export interface CrossSectionPanelProps {
+  /** Every point cloud in the scene, with the ones the section cuts checked.
+   *  Flat clouds carry a `disabledReason`: only streamed clouds are clipped. */
+  picker: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
   /**
    * Push the panel down when another tool's panel occupies the top slot. The
    * section is a view state that coexists with a tool rather than replacing it,
@@ -53,6 +61,7 @@ export interface CrossSectionPanelProps {
 }
 
 export function CrossSectionPanel({
+  picker,
   stacked = false,
   hasSlab,
   drawing,
@@ -76,6 +85,7 @@ export function CrossSectionPanel({
   onToggleLocked,
   onClose,
 }: CrossSectionPanelProps) {
+  const targetCount = picker.selectedIds.size;
   return (
     <div
       data-testid="cross-section-panel"
@@ -86,11 +96,12 @@ export function CrossSectionPanel({
       data-suspended={suspended ? 'true' : 'false'}
       data-coverage={coverage ? `${coverage.index}/${coverage.total}` : ''}
       data-thickness={thickness}
+      data-target-count={targetCount}
       // z-20 keeps the panel above the z-10 lasso overlay, which fills the
       // viewport while drawing. Without it the overlay swallows every click here
       // and the panel cannot even be closed. See CropPanel / LabelPanel.
-      className={`absolute right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20 ${
-        stacked ? 'top-[26rem]' : 'top-4'
+      className={`absolute right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20 overflow-y-auto ${
+        stacked ? 'top-[26rem] max-h-[calc(100%-27rem)]' : 'top-4 max-h-[calc(100%-2rem)]'
       }`}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
@@ -104,10 +115,28 @@ export function CrossSectionPanel({
         </button>
       </div>
 
+      <div className="mb-3">
+        <ObjectPicker
+          items={picker.items}
+          selectedIds={picker.selectedIds}
+          onChange={picker.onChange}
+          label="Clouds"
+          emptyMessage="No point clouds in the scene."
+          rowTestId="section-target-row"
+          data-testid="section-targets"
+        />
+        {targetCount === 0 && picker.items.length > 0 && (
+          <p className="mt-1 text-[10px] text-neutral-500" data-testid="section-none-checked">
+            Check the clouds to section.
+          </p>
+        )}
+      </div>
+
       <button
         data-testid="section-draw"
         onClick={onDraw}
-        className={`w-full mb-3 px-2 py-1.5 text-xs font-medium rounded transition-colors flex items-center justify-center gap-1.5 ${
+        disabled={targetCount === 0}
+        className={`w-full mb-3 px-2 py-1.5 text-xs font-medium rounded transition-colors flex items-center justify-center gap-1.5 disabled:bg-neutral-700 disabled:text-neutral-500 disabled:cursor-not-allowed ${
           drawing
             ? 'bg-blue-600 hover:bg-blue-500 text-white'
             : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
@@ -119,7 +148,7 @@ export function CrossSectionPanel({
           : hasSlab ? 'Redraw section' : 'Draw section'}
       </button>
 
-      {hasSlab && (
+      {hasSlab && targetCount > 0 && (
         <>
           <div className="mb-3">
             <label className="text-[10px] text-neutral-400 block mb-1">

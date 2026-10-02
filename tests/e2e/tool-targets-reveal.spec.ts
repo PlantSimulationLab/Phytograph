@@ -7,7 +7,9 @@ import { resetToFreshScene } from './helpers/resetApp';
 
 // A hidden object checked in a tool's picker is shown while it is checked.
 //
-// Crop, Erase, Filter and Transformation act on their picker's CHECKBOXES,
+// Crop, Erase, Filter, Resample, Compute Normals, Cross-section and
+// Transformation act on
+// their picker's CHECKBOXES,
 // visible or not, while their previews are drawn only on what is visible. So a
 // hidden checked object used to be edited blind: the tool appeared to do
 // nothing to the visible object beside it while one the user could not see was
@@ -159,6 +161,84 @@ test('filter: a checked hidden scan is shown, then hidden on close', async () =>
   await scanBox.check();
   await expect(scanRow()).toHaveAttribute('data-visible', 'true');
   await page.getByTestId('filter-close').click();
+  await expect(panel).toHaveCount(0);
+  await expectUntouched();
+});
+
+test('resample: a checked hidden scan is shown, then hidden on close', async () => {
+  const { page } = session;
+  await importHidden();
+  await page.getByTestId('tool-resample').click();
+  const panel = page.getByTestId('resample-panel');
+  await expect(panel).toBeVisible();
+  const scanBox = panel.locator('[data-testid="resample-target-row"][data-label="tiny"]').locator('input');
+  await scanBox.uncheck();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  await scanBox.uncheck();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  await page.getByTestId('resample-close').click();
+  await expect(panel).toHaveCount(0);
+  await expectUntouched();
+});
+
+test('resample: applying to a hidden scan thins it and hides it again', async () => {
+  const { page } = session;
+  await importHidden();
+  await page.getByTestId('tool-resample').click();
+  const panel = page.getByTestId('resample-panel');
+  const scanBox = panel.locator('[data-testid="resample-target-row"][data-label="tiny"]').locator('input');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  await page.getByRole('button', { name: '25%' }).click();
+  await expect(panel).toHaveAttribute('data-points-after', '15');
+  await page.getByTestId('resample-apply').click();
+  // Applying closes the tool, so the scan goes back to hidden — thinned.
+  await expect(scanRow()).toHaveAttribute('data-point-count', '15', { timeout: 60_000 });
+  await expect(panel).toHaveCount(0);
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+});
+
+test('compute normals: a checked hidden scan is shown, then hidden on close', async () => {
+  const { page } = session;
+  await importHidden();
+  await page.getByTestId('tool-compute-normals').click();
+  const panel = page.getByTestId('compute-normals-panel');
+  await expect(panel).toBeVisible();
+  const scanBox = panel.locator('[data-testid="compute-normals-target-row"][data-label="tiny"]').locator('input');
+  await scanBox.uncheck();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  await scanBox.uncheck();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  await page.getByTestId('compute-normals-close').click();
+  await expect(panel).toHaveCount(0);
+  await expectUntouched();
+});
+
+test('cross-section: a checked hidden scan is shown, then hidden on close', async () => {
+  const { page } = session;
+  await importHidden();
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toBeVisible();
+  const scanBox = panel.locator('[data-testid="section-target-row"][data-label="tiny"]').locator('input');
+  await scanBox.uncheck();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  await scanBox.uncheck();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'false');
+  await scanBox.check();
+  await expect(scanRow()).toHaveAttribute('data-visible', 'true');
+  // No section was drawn, so closing the panel ends it.
+  await page.getByTestId('tool-cross-section').click();
   await expect(panel).toHaveCount(0);
   await expectUntouched();
 });

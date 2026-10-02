@@ -175,3 +175,58 @@ test('warns that normals are out of date after the cloud is edited', async () =>
   await expect(page.getByTestId('compute-normals-stale-warning')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('compute-normals-run-button')).toContainText('Recompute');
 });
+
+test('computes normals on every checked cloud, and only on those', async () => {
+  const { app, page } = session;
+  // A second cloud big enough to fit (the backend wants at least 100 points).
+  const BANDS = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalar-bands.xyz');
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tent_normals"]'))
+    .toBeVisible({ timeout: 20_000 });
+  await importFiles(app, page, 'import-point-cloud', BANDS);
+  await completeImportWizard(page);
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="scalar-bands"]'))
+    .toHaveAttribute('data-point-count', '1000', { timeout: 20_000 });
+
+  const panel = page.getByTestId('compute-normals-panel');
+  const runButton = page.getByTestId('compute-normals-run-button');
+  const box = (name: string) => panel
+    .locator(`[data-testid="compute-normals-target-row"][data-label="${name}"]`).locator('input');
+
+  // Nothing selected in the Scans pane → nothing checked, nothing to run.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await page.getByTestId('tool-compute-normals').click();
+  await expect(panel).toHaveAttribute('data-target-count', '0');
+  await expect(runButton).toBeDisabled();
+
+  // Run on `scalar-bands` alone.
+  await box('scalar-bands').check();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  await expect(runButton).toHaveText('Compute Normals');
+  await runButton.click();
+  await expect(panel).toHaveCount(0, { timeout: 120_000 });
+
+  // The button reads the BACKEND's per-session status: "Recompute" only when
+  // every checked cloud carries normals. scalar-bands does; the unchecked tent must
+  // not have been touched, so checking it too drops back to "Compute".
+  await page.getByTestId('tool-compute-normals').click();
+  await box('tent_normals').uncheck();
+  await box('scalar-bands').check();
+  await expect(runButton).toHaveText('Recompute Normals', { timeout: 20_000 });
+  await box('tent_normals').check();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  await expect(runButton).toHaveText('Compute Normals', { timeout: 20_000 });
+
+  // Run on both: now each one alone, and the pair, report normals.
+  await runButton.click();
+  await expect(panel).toHaveCount(0, { timeout: 120_000 });
+  await page.getByTestId('tool-compute-normals').click();
+  await box('tent_normals').check();
+  await box('scalar-bands').check();
+  await expect(runButton).toHaveText('Recompute Normals', { timeout: 20_000 });
+  await box('scalar-bands').uncheck();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  await expect(runButton).toHaveText('Recompute Normals', { timeout: 20_000 });
+});
