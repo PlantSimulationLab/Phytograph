@@ -80,9 +80,18 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // 5s/10s budgets were laptop-sized on their own merits, but note that a
     // failure here is far more likely to be something eating the click than the
     // op genuinely running long.
+    //
+    // Both halves of the running state are sampled in ONE in-page frame. As two
+    // separate Playwright assertions this raced the op itself: Cancel was seen,
+    // the run then finished and the panel auto-closed on success, and the
+    // follow-up "run button is disabled" waited 15 s on an element that no
+    // longer existed. That is the "finished first" outcome this spec allows.
     await runButton.click();
-    await expect(cancelButton).toBeVisible({ timeout: 30_000 });
-    await expect(runButton).toBeDisabled();
+    await page.waitForFunction(() => {
+      const run = document.querySelector<HTMLButtonElement>('[data-testid="dem-run-button"]');
+      const cancel = document.querySelector<HTMLElement>('[data-testid="dem-cancel-button"]');
+      return !!run && !!cancel && run.disabled && cancel.getClientRects().length > 0;
+    }, undefined, { timeout: 30_000 });
 
     // Cancel it. (Best-effort — on a fast machine the tiny grid may finish first;
     // either way the UI must end up idle.)
