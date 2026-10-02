@@ -11788,6 +11788,63 @@ export default function PointCloudViewer({
     setCropMeshTargetsState(pruned);
   }, [meshes]);
 
+  // A CHECKED tool target is always on screen. Crop, Erase, Filter and the
+  // Transformation tool all act on their picker's checkboxes, visible or not,
+  // while their previews can only be drawn on what is visible — so a hidden
+  // checked object was edited blind while the tool appeared to do nothing to
+  // the visible one beside it. Checking a hidden scan or mesh shows it for as
+  // long as it stays checked; unchecking it, or closing the tool (applying
+  // included), hides it again. Objects that were already visible are never
+  // touched.
+  const toolCheckedClouds = useMemo(() => {
+    const ids = new Set<string>();
+    if (editMode === 'crop') for (const id of cropTargets) ids.add(id);
+    if (editMode === 'erase') for (const id of eraseTargets) ids.add(id);
+    if (showFilterPanel) for (const id of filterTargets) ids.add(id);
+    if (editMode === 'translate') {
+      for (const key of transformTargets) {
+        const t = parseTargetKey(key);
+        if (t?.kind === 'cloud') ids.add(t.id);
+      }
+    }
+    return ids;
+  }, [editMode, showFilterPanel, cropTargets, eraseTargets, filterTargets, transformTargets]);
+  const toolCheckedMeshes = useMemo(() => {
+    const ids = new Set<string>();
+    if (editMode === 'crop') for (const id of cropMeshTargets) ids.add(id);
+    if (editMode === 'translate') {
+      for (const key of transformTargets) {
+        const t = parseTargetKey(key);
+        if (t?.kind === 'mesh') ids.add(t.id);
+      }
+    }
+    return ids;
+  }, [editMode, cropMeshTargets, transformTargets]);
+  const toolRevealedRef = useRef({ clouds: new Set<string>(), meshes: new Set<string>() });
+  useEffect(() => {
+    const revealed = toolRevealedRef.current;
+    for (const id of [...revealed.clouds]) {
+      if (toolCheckedClouds.has(id)) continue;
+      revealed.clouds.delete(id);
+      if (clouds.some(c => c.id === id && c.visible)) onHideScan(id);
+    }
+    const rehide = [...revealed.meshes].filter(id => !toolCheckedMeshes.has(id));
+    if (rehide.length > 0) {
+      for (const id of rehide) revealed.meshes.delete(id);
+      setMeshes(prev => prev.map(m => (rehide.includes(m.id) && m.visible ? { ...m, visible: false } : m)));
+    }
+    for (const cloud of clouds) {
+      if (cloud.visible || !toolCheckedClouds.has(cloud.id)) continue;
+      revealed.clouds.add(cloud.id);
+      onToggleVisibility(cloud.id);
+    }
+    const reveal = meshes.filter(m => !m.visible && toolCheckedMeshes.has(m.id)).map(m => m.id);
+    if (reveal.length > 0) {
+      for (const id of reveal) revealed.meshes.add(id);
+      setMeshes(prev => prev.map(m => (reveal.includes(m.id) && !m.visible ? { ...m, visible: true } : m)));
+    }
+  }, [toolCheckedClouds, toolCheckedMeshes, clouds, meshes, onHideScan, onToggleVisibility, setMeshes]);
+
   // An object deleted while the tool is open drops out of the checked set.
   useEffect(() => {
     if (editMode !== 'translate') return;
@@ -24415,6 +24472,8 @@ export default function PointCloudViewer({
               const oct = octreeRegistryRef.current.get(c.id);
               return oct ? [oct] : [];
             })}
+            // ...and on mesh surfaces whenever a mesh is being cropped.
+            snapToMeshes={cropMeshTargets.size > 0}
             onMove={(x, y) => {
               boxDrawCursorRef.current = { x: x + displayOffset.x, y: y + displayOffset.y };
               // Re-render so the corner-1 marker / preview box follows the

@@ -5,6 +5,14 @@ covers the five operations you'll reach for most often: **transform**,
 **crop**, **erase**, **filter**, and **resample**. Apply them in
 roughly that order.
 
+!!! note "Checking a hidden object shows it"
+    Transform, Crop, Erase and Filter act on the objects **checked** in their
+    panel, not on what happens to be visible. So that you always see what a
+    tool is about to change, checking a hidden scan or mesh shows it for as
+    long as it stays checked. It is hidden again when you uncheck it or the
+    tool closes (applying included). Objects that were already visible are
+    left alone.
+
 ## Transform (move, rotate and scale)
 
 Use **Transform** (in the tool column) to move, rotate and scale point clouds
@@ -439,6 +447,9 @@ region then cuts all of them — handy for trimming a cloud and the surface
 triangulated from it to the same plot. The button is available with only a
 mesh in the scene, and the Apply button names what it will cut ("Apply crop to
 1 scan + 2 meshes").
+
+With a mesh checked, **Draw box in viewport** lands each corner on the mesh
+surface under the cursor, the same way it lands on a scan's points.
 
 Everything about the region works as it does for a cloud: **Box**, **Rect**
 and **Polygon**; **Keep Inside**, **Keep Outside** and **Segment** (the

@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
 import { pickAcrossOctrees } from '../../../lib/octreeMultiPick';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
+import { nearestSnapSurfaceHit } from '../../../lib/originSnapSurface';
 import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octreePickSplat';
 
 // Invisible click target that fills the canvas. While active (mounted),
@@ -17,7 +18,9 @@ import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octree
 //
 //   1. If `octrees` is non-empty, a potree GPU pick along the event ray — the
 //      corner lands on the SURFACE actually under the cursor.
-//   2. Otherwise (or on a miss), the analytic ray x plane at `groundZ`.
+//   2. With `snapToMeshes`, the mesh / QSM surface under the cursor; whichever
+//      of 1 and 2 is nearer the camera wins.
+//   3. Otherwise (or on a miss), the analytic ray x plane at `groundZ`.
 //
 // Step 1 exists because step 2 alone is only correct from a near-top-down
 // view. Projecting every click onto one flat plane at the scene floor means
@@ -33,6 +36,7 @@ import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octree
 export function BoxDrawRaycaster({
   groundZ,
   octrees,
+  snapToMeshes = false,
   onPick,
   onMove,
 }: {
@@ -48,6 +52,12 @@ export function BoxDrawRaycaster({
   // root at the display offset), so the caller adds the offset back once and
   // does not need to know which path answered.
   octrees?: PointCloudOctree[];
+  // Also land corners on mesh / QSM surfaces (lib/originSnapSurface). Without
+  // it a click on a mesh carries on to the ground plane — on a mesh-only scene
+  // that is the mesh's own floor, so a corner aimed at the top of an object
+  // lands its whole height further along the view ray. Off by default for the
+  // same reason `octrees` is optional.
+  snapToMeshes?: boolean;
   onPick: (x: number, y: number) => void;
   onMove?: (x: number, y: number) => void;
 }) {
@@ -66,7 +76,7 @@ export function BoxDrawRaycaster({
   // the same reason PointPicker does: a corner must not land on a point the
   // user cannot see. The caller suspends the crop clip while corners are being
   // placed, so what is pickable and what is visible agree.
-  const surfacePoint = (ray: THREE.Ray): { x: number; y: number } | null => {
+  const surfacePoint = (ray: THREE.Ray): { x: number; y: number; z: number } | null => {
     if (!octrees || octrees.length === 0) return null;
     try {
       const hit = pickAcrossOctrees(octrees, gl, camera, ray, {
@@ -76,7 +86,7 @@ export function BoxDrawRaycaster({
         // corner landed. See lib/octreePickSplat.
         onBeforePickRender: makeInflatePickSplat(gl.getPixelRatio()),
       }) as { position?: { x: number; y: number; z: number } } | null;
-      if (hit?.position) return { x: hit.position.x, y: hit.position.y };
+      if (hit?.position) return hit.position;
     } catch {
       // A pick against a half-streamed octree can throw; fall through to the
       // ground plane rather than dropping the click.
@@ -96,8 +106,23 @@ export function BoxDrawRaycaster({
     };
   };
 
-  const hitPoint = (e: ThreeEvent<MouseEvent>): { x: number; y: number } | null =>
-    surfacePoint(e.ray) ?? planePoint(e.ray);
+  // Mesh / QSM surface under the cursor. Their groups carry click handlers, so
+  // R3F has already raycast them (through the BVH) for this event — free, and
+  // in display space like the other two paths.
+  const meshPoint = (e: ThreeEvent<MouseEvent>) =>
+    snapToMeshes ? nearestSnapSurfaceHit(e.intersections) : null;
+
+  const hitPoint = (e: ThreeEvent<MouseEvent>): { x: number; y: number } | null => {
+    const mesh = meshPoint(e);
+    const cloud = surfacePoint(e.ray);
+    if (mesh && cloud) {
+      // A mesh in front of the cloud point is what the user clicked on.
+      const cloudDistance = new THREE.Vector3(cloud.x, cloud.y, cloud.z)
+        .sub(e.ray.origin).dot(e.ray.direction);
+      return mesh.distance < cloudDistance ? mesh.point : cloud;
+    }
+    return mesh?.point ?? cloud ?? planePoint(e.ray);
+  };
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
     const hit = hitPoint(e);
@@ -106,8 +131,8 @@ export function BoxDrawRaycaster({
     onPick(hit.x, hit.y);
   };
 
-  // The live preview follows the GROUND PLANE only, never the surface pick.
-  // A GPU pick renders the visible nodes into an off-screen index buffer and
+  // The live preview follows a mesh surface or the GROUND PLANE, never the
+  // octree surface pick. A GPU pick renders the visible nodes into an off-screen index buffer and
   // reads them back; doing that on every pointermove would stall the frame
   // loop. The plane is analytic and free, so the rubber-band stays smooth and
   // the click itself pays for the accurate answer. The preview can therefore
@@ -115,7 +140,7 @@ export function BoxDrawRaycaster({
   // since the marker at corner 1 is drawn from the COMMITTED value.
   const handleMove = (e: ThreeEvent<MouseEvent>) => {
     if (!onMove) return;
-    const hit = planePoint(e.ray);
+    const hit = meshPoint(e)?.point ?? planePoint(e.ray);
     if (!hit) return;
     onMove(hit.x, hit.y);
   };

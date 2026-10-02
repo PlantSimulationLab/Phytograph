@@ -294,3 +294,47 @@ test('draw box: dragging the viewport while placing corners does not orbit', asy
   await page.keyboard.press('Escape');
   await expect(button).toContainText('Draw box in viewport');
 });
+
+// ── 4. Corners land on a MESH surface too ─────────────────────────────────
+//
+// Fixture: tall-block.ply — a 3 × 1 × 6 block, x ∈ [0,3], y ∈ [0,1], z ∈ [0,6].
+//
+// The surface pick above is a potree pick, so it only ever answered for point
+// clouds. With a mesh checked instead, every click fell through to the ground
+// plane — and in a mesh-only scene that plane is the mesh's own floor, so a
+// corner aimed at the block's face carried on through it and landed the height
+// of the hit further along the view ray. On a real scanned mesh that put the
+// box nowhere near what was clicked.
+//
+// From the oblique camera (looking along +y, ~27° down) both clicks hit the
+// block's near face, so each corner's y must be inside the block: y ∈ [0, 1].
+// The ground-plane fallback for the same two rays lands at y ≈ 2·z of the hit
+// — several meters past the block's far face.
+test('draw box: corners land on the mesh surface under the cursor', async () => {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', join(repoRoot, 'tests', 'e2e', 'fixtures', 'tall-block.ply'));
+  const meshRow = page.locator('[data-testid="mesh-row"][data-mesh-name="tall-block"]');
+  await expect(meshRow).toHaveAttribute('data-triangle-count', '12', { timeout: 30_000 });
+
+  await page.getByTestId('tool-crop').click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toBeVisible();
+  await panel.locator('[data-testid="crop-mesh-target-row"][data-label="tall-block"]').locator('input').check();
+  await expect(panel).toHaveAttribute('data-mesh-count', '1');
+  await expect(panel).toHaveAttribute('data-crop-max', '3.000,1.000,6.000');
+
+  await orientOblique(page);
+  await drawBoxAt(page, { fx: 0.47, fy: 0.42 }, { fx: 0.53, fy: 0.58 });
+
+  const drawn = await cropBounds(page);
+  const where = `box x [${drawn.min.x}, ${drawn.max.x}] y [${drawn.min.y}, ${drawn.max.y}]`;
+  expect(drawn.min.y, where).toBeGreaterThan(-0.05);
+  expect(drawn.max.y, where).toBeLessThan(1.05);
+  // Two distinct clicks on the face are two distinct x, both on the block.
+  expect(drawn.min.x, where).toBeGreaterThan(-0.05);
+  expect(drawn.max.x, where).toBeLessThan(3.05);
+  expect(drawn.max.x - drawn.min.x, where).toBeGreaterThan(0.05);
+  // The box keeps the checked mesh's full height.
+  expect(drawn.min.z).toBeCloseTo(0, 3);
+  expect(drawn.max.z).toBeCloseTo(6, 3);
+});
