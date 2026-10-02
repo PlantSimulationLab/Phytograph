@@ -713,7 +713,9 @@ count when the write finishes — there's no need to click Export twice.
 ### Mesh formats
 
 Click a format and pick the destination in the save dialog; the file is written
-when you confirm, and a toast reports what was saved.
+when you confirm, and a toast reports what was saved. The suggested filename is
+the mesh's name in the Meshes panel (spaces become underscores), so renaming a
+mesh there also names its export.
 
 | Format | Carries |
 |---|---|

@@ -10,6 +10,7 @@ import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseTo
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
 import { bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
+import { mergeMeshData, mergedMeshName, meshMergeBlockReason, meshMergeSetBlockReason } from '../lib/meshMerge';
 import { countMask, cropMeshEntry, meshCropBlockReason, meshTriangleRegionMask, meshWorldBounds, subsetMaterials, subsetMeshData } from '../lib/meshCrop';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
@@ -382,7 +383,7 @@ export type {
 } from '../lib/pointCloudTypes';
 import { plantResponseToMeshData } from '../lib/plantMeshData';
 import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportFormat } from '../lib/qsmExport';
-import { serializeMeshObj, serializeMeshPly, serializeMeshStl, sanitizeMeshName } from '../lib/meshExport';
+import { serializeMeshObj, serializeMeshPly, serializeMeshStl, meshExportFileName } from '../lib/meshExport';
 
 // Appended to the Segment Trees completion toast when the cloud has never been
 // through Ground Segmentation (`ground_warning`). Worded as a reminder because
@@ -10469,7 +10470,7 @@ export default function PointCloudViewer({
       { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
       { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
       { id: 'cloud-auto-register', name: 'Auto-Register Clouds', keywords: ['register', 'registration', 'global', 'coarse', 'automatic', 'align', 'rotated', 'match'], action: () => setShowAutoRegisterDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Sparkles, testId: 'tool-auto-register', multiInput: true },
-      { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
+      { id: 'cloud-stitch', name: 'Stitch', keywords: ['merge', 'combine', 'join', 'clouds', 'mesh', 'meshes'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true, multiInputKind: 'cloud-or-mesh' },
       // Menu-bar and palette only — deliberately NO `toolGroup` and NO `icon`,
       // so it never takes a slot in the Tools palette. It is a project-wide
       // corrective, not something reached for mid-workflow, and a toolbar
@@ -12666,12 +12667,12 @@ export default function PointCloudViewer({
     const mesh = meshes.find(m => m.id === meshId);
     if (!mesh) return;
 
-    const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
-    // Use plant name if it's a plant, otherwise use source cloud filename
-    const defaultBase = mesh.isPlant
-      ? `${mesh.plantType}_plant_age${mesh.plantAge}`
-      : (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'mesh');
-    const suggestedName = `${sanitizeMeshName(defaultBase)}_mesh.${format}`;
+    // Suggest the name the Meshes panel shows for this mesh (collision ordinal
+    // included, so two "Helios triangulation" meshes don't offer the same file).
+    const suggestedName = meshExportFileName(
+      meshDisplayNameFor(mesh, meshes, m => clouds.find(c => c.id === m.sourceCloudId)?.data.fileName),
+      format,
+    );
     const comments = mesh.isPlant
       ? [`Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`]
       : [];
@@ -12695,7 +12696,7 @@ export default function PointCloudViewer({
       const slash = savePath ? savePath.lastIndexOf(sep) : -1;
       const dir = savePath && slash >= 0 ? savePath.slice(0, slash) : '';
       const chosenFile = savePath ? savePath.slice(slash + 1) : suggestedName;
-      const baseName = chosenFile.replace(/\.[^.]+$/, '') || sanitizeMeshName(defaultBase);
+      const baseName = chosenFile.replace(/\.[^.]+$/, '') || suggestedName.replace(/\.[^.]+$/, '');
 
       // Write the mesh where it is DRAWN. `mesh.data` holds local vertices;
       // serializing it as-is dropped the mesh's position / rotation / scale,
@@ -12994,6 +12995,80 @@ export default function PointCloudViewer({
     return !!(mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
               mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData));
   }, []);
+
+  // Merge 2+ meshes into one (the Meshes side of the Stitch dialog). Each source
+  // is baked to where it is DRAWN, so the result sits exactly where they were
+  // seen. Sources are taken in SCENE order, not pick order, so "first" below
+  // (pivot, color, opacity, name order) is the topmost row. `isPlane` is
+  // deliberately not carried: it also drives the row's center/size readout,
+  // which reads the transform of a unit quad and would be wrong for a merge.
+  // Vertices are baked relative to the first source's position, which the
+  // merged mesh then takes as its own — a mesh placed far from the origin keeps
+  // its Float32 vertex precision that way.
+  const handleMergeMeshes = useCallback((ids: string[], opts?: { retainOriginals?: boolean }) => {
+    const sources = meshes.filter(m => ids.includes(m.id) && !meshMergeBlockReason(m, isTriangulatedMesh(m)));
+    if (sources.length < 2) return;
+    const setBlock = meshMergeSetBlockReason(sources);
+    if (setBlock) {
+      showToast({ type: 'error', title: 'Cannot merge these meshes', message: setBlock });
+      return;
+    }
+    const retain = opts?.retainOriginals === true;
+
+    const matrices = sources.map(meshCropMatrixOf);
+    const pivot = new THREE.Vector3().setFromMatrixPosition(matrices[0]);
+    const toPivot = new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z);
+    const { data, materials } = mergeMeshData(sources.map((m, i) => ({
+      data: m.data,
+      matrix: toPivot.clone().multiply(matrices[i]),
+      color: m.color,
+      materials: m.plantMaterials,
+    })));
+
+    const first = sources[0];
+    const merged: MeshEntry = {
+      id: crypto.randomUUID(),
+      sourceCloudId: 'imported',
+      data,
+      ...(materials ? { plantMaterials: materials } : {}),
+      visible: true,
+      color: first.color,
+      method: 'delaunay',
+      name: mergedMeshName(sources.map(displayNameOfMesh), meshes.map(displayNameOfMesh)),
+    };
+    const transformOf = (id: string): TransformState => ({
+      position: { ...(meshPositions.get(id) || { x: 0, y: 0, z: 0 }) },
+      rotation: { ...(meshRotations.get(id) || { x: 0, y: 0, z: 0 }) },
+      scale: { ...(meshScales.get(id) || { x: 1, y: 1, z: 1 }) },
+    });
+    const sourceActions: SceneAction[] = sources.map(m => (retain
+      ? { t: 'replaceObject', kind: 'mesh', id: m.id, before: m, after: { ...m, visible: false } }
+      : { t: 'remove', kind: 'mesh', id: m.id, index: meshes.findIndex(x => x.id === m.id), object: m, transform: transformOf(m.id) }));
+    scene.commit({
+      label: retain ? `Merge ${sources.length} meshes (kept originals)` : `Merge ${sources.length} meshes`,
+      actions: [
+        ...sourceActions,
+        {
+          t: 'add', kind: 'mesh', id: merged.id, object: merged,
+          transform: { position: { x: pivot.x, y: pivot.y, z: pivot.z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+        },
+      ],
+    });
+    // The merged mesh should look like the first one it came from. Opacity is
+    // carried as the EFFECTIVE value, not just an explicit override: the merge
+    // is tagged 'imported' (default 1.0) while a shape defaults to 0.7, so
+    // copying only overrides would turn merged shapes opaque.
+    const opacity = meshOpacities.get(first.id) ?? defaultMeshOpacity(first);
+    setMeshOpacities(prev => new Map(prev).set(merged.id, opacity));
+    const colorMode = meshColorModes.get(first.id);
+    if (colorMode !== undefined) setMeshColorModes(prev => new Map(prev).set(merged.id, colorMode));
+    setSelectedMeshIds(new Set([merged.id]));
+    showToast({
+      type: 'success',
+      title: 'Meshes Merged',
+      message: `Combined ${sources.length} meshes into ${data.triangleCount.toLocaleString()} triangles${retain ? ' — originals kept and hidden' : ''}`,
+    });
+  }, [meshes, isTriangulatedMesh, meshCropMatrixOf, displayNameOfMesh, meshPositions, meshRotations, meshScales, meshOpacities, meshColorModes, scene]);
 
   // Whether a per-mesh opacity control is meaningful. Transparency blends a
   // solid / vertex-colored surface; it's a no-op on textured plants, whose
@@ -29124,6 +29199,13 @@ export default function PointCloudViewer({
         })}
         initialSelectedIds={selectedIds}
         onStitch={(ids, opts) => { if (ids.length >= 2) onStitchClouds?.(ids, opts); }}
+        meshes={meshes.map(m => ({
+          id: m.id, label: displayNameOfMesh(m), color: m.color, triangleCount: m.data.triangleCount,
+          disabledReason: meshMergeBlockReason(m, isTriangulatedMesh(m)),
+        }))}
+        initialSelectedMeshIds={selectedMeshIds}
+        onMergeMeshes={handleMergeMeshes}
+        meshSetBlockReason={(ids) => meshMergeSetBlockReason(meshes.filter(m => ids.includes(m.id)))}
       />
       <AlignDialog
         isOpen={showAlignDialog}

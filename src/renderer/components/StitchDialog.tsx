@@ -1,6 +1,7 @@
-// Self-contained "Stitch Clouds" dialog. Picks 2+ point clouds to merge into one,
-// independent of the viewport selection (seeded from it when available). Replaces
-// the old selection-gated stitch button.
+// Self-contained "Stitch" dialog. Picks 2+ point clouds to merge into one cloud,
+// or — on the Meshes side of the toggle at the top — 2+ meshes to merge into one
+// mesh. Independent of the viewport selection (seeded from it when available).
+// Replaces the old selection-gated stitch button.
 import { useState, useEffect, useMemo } from 'react';
 import { Merge, X, AlertTriangle } from 'lucide-react';
 import { ObjectPicker, type PickerItem } from './ObjectPicker';
@@ -17,6 +18,18 @@ export interface StitchCloudOption {
   hasOrigin?: boolean;
 }
 
+export interface StitchMeshOption {
+  id: string;
+  label: string;
+  color?: string;
+  triangleCount?: number;
+  // Why this mesh cannot be merged (a triangulation, plant, DEM, …). The row
+  // is listed but disabled, so the user sees why it is not on offer.
+  disabledReason?: string;
+}
+
+export type StitchMode = 'clouds' | 'meshes';
+
 interface StitchDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -24,10 +37,24 @@ interface StitchDialogProps {
   initialSelectedIds?: Set<string>;
   // `opts` is an object so future stitch options stay additive.
   onStitch: (ids: string[], opts: { retainOriginals: boolean }) => void;
+  meshes?: StitchMeshOption[];
+  initialSelectedMeshIds?: Set<string>;
+  onMergeMeshes?: (ids: string[], opts: { retainOriginals: boolean }) => void;
+  // Why the picked meshes cannot be merged TOGETHER although each is mergeable
+  // on its own (textured with untextured), or undefined when they can.
+  meshSetBlockReason?: (ids: string[]) => string | undefined;
 }
 
-export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onStitch }: StitchDialogProps) {
+const NO_MESHES: StitchMeshOption[] = [];
+
+export function StitchDialog({
+  isOpen, onClose, clouds, initialSelectedIds, onStitch,
+  meshes = NO_MESHES, initialSelectedMeshIds, onMergeMeshes, meshSetBlockReason,
+}: StitchDialogProps) {
+  const [mode, setMode] = useState<StitchMode>('clouds');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Each side keeps its own picks, so flipping the toggle loses nothing.
+  const [selectedMeshes, setSelectedMeshes] = useState<Set<string>>(new Set());
   // When true the input clouds survive the merge (hidden) instead of being
   // removed from the scene. Deliberately not persisted — resets on every open,
   // so the destructive default is always an explicit choice.
@@ -40,6 +67,17 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
       for (const id of initialSelectedIds) if (clouds.some(c => c.id === id)) seed.add(id);
     }
     setSelected(seed);
+    const meshSeed = new Set<string>();
+    if (initialSelectedMeshIds) {
+      for (const id of initialSelectedMeshIds) {
+        if (meshes.some(m => m.id === id && !m.disabledReason)) meshSeed.add(id);
+      }
+    }
+    setSelectedMeshes(meshSeed);
+    // Open on the side the user is evidently working on: meshes when only
+    // meshes are selected in the viewport, or when there are no clouds at all.
+    const meshSelected = !!initialSelectedMeshIds && meshes.some(m => initialSelectedMeshIds.has(m.id));
+    setMode((meshSelected && seed.size === 0) || (clouds.length === 0 && meshes.length > 0) ? 'meshes' : 'clouds');
     setRetainOriginals(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
@@ -63,9 +101,42 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
     [clouds, selected],
   );
 
+  const meshItems = useMemo<PickerItem[]>(
+    () => meshes.map(m => ({
+      id: m.id,
+      label: m.label,
+      color: m.color,
+      detail: m.triangleCount != null ? `${m.triangleCount.toLocaleString()} triangles` : undefined,
+      disabledReason: m.disabledReason,
+    })),
+    [meshes],
+  );
+
   if (!isOpen) return null;
 
-  const canStitch = selected.size >= 2;
+  const meshMode = mode === 'meshes';
+  const noun = meshMode ? 'meshes' : 'clouds';
+  // Count only picks that still exist and are still pickable. An object removed
+  // while the dialog is open (an undo, say) would otherwise leave the button
+  // live on a set the handler then rejects — closing the dialog on a no-op.
+  const pickable = new Set(meshMode
+    ? meshes.filter(m => !m.disabledReason).map(m => m.id)
+    : clouds.map(c => c.id));
+  const picked = new Set(Array.from(meshMode ? selectedMeshes : selected).filter(id => pickable.has(id)));
+  const setBlock = meshMode && picked.size >= 2 ? meshSetBlockReason?.(Array.from(picked)) : undefined;
+  const canStitch = picked.size >= 2 && !setBlock;
+  const modeButton = (m: StitchMode, text: string) => (
+    <button
+      data-testid={`stitch-mode-${m}`}
+      aria-pressed={mode === m}
+      onClick={() => setMode(m)}
+      className={`flex-1 px-3 py-1 rounded text-xs font-medium transition-colors ${
+        mode === m ? 'bg-neutral-600 text-white' : 'text-neutral-400 hover:text-neutral-200'
+      }`}
+    >
+      {text}
+    </button>
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
@@ -74,7 +145,7 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 bg-neutral-800/90">
           <div className="flex items-center gap-2">
             <Merge className="w-4 h-4 text-neutral-400" />
-            <h2 className="text-sm font-semibold text-white">Stitch Point Clouds</h2>
+            <h2 className="text-sm font-semibold text-white">Stitch</h2>
           </div>
           <button onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
             <X className="w-4 h-4 text-neutral-400" />
@@ -82,18 +153,39 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
         </div>
 
         <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+          <div className="flex gap-1 p-1 rounded bg-neutral-900/60 border border-neutral-700">
+            {modeButton('clouds', 'Point clouds')}
+            {modeButton('meshes', 'Meshes')}
+          </div>
+
           <p className="text-xs text-neutral-400">
-            Select two or more clouds to merge into a single point cloud.
+            {meshMode
+              ? 'Select two or more meshes to merge into a single mesh, where they are drawn.'
+              : 'Select two or more clouds to merge into a single point cloud.'}
           </p>
-          <ObjectPicker
-            data-testid="stitch-picker"
-            label="Clouds"
-            items={items}
-            selectedIds={selected}
-            onChange={setSelected}
-            mode="multi"
-            emptyMessage="No point clouds available to stitch."
-          />
+          {meshMode ? (
+            <ObjectPicker
+              key="meshes"
+              data-testid="stitch-mesh-picker"
+              label="Meshes"
+              items={meshItems}
+              selectedIds={selectedMeshes}
+              onChange={setSelectedMeshes}
+              mode="multi"
+              emptyMessage="No meshes available to merge."
+            />
+          ) : (
+            <ObjectPicker
+              key="clouds"
+              data-testid="stitch-picker"
+              label="Clouds"
+              items={items}
+              selectedIds={selected}
+              onChange={setSelected}
+              mode="multi"
+              emptyMessage="No point clouds available to stitch."
+            />
+          )}
 
           <label
             data-testid="stitch-retain-originals"
@@ -106,14 +198,24 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
               className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-green-600"
             />
             <span className="flex flex-col">
-              <span className="text-xs text-neutral-300">Keep original clouds</span>
+              <span className="text-xs text-neutral-300">Keep original {noun}</span>
               <span className="text-[10px] text-neutral-500">
                 Sources stay in the scene (hidden) instead of being removed.
               </span>
             </span>
           </label>
 
-          {originsLost > 0 && (
+          {setBlock && (
+            <div
+              data-testid="stitch-mesh-block"
+              className="flex gap-2 text-[11px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2.5 py-2"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+              <div>{setBlock}</div>
+            </div>
+          )}
+
+          {!meshMode && originsLost > 0 && (
             <div
               data-testid="stitch-origin-warning"
               className="flex gap-2 text-[11px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2.5 py-2"
@@ -141,17 +243,21 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
 
         <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-700 bg-neutral-800/90">
           <span className="text-[11px] text-neutral-500">
-            {canStitch ? `${selected.size} clouds selected` : 'Select at least 2 clouds'}
+            {picked.size >= 2 ? `${picked.size} ${noun} selected` : `Select at least 2 ${noun}`}
           </span>
           <button
             data-testid="stitch-run"
-            onClick={() => { onStitch(Array.from(selected), { retainOriginals }); onClose(); }}
+            onClick={() => {
+              if (meshMode) onMergeMeshes?.(Array.from(picked), { retainOriginals });
+              else onStitch(Array.from(picked), { retainOriginals });
+              onClose();
+            }}
             disabled={!canStitch}
             className={`px-4 py-1.5 rounded text-xs font-medium transition-colors ${
               canStitch ? 'bg-green-600 hover:bg-green-500 text-white' : 'bg-neutral-700 text-neutral-500 cursor-not-allowed'
             }`}
           >
-            {originsLost > 0 ? 'Stitch anyway' : 'Stitch'}
+            {meshMode ? 'Merge' : originsLost > 0 ? 'Stitch anyway' : 'Stitch'}
           </button>
         </div>
       </div>

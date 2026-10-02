@@ -107,7 +107,9 @@ test('exports a triangulated mesh to OBJ at the path the user chose', async () =
   // than naming the file behind the user's back.
   const calls = (await getSaveDialogCalls(app)) as { defaultPath?: string }[];
   expect(calls).toHaveLength(1);
-  expect(calls[0].defaultPath).toMatch(/\.obj$/);
+  // …named after the mesh as the Meshes panel shows it ("Ball-pivoting
+  // triangulation (tiny.xyz)"), not a generic "mesh_mesh.obj".
+  expect(calls[0].defaultPath).toBe('Ball-pivoting_triangulation_tiny.obj');
 
   // The bytes on disk describe the mesh the UI reported.
   const obj = readFileSync(objPath, 'utf8');

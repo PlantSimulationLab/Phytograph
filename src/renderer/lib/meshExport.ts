@@ -33,6 +33,20 @@ export function sanitizeMeshName(name: string, fallback = 'mesh'): string {
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
+// Default filename offered when exporting a mesh: the name the Meshes panel
+// shows for it, made filesystem-safe. The panel label can embed the source
+// cloud's filename ("Poisson triangulation (tree.xyz)") or BE a filename
+// ("imported.obj"), so a file extension at the end or just inside a closing
+// parenthesis is dropped — otherwise the suggestion reads "tree.xyz.ply". The
+// extension must start with a letter so a version-like "v1.5" survives.
+export function meshExportFileName(displayName: string, format: string): string {
+  const stem = displayName
+    .replace(/\.[A-Za-z][A-Za-z0-9]{0,4}(?=\s*\)|\s*$)/g, '')
+    .replace(/[()]/g, ' ')
+    .replace(/×/g, 'x');
+  return `${sanitizeMeshName(stem)}.${format}`;
+}
+
 /**
  * File extension matching an image buffer's magic number.
  *

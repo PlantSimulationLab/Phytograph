@@ -16,8 +16,10 @@ The simplest case: you have several point clouds of the same plant
 (e.g., from different scan positions) that are already roughly aligned
 in world coordinates, and you want a single combined cloud.
 
-1. Open **Stitch Clouds** from the **Pre-processing** toolbar group (merge
-   icon) or **Tools → Pre-processing → Stitch Clouds…**.
+1. Open **Stitch** from the **Pre-processing** toolbar group (merge
+   icon) or **Tools → Pre-processing → Stitch…**. The toggle at the top of
+   the dialog picks what to merge: **Point clouds** (this section) or
+   **Meshes** ([below](#stitch-meshes)).
 2. In the dialog, check the two or more clouds to merge. (If you had clouds
    selected in the scene, they're pre-checked — you can change the choice
    here.)
@@ -80,6 +82,50 @@ merge itself.
     The underlying points, colors, intensity, and scalar attributes are all
     preserved (attributes present on only some inputs are carried through and
     filled with zeros for the clouds that lacked them).
+
+### Stitch meshes
+
+The **Meshes** side of the toggle merges two or more mesh objects into a
+single mesh. The dialog opens on it automatically when only meshes are
+selected in the scene, or when the scene has no point clouds.
+
+1. Open **Stitch** and switch the toggle to **Meshes**.
+2. Check the meshes to merge.
+3. Optionally tick **Keep original meshes** to keep the sources, hidden.
+4. Click **Merge**.
+
+Each mesh is merged **where it is drawn**: a mesh you moved, rotated, or
+scaled with its Transform editor contributes its geometry at that placement.
+The merged mesh is named after its sources (`cube_sphere_merged`) and is one
+**Undo** step — undo removes it and restores the sources (and, with **Keep
+original meshes**, shows them again).
+
+What carries over:
+
+- **Vertex colors** — if any source has per-vertex colors, or the sources have
+  different solid colors, the merged mesh is vertex-colored; a source without
+  its own colors is filled with its solid display color. Sources that all share
+  one solid color stay a solid-colored mesh.
+- **Normals** — kept only when every source has them.
+- **Textures and materials** — kept when every source is textured.
+
+The merged mesh is an ordinary mesh: it keeps the first source's color and
+opacity, but a merged **plane** no longer shows a plane's center/size readout
+or its ground-grid depth offset.
+
+Only **imported meshes** and **primitive shapes** can be merged. Other meshes
+are listed but grayed out, with the reason in the tooltip:
+
+- **Triangulations** carry per-scan data and an adjustable triangle filter
+  that a merge would discard.
+- **Voxel grids**, **generated plants**, **DEMs**, and **fitted crowns** carry
+  state describing the whole object (cells, growth parameters, an elevation
+  raster, crown metrics).
+
+!!! note "Textured and untextured meshes don't mix"
+    A textured mesh and an untextured one can't share a single mesh, so the
+    dialog disables **Merge** and says so when the checked set contains both.
+    Merge the textured ones and the untextured ones separately.
 
 ## Auto-register (when clouds start far apart)
 

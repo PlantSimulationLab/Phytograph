@@ -54,7 +54,7 @@ by the four stages of a typical processing pipeline.
 
 - :phytograph-align-icp: **[Align with ICP](register-compare.md#cloud-to-cloud-icp)** — refine cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh alignment.
 
-- :phytograph-stitch: **[Stitch clouds](register-compare.md#stitch)** — merge overlapping scans into one cloud.
+- :phytograph-stitch: **[Stitch clouds or meshes](register-compare.md#stitch)** — merge overlapping scans into one cloud, or several meshes into one mesh.
 
 - :material-ruler: **[Cloud-to-mesh distance](register-compare.md#cloud-to-mesh-distance)** — measure how far a cloud sits from a reference surface.
 

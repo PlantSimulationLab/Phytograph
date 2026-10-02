@@ -4,6 +4,7 @@ import {
   serializeMeshPly,
   serializeMeshStl,
   sanitizeMeshName,
+  meshExportFileName,
   imageExtFromBytes,
   decodeBase64,
 } from './meshExport';
@@ -104,6 +105,40 @@ describe('decodeBase64', () => {
 
   it('returns null on malformed input rather than throwing', () => {
     expect(decodeBase64('not!valid!base64!!')).toBeNull();
+  });
+});
+
+describe('meshExportFileName', () => {
+  it('uses a user-assigned mesh name', () => {
+    expect(meshExportFileName('My mesh', 'ply')).toBe('My_mesh.ply');
+  });
+
+  it('drops the source extension from an imported mesh', () => {
+    expect(meshExportFileName('imported.obj', 'ply')).toBe('imported.ply');
+  });
+
+  it('flattens a triangulation label and its embedded source filename', () => {
+    expect(meshExportFileName('Poisson triangulation (tree.xyz)', 'obj'))
+      .toBe('Poisson_triangulation_tree.obj');
+  });
+
+  it('keeps the collision ordinal so duplicates get distinct files', () => {
+    expect(meshExportFileName('Helios triangulation (2)', 'stl')).toBe('Helios_triangulation_2.stl');
+    expect(meshExportFileName('Poisson triangulation (a.xyz) (2)', 'ply'))
+      .toBe('Poisson_triangulation_a_2.ply');
+  });
+
+  it('handles plant and canopy labels', () => {
+    expect(meshExportFileName('bean (30d)', 'obj')).toBe('bean_30d.obj');
+    expect(meshExportFileName('bean canopy 3×2 (30d)', 'obj')).toBe('bean_canopy_3x2_30d.obj');
+  });
+
+  it('does not mistake a version number for an extension', () => {
+    expect(meshExportFileName('trunk v1.5', 'ply')).toBe('trunk_v1.5.ply');
+  });
+
+  it('falls back when nothing usable remains', () => {
+    expect(meshExportFileName('///', 'ply')).toBe('mesh.ply');
   });
 });
 

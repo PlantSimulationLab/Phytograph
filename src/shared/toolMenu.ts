@@ -49,7 +49,7 @@ export const TOOLS_MENU: ToolMenuSection[] = [
       { id: 'cloud-move-origin', label: 'Move to Origin' },
       { id: 'cloud-backfill-misses', label: 'Backfill Misses' },
       null,
-      { id: 'cloud-stitch', label: 'Stitch Clouds…' },
+      { id: 'cloud-stitch', label: 'Stitch…' },
     ],
   },
   {

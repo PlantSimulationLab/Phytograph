@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
-import { StitchDialog, type StitchCloudOption } from './StitchDialog';
+import { StitchDialog, type StitchCloudOption, type StitchMeshOption } from './StitchDialog';
 
 afterEach(cleanup);
 
@@ -141,5 +141,110 @@ describe('StitchDialog retain-originals option', () => {
     fireEvent.click(retainBox());
     // Retained: the origin-dependent analyses are still runnable on the sources.
     expect(warning()!.textContent).toContain('The originals keep their origins');
+  });
+});
+
+// The Meshes side of the toggle merges mesh objects through the same modal.
+// It must never leak cloud-only behavior (the origin warning, "Stitch anyway"),
+// and it must make refused meshes visible-but-unpickable rather than absent.
+describe('StitchDialog mesh mode', () => {
+  const MESHES: StitchMeshOption[] = [
+    { id: 'm1', label: 'cube', triangleCount: 12 },
+    { id: 'm2', label: 'sphere', triangleCount: 1200 },
+    { id: 'm3', label: 'leaf_mesh', triangleCount: 50, disabledReason: 'A triangulation keeps its scan and filter data.' },
+  ];
+  const modeButton = (m: 'clouds' | 'meshes') => screen.getByTestId(`stitch-mode-${m}`);
+  const openMeshes = (props: Partial<React.ComponentProps<typeof StitchDialog>> = {}) => {
+    const onMergeMeshes = vi.fn();
+    const r = open({ meshes: MESHES, onMergeMeshes, ...props });
+    return { ...r, onMergeMeshes };
+  };
+
+  it('opens on clouds by default and switches to meshes with the toggle', () => {
+    openMeshes();
+    expect(modeButton('clouds').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.queryByTestId('stitch-mesh-picker')).toBeNull();
+    fireEvent.click(modeButton('meshes'));
+    expect(modeButton('meshes').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('stitch-mesh-picker').textContent).toContain('1,200 triangles');
+    expect(screen.queryByTestId('stitch-picker')).toBeNull();
+    expect(screen.getByTestId('stitch-retain-originals').textContent).toContain('Keep original meshes');
+  });
+
+  it('opens on meshes when only meshes are selected in the viewport', () => {
+    openMeshes({ initialSelectedMeshIds: new Set(['m1', 'm2']) });
+    expect(modeButton('meshes').getAttribute('aria-pressed')).toBe('true');
+    expect(runButton().textContent).toBe('Merge');
+    expect(runButton().disabled).toBe(false);
+  });
+
+  it('stays on clouds when a cloud is selected too', () => {
+    openMeshes({ initialSelectedIds: new Set(['c']), initialSelectedMeshIds: new Set(['m1']) });
+    expect(modeButton('clouds').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('opens on meshes when the scene has no clouds', () => {
+    openMeshes({ clouds: [] });
+    expect(modeButton('meshes').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('merges the picked meshes, and never calls the cloud stitch', () => {
+    const { onStitch, onMergeMeshes, onClose } = openMeshes({ initialSelectedMeshIds: new Set(['m1', 'm2']) });
+    fireEvent.click(retainBox());
+    fireEvent.click(runButton());
+    expect(onMergeMeshes).toHaveBeenCalledWith(['m1', 'm2'], { retainOriginals: true });
+    expect(onStitch).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('does not seed a refused mesh from the selection', () => {
+    // m3 is a triangulation: selected in the viewport, but not mergeable, so
+    // only m1 is picked and the merge stays disabled.
+    openMeshes({ initialSelectedMeshIds: new Set(['m1', 'm3']) });
+    expect(runButton().disabled).toBe(true);
+    expect(screen.getByText('Select at least 2 meshes')).toBeTruthy();
+  });
+
+  it('never shows the scanner-origin warning in mesh mode', () => {
+    // Clouds a + b (both with origins) are picked on the cloud side.
+    openMeshes({ initialSelectedIds: new Set(['a', 'b']) });
+    expect(warning()).not.toBeNull();
+    fireEvent.click(modeButton('meshes'));
+    expect(warning()).toBeNull();
+    // …and the cloud picks survive the round trip.
+    fireEvent.click(modeButton('clouds'));
+    expect(runButton().textContent).toBe('Stitch anyway');
+  });
+
+  it('stops counting a picked mesh that vanishes while the dialog is open', () => {
+    // m2 is removed from the scene (e.g. an undo) with the dialog still open.
+    // The button must go dead rather than fire a merge of one mesh.
+    const { view, onMergeMeshes } = openMeshes({ initialSelectedMeshIds: new Set(['m1', 'm2']) });
+    expect(runButton().disabled).toBe(false);
+    view.rerender(
+      <StitchDialog
+        isOpen
+        onClose={() => {}}
+        clouds={CLOUDS}
+        onStitch={() => {}}
+        meshes={MESHES.filter(m => m.id !== 'm2')}
+        initialSelectedMeshIds={new Set(['m1', 'm2'])}
+        onMergeMeshes={onMergeMeshes}
+      />,
+    );
+    expect(runButton().disabled).toBe(true);
+    expect(screen.getByText('Select at least 2 meshes')).toBeTruthy();
+  });
+
+  it('blocks a set that cannot share one mesh and says why', () => {
+    const reason = 'Textured and untextured meshes cannot be merged into one mesh.';
+    const { onMergeMeshes } = openMeshes({
+      initialSelectedMeshIds: new Set(['m1', 'm2']),
+      meshSetBlockReason: (ids) => (ids.includes('m2') ? reason : undefined),
+    });
+    expect(screen.getByTestId('stitch-mesh-block').textContent).toContain(reason);
+    expect(runButton().disabled).toBe(true);
+    fireEvent.click(runButton());
+    expect(onMergeMeshes).not.toHaveBeenCalled();
   });
 });
