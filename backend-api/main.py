@@ -25764,7 +25764,7 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
         # One trailing column after RGB is conventionally intensity/reflectance;
         # more than one is ambiguous, so leave them reassignable.
         if trailing == 1:
-            roles += ['intensity']
+            roles += [_lone_trailing_column_role(sample, after_rgb)]
         else:
             roles += ['skip'] * trailing
         return roles
@@ -25772,10 +25772,45 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
     # No RGB: a lone trailing column is positionally intensity; anything wider
     # is carried as reassignable extras rather than guessed.
     if rest == 1:
-        roles += ['intensity']
+        roles += [_lone_trailing_column_role(sample, rest_start)]
     else:
         roles += ['skip'] * rest
     return roles
+
+
+def _column_looks_like_class_ids(sample: List[List[float]], idx: int) -> bool:
+    """Do the sampled values of column `idx` read as class ids, not a measurement?
+
+    True when every value is a non-negative whole number, there are few distinct
+    values, and those values REPEAT across the sample (at most half as many
+    distinct values as rows). The repetition bar is what separates a label from
+    a short run of integer intensities: three rows holding 12/240/99 say nothing
+    either way, while 64 rows drawn from {0, 1, 2} cannot be a return strength.
+    Without evidence (empty sample, short row) the answer is False.
+    """
+    values = [row[idx] for row in sample if idx < len(row)]
+    if not values or len(values) != len(sample):
+        return False
+    if any(v < 0 or v != int(v) for v in values):
+        return False
+    distinct = len(set(values))
+    return distinct <= _CATEGORICAL_MAX_DISTINCT and distinct * 2 <= len(values)
+
+
+def _lone_trailing_column_role(sample: List[List[float]], idx: int) -> str:
+    """Role for the single column left over after xyz (and RGB) in a headerless file.
+
+    Position says intensity, and for a real scanner export that is right. But a
+    4-column `x y z label` file is just as common (segmentation datasets such as
+    Pheno4D ship exactly that), and pre-selecting 'Intensity' for it reads to the
+    user as a detection rather than a guess — while also hiding the wizard's
+    "looks categorical" prompt, which is only offered on a Scalar column. So when
+    the values themselves look like class ids the column is left unassigned
+    ('skip'), which the importer carries as a plain scalar the user can name.
+    """
+    if _column_looks_like_class_ids(sample, idx):
+        return 'skip'
+    return 'intensity'
 
 
 def _columns_look_like_rgb255(sample: List[List[float]], idxs) -> bool:

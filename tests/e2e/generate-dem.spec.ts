@@ -259,6 +259,15 @@ test('a DTM carries color-by layers and exports the selected one as a raster', a
   if (existsSync(ascPath)) rmSync(ascPath);
   try {
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
+    // The fixture's 4th column is a small-integer class id, so the wizard no
+    // longer guesses it is intensity — it arrives as an unnamed Scalar. The
+    // intensity layer asserted below needs an intensity channel, so assign the
+    // role by hand, as a user with a real intensity column would.
+    const col4Role = page
+      .locator('[data-testid="import-wizard-column"][data-col-index="3"]')
+      .getByTestId('import-wizard-role');
+    await expect(col4Role).toHaveValue('extra', { timeout: 30_000 });
+    await col4Role.selectOption('intensity');
     await completeImportWizard(page);
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });

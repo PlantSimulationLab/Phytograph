@@ -210,17 +210,56 @@ def test_explicit_is_miss_role_token_pins_canonical_slug(tmp_path: Path):
 def test_preview_headerless_xyz_positional(client, tmp_path: Path):
     # No header; 4 columns → x y z + a small-integer class column.
     f = tmp_path / "plants.xyz"
-    f.write_text("0.1 0.2 0.3 1\n0.4 0.5 0.6 2\n0.7 0.8 0.9 1\n")
+    f.write_text("".join(
+        f"{0.1 * i:.2f} 0.2 0.3 {i % 3}\n" for i in range(30)))
     res = client.post("/api/pointcloud/preview", json={"file_path": str(f)})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["has_header"] is False
     roles = [c["detected_role"] for c in body["columns"]]
     assert roles[:3] == ["x", "y", "z"]
-    # The 4th column auto-detects as intensity positionally, but its values look
-    # categorical — the wizard surfaces that so the user can switch it to a
-    # categorical scalar.
+    # Position alone would call the 4th column intensity, but its values are
+    # class ids. Pre-selecting 'Intensity' presents a guess as a detection (and
+    # hides the wizard's categorical prompt, offered only on a Scalar column),
+    # so it arrives unassigned with the categorical hint instead.
+    assert roles[3] == "skip"
+    assert body["columns"][3]["suggested_slug"] == "col_4"
     assert body["columns"][3]["type_hint"] == "categorical"
+
+
+def test_lone_trailing_measurement_column_is_still_intensity(tmp_path: Path):
+    # The positional rule survives for a column that reads as a measurement:
+    # fractional values, a signed dB reflectance, and an integer intensity with
+    # too many distinct values to be a label.
+    rows = range(40)
+    cases = {
+        "frac.xyz": [f"{0.1 * i:.2f} 0.2 0.3 {0.01 * i:.4f}" for i in rows],
+        "db.xyz": [f"{0.1 * i:.2f} 0.2 0.3 {-(i % 3)}" for i in rows],
+        "wide.xyz": [f"{0.1 * i:.2f} 0.2 0.3 {1000 + 37 * i}" for i in rows],
+    }
+    for name, lines in cases.items():
+        f = tmp_path / name
+        f.write_text("\n".join(lines) + "\n")
+        assert main._autodetect_xyz_columns(str(f)) == [
+            "x", "y", "z", "intensity"], name
+
+
+def test_lone_trailing_class_column_after_rgb_is_not_intensity(tmp_path: Path):
+    # `x y z r g b label`: the same guard applies to the column after RGB.
+    f = tmp_path / "xyzrgbl.xyz"
+    f.write_text("".join(
+        f"{0.1 * i:.2f} 0.2 0.3 {(7 * i) % 256} 100 50 {i % 4}\n"
+        for i in range(40)))
+    assert main._autodetect_xyz_columns(str(f)) == [
+        "x", "y", "z", "r255", "g255", "b255", "skip"]
+
+
+def test_column_looks_like_class_ids_needs_repetition():
+    # Few rows with all-distinct integers are no evidence of a label column.
+    assert not main._column_looks_like_class_ids([[0, 0, 0, 12], [0, 0, 0, 240], [0, 0, 0, 99]], 3)
+    assert main._column_looks_like_class_ids([[0, 0, 0, float(i % 2)] for i in range(8)], 3)
+    assert not main._column_looks_like_class_ids([], 3)
+    assert not main._column_looks_like_class_ids([[0, 0, 0]], 3)
 
 
 def test_preview_headerless_six_col_rgb_detected(client, tmp_path: Path):

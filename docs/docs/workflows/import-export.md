@@ -402,7 +402,10 @@ name when one is present. Without a header it falls back to position: the
 coordinates are the first three columns (or, if up to two **all-integer**
 columns lead the fractional coordinates, the row/column scan indices come
 first and xyz follow); a 0–255 integer triple right after xyz is taken as
-**RGB**; and a lone trailing column as **intensity**. Anything else is stored
+**RGB**; and a lone trailing column as **intensity** — unless its values look
+like class ids (a few repeating non-negative whole numbers, as in an
+`x y z label` file), in which case it is left as an unnamed scalar and the
+wizard offers to make it a **Label**. Anything else is stored
 as a **scalar field** named after the column header (or `Column N` if there's
 no header). The [import wizard](#the-import-wizard) is where you correct that
 mapping when the file uses a non-standard column order, RGB stored as 0–1

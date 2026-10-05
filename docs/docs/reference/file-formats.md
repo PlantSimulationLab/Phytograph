@@ -88,7 +88,11 @@ precision are read as the scan row/column index (so a `row col x y z …`
 terrestrial-scanner export isn't mistaken for `x y z …`). An all-integer
 cloud, with no fractional column to anchor on, keeps xyz at column 0. After
 xyz, a 0–255 integer triple is taken as RGB and a lone trailing column as
-intensity. The RGB guess is range-checked: those three columns are only
+intensity. That last guess is checked against the values too: a trailing column
+holding a few repeating non-negative whole numbers is a class label, not a
+return strength (segmentation datasets commonly ship `x y z label`), so it is
+left as an unnamed scalar for you to name, with a prompt to switch it to
+**Label**. The RGB guess is range-checked: those three columns are only
 assigned to red/green/blue when their sampled values actually look like 8-bit
 color (0–255 integers), so columns that hold timestamps, return counts, or a
 reflectance that ranges above 255 (e.g. Helios multi-return
