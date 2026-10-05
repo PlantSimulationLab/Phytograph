@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { Eraser, X } from 'lucide-react';
 import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 
@@ -85,7 +86,7 @@ export function ErasePanel({
         picker ? 'max-h-[calc(100%-2rem)] overflow-y-auto' : ''
       }`}
     >
-      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
+      <div className={`text-xs font-medium text-neutral-300 flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <span className="flex items-center gap-2">
           <Eraser className="w-3 h-3" />
           Erase Brush

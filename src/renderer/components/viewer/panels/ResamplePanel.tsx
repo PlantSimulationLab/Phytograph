@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { ChartScatter, Loader2, X } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
@@ -63,7 +64,7 @@ export function ResamplePanel({
       className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto"
       onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
     >
-      <div className="flex items-center justify-between mb-3">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <ChartScatter className="w-3 h-3" />
           Resample

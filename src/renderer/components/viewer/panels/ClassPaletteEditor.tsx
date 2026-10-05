@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { useMemo, useState } from 'react';
 import { Palette, X, Plus, Trash2, Save, Download, Upload, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
@@ -188,7 +189,7 @@ export function ClassPaletteEditor({
       // the editor cannot even be closed. See CropPanel / LabelPanel.
       className="absolute right-4 top-4 w-80 max-h-[calc(100%-2rem)] overflow-y-auto bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-xl border border-neutral-700/50 z-30"
     >
-      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
+      <div className={`text-xs font-medium text-neutral-300 flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <span className="flex items-center gap-2">
           <Palette className="w-3 h-3" />
           Edit classes

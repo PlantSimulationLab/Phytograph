@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { Globe, Loader2, Maximize2, X } from 'lucide-react';
 import { AlignmentDistanceResponse } from '../../../utils/backendApi';
 
@@ -28,7 +29,7 @@ export function AlignmentPanel({
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') onClose(); }}
       ref={(el) => el?.focus()}
     >
-      <div className="flex items-center justify-between mb-3">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Globe className="w-3 h-3" />
           Alignment

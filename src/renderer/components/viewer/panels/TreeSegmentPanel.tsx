@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { useEffect, useRef, useState } from 'react';
 import { Sprout, Loader2, X, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
@@ -119,7 +120,7 @@ export function TreeSegmentPanel({
       // the panel a genuine blocker, so ViewportBlockedZone hatches it.
       className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto z-20"
     >
-      <div className="flex items-center justify-between mb-3">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Sprout className="w-3 h-3" />
           Tree Segmentation

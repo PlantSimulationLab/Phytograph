@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { Layers3, X, ChevronLeft, ChevronRight, Home, Pencil, Lock, LockOpen, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
@@ -104,7 +105,7 @@ export function CrossSectionPanel({
         stacked ? 'top-[26rem] max-h-[calc(100%-27rem)]' : 'top-4 max-h-[calc(100%-2rem)]'
       }`}
     >
-      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
+      <div className={`text-xs font-medium text-neutral-300 flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <span className="flex items-center gap-2">
           <Layers3 className="w-3 h-3" />
           Cross-section

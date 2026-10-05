@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { AlertTriangle, Loader2, X } from 'lucide-react';
 import { NormalsIcon } from '../../icons/NormalsIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
@@ -72,7 +73,7 @@ export function ComputeNormalsPanel({
       data-target-count={targetCount}
       className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto"
     >
-      <div className="flex items-center justify-between mb-3">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <NormalsIcon className="w-3 h-3" />
           Compute Normals

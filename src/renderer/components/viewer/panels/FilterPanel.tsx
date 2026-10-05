@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { ChevronDown, ChevronRight, Filter, Loader2, X } from 'lucide-react';
 import type { FilterRange } from '../../../lib/pointCloudTypes';
 import type { DenoiseStats, NoiseMethod, NoiseParams } from '../../../utils/backendApi';
@@ -46,7 +47,7 @@ const PANEL_CLASS =
 
 function PanelHeader({ onClose }: { onClose: () => void }) {
   return (
-    <div className="flex items-center justify-between mb-3">
+    <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
       <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
         <Filter className="w-3 h-3" />
         Filter Points
