@@ -724,6 +724,52 @@ test.describe('translate cloud', () => {
     await expect.poll(async () => (await readEntryWhenReady()).net.x).toBeCloseTo(0, 3);
   });
 
+  // Regression: a checkbox in the panel's Objects picker KEEPS focus after the
+  // click that toggles it, and the shortcut guard counted any focused <input>
+  // as "typing" — so t / s / r did nothing right after changing the checked
+  // objects (the only visible effect was the checkbox's keyboard focus ring).
+  //
+  // Deliberately NO blur / focus-body here, unlike keyGesture above: every
+  // other gesture test moves focus to <body> first, which is exactly why none
+  // of them caught this.
+  test('t works right after toggling an object in the Transform panel picker', async () => {
+    const { page } = session;
+    await importTiny();
+    await openTranslateTool();
+
+    const row = page.locator('[data-testid="transform-target-row"][data-label="tiny"]');
+    await expect(row).toHaveAttribute('data-checked', 'true');
+    const checkbox = row.locator('input[type="checkbox"]');
+    await checkbox.click();
+    await expect(row).toHaveAttribute('data-checked', 'false');
+    await checkbox.click();
+    await expect(row).toHaveAttribute('data-checked', 'true');
+    // The failure condition itself: focus is still on the checkbox.
+    await expect(checkbox).toBeFocused();
+
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(checkbox).toBeFocused();
+
+    const hud = page.getByTestId('transform-hud');
+    await page.keyboard.press('t');
+    await expect(hud).toHaveAttribute('data-transform-op', 'translate');
+    await page.keyboard.press('x');
+    await expect(hud).toHaveAttribute('data-transform-axis', 'x');
+    await page.keyboard.press('2');
+    await expect(hud).toContainText('2');
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(hud).toHaveCount(0);
+
+    // The gesture drove the real draft, and the cloud is still the target.
+    await expect(page.getByTestId('translate-input-x')).toHaveValue('2.000');
+    await expect(row).toHaveAttribute('data-checked', 'true');
+    await expect.poll(async () => (await readEntryWhenReady()).net.x).toBeCloseTo(2, 3);
+
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
+  });
+
   test('r rotates a cloud about the scene origin, and Esc undoes only that gesture', async () => {
     const { page } = session;
     await importTiny();

@@ -3,6 +3,7 @@ import { flushSync, createPortal } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
+import { isTypingTarget } from '../lib/keyboardFocus';
 import { shouldDeferOctreeRebuild } from '../lib/deferOctreeRebuild';
 import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
@@ -5834,8 +5835,9 @@ export default function PointCloudViewer({
     if (!hasSection) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      if (isTypingTarget(e.target)) return;
+      // A focused radio group moves its own selection with the arrow keys.
+      if (e.key.startsWith('Arrow') && (e.target as HTMLInputElement | null)?.type === 'radio') return;
       const dir = e.key === ',' || e.key === 'ArrowLeft' ? -1
         : e.key === '.' || e.key === 'ArrowRight' ? 1 : 0;
       if (!dir) return;
@@ -6197,9 +6199,7 @@ export default function PointCloudViewer({
     const onKey = (e: KeyboardEvent) => {
       if (!labelBrushActiveRef.current) return;
       if (e.key !== '[' && e.key !== ']') return;
-      const el = document.activeElement as HTMLElement | null;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-        || el.tagName === 'SELECT' || el.isContentEditable)) return;
+      if (isTypingTarget(document.activeElement)) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       e.preventDefault();
       setLabelBrushPx((px) => clamp(Math.round(px * (e.key === ']' ? 1.12 : 1 / 1.12))));
@@ -8812,9 +8812,7 @@ export default function PointCloudViewer({
       // current viewing angle. Ignored while typing, with a modifier held, or
       // while a transform modal (t/s/r) owns the keyboard.
       if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !transformModalRef.current) {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing) {
           e.preventDefault();
           zoomToSelectionRef.current();
@@ -8826,9 +8824,7 @@ export default function PointCloudViewer({
       // makes clicks stamp; OFF lets the user orbit to reframe without leaving
       // the tool. Ignored while typing or with a modifier held.
       if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing && editMode === 'erase') {
           e.preventDefault();
           setEraseActive(a => !a);
@@ -8838,9 +8834,7 @@ export default function PointCloudViewer({
       // Without a quick disarm the tool swallows every viewport click, so there
       // is no way to orbit between strokes.
       if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing && showLabelPanel) {
           e.preventDefault();
           setLabelDrawing(d => !d);
@@ -8848,9 +8842,7 @@ export default function PointCloudViewer({
       }
       // The label tool's class, tool and swap keys (see labelKeyRef).
       {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing && labelKeyRef.current(e)) {
           e.preventDefault();
           return;
@@ -8858,9 +8850,7 @@ export default function PointCloudViewer({
       }
       // 'N' / Shift+N step through the places unlabeled points gather.
       if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing && showLabelPanel) {
           e.preventDefault();
           void labelFinderStepRef.current(e.shiftKey ? -1 : 1);
@@ -8883,9 +8873,7 @@ export default function PointCloudViewer({
         if (editMode === 'crop' || editMode === 'label') {
           // Not while typing: Enter in a panel field (a class name, a crop
           // coordinate) confirms the field; it must not close the lasso.
-          const el = document.activeElement as HTMLElement | null;
-          const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-            || el.tagName === 'SELECT' || el.isContentEditable);
+          const typing = isTypingTarget(document.activeElement);
           if (cropDrawState === 'drawing-polygon' && !typing) {
             e.preventDefault();
             closePolygonFrom(polygonInProgress);
@@ -9012,9 +9000,7 @@ export default function PointCloudViewer({
       // further down — the same reason sceneOriginRef exists for the early
       // callbacks.
       if ((e.key === 'Enter' || e.key === 'Backspace') && pointPickMode && pendingVertices.length > 0) {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing) {
           if (e.key === 'Enter') {
             if (pickerMode === 'polyline') {
@@ -9032,9 +9018,7 @@ export default function PointCloudViewer({
       // whole time its panel is open, so without the guard every Backspace in
       // the Edit classes names/values was eaten instead of deleting a character.
       if (e.key === 'Backspace' && (editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
-        const el = document.activeElement as HTMLElement | null;
-        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-          || el.tagName === 'SELECT' || el.isContentEditable);
+        const typing = isTypingTarget(document.activeElement);
         if (!typing) {
           e.preventDefault();
           setPolygonInProgress(prev => prev.slice(0, -1));
@@ -18757,17 +18741,10 @@ export default function PointCloudViewer({
   // X/Y/Z lock axis, Shift+X/Y/Z lock to the perpendicular plane; typing digits
   // enters an exact value — units for rotate are degrees). Enter/click commits,
   // Esc/right-click cancels. Scale and rotate apply to the selected mesh only;
-  // translate also works on skeletons and point clouds. Suppressed while an input
-  // is focused.
+  // translate also works on skeletons and point clouds. Suppressed while a text
+  // field is focused (isTypingTarget) — a focused checkbox does not count.
   useEffect(() => {
-    const isInputFocused = (): boolean => {
-      const el = document.activeElement as HTMLElement | null;
-      if (!el) return false;
-      const tag = el.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-      if (el.isContentEditable) return true;
-      return false;
-    };
+    const isInputFocused = (): boolean => isTypingTarget(document.activeElement);
 
     const lastMouse = lastMouseRef.current;
 
