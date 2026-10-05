@@ -54,7 +54,10 @@ test('Transform is available with nothing selected and moves a mesh checked in i
 
     await rows.first().click();
     await expect(rows.first()).toHaveAttribute('data-checked', 'true');
-    await expect(page.getByTestId('translate-ok')).toBeEnabled();
+    // Checked, but nothing to apply yet: Apply stays grayed out, so a lit
+    // button always means there are changes waiting.
+    await expect(page.getByTestId('translate-ok')).toBeDisabled();
+    await expect(page.getByTestId('translate-ok')).toHaveAttribute('title', 'No changes to apply');
 
     const moveX = page.getByTestId('translate-input-x');
     await moveX.fill('4');
@@ -62,11 +65,14 @@ test('Transform is available with nothing selected and moves a mesh checked in i
     // A draft: the mesh's stored transform is untouched until Apply.
     await expect(meshRow).toHaveAttribute('data-mesh-position', before.map(v => v.toFixed(2)).join(','));
 
+    await expect(page.getByTestId('translate-ok')).toBeEnabled();
     await expect(page.getByTestId('translate-ok')).toHaveText('Apply');
     // Apply commits and leaves the tool open (fields back to zero); then close.
     await page.getByTestId('translate-ok').click();
     await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'false', { timeout: 20_000 });
     await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-applying', 'false');
+    // Applied: nothing pending again, so Apply grays back out.
+    await expect(page.getByTestId('translate-ok')).toBeDisabled();
     await page.getByTestId('translate-cancel').click();
     await expect(page.getByTestId('translate-panel')).toBeHidden();
     await expect.poll(async () => {

@@ -87,6 +87,10 @@ Nothing is applied until you decide:
   open with the same objects checked and the values back to zero, so you can
   go straight on to the next change — move another scan by a different
   amount, or a mesh after a cloud — without reopening the tool.
+  **Apply** is grayed out while there is nothing to apply, so a lit button
+  means there are changes waiting. The pending values belong to whatever is
+  checked — apply them before checking a different object, or that object
+  takes them on too.
 - **Cancel** discards the changes you haven't applied yet and closes the
   panel — the objects snap back to where the last **Apply** left them. With
   nothing pending the button reads **Close**.

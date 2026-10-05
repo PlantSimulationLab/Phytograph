@@ -1,3 +1,4 @@
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { useState, useCallback } from 'react';
 import { Move, RotateCcw, X, Loader2, Maximize2, Lock, Unlock, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
@@ -98,6 +99,12 @@ export function TransformationPanel({
   // With a picker the numbers are a DELTA applied to many objects, so say so.
   const relative = !!picker;
   const nothingChecked = !!picker && picker.selectedIds.size === 0;
+  // The tool stays open after Apply, so an Apply with nothing pending would be
+  // a no-op. Graying it out makes the button double as the "you have unapplied
+  // changes" signal: the pending transform follows the CHECKED set, so it must
+  // be applied before checking a different object. (The skeleton panel's OK
+  // closes the panel, so it stays live with nothing pending.)
+  const nothingPending = keepOpenOnApply && !isDirty;
   // Whether the X-close confirm ("Apply or discard?") is showing.
   const [confirmClose, setConfirmClose] = useState(false);
 
@@ -116,7 +123,7 @@ export function TransformationPanel({
       data-dirty={isDirty ? 'true' : 'false'}
       data-applying={isApplying ? 'true' : 'false'}
     >
-      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
+      <div className={`text-xs font-medium text-neutral-300 flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <span className="flex items-center gap-2">
           <Move className="w-3 h-3" />
           Transform
@@ -321,10 +328,12 @@ export function TransformationPanel({
         </button>
         <button
           onClick={onApply}
-          disabled={isApplying || !!okBlockedReason || nothingChecked}
-          title={okBlockedReason ?? (nothingChecked ? 'Check the objects to transform' : undefined)}
+          disabled={isApplying || !!okBlockedReason || nothingChecked || nothingPending}
+          title={okBlockedReason ?? (nothingChecked ? 'Check the objects to transform' : nothingPending ? 'No changes to apply' : undefined)}
           data-testid="translate-ok"
-          className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium disabled:opacity-60 disabled:cursor-wait flex items-center justify-center gap-1.5"
+          className={`flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium flex items-center justify-center gap-1.5 ${
+            isApplying ? 'disabled:opacity-60 disabled:cursor-wait' : 'disabled:opacity-40 disabled:cursor-not-allowed'
+          }`}
         >
           {isApplying ? (
             <>
