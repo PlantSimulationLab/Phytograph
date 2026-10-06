@@ -144,23 +144,29 @@ test('explicit meters on a millimeter scan warns that it is not plant-sized', as
   await expect(info.getByTestId('toast-message')).toContainText('not the size of a plant', { timeout: 30_000 });
 });
 
-test('segments every selected scan, each on its own', async () => {
+test('segments every checked cloud, each on its own', async () => {
   const { page } = session;
   // Two different plants in two different units, so the summary has to name
   // each scan's units and each scan's leaflet count separately.
   const tomato = await importOne(page, TOMATO, 'potted-tomato', 60745);
   const beet = await importOne(page, BEET_MM, 'sugar-beet-mm', 11267);
-  if ((await tomato.getAttribute('data-selected')) !== 'true') {
-    await tomato.click({ modifiers: ['ControlOrMeta'] });
-  }
-  await expect(tomato).toHaveAttribute('data-selected', 'true');
-  await expect(beet).toHaveAttribute('data-selected', 'true');
-
+  // The panel's own Clouds picker decides what is segmented, not the Scans
+  // pane: opened with nothing selected it has nothing checked and nothing to
+  // run, and the two scans are checked there.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
   await page.getByTestId('tool-organ-segment').click();
-  await expect(page.getByTestId('organ-segment-panel')).toBeVisible();
-  await expect(page.getByTestId('organ-multi-note')).toContainText('2 scans selected');
+  const panel = page.getByTestId('organ-segment-panel');
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId('organ-none-checked')).toBeVisible();
+  await expect(page.getByTestId('organ-segment-run-button')).toHaveCount(0);
+  const target = (name: string) =>
+    panel.locator(`[data-testid="organ-target-row"][data-label="${name}"]`).locator('input');
+  await target('potted-tomato').check();
   const run = page.getByTestId('organ-segment-run-button');
-  await expect(run).toHaveText('Segment 2 Scans');
+  await expect(run).toHaveText('Segment Organs');
+  await target('sugar-beet-mm').check();
+  await expect(page.getByTestId('organ-multi-note')).toContainText('2 clouds checked');
+  await expect(run).toHaveText('Segment 2 Clouds');
   await page.getByTestId('organ-color-by').selectOption('leaflet');
   await run.click();
 

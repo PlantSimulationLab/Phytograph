@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
@@ -414,4 +415,72 @@ test('canopy height finds one tree per touching crown, and its spacing is read',
   const { n: coarse } = await runAndReadTreeCount(page);
   expect(coarse).toBeLessThanOrEqual(6);
   expect(coarse).toBeGreaterThanOrEqual(1);
+});
+
+// LAST in the file on purpose: it splits multi_tree.xyz, and octree caches are
+// content-addressed, so running it earlier pre-builds the very per-tree octrees
+// the split test above waits on — its status pill then flashes by too fast to
+// observe.
+// The panel has its own Clouds picker, seeded from the Scans-pane selection,
+// and segments every checked cloud on its own, one after another. It used to
+// require exactly ONE selected scan: with two selected the panel never mounted
+// and the toolbar button was a dead click.
+//
+// The second cloud is the same plot moved 200 m in X, written at test time:
+// identical trees, so on its own it must come out as the SAME number of trees —
+// which it would not if the two clouds were pooled into one run, or if only
+// the first were segmented.
+test('segments every checked cloud on its own, one after another', async () => {
+  const { app, page } = session;
+  const dir = mkdtempSync(join(tmpdir(), 'phytograph-trees-'));
+  const SHIFTED = join(dir, 'multi_tree_shifted.xyz');
+  writeFileSync(SHIFTED, readFileSync(FIXTURE, 'utf8').split('\n').filter((l) => l.trim()).map((l) => {
+    const [x, y, z] = l.trim().split(/\s+/);
+    return `${(Number(x) + 200).toFixed(3)} ${y} ${z}`;
+  }).join('\n') + '\n');
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
+  await expect(rowA).toHaveAttribute('data-point-count', String(EXPECTED_POINTS), { timeout: 20_000 });
+  await importFiles(app, page, 'import-point-cloud', SHIFTED);
+  await completeImportWizard(page);
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree_shifted"]');
+  await expect(rowB).toHaveAttribute('data-point-count', String(EXPECTED_POINTS), { timeout: 20_000 });
+
+  // Nothing selected: the tool still opens, on the picker alone.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await page.getByTestId('tool-tree-segment').click();
+  const panel = page.getByTestId('tree-segment-panel');
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId('tree-none-checked')).toBeVisible();
+  await expect(page.getByTestId('tree-segment-run-button')).toHaveCount(0);
+
+  const target = (name: string) =>
+    panel.locator(`[data-testid="tree-target-row"][data-label="${name}"]`).locator('input');
+  // One cloud: trunk seeding is offered. Two: it is not, and the panel says why.
+  await target('multi_tree').check();
+  await expect(page.getByTestId('tree-seed-mode')).toBeVisible();
+  await expect(page.getByTestId('tree-segment-run-button')).toHaveText('Segment Trees');
+  await target('multi_tree_shifted').check();
+  await expect(page.getByTestId('tree-seed-mode')).toHaveCount(0);
+  await expect(page.getByTestId('tree-seeds-single-only')).toBeVisible();
+  await expect(page.getByTestId('tree-segment-run-button')).toHaveText('Segment 2 Clouds');
+
+  await page.getByTestId('tree-split-clouds').check();
+  const childrenA = page.locator('[data-testid="scan-row"][data-scan-name^="multi_tree (tree "]');
+  const childrenB = page.locator('[data-testid="scan-row"][data-scan-name^="multi_tree_shifted (tree "]');
+  const nA = await runAndCountTrees(page, childrenA);
+  const nB = await childrenB.count();
+  expect(nA, 'the plot holds several trees').toBeGreaterThan(1);
+  expect(nB, 'the shifted copy of the same plot must split into the same trees').toBe(nA);
+
+  // A clean run closes the panel, and both parents are hidden under their trees.
+  await expect(panel).toHaveCount(0);
+  await expect(rowA).toHaveAttribute('data-visible', 'false');
+  await expect(rowB).toHaveAttribute('data-visible', 'false');
+  // One summary names both clouds.
+  const toast = page.getByTestId('toast-success').filter({ hasText: 'Tree Segmentation Complete' }).last();
+  await expect(toast).toContainText('multi_tree: Segmented');
+  await expect(toast).toContainText('multi_tree_shifted: Segmented');
 });

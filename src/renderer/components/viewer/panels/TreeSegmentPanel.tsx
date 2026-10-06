@@ -4,12 +4,16 @@ import { Sprout, Loader2, X, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 import type { TreeSegmentMethod } from '../../../utils/backendApi';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
 
 // Presentational tool panel for TreeIso tree-instance segmentation. State,
 // handlers (`onSegment`/`onMerge`/`onSplit`), and the seed-mode pointer plumbing
 // all live in PointCloudViewer. `hasTrees` is computed by the parent (whether
 // the selected flat cloud already carries a tree_instance field) so this stays
-// a pure render. Parent gates on `showTreeSegmentPanel && selectedIds.size === 1`.
+// a pure render. Parent gates on `showTreeSegmentPanel` alone: WHICH clouds
+// are segmented is the `picker`'s checked set, seeded from the Scans-pane
+// selection on open. Each is segmented on its own, one after another. Trunk
+// seeds and Refine describe ONE cloud, so they need exactly one checked.
 interface TreeSegmentPanelProps {
   // 'treeiso' shows the TreeIso knobs; 'chm' the canopy-height ones.
   method: TreeSegmentMethod;
@@ -24,6 +28,12 @@ interface TreeSegmentPanelProps {
   regStrength2: number;
   maxGap: number;
   maxOutlierGap: number;
+  /** Every point cloud in the scene, with the ones to segment checked. */
+  picker: CloudPicker;
+  /** How many clouds are checked; with none, only the picker is shown. */
+  targetCount: number;
+  /** "name (i/N)" while a run works through several clouds. */
+  progress?: string | null;
   seedMode: boolean;
   seedCount: number;
   // Automatic stem seeds (fills the seed list) and tiling for large plots.
@@ -77,6 +87,9 @@ export function TreeSegmentPanel({
   regStrength2,
   maxGap,
   maxOutlierGap,
+  picker,
+  targetCount,
+  progress = null,
   seedMode,
   seedCount,
   autoSeedInProgress,
@@ -127,11 +140,26 @@ export function TreeSegmentPanel({
         </div>
         <button
           onClick={onClose}
+          aria-label="Close"
+          title="Close"
           className="p-1 hover:bg-neutral-700 rounded"
         >
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={targetCount}
+        testIdPrefix="tree"
+        noneHint="Check the clouds to segment."
+        locked={inProgress}
+      />
+      {targetCount > 1 && (
+        <p className="-mt-2 mb-3 text-[10px] text-neutral-500" data-testid="tree-multi-hint">
+          Each cloud is segmented on its own, with the settings below.
+        </p>
+      )}
+      {targetCount > 0 && (<>
 
       {/* Method. TreeIso needs visible stems; an airborne scan of a closed
           canopy has almost none, and TreeIso fuses its touching crowns
@@ -310,7 +338,13 @@ export function TreeSegmentPanel({
       </div>
       </>)}
 
-      {/* Trunk seeding (human-in-the-loop) */}
+      {/* Trunk seeding (human-in-the-loop). Seeds are places in ONE cloud. */}
+      {targetCount > 1 ? (
+        <div data-testid="tree-seeds-single-only" className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-500">
+          Trunk seeds mark the trees of one cloud: check just one to use them.
+          {seedCount > 0 && ' The seeds you placed are kept, and are not used for this run.'}
+        </div>
+      ) : (
       <div className="mb-3 p-2 bg-neutral-900/50 rounded">
         <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-2">
           <input
@@ -365,6 +399,7 @@ export function TreeSegmentPanel({
           )}
         </div>
       </div>
+      )}
 
       {/* Tiling for large plots (TreeIso only: the CHM is one linear pass). */}
       {method === 'treeiso' && <div className="grid grid-cols-2 gap-2 mb-3 text-[10px] text-neutral-400">
@@ -437,6 +472,11 @@ export function TreeSegmentPanel({
         </div>
       )}
 
+      {inProgress && progress && (
+        <div data-testid="tree-segment-progress" className="mb-2 text-[10px] text-neutral-400 truncate" title={progress}>
+          {progress}
+        </div>
+      )}
       {inProgress ? (
         <div className="flex gap-2">
           <button
@@ -467,7 +507,7 @@ export function TreeSegmentPanel({
           }`}
         >
           {costWarning ? <AlertTriangle className="w-3 h-3" /> : <Sprout className="w-3 h-3" />}
-          {costWarning ? 'Segment Anyway' : 'Segment Trees'}
+          {costWarning ? 'Segment Anyway' : targetCount > 1 ? `Segment ${targetCount} Clouds` : 'Segment Trees'}
         </button>
       )}
 
@@ -535,6 +575,7 @@ export function TreeSegmentPanel({
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 }

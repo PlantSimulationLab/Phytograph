@@ -114,7 +114,7 @@ test('removes wood, leaving a leaf-only cloud', async () => {
   }).toPass({ timeout: 60_000 });
 });
 
-test('segments two selected scans together and labels both', async () => {
+test('segments two checked clouds together and labels both', async () => {
   const { app, page } = session;
 
   // Import two distinct tree scans at once.
@@ -126,16 +126,22 @@ test('segments two selected scans together and labels both', async () => {
   await expect(row1).toBeVisible({ timeout: 20_000 });
   await expect(row2).toBeVisible({ timeout: 20_000 });
 
-  // Select both: click the first, then meta-click the second to add it.
+  // Select one in the Scans pane; the second is added in the panel's own
+  // Clouds picker, which is what decides the set.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
   await row1.click();
-  await row2.click({ modifiers: ['Meta'] });
   await expect(row1).toHaveAttribute('data-selected', 'true');
-  await expect(row2).toHaveAttribute('data-selected', 'true');
+  await expect(row2).toHaveAttribute('data-selected', 'false');
 
-  // Open the panel; with >1 scan selected the multi-mode chooser appears.
   await page.getByTestId('tool-wood-segment').click();
-  await expect(page.getByTestId('wood-segment-panel')).toBeVisible();
+  const panel = page.getByTestId('wood-segment-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  // One cloud checked: no multi-mode chooser. Checking the second brings it up.
   const multi = page.getByTestId('wood-multi-mode');
+  await expect(multi).toHaveCount(0);
+  await panel.locator('[data-testid="wood-target-row"][data-label="tree_wood_leaf2"]').locator('input').check();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
   await expect(multi).toBeVisible();
   await page.getByTestId('wood-mode-aggregate').check();
 
@@ -152,6 +158,18 @@ test('segments two selected scans together and labels both', async () => {
   // not split or removed).
   expect(parseInt((await row1.getAttribute('data-point-count')) ?? '0', 10)).toBe(4240);
   expect(parseInt((await row2.getAttribute('data-point-count')) ?? '0', 10)).toBe(3360);
+
+  // BOTH were labeled — including the one that was only ever checked in the
+  // panel, never selected in the Scans pane: each is left colored by its own
+  // wood_class column.
+  await page.getByRole('button', { name: 'Display' }).click();
+  const colorMode = page.getByTestId('display-color-mode');
+  for (const row of [row1, row2]) {
+    await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+    await row.click();
+    await expect(row).toHaveAttribute('data-selected', 'true');
+    await expect(colorMode).toHaveValue('scalar:wood_class');
+  }
 });
 
 // A REAL tree, not the toy above: LeWoS tree 1 (tropical, hand-labeled,

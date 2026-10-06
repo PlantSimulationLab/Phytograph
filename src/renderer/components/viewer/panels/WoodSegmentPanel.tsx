@@ -4,6 +4,8 @@ import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 import { MlModelControls } from './MlModelControls';
 import { type WoodSegMethod } from '../../../utils/backendApi';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 // Output mode for wood/leaf segmentation:
 //  - 'label': keep all points, write the wood_class column, color by it.
@@ -38,6 +40,9 @@ interface WoodSegmentPanelProps {
   method: WoodMethod;
   // The ML model to run (null = the bundled default). Only used when method is 'ml'.
   modelId: string | null;
+  /** Every point cloud in the scene, with the ones to segment checked. */
+  picker: CloudPicker;
+  /** How many clouds are checked; with none, only the picker is shown. */
   selectedCount: number;
   inProgress: boolean;
   error: string | null;
@@ -69,6 +74,7 @@ export function WoodSegmentPanel({
   multiMode,
   method,
   modelId,
+  picker,
   selectedCount,
   inProgress,
   error,
@@ -87,16 +93,24 @@ export function WoodSegmentPanel({
   onCancel,
 }: WoodSegmentPanelProps) {
   return (
-    <div data-testid="wood-segment-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-      <div className="flex items-center justify-between mb-3">
+    <div data-testid="wood-segment-panel" data-target-count={selectedCount} className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <WoodLeafIcon className="w-3 h-3" />
           Wood / Leaf Segmentation
         </div>
-        <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
+        <button onClick={onClose} aria-label="Close" title="Close" className="p-1 hover:bg-neutral-700 rounded">
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={selectedCount}
+        testIdPrefix="wood"
+        noneHint="Check the clouds to segment."
+        locked={inProgress}
+      />
+      {selectedCount > 0 && (<>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
         Separates woody structure (trunk, branches) from leaves. Crop the ground
@@ -152,7 +166,7 @@ export function WoodSegmentPanel({
       {selectedCount > 1 && (
         <div data-testid="wood-multi-mode" className="mb-3">
           <div className="text-[10px] text-neutral-400 mb-1">
-            {selectedCount} scans selected
+            {selectedCount} clouds checked
           </div>
           <label className="flex items-start gap-2 mb-1.5 cursor-pointer">
             <input
@@ -354,6 +368,7 @@ export function WoodSegmentPanel({
           Segment Wood / Leaf
         </button>
       )}
+      </>)}
     </div>
   );
 }

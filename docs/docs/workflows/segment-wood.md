@@ -31,10 +31,14 @@ There are four methods (see **Method** below):
 
 1. Crop the ground first (see [Segment ground points](segment-ground.md)) —
    the tool expects a cloud of plant material, not soil.
-2. Select a single point cloud.
+2. Select the point cloud (or clouds) you want to segment.
 3. Click **Segment Wood / Leaf** (the icon showing a bare forked branch and a
    leaf either side of a dashed split, in the **Tools** › Segmentation group),
-   or open the command palette and choose **Segment Wood / Leaf**.
+   or open the command palette and choose **Segment Wood / Leaf**. Under
+   **Clouds**, the panel lists every point cloud in the scene with the ones
+   you had selected checked; check or uncheck them there. Once the panel is
+   open, clicking in the Scans pane no longer changes the set, and a hidden
+   cloud you check is shown for as long as it stays checked.
 4. Choose the method and adjust the parameters if needed (the defaults work
    across broadleaf and conifer scans; the sensitivity, neighborhood, smoothing
    and reflectance settings belong to the geometric methods and are hidden for
@@ -77,19 +81,19 @@ There are four methods (see **Method** below):
 
 ### Multiple scans
 
-If you select **more than one scan**, a chooser appears:
+If **more than one cloud is checked** under **Clouds**, a chooser appears:
 
-- **Segment scans together** — the selected scans are combined into one dense
+- **Segment scans together** — the checked scans are combined into one dense
   cloud, segmented once, and the wood/leaf labels are written back to each
   scan in place. Use this for several **views of a single tree**: merging the
   views gives each point a fuller local neighborhood, which the classifier
   reads more reliably than a thin single-view cloud. The scans must already be
   in a common coordinate frame — [register](register-compare.md) them first if
-  they aren't. (In-memory clouds only; if a selection streams from an octree,
+  they aren't. (In-memory clouds only; if a checked cloud streams from an octree,
   each is segmented separately.)
-- **Segment each scan separately** — classify every selected scan
-  independently, in sequence. Use this for **separate trees** that each happen
-  to be selected, where each scan is already a complete cloud.
+- **Segment each scan separately** — classify every checked scan
+  independently, in sequence. Use this for **separate trees**, where each scan
+  is already a complete cloud.
 
 When it finishes, the cloud is recolored by the **Wood Class** attribute
 (dark brown for wood, green for leaf) with a legend in the corner. In

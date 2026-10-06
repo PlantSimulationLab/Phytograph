@@ -2,6 +2,8 @@ import { Clover, Loader2, X } from 'lucide-react';
 import { InfoHint } from '../../InfoHint';
 import { MlModelControls } from './MlModelControls';
 import { type OrganUnits } from '../../../utils/backendApi';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 // What the result is colored by once the columns are written. Both columns are
 // always written; this only picks the color mode the cloud is left in.
@@ -12,6 +14,9 @@ export type OrganColorBy = 'organ' | 'leaflet';
 // PointCloudViewer; the parent gates on `showOrganSegmentPanel && selectedIds.size >= 1`.
 // With several clouds selected, each is segmented on its own, in turn.
 interface OrganSegmentPanelProps {
+  /** Every point cloud in the scene, with the ones to segment checked. */
+  picker: CloudPicker;
+  /** How many clouds are checked; with none, only the picker is shown. */
   selectedCount: number;
   /** Which scan is running, while a multi-selection runs; null otherwise. */
   progress: { index: number; total: number } | null;
@@ -29,6 +34,7 @@ interface OrganSegmentPanelProps {
 }
 
 export function OrganSegmentPanel({
+  picker,
   selectedCount,
   progress,
   units,
@@ -44,16 +50,24 @@ export function OrganSegmentPanel({
   onCancel,
 }: OrganSegmentPanelProps) {
   return (
-    <div data-testid="organ-segment-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-      <div className="flex items-center justify-between mb-3">
+    <div data-testid="organ-segment-panel" data-target-count={selectedCount} className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Clover className="w-3 h-3" />
           Plant Organs
         </div>
-        <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
+        <button onClick={onClose} aria-label="Close" title="Close" className="p-1 hover:bg-neutral-700 rounded">
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={selectedCount}
+        testIdPrefix="organ"
+        noneHint="Check the clouds to segment."
+        locked={inProgress}
+      />
+      {selectedCount > 0 && (<>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
         Labels a single herbaceous plant (potted or in a row) as soil, stem and
@@ -64,7 +78,7 @@ export function OrganSegmentPanel({
 
       {selectedCount > 1 && (
         <div data-testid="organ-multi-note" className="mb-3 text-[10px] text-neutral-400">
-          {selectedCount} scans selected. Each is segmented on its own, one
+          {selectedCount} clouds checked. Each is segmented on its own, one
           after another, so each should hold one plant.
         </div>
       )}
@@ -155,10 +169,11 @@ export function OrganSegmentPanel({
             className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
           >
             <Clover className="w-3 h-3" />
-            {selectedCount > 1 ? `Segment ${selectedCount} Scans` : 'Segment Organs'}
+            {selectedCount > 1 ? `Segment ${selectedCount} Clouds` : 'Segment Organs'}
           </button>
         )}
       </div>
+      </>)}
     </div>
   );
 }

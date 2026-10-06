@@ -1361,6 +1361,19 @@ export default function PointCloudViewer({
   }, [showDEMPanel, clouds, selectedIds]);
   // Plant-organ segmentation state (ML: soil / stem / leaf + leaflet ids).
   const [showOrganSegmentPanel, setShowOrganSegmentPanel] = useState(false);
+  // The clouds each segmentation panel has checked — its own picker, seeded
+  // from the Scans-pane selection when it opens (see CloudTargetPicker).
+  const [organTargets, setOrganTargets] = useState<Set<string>>(() => new Set());
+  const [woodTargets, setWoodTargets] = useState<Set<string>>(() => new Set());
+  const [treeTargets, setTreeTargets] = useState<Set<string>>(() => new Set());
+  // Trunk seeds, Auto-seed and Refine describe ONE cloud: this is it, or null
+  // while several (or none) are checked.
+  const treeSoleTarget = useMemo(() => {
+    const checked = clouds.filter(c => treeTargets.has(c.id));
+    return checked.length === 1 ? checked[0] : null;
+  }, [clouds, treeTargets]);
+  // "name (i/N)" while a tree run works through several clouds; null for one.
+  const [treeProgress, setTreeProgress] = useState<string | null>(null);
   const [organSegmentInProgress, setOrganSegmentInProgress] = useState(false);
   const [organSegmentError, setOrganSegmentError] = useState<string | null>(null);
   // "Scan k of N" while a multi-selection runs; null for a single cloud.
@@ -1403,7 +1416,10 @@ export default function PointCloudViewer({
   // expensive job actually starts. Cleared whenever a run begins or succeeds, so
   // a later (cheaper) cloud doesn't inherit a stale confirmation.
   const [treeSegmentCostWarning, setTreeSegmentCostWarning] = useState<string | null>(null);
-  const treeCostAcknowledgedRef = useRef(false);
+  // A cost advisory stops the run at the cloud that raised it; "Segment
+  // Anyway" resumes there without redoing the clouds in `done`. Same shape as
+  // groundResumeRef.
+  const treeResumeRef = useRef<{ ack: boolean; done: Set<string> }>({ ack: false, done: new Set() });
   // "Split into one cloud per tree" runs AFTER the panel (and its inline
   // spinner) has closed and the recolored parent is already on screen, so
   // without this the user watches a finished-looking viewport while the backend
@@ -1426,10 +1442,12 @@ export default function PointCloudViewer({
   // in the field for the frame before seeding and is what a cloud with no usable
   // extent falls back to.
   const [treeMaxOutlierGap, setTreeMaxOutlierGap] = useState(0.65);
+  // Seeded ONCE per opening, from the widest checked cloud (one parameter set
+  // runs on all of them), and only once something is checked — the same rule,
+  // for the same reasons, as the ground panel's seed above.
   const treePanelWasOpen = useRef(false);
   useEffect(() => {
     if (showTreeSegmentPanel && !treePanelWasOpen.current) {
-      const sel = clouds.find((c) => selectedIds.has(c.id));
       // Hits-only extent — same reason as the CSF and DEM seeds above, and the
       // stakes are higher here: treeSegmentDefaultsForExtent returns ABSOLUTE
       // metric distances that all four saturate at their clamps on a miss-set
@@ -1440,17 +1458,23 @@ export default function PointCloudViewer({
       // (raw voxel sizes are a foot-gun), so the user cannot see or override a
       // bad value there either; max_outlier_gap IS surfaced, but seeding it from
       // a miss-set extent would still start it in the wrong place.
-      const size = sel ? extentForParameterSeeding(sel.data) : null;
+      let size: { x: number; y: number; z: number } | null = null;
+      for (const sel of clouds) {
+        if (!treeTargets.has(sel.id)) continue;
+        const s = extentForParameterSeeding(sel.data);
+        if (s && (!size || Math.max(s.x, s.y) > Math.max(size.x, size.y))) size = s;
+      }
       if (size) {
         const d = treeSegmentDefaultsForExtent(Math.max(size.x, size.y));
         setTreeDecimateRes1(d.decimateRes1);
         setTreeDecimateRes2(d.decimateRes2);
         setTreeMaxGap(d.maxGap);
         setTreeMaxOutlierGap(d.maxOutlierGap);
+        treePanelWasOpen.current = true;
       }
     }
-    treePanelWasOpen.current = showTreeSegmentPanel;
-  }, [showTreeSegmentPanel, clouds, selectedIds]);
+    if (!showTreeSegmentPanel) treePanelWasOpen.current = false;
+  }, [showTreeSegmentPanel, clouds, treeTargets]);
   const [treeSplitClouds, setTreeSplitClouds] = useState(false);
   // Human-in-the-loop trunk seeding: when seeding, clicks drop a seed marker.
   const [treeSeedMode, setTreeSeedMode] = useState(false);
@@ -7472,6 +7496,17 @@ export default function PointCloudViewer({
     });
   }, [clouds]);
 
+  // Rows of a tool panel's cloud picker: every point cloud in the scene.
+  const cloudPickerItems = useMemo(() => clouds.map((c) => {
+    const sc = scans.find(x => x.id === c.id);
+    return {
+      id: c.id,
+      label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+      color: c.color,
+      detail: `${c.data.pointCount.toLocaleString()} pts`,
+    };
+  }), [clouds, scans]);
+
   // The panel's cloud picker. A cloud without a session is listed but cannot
   // be checked: labels are columns of the session, and it has none.
   const labelPicker = useMemo<LabelPanelPicker>(() => ({
@@ -10192,7 +10227,7 @@ export default function PointCloudViewer({
   // z-10 click overlay: while seeding, the panels that cover the viewport can't
   // take a seed, so mark them instead of letting clicks vanish there. Seeding
   // has no rubber-band, so the ⊘ at the clamped cursor is the whole feedback.
-  const treeSeedActive = showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1;
+  const treeSeedActive = showTreeSegmentPanel && treeSeedMode && !!treeSoleTarget;
   const seedZone = useViewportBlockZone(treeSeedActive, viewerRootRef);
 
   // Is anything actually loaded? Drives the camera's framing decision and the
@@ -10784,9 +10819,29 @@ export default function PointCloudViewer({
         setGroundSegmentCostWarning(null);
         setShowGroundSegmentPanel(true);
       }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
-      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: WoodLeafIcon, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
-      { id: 'cloud-organ-segment', name: 'Segment Plant Organs', keywords: ['organ', 'organs', 'leaflet', 'leaflets', 'stem', 'petiole', 'soil', 'pot', 'herbaceous', 'plantcloudfit', 'classify', 'classification', 'instance'], action: () => { closeAllToolPanels('organ-segment'); setShowOrganSegmentPanel(!showOrganSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Clover, testId: 'tool-organ-segment', isActive: () => showOrganSegmentPanel },
-      { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
+      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => {
+        if (showWoodSegmentPanel) { setShowWoodSegmentPanel(false); return; }
+        closeAllToolPanels('wood-segment');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setWoodTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setShowWoodSegmentPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: WoodLeafIcon, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
+      { id: 'cloud-organ-segment', name: 'Segment Plant Organs', keywords: ['organ', 'organs', 'leaflet', 'leaflets', 'stem', 'petiole', 'soil', 'pot', 'herbaceous', 'plantcloudfit', 'classify', 'classification', 'instance'], action: () => {
+        if (showOrganSegmentPanel) { setShowOrganSegmentPanel(false); return; }
+        closeAllToolPanels('organ-segment');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setOrganTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setShowOrganSegmentPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: Clover, testId: 'tool-organ-segment', isActive: () => showOrganSegmentPanel },
+      { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => {
+        if (showTreeSegmentPanel) { setShowTreeSegmentPanel(false); return; }
+        closeAllToolPanels('tree-segment');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setTreeTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        treeResumeRef.current = { ack: false, done: new Set() };
+        setTreeSegmentCostWarning(null);
+        setShowTreeSegmentPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
       // ── Reconstruction & analysis ───────────────────────────────────
       // Triangulate opens a popup with its own scan picker (seeded from the
@@ -12076,6 +12131,9 @@ export default function PointCloudViewer({
     setSectionTargets(prune);
     setLabelTargets(prune);
     setGroundTargets(prune);
+    setWoodTargets(prune);
+    setOrganTargets(prune);
+    setTreeTargets(prune);
     // Nothing left to act on: close, or File → New leaves an empty panel open
     // with its toolbar button toggled ON.
     if (clouds.length === 0) {
@@ -12083,6 +12141,9 @@ export default function PointCloudViewer({
       setShowSectionPanel(false);
       setShowLabelPanel(false);
       setShowGroundSegmentPanel(false);
+      setShowWoodSegmentPanel(false);
+      setShowOrganSegmentPanel(false);
+      setShowTreeSegmentPanel(false);
       clearSlabSection();
     }
   }, [clouds, clearSlabSection]);
@@ -12107,6 +12168,9 @@ export default function PointCloudViewer({
     if (showSectionPanel || slab) for (const id of sectionTargets) ids.add(id);
     if (showLabelPanel) for (const id of labelTargets) ids.add(id);
     if (showGroundSegmentPanel) for (const id of groundTargets) ids.add(id);
+    if (showWoodSegmentPanel) for (const id of woodTargets) ids.add(id);
+    if (showOrganSegmentPanel) for (const id of organTargets) ids.add(id);
+    if (showTreeSegmentPanel) for (const id of treeTargets) ids.add(id);
     if (editMode === 'translate') {
       for (const key of transformTargets) {
         const t = parseTargetKey(key);
@@ -12114,8 +12178,10 @@ export default function PointCloudViewer({
       }
     }
     return ids;
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, showLabelPanel, showGroundSegmentPanel, slab,
-      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, labelTargets, groundTargets, transformTargets]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, showLabelPanel, showGroundSegmentPanel,
+      showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, slab,
+      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, labelTargets, groundTargets,
+      woodTargets, organTargets, treeTargets, transformTargets]);
   const toolCheckedMeshes = useMemo(() => {
     const ids = new Set<string>();
     if (editMode === 'crop') for (const id of cropMeshTargets) ids.add(id);
@@ -16156,7 +16222,7 @@ export default function PointCloudViewer({
   // — gates the assist toggle in the panel. Octree/session clouds expose it via
   // a scalar field or the source's intensity, which the backend re-reads.
   const woodReflectanceAvailable = useMemo(() => {
-    const ids = Array.from(selectedIds);
+    const ids = Array.from(woodTargets);
     return ids.some(tid => {
       const c = clouds.find(x => x.id === tid);
       if (!c) return false;
@@ -16164,7 +16230,7 @@ export default function PointCloudViewer({
       const hasField = !!sf && Object.keys(sf).some(k => /^(reflectance|intensity)$/i.test(k));
       return hasField || !!(c.data.intensities && c.data.intensities.length > 0);
     });
-  }, [selectedIds, clouds]);
+  }, [woodTargets, clouds]);
 
   // Segment wood vs leaf points (geometric, non-ML: verticality + low-sphericity).
   // Writes a `wood_class` scalar attribute (1=wood, 2=leaf) and colors by it.
@@ -16175,7 +16241,8 @@ export default function PointCloudViewer({
   //  - 'split':  additionally emit wood-only and leaf-only child clouds.
   //  - 'remove': drop the wood points, leaving a leaf-only cloud (wood removal).
   const handleWoodSegment = useCallback(async () => {
-    const ids = Array.from(selectedIds);
+    // The clouds checked in the panel, in scene order.
+    const ids = clouds.filter(c => woodTargets.has(c.id)).map(c => c.id);
     if (ids.length === 0) return;
     const targets = ids
       .map(tid => clouds.find(c => c.id === tid))
@@ -16343,7 +16410,7 @@ export default function PointCloudViewer({
       woodSegmentAbortRef.current = null;
       woodSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodModelId, woodUseReflectance, inlineReflectance]);
+  }, [woodTargets, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodModelId, woodUseReflectance, inlineReflectance]);
 
   // Segment a single cloud and apply the result per `woodMode` (label / split /
   // remove). Used by the per-scan path (and single selection).
@@ -16615,9 +16682,8 @@ export default function PointCloudViewer({
   }, [buildPointSource, onUpdateCloud]);
 
   const handleOrganSegment = useCallback(async () => {
-    const targets = Array.from(selectedIds)
-      .map(tid => clouds.find(c => c.id === tid))
-      .filter((c): c is PointCloudEntry => !!c);
+    // The clouds checked in the panel, in scene order.
+    const targets = clouds.filter(c => organTargets.has(c.id));
     if (targets.length === 0) return;
     const params = { units: organUnits, ...(organModelId ? { model_id: organModelId } : {}) };
     const field = organColorBy === 'leaflet' ? LEAFLET_ID_ATTRIBUTE : PLANT_ORGAN_ATTRIBUTE;
@@ -16687,7 +16753,7 @@ export default function PointCloudViewer({
       setOrganSegmentProgress(null);
       organSegmentAbortRef.current = null;
     }
-  }, [selectedIds, clouds, segmentOneOrganCloud, organUnits, organModelId, organColorBy]);
+  }, [organTargets, clouds, segmentOneOrganCloud, organUnits, organModelId, organColorBy]);
 
   // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
   // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
@@ -16695,11 +16761,14 @@ export default function PointCloudViewer({
   // and append the column (sessionSegmentTrees) — no file re-read; flat clouds
   // get labels written into scalarFields. Optional trunk seeds (treeSeedPoints)
   // drive human-in-the-loop seeding.
+  //
+  // Every checked cloud is segmented on its own, one after another (see
+  // handleGroundSegment for the loop's rules). Clouds are read through
+  // `cloudsRef` each iteration: a split adds clouds as the run goes.
   const handleSegmentTrees = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    const targetIds = cloudsRef.current.filter(c => treeTargets.has(c.id)).map(c => c.id);
+    if (targetIds.length === 0) return;
+    const multi = targetIds.length > 1;
 
     setTreeSegmentInProgress(true);
     setTreeSegmentError(null);
@@ -16709,8 +16778,8 @@ export default function PointCloudViewer({
     // Consume any pending "Segment Anyway" confirmation: this run carries the
     // acknowledgment, and the armed state is cleared so a subsequent run on a
     // different cloud prompts again rather than silently inheriting it.
-    const acknowledgeCost = treeCostAcknowledgedRef.current;
-    treeCostAcknowledgedRef.current = false;
+    const { ack: acknowledgeCost, done } = treeResumeRef.current;
+    treeResumeRef.current = { ack: false, done: new Set() };
     setTreeSegmentCostWarning(null);
 
     const tiParams = {
@@ -16728,9 +16797,30 @@ export default function PointCloudViewer({
       chm_min_height: treeChmMinHeight,
       ...(treeChmCell != null ? { chm_cell: treeChmCell } : {}),
     };
-    const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
+    // Seeds are places in ONE cloud's trees: with several checked they are
+    // not sent (the panel says so), rather than seeding every cloud with marks
+    // placed on one of them.
+    const seeds = !multi && treeSeedPoints.length > 0
+      ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
-    try {
+    // One cloud's whole run: segment, recolor, optionally split. Resolves with
+    // what the summary toast says about it; throws on failure, cancel or a cost
+    // advisory, which the loop below sorts out. `closePanel` is set on the
+    // last cloud of a clean run.
+    const segmentOne = async (
+      cloud: PointCloudEntry, position: string, closePanel: boolean,
+    ): Promise<{ message: string; fusion: boolean }> => {
+      const id = cloud.id;
+      const splitLabel = (message?: string) =>
+        `${multi ? `${position}: ` : ''}${message || 'Splitting into per-tree clouds…'}`;
+      // The recolored cloud is on screen. The last one closes the panel; an
+      // earlier one is unchecked instead, so a split can hide its parent (a
+      // checked cloud is kept on screen while its tool is open).
+      const segmented = () => {
+        if (closePanel) { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
+        else setTreeTargets(prev => { const next = new Set(prev); next.delete(id); return next; });
+      };
+
       const ps = await buildPointSource(cloud);
 
       // --- Session-backed octree cloud: TreeIso on the in-RAM array, append
@@ -16757,8 +16847,7 @@ export default function PointCloudViewer({
         retireLabelColumn(id, TREE_INSTANCE_ATTRIBUTE);
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
-        setShowTreeSegmentPanel(false);
-        setTreeSeedMode(false);
+        segmented();
 
         // Optional split: fan `tree_instance` out into one child session per tree
         // in a SINGLE backend call (parent untouched). The server slices every
@@ -16768,12 +16857,12 @@ export default function PointCloudViewer({
         const numTrees = meta.num_trees ?? 0;
         let splitCount = 0;
         if (treeSplitClouds && onAddCloud && numTrees > 0) {
-          setTreeSplitProgress({ label: 'Splitting into per-tree clouds…', value: null });
+          setTreeSplitProgress({ label: splitLabel(), value: null });
           treeSplitRunIdRef.current = null;
           const { children } = await sessionExtractByColumn(sessionId, 'tree_instance', {
             signal: abort.signal,
             onProgress: (value, message) => setTreeSplitProgress({
-              label: message || 'Splitting into per-tree clouds…',
+              label: splitLabel(message),
               value: value ?? null,
             }),
             onRunId: (runId) => { treeSplitRunIdRef.current = runId; },
@@ -16804,6 +16893,7 @@ export default function PointCloudViewer({
           // point at tree id 0), and hiding the parent then would leave an empty
           // viewport with nothing to show for the run.
           if (childEntries.length > 0) onHideScan(id);
+          setTreeSplitProgress(null);
         }
 
         // Multi-trunk advisory: several trees were probably fused into one
@@ -16812,9 +16902,8 @@ export default function PointCloudViewer({
         // the ONLY signal that a plausible-looking result is wrong — this is the
         // path the reported 5-trees-as-2 almond run took.
         const fusionWarning = meta.fusion_warning;
-        showToast({
-          type: fusionWarning ? 'error' : 'success',
-          title: 'Tree Segmentation Complete',
+        return {
+          fusion: !!fusionWarning,
           message: [
             treeSplitClouds && splitCount > 0
               ? `Segmented ${meta.point_count.toLocaleString()} points into ${splitCount} tree cloud${splitCount === 1 ? '' : 's'}.`
@@ -16822,8 +16911,7 @@ export default function PointCloudViewer({
             fusionWarning,
             meta.ground_warning ? TREE_GROUND_REMINDER : null,
           ].filter(Boolean).join(' '),
-        });
-        return;
+        };
       }
 
       // --- Flat cloud: segment in memory, write scalarFields. ---
@@ -16847,12 +16935,10 @@ export default function PointCloudViewer({
 
       const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams }, abort.signal);
       // Not a failure: the backend wants an explicit confirmation before an
-      // expensive run. Arm the panel's "Segment Anyway" and stop here — clicking
-      // again re-sends with acknowledge_cost.
+      // expensive run. Raised like the session path's 409, so the loop arms the
+      // panel's "Segment Anyway" — clicking again re-sends with acknowledge_cost.
       if (!response.success && response.cost_warning) {
-        treeCostAcknowledgedRef.current = true;
-        setTreeSegmentCostWarning(response.cost_warning.message);
-        return;
+        throw new CostWarningError(response.cost_warning);
       }
       if (!response.success) {
         throw new Error(response.error || 'Tree segmentation failed');
@@ -16867,8 +16953,7 @@ export default function PointCloudViewer({
       };
       onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
       setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
-      setShowTreeSegmentPanel(false);
-      setTreeSeedMode(false);
+      segmented();
 
       // Optional split: one child cloud per tree id (skip 0 = unassigned).
       if (treeSplitClouds && onAddCloud) {
@@ -16932,44 +17017,84 @@ export default function PointCloudViewer({
       // red; the ground reminder only rides along (it reports that Ground
       // Segmentation was never run, not that ground was found). Neither is a
       // failure — the labels are applied either way.
-      showToast({
-        type: response.fusion_warning ? 'error' : 'success',
-        title: 'Tree Segmentation Complete',
+      return {
+        fusion: !!response.fusion_warning,
         message: [
           `Segmented ${response.num_trees} trees.`,
           response.fusion_warning,
           response.ground_warning ? TREE_GROUND_REMINDER : null,
         ].filter(Boolean).join(' '),
-      });
-    } catch (error) {
-      // User canceled (Cancel button aborted the fetch, or the split pill's
-      // cancel reached the backend worker) — not a failure.
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (error instanceof ScanCanceledError) return;
-      // Session path: a 409 cost advisory is a confirmation prompt, not an
-      // error. Arm "Segment Anyway" instead of surfacing a failure toast.
-      if (error instanceof CostWarningError) {
-        treeCostAcknowledgedRef.current = true;
-        setTreeSegmentCostWarning(error.costWarning.message);
-        return;
+      };
+    };
+
+    const failures: Array<{ name: string; message: string }> = [];
+    const summaries: Array<{ name: string; message: string; fusion: boolean }> = [];
+    try {
+      for (const [i, id] of targetIds.entries()) {
+        if (abort.signal.aborted) return;
+        if (done.has(id)) continue;
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        if (!cloud) continue;
+        const name = cloud.data.fileName ?? id;
+        const position = `${name} (${i + 1}/${targetIds.length})`;
+        setTreeProgress(multi ? position : null);
+        try {
+          const closePanel = i === targetIds.length - 1 && failures.length === 0;
+          summaries.push({ name, ...(await segmentOne(cloud, position, closePanel)) });
+          done.add(id);
+        } catch (error) {
+          // User canceled (Cancel button aborted the fetch, or the split pill's
+          // cancel reached the backend worker) — not a failure, and it ends the
+          // whole run: the clouds not yet started are skipped.
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          if (error instanceof ScanCanceledError) return;
+          // A cost advisory is a confirmation prompt, not an error: stop here
+          // and arm "Segment Anyway", which resumes from this cloud.
+          if (error instanceof CostWarningError) {
+            treeResumeRef.current = { ack: true, done };
+            setTreeSegmentCostWarning(
+              multi ? `${name}: ${error.costWarning.message}` : error.costWarning.message);
+            return;
+          }
+          // One cloud failing does not stop the others.
+          console.error('Tree segmentation error:', error);
+          failures.push({
+            name,
+            message: error instanceof Error ? error.message : 'Tree segmentation failed',
+          });
+        }
       }
-      console.error('Tree segmentation error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Tree segmentation failed';
-      setTreeSegmentError(errorMessage);
-      showToast({ type: 'error', title: 'Tree Segmentation Failed', message: errorMessage });
+
+      if (failures.length > 0) {
+        // Say which clouds failed, and leave the panel open on them.
+        const errorMessage = multi
+          ? failures.map(f => `${f.name}: ${f.message}`).join('\n')
+          : failures[0].message;
+        setTreeSegmentError(errorMessage);
+        showToast({ type: 'error', title: 'Tree Segmentation Failed', message: errorMessage });
+      }
+      if (summaries.length > 0) {
+        showToast({
+          type: summaries.some(r => r.fusion) ? 'error' : 'success',
+          title: 'Tree Segmentation Complete',
+          message: multi
+            ? summaries.map(r => `${r.name}: ${r.message}`).join('\n')
+            : summaries[0].message,
+        });
+      }
     } finally {
       setTreeSegmentInProgress(false);
       setTreeSplitProgress(null);
+      setTreeProgress(null);
       treeSegmentAbortRef.current = null;
       treeSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmCrownScale, treeChmMinHeight, treeChmCell]);
+  }, [treeTargets, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmCrownScale, treeChmMinHeight, treeChmCell]);
 
   // Fill the seed list with one seed per trunk found in the breast-height
   // layer, and turn seed mode on so they are drawn for review before running.
   const handleAutoSeedStems = useCallback(async () => {
-    const cloud = clouds.find(c => selectedIds.has(c.id));
-    const sessionId = cloud?.data.octree?.sessionId;
+    const sessionId = treeSoleTarget?.data.octree?.sessionId;
     if (!sessionId || treeAutoSeedInProgress) return;
     setTreeAutoSeedInProgress(true);
     setTreeSegmentError(null);
@@ -16988,7 +17113,7 @@ export default function PointCloudViewer({
     } finally {
       setTreeAutoSeedInProgress(false);
     }
-  }, [clouds, selectedIds, treeAutoSeedInProgress, showToast]);
+  }, [treeSoleTarget, treeAutoSeedInProgress, showToast]);
 
   // Refine the tree_instance field in place (flat clouds only — octree clouds
   // bake the attribute on disk and would need a backend re-run). Reads the
@@ -16998,10 +17123,10 @@ export default function PointCloudViewer({
     transform: (labels: Float32Array, positions: Float32Array) => Float32Array,
     actionLabel: string,
   ) => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    const field = cloud?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE];
+    const cloud = treeSoleTarget;
+    if (!cloud) return;
+    const id = cloud.id;
+    const field = cloud.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE];
     if (!cloud || !field) {
       showToast({ type: 'error', title: 'No tree segmentation', message: 'Run Segment Trees first (flat clouds only).' });
       return;
@@ -17023,7 +17148,7 @@ export default function PointCloudViewer({
       const msg = error instanceof Error ? error.message : 'Refine failed';
       showToast({ type: 'error', title: 'Refine Failed', message: msg });
     }
-  }, [selectedIds, clouds, onUpdateCloud]);
+  }, [treeSoleTarget, onUpdateCloud]);
 
   const handleMergeTrees = useCallback(() => {
     refineTreeLabels((labels) => mergeTrees(labels, [treeMergeA, treeMergeB]), 'Trees Merged');
@@ -22153,6 +22278,7 @@ export default function PointCloudViewer({
     treeSplitRunIdRef.current = null;
     setTreeSegmentInProgress(false);
     setTreeSplitProgress(null);
+    setTreeProgress(null);
   }, []);
 
   const cancelSkeleton = useCallback(() => {
@@ -28406,8 +28532,14 @@ export default function PointCloudViewer({
       })()}
 
       {/* Wood/Leaf Segmentation Panel */}
-      {showWoodSegmentPanel && selectedIds.size >= 1 && (
+      {/* No selection-size gate: these panels own their cloud pickers. */}
+      {showWoodSegmentPanel && (
         <WoodSegmentPanel
+          picker={{
+            items: cloudPickerItems,
+            selectedIds: woodTargets,
+            onChange: (next) => setWoodTargets(new Set(next)),
+          }}
           woodBias={woodBias}
           kMax={woodKMax}
           regIters={woodRegIters}
@@ -28415,7 +28547,7 @@ export default function PointCloudViewer({
           multiMode={woodMultiMode}
           method={woodMethod}
           modelId={woodModelId}
-          selectedCount={selectedIds.size}
+          selectedCount={clouds.filter(c => woodTargets.has(c.id)).length}
           inProgress={woodSegmentInProgress}
           error={woodSegmentError}
           reflectanceAvailable={woodReflectanceAvailable}
@@ -28435,9 +28567,14 @@ export default function PointCloudViewer({
       )}
 
       {/* Plant Organ Segmentation Panel (ML) */}
-      {showOrganSegmentPanel && selectedIds.size >= 1 && (
+      {showOrganSegmentPanel && (
         <OrganSegmentPanel
-          selectedCount={selectedIds.size}
+          picker={{
+            items: cloudPickerItems,
+            selectedIds: organTargets,
+            onChange: (next) => setOrganTargets(new Set(next)),
+          }}
+          selectedCount={clouds.filter(c => organTargets.has(c.id)).length}
           progress={organSegmentProgress}
           units={organUnits}
           colorBy={organColorBy}
@@ -28454,8 +28591,21 @@ export default function PointCloudViewer({
       )}
 
       {/* Tree Segmentation Panel (TreeIso) */}
-      {showTreeSegmentPanel && selectedIds.size === 1 && (
+      {showTreeSegmentPanel && (
         <TreeSegmentPanel
+          picker={{
+            items: cloudPickerItems,
+            selectedIds: treeTargets,
+            // A changed set is a different run: a pending "Segment Anyway"
+            // was for the clouds as they were.
+            onChange: (next) => {
+              treeResumeRef.current = { ack: false, done: new Set() };
+              setTreeSegmentCostWarning(null);
+              setTreeTargets(new Set(next));
+            },
+          }}
+          targetCount={clouds.filter(c => treeTargets.has(c.id)).length}
+          progress={treeProgress}
           method={treeMethod}
           chmCrownScale={treeChmCrownScale}
           chmMinHeight={treeChmMinHeight}
@@ -28480,7 +28630,7 @@ export default function PointCloudViewer({
           inProgress={treeSegmentInProgress}
           error={treeSegmentError}
           costWarning={treeSegmentCostWarning}
-          hasTrees={!!clouds.find(cl => selectedIds.has(cl.id))?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE]}
+          hasTrees={!!treeSoleTarget?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE]}
           mergeA={treeMergeA}
           mergeB={treeMergeB}
           splitId={treeSplitId}

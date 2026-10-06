@@ -63,10 +63,12 @@ tree.
 1. **Import** your scan (see [Import & export](import-export.md)) and, if needed,
    run [Segment ground points](segment-ground.md) — either keep the non-ground
    cloud or keep the labeled cloud (the ground is excluded automatically).
-2. **Select** the cloud in the scan list.
+2. **Select** the cloud (or clouds) in the scan list.
 3. Open the **Segment Trees** tool from the toolbar (the trees/forest icon in
    the **Tools** › Segmentation group) or the command palette
-   (`Cmd/Ctrl-K` → "Segment Trees").
+   (`Cmd/Ctrl-K` → "Segment Trees"). Under **Clouds**, the panel lists every
+   point cloud in the scene with the ones you had selected checked; check or
+   uncheck them there (see [Segment several clouds](#segment-several-clouds)).
 4. Choose the **Method** (see [Choose a method](#choose-a-method)). For
    **Canopy height**, the settings are:
     - **Crown scale (m)** — roughly the width of the smaller crowns in the
@@ -135,9 +137,39 @@ progress; the per-tree clouds all appear in the scan list when it finishes.
 Canceling from the pill leaves the recolored parent cloud in place and adds no
 per-tree clouds.
 
+## Segment several clouds
+
+The **Clouds** list at the top of the panel decides what is segmented. It
+starts with the clouds selected in the Scans pane checked — with nothing
+selected, nothing is checked and the panel asks you to check one. Once the
+panel is open, clicking in the Scans pane no longer changes the set; only the
+checkboxes do. Checking a hidden cloud shows it for as long as it stays
+checked.
+
+With more than one checked, the button reads **Segment N Clouds** and the run
+works through them one after another:
+
+- **Each cloud is segmented on its own.** They are not merged: each gets its
+  own **Tree Instance** column, numbered from 1, and its own per-tree clouds
+  when **Split** is on. To segment several scans of the *same* trees as one,
+  merge them into one cloud first.
+- **One set of parameters runs on all of them**, seeded from the widest checked
+  cloud.
+- **Trunk seeds, Auto-seed stems and Refine need exactly one cloud checked.**
+  They describe one cloud's trees. With several checked, seeds you have placed
+  are kept but not used for the run.
+- The panel names the cloud it is on, and each one is unchecked as it
+  finishes. **Cancel** stops the current cloud and skips the ones not started;
+  the ones already finished keep their result.
+- A cloud that fails does not stop the others. The panel stays open with the
+  failed clouds still checked and says what went wrong with each.
+- The large-run advisory is raised per cloud: the run pauses at the cloud that
+  needs it, and **Segment Anyway** carries on from there.
+
 ## Seeding trunks (optional)
 
-For tricky scenes you can guide the result by marking trunks yourself:
+For tricky scenes you can guide the result by marking trunks yourself (with one
+cloud checked):
 
 1. In the panel, turn on **Seed trunks**.
 2. Left-click each trunk in the viewer — a numbered marker drops at that spot.
