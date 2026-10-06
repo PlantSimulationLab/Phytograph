@@ -1103,7 +1103,16 @@ export default function PointCloudViewer({
   // panel's "Segment Anyway"; the next run re-sends with acknowledge_cost. Same
   // shape as the TreeIso pair below.
   const [groundSegmentCostWarning, setGroundSegmentCostWarning] = useState<string | null>(null);
-  const groundCostAcknowledgedRef = useRef(false);
+  // The clouds the Ground Segmentation panel has checked — its own picker,
+  // seeded from the Scans-pane selection when it opens. Each is segmented on
+  // its own, one after another, with the panel's parameters.
+  const [groundTargets, setGroundTargets] = useState<Set<string>>(() => new Set());
+  // "name (i/N)" while a run works through several clouds; null for one.
+  const [groundProgress, setGroundProgress] = useState<string | null>(null);
+  // A cost advisory stops the run at the cloud that raised it. "Segment
+  // Anyway" resumes there: `ack` rides on the next request, and the clouds in
+  // `done` are not segmented a second time. Same shape as normalsResumeRef.
+  const groundResumeRef = useRef<{ ack: boolean; done: Set<string> }>({ ack: false, done: new Set() });
   // --- Compute Normals -------------------------------------------------------
   const [showComputeNormalsPanel, setShowComputeNormalsPanel] = useState(false);
   // Its picker's checked clouds (seeded from the Scans pane on open). Normals
@@ -1189,7 +1198,7 @@ export default function PointCloudViewer({
   // and the panel re-seeds from extent every time it opens, so without the key
   // the measurement would be silently clobbered the moment the user reopened it.
   const [groundAutoMeasured, setGroundAutoMeasured] =
-    useState<{ cloudId: string; value: number } | null>(null);
+    useState<ReadonlyMap<string, number>>(() => new Map());
   const [groundRigidness, setGroundRigidness] = useState(3);
   const [groundSlopeSmooth, setGroundSlopeSmooth] = useState(false);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
@@ -1202,42 +1211,55 @@ export default function PointCloudViewer({
     useState<{ label: string; value: number | null } | null>(null);
   const groundSplitRunIdRef = useRef<string | null>(null);
   // Seed CSF cloth-resolution / class-threshold / rigidness / slope-smooth from
-  // the selected cloud's horizontal extent AND vertical relief each time the
+  // the checked clouds' horizontal extent AND vertical relief each time the
   // ground panel OPENS. CSF's params are absolute distances, so a fixed default
   // that suits a ~1 m plant scan badly under-segments a 50 m field (nearly
   // everything labeled non-ground); and a coarse, stiff cloth tuned for a large
   // FLAT field bridges over a large SLOPED tile and only finds the valley floor.
   // groundSegmentDefaultsForExtent picks the right recipe from the X/Y extent
   // (Z is up, so size.z is the vertical relief), and the user can still override
-  // every field in the panel. Guarded by a ref so it only fires on the open
-  // transition — re-running on a later `clouds`/`selectedIds` change would
-  // clobber any manual tweaks the user made while the panel is open.
+  // every field in the panel.
+  //
+  // One parameter set runs on every checked cloud, so with several it is seeded
+  // from the WIDEST: the cloth is what a wide tile cannot do without, and a
+  // close-range cloth on a field is the failure that labels everything
+  // non-ground.
+  //
+  // Guarded by a ref so it fires ONCE per opening — re-running on a later
+  // `clouds`/checked-set change would clobber any manual tweaks the user made
+  // while the panel is open. "Once" waits for something to be checked: the
+  // panel can open with nothing checked (nothing was selected), and the first
+  // cloud checked then is the first there is anything to seed from.
   const groundPanelWasOpen = useRef(false);
   useEffect(() => {
     if (showGroundSegmentPanel && !groundPanelWasOpen.current) {
-      const sel = clouds.find((c) => selectedIds.has(c.id));
-      // Hits-only extent, NOT bounds.size: a miss sits ~1 km out and would set
-      // the raw extent single-handedly, seeding a cloth resolution ~1000x too
-      // coarse. See extentForParameterSeeding.
-      const size = sel ? extentForParameterSeeding(sel.data) : null;
-      if (size) {
+      let seed: PointCloudEntry | null = null;
+      let size: { x: number; y: number; z: number } | null = null;
+      for (const sel of clouds) {
+        if (!groundTargets.has(sel.id)) continue;
+        // Hits-only extent, NOT bounds.size: a miss sits ~1 km out and would set
+        // the raw extent single-handedly, seeding a cloth resolution ~1000x too
+        // coarse. See extentForParameterSeeding.
+        const s = extentForParameterSeeding(sel.data);
+        if (s && (!size || Math.max(s.x, s.y) > Math.max(size.x, size.y))) { seed = sel; size = s; }
+      }
+      if (seed && size) {
         // Point spacing (measured at import) selects the ALS vs close-range
         // recipe; undefined on a renderer-built cloud, which is close-range.
         const defaults = groundSegmentDefaultsForExtent(
-          Math.max(size.x, size.y), size.z, sel?.data.pointSpacing);
+          Math.max(size.x, size.y), size.z, seed.data.pointSpacing);
         setGroundClothResolution(defaults.clothResolution);
         setGroundRigidness(defaults.rigidness);
         setGroundSlopeSmooth(defaults.slopeSmooth);
         // Prefer a tolerance already MEASURED on this cloud over the extent seed
         // — it's the better number, and re-seeding over it would throw away the
         // result of the run the user just did.
-        const measured = sel && groundAutoMeasured?.cloudId === sel.id
-          ? groundAutoMeasured.value : null;
-        setGroundClassThreshold(measured ?? defaults.classThreshold);
+        setGroundClassThreshold(groundAutoMeasured.get(seed.id) ?? defaults.classThreshold);
+        groundPanelWasOpen.current = true;
       }
     }
-    groundPanelWasOpen.current = showGroundSegmentPanel;
-  }, [showGroundSegmentPanel, clouds, selectedIds, groundAutoMeasured]);
+    if (!showGroundSegmentPanel) groundPanelWasOpen.current = false;
+  }, [showGroundSegmentPanel, clouds, groundTargets, groundAutoMeasured]);
 
   // Ask the backend whether this cloud already carries normals, and whether an
   // edit has landed since they were computed. Fires on the panel's OPEN
@@ -10753,7 +10775,15 @@ export default function PointCloudViewer({
           clouds.filter(c => c.data.octree?.sessionId).map(c => c.id), selectedIds));
         setShowLabelPanel(true);
       }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
-      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
+      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => {
+        if (showGroundSegmentPanel) { setShowGroundSegmentPanel(false); return; }
+        closeAllToolPanels('ground-segment');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setGroundTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        groundResumeRef.current = { ack: false, done: new Set() };
+        setGroundSegmentCostWarning(null);
+        setShowGroundSegmentPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: WoodLeafIcon, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
       { id: 'cloud-organ-segment', name: 'Segment Plant Organs', keywords: ['organ', 'organs', 'leaflet', 'leaflets', 'stem', 'petiole', 'soil', 'pot', 'herbaceous', 'plantcloudfit', 'classify', 'classification', 'instance'], action: () => { closeAllToolPanels('organ-segment'); setShowOrganSegmentPanel(!showOrganSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Clover, testId: 'tool-organ-segment', isActive: () => showOrganSegmentPanel },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
@@ -12045,12 +12075,14 @@ export default function PointCloudViewer({
     setNormalsTargets(prune);
     setSectionTargets(prune);
     setLabelTargets(prune);
+    setGroundTargets(prune);
     // Nothing left to act on: close, or File → New leaves an empty panel open
     // with its toolbar button toggled ON.
     if (clouds.length === 0) {
       setShowComputeNormalsPanel(false);
       setShowSectionPanel(false);
       setShowLabelPanel(false);
+      setShowGroundSegmentPanel(false);
       clearSlabSection();
     }
   }, [clouds, clearSlabSection]);
@@ -12074,6 +12106,7 @@ export default function PointCloudViewer({
     // A section outlives its panel, so its clouds stay shown while it exists.
     if (showSectionPanel || slab) for (const id of sectionTargets) ids.add(id);
     if (showLabelPanel) for (const id of labelTargets) ids.add(id);
+    if (showGroundSegmentPanel) for (const id of groundTargets) ids.add(id);
     if (editMode === 'translate') {
       for (const key of transformTargets) {
         const t = parseTargetKey(key);
@@ -12081,8 +12114,8 @@ export default function PointCloudViewer({
       }
     }
     return ids;
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, showLabelPanel, slab,
-      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, labelTargets, transformTargets]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, showLabelPanel, showGroundSegmentPanel, slab,
+      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, labelTargets, groundTargets, transformTargets]);
   const toolCheckedMeshes = useMemo(() => {
     const ids = new Set<string>();
     if (editMode === 'crop') for (const id of cropMeshTargets) ids.add(id);
@@ -15464,11 +15497,14 @@ export default function PointCloudViewer({
       showToast, migrateScalarSlug, refreshScalarFields, selectedScalarField]);
 
 
+  // Segment every checked cloud, one after another, each on its own (a cloth
+  // per cloud). Clouds are read through `cloudsRef` each iteration: the
+  // callback is not re-created while it runs, so a closed-over `clouds` would
+  // be the array from before the loop — and a split adds clouds as it goes.
   const handleGroundSegment = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    const targetIds = cloudsRef.current.filter(c => groundTargets.has(c.id)).map(c => c.id);
+    if (targetIds.length === 0) return;
+    const multi = targetIds.length > 1;
 
     setGroundSegmentInProgress(true);
     setGroundSegmentError(null);
@@ -15478,8 +15514,8 @@ export default function PointCloudViewer({
     // Consume any pending "Segment Anyway" confirmation: this run carries the
     // acknowledgment, and the armed state is cleared so a later run on a
     // different cloud prompts again rather than silently inheriting it.
-    const acknowledgeCost = groundCostAcknowledgedRef.current;
-    groundCostAcknowledgedRef.current = false;
+    const { ack: acknowledgeCost, done } = groundResumeRef.current;
+    groundResumeRef.current = { ack: false, done: new Set() };
     setGroundSegmentCostWarning(null);
 
     const csfParams = {
@@ -15489,16 +15525,37 @@ export default function PointCloudViewer({
       slope_smooth: groundSlopeSmooth,
       auto_class_threshold: groundAutoClassThreshold,
     };
-    // Show what auto mode measured, and keep it against this cloud so reopening
-    // the panel offers the measured value instead of re-seeding from extent.
-    const noteAutoThreshold = (used?: number) => {
-      if (!groundAutoClassThreshold || used == null) return '';
-      setGroundAutoMeasured({ cloudId: id, value: used });
-      setGroundClassThreshold(used);
-      return ` Measured ground tolerance ${used.toFixed(2)} m.`;
-    };
 
-    try {
+    // One cloud's whole run: classify, recolor, optionally split. Resolves with
+    // the line the success toast says about it; throws on failure, cancel or a
+    // cost advisory, which the loop below sorts out. `closePanel` is set on the
+    // last cloud of a clean run, so the panel closes as soon as the recolored
+    // cloud lands and the split (if any) is left to its status pill.
+    const segmentOne = async (
+      cloud: PointCloudEntry, position: string, closePanel: boolean,
+    ): Promise<string> => {
+      const id = cloud.id;
+      // Show what auto mode measured, and keep it against this cloud so reopening
+      // the panel offers the measured value instead of re-seeding from extent.
+      // With several clouds each measures its own, so the field is left alone.
+      const noteAutoThreshold = (used?: number) => {
+        if (!groundAutoClassThreshold || used == null) return '';
+        setGroundAutoMeasured(prev => new Map(prev).set(id, used));
+        if (!multi) setGroundClassThreshold(used);
+        return ` Measured ground tolerance ${used.toFixed(2)} m.`;
+      };
+      const splitLabel = (message?: string) =>
+        `${multi ? `${position}: ` : ''}${message || 'Splitting into ground + plant clouds…'}`;
+      // The classified cloud is on screen: this cloud's part of the panel is
+      // over. The last one closes it; an earlier one is UNCHECKED instead, so
+      // the picker counts down — and so a split can hide this parent. A checked
+      // cloud is kept on screen while its tool is open (see toolCheckedClouds),
+      // which would draw the whole parent back over the halves split out of it.
+      const classified = () => {
+        if (closePanel) setShowGroundSegmentPanel(false);
+        else setGroundTargets(prev => { const next = new Set(prev); next.delete(id); return next; });
+      };
+
       const ps = await buildPointSource(cloud);
 
       // --- Session-backed octree cloud: CSF on the in-RAM array, append
@@ -15531,7 +15588,7 @@ export default function PointCloudViewer({
           onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         }
         setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
-        setShowGroundSegmentPanel(false);
+        classified();
         // Record what auto mode measured NOW, not in the toast below: the split
         // is cancelable, and a cancel returns from the catch — which would
         // throw away a tolerance the backend has already measured and returned.
@@ -15545,14 +15602,14 @@ export default function PointCloudViewer({
         // the StatusPill. `includeMisses` keeps the old per-extract behavior of
         // duplicating the sky/miss shell onto each child (LAD's denominator).
         if (willSplit) {
-          setGroundSplitProgress({ label: 'Splitting into ground + plant clouds…', value: null });
+          setGroundSplitProgress({ label: splitLabel(), value: null });
           groundSplitRunIdRef.current = null;
           const { children } = await sessionExtractByColumn(sessionId, GROUND_CLASS_ATTRIBUTE, {
             includeMisses: true,
             rebuildParent: false,
             signal: abort.signal,
             onProgress: (value, message) => setGroundSplitProgress({
-              label: message || 'Splitting into ground + plant clouds…',
+              label: splitLabel(message),
               value: value ?? null,
             }),
             onRunId: (runId) => { groundSplitRunIdRef.current = runId; },
@@ -15588,15 +15645,10 @@ export default function PointCloudViewer({
           // whole cloud on top of the children that were just split out of it —
           // z-fighting mush instead of a visible separation.
           if (children.length > 0) onHideScan(id);
+          setGroundSplitProgress(null);
         }
 
-        showToast({
-          type: 'success',
-          title: 'Ground Segmentation Complete',
-          message: `Classified ${meta.point_count.toLocaleString()} points (ground vs plant).`
-            + autoNote,
-        });
-        return;
+        return `Classified ${meta.point_count.toLocaleString()} points (ground vs plant).${autoNote}`;
       }
 
       // --- Flat cloud: classify in memory, write scalarFields. ---
@@ -15629,7 +15681,7 @@ export default function PointCloudViewer({
       };
       onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
       setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
-      setShowGroundSegmentPanel(false);
+      classified();
 
       // Optional split into ground / plant child clouds.
       if (groundSplitClouds && onAddCloud) {
@@ -15698,37 +15750,76 @@ export default function PointCloudViewer({
         if (splitChildren > 0) onHideScan(id);
       }
 
-      showToast({
-        type: 'success',
-        title: 'Ground Segmentation Complete',
-        message: `${response.num_ground.toLocaleString()} ground, ${response.num_plant.toLocaleString()} plant`
-          + noteAutoThreshold(response.class_threshold_used),
-      });
-    } catch (error) {
-      // User canceled — not a failure. Two shapes: the Cancel button aborted
-      // the fetch, or (split path) the backend acknowledged the cancel with a
-      // `canceled` marker before the abort landed. The tree twin catches both;
-      // missing the second turned a user-initiated cancel into a red toast.
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (error instanceof ScanCanceledError) return;
-      // A 409 cost advisory is a confirmation prompt, not an error: arm
-      // "Segment Anyway" instead of surfacing a failure toast.
-      if (error instanceof CostWarningError) {
-        groundCostAcknowledgedRef.current = true;
-        setGroundSegmentCostWarning(error.costWarning.message);
-        return;
+      return `${response.num_ground.toLocaleString()} ground, ${response.num_plant.toLocaleString()} plant`
+        + noteAutoThreshold(response.class_threshold_used);
+    };
+
+    const failures: Array<{ name: string; message: string }> = [];
+    const summaries: Array<{ name: string; message: string }> = [];
+    try {
+      for (const [i, id] of targetIds.entries()) {
+        if (abort.signal.aborted) return;
+        if (done.has(id)) continue;
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        if (!cloud) continue;
+        const name = cloud.data.fileName ?? id;
+        const position = `${name} (${i + 1}/${targetIds.length})`;
+        setGroundProgress(multi ? position : null);
+        try {
+          const closePanel = i === targetIds.length - 1 && failures.length === 0;
+          summaries.push({ name, message: await segmentOne(cloud, position, closePanel) });
+          done.add(id);
+        } catch (error) {
+          // User canceled — not a failure, and it ends the whole run: the
+          // clouds not yet started are skipped. Two shapes: the Cancel button
+          // aborted the fetch, or (split path) the backend acknowledged the
+          // cancel with a `canceled` marker before the abort landed. The tree
+          // twin catches both; missing the second turned a user-initiated
+          // cancel into a red toast.
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          if (error instanceof ScanCanceledError) return;
+          // A 409 cost advisory is a confirmation prompt, not an error: stop
+          // here and arm "Segment Anyway", which resumes from this cloud.
+          if (error instanceof CostWarningError) {
+            groundResumeRef.current = { ack: true, done };
+            setGroundSegmentCostWarning(
+              multi ? `${name}: ${error.costWarning.message}` : error.costWarning.message);
+            return;
+          }
+          // One cloud failing does not stop the others.
+          console.error('Ground segmentation error:', error);
+          failures.push({
+            name,
+            message: error instanceof Error ? error.message : 'Ground segmentation failed',
+          });
+        }
       }
-      console.error('Ground segmentation error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Ground segmentation failed';
-      setGroundSegmentError(errorMessage);
-      showToast({ type: 'error', title: 'Ground Segmentation Failed', message: errorMessage });
+
+      if (failures.length > 0) {
+        // Say which clouds failed, and leave the panel open on them.
+        const errorMessage = multi
+          ? failures.map(f => `${f.name}: ${f.message}`).join('\n')
+          : failures[0].message;
+        setGroundSegmentError(errorMessage);
+        showToast({ type: 'error', title: 'Ground Segmentation Failed', message: errorMessage });
+      }
+      if (summaries.length > 0) {
+        showToast({
+          type: 'success',
+          title: 'Ground Segmentation Complete',
+          message: multi
+            ? summaries.map(r => `${r.name}: ${r.message}`).join('\n')
+            : summaries[0].message,
+        });
+      }
     } finally {
       setGroundSegmentInProgress(false);
       setGroundSplitProgress(null);
+      setGroundProgress(null);
       groundSegmentAbortRef.current = null;
       groundSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
+  }, [groundTargets, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
 
   // Generate a DEM (Digital Elevation Model) from the selected cloud's ground
   // points. The bare-earth surface comes back as a heightmap mesh (stored as a
@@ -22030,6 +22121,7 @@ export default function PointCloudViewer({
     groundSplitRunIdRef.current = null;
     setGroundSegmentInProgress(false);
     setGroundSplitProgress(null);
+    setGroundProgress(null);
   }, []);
 
   const cancelOrganSegment = useCallback(() => {
@@ -28165,15 +28257,36 @@ export default function PointCloudViewer({
           onClose={() => setShowScalarFieldsPanel(false)}
         />
       )}
-      {showGroundSegmentPanel && selectedIds.size === 1 && (
+      {/* No selection-size gate: the panel owns its own cloud picker. */}
+      {showGroundSegmentPanel && (
         <GroundSegmentPanel
+          picker={{
+            items: clouds.map(c => {
+              const sc = scans.find(x => x.id === c.id);
+              return {
+                id: c.id,
+                label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+                color: c.color,
+                detail: `${c.data.pointCount.toLocaleString()} pts`,
+              };
+            }),
+            selectedIds: groundTargets,
+            // A changed set is a different run: a pending "Segment Anyway"
+            // was for the clouds as they were.
+            onChange: (next) => {
+              groundResumeRef.current = { ack: false, done: new Set() };
+              setGroundSegmentCostWarning(null);
+              setGroundTargets(new Set(next));
+            },
+          }}
+          targetCount={clouds.filter(c => groundTargets.has(c.id)).length}
+          progress={groundProgress}
           clothResolution={groundClothResolution}
           classThreshold={groundClassThreshold}
           autoClassThreshold={groundAutoClassThreshold}
-          lastAutoThreshold={
-            Array.from(selectedIds)[0] === groundAutoMeasured?.cloudId
-              ? groundAutoMeasured.value : null
-          }
+          // Each cloud measures its own tolerance, so one is only shown for one.
+          lastAutoThreshold={groundTargets.size === 1
+            ? groundAutoMeasured.get([...groundTargets][0]) ?? null : null}
           rigidness={groundRigidness}
           slopeSmooth={groundSlopeSmooth}
           splitClouds={groundSplitClouds}

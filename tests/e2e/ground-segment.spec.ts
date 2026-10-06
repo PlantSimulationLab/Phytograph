@@ -89,6 +89,72 @@ test('segments ground vs plant and colors by the ground_class attribute', async 
   await expect(plantRow).toHaveAttribute('data-visible', 'true');
 });
 
+// The panel has its own Clouds picker, seeded from the Scans-pane selection,
+// and segments every checked cloud on its own, one after another. It used to
+// require exactly ONE selected scan: with two selected the panel never mounted
+// and the toolbar button was a dead click.
+//
+// ground_plants_sparse.xyz is ground_plants.xyz moved 3 m in X with every other
+// plant point dropped: 1600 ground + 300 plant. The two clouds therefore split
+// into DIFFERENT counts, which is what proves each got its own cloth rather
+// than one segmentation being applied to both (or the two being pooled).
+test('segments every checked cloud on its own, one after another', async () => {
+  const { app, page } = session;
+  const SPARSE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants_sparse.xyz');
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
+  await expect(rowA).toHaveAttribute('data-point-count', '2200', { timeout: 20_000 });
+  await importFiles(app, page, 'import-point-cloud', SPARSE);
+  await completeImportWizard(page);
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants_sparse"]');
+  await expect(rowB).toHaveAttribute('data-point-count', '1900', { timeout: 20_000 });
+
+  // Nothing selected: the tool still opens, with nothing checked and no
+  // settings to run — only the picker.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await page.getByTestId('tool-ground-segment').click();
+  const panel = page.getByTestId('ground-segment-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-target-count', '0');
+  await expect(page.getByTestId('ground-none-checked')).toBeVisible();
+  await expect(page.getByTestId('ground-segment-run-button')).toHaveCount(0);
+
+  const target = (name: string) =>
+    panel.locator(`[data-testid="ground-target-row"][data-label="${name}"]`).locator('input');
+  await target('ground_plants').check();
+  await target('ground_plants_sparse').check();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  const run = page.getByTestId('ground-segment-run-button');
+  await expect(run).toHaveText('Segment 2 Clouds');
+
+  await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
+  await page.getByTestId('ground-class-threshold').fill('0.05');
+  await page.getByTestId('ground-split-clouds').check();
+  await run.click();
+
+  // Each parent is split into its OWN halves.
+  const child = (name: string) => page.locator(`[data-testid="scan-row"][data-scan-name="${name}"]`);
+  await expect(child('ground_plants (ground)')).toHaveAttribute('data-point-count', '1600', { timeout: 60_000 });
+  await expect(child('ground_plants (non-ground)')).toHaveAttribute('data-point-count', '600', { timeout: 60_000 });
+  await expect(child('ground_plants_sparse (ground)')).toHaveAttribute('data-point-count', '1600', { timeout: 60_000 });
+  await expect(child('ground_plants_sparse (non-ground)')).toHaveAttribute('data-point-count', '300', { timeout: 60_000 });
+
+  // A clean run closes the panel, and BOTH classified parents end up hidden
+  // under their halves.
+  await expect(panel).toHaveCount(0, { timeout: 60_000 });
+  await expect(rowA).toHaveAttribute('data-visible', 'false');
+  await expect(rowB).toHaveAttribute('data-visible', 'false');
+  await expect(rowA).toHaveAttribute('data-point-count', '2200');
+  await expect(rowB).toHaveAttribute('data-point-count', '1900');
+  // One summary names both clouds.
+  const toast = page.getByTestId('toast-success').filter({ hasText: 'Ground Segmentation Complete' }).last();
+  await expect(toast).toContainText('ground_plants: Classified 2,200 points');
+  await expect(toast).toContainText('ground_plants_sparse: Classified 1,900 points');
+});
+
 // "Measure from the scan" derives the ground tolerance from the settled cloth
 // instead of the seeded value (which scales with the cloud's horizontal extent —
 // a quantity unrelated to how thick the ground return band is). Drives the real

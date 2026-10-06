@@ -2,11 +2,25 @@ import { AlertTriangle, Loader2, X } from 'lucide-react';
 import { GroundSegmentIcon } from '../../icons/GroundSegmentIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 // Presentational tool panel for ground (cloth-simulation) segmentation. The
 // `onSegment` handler and all state live in PointCloudViewer; the parent gates
-// rendering on `showGroundSegmentPanel && selectedIds.size === 1`.
+// rendering on `showGroundSegmentPanel` alone. WHICH clouds are segmented is
+// the `picker`'s checked set, seeded from the Scans-pane selection on open;
+// each is segmented on its own, one after another, with these parameters.
 interface GroundSegmentPanelProps {
+  /** Every point cloud in the scene, with the ones to segment checked. */
+  picker: {
+    items: PickerItem[];
+    selectedIds: Set<string>;
+    onChange: (next: Set<string>) => void;
+  };
+  /** How many clouds are checked; with none, only the picker is shown. */
+  targetCount: number;
+  /** "name (i/N)" while a run works through several clouds. */
+  progress?: string | null;
   clothResolution: number;
   classThreshold: number;
   autoClassThreshold: boolean;
@@ -33,6 +47,9 @@ interface GroundSegmentPanelProps {
 }
 
 export function GroundSegmentPanel({
+  picker,
+  targetCount,
+  progress = null,
   clothResolution,
   classThreshold,
   autoClassThreshold,
@@ -54,19 +71,48 @@ export function GroundSegmentPanel({
   onCancel,
 }: GroundSegmentPanelProps) {
   return (
-    <div data-testid="ground-segment-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-      <div className="flex items-center justify-between mb-3">
+    <div
+      data-testid="ground-segment-panel"
+      data-target-count={targetCount}
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto"
+    >
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <GroundSegmentIcon className="w-3 h-3" />
           Ground Segmentation
         </div>
         <button
           onClick={onClose}
+          aria-label="Close"
+          title="Close"
           className="p-1 hover:bg-neutral-700 rounded"
         >
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+
+      <div className="mb-3">
+        <ObjectPicker
+          items={picker.items}
+          selectedIds={picker.selectedIds}
+          onChange={inProgress ? () => {} : picker.onChange}
+          label="Clouds"
+          emptyMessage="No point clouds in the scene."
+          rowTestId="ground-target-row"
+          data-testid="ground-targets"
+        />
+        {targetCount === 0 && picker.items.length > 0 && (
+          <p className="mt-1 text-[10px] text-neutral-500" data-testid="ground-none-checked">
+            Check the clouds to segment.
+          </p>
+        )}
+        {targetCount > 1 && (
+          <p className="mt-1 text-[10px] text-neutral-500" data-testid="ground-multi-hint">
+            Each cloud is segmented on its own, with the settings below.
+          </p>
+        )}
+      </div>
+      {targetCount > 0 && (<>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
         Cloth Simulation Filter separates ground from plant points. Lower
@@ -211,7 +257,7 @@ export function GroundSegmentPanel({
       </div>
 
       {error && (
-        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300 whitespace-pre-line">
           {error}
         </div>
       )}
@@ -228,6 +274,11 @@ export function GroundSegmentPanel({
         </div>
       )}
 
+      {inProgress && progress && (
+        <div data-testid="ground-segment-progress" className="mb-2 text-[10px] text-neutral-400 truncate" title={progress}>
+          {progress}
+        </div>
+      )}
       {inProgress ? (
         <div className="flex gap-2">
           <button
@@ -258,9 +309,10 @@ export function GroundSegmentPanel({
           }`}
         >
           {costWarning ? <AlertTriangle className="w-3 h-3" /> : <GroundSegmentIcon className="w-3 h-3" />}
-          {costWarning ? 'Segment Anyway' : 'Segment Ground'}
+          {costWarning ? 'Segment Anyway' : targetCount > 1 ? `Segment ${targetCount} Clouds` : 'Segment Ground'}
         </button>
       )}
+      </>)}
     </div>
   );
 }

@@ -9,9 +9,12 @@ labels the points the cloth settles onto as ground.
 
 ## Segment
 
-1. Select a single point cloud.
+1. Select the point cloud (or clouds) you want to segment.
 2. Click **Segment Ground** (the points-split-by-a-ground-plane icon in the
    tool column), or open the command palette and choose **Segment Ground**.
+   Under **Clouds**, the panel lists every point cloud in the scene with the
+   ones you had selected checked; check or uncheck them there (see
+   [Segment several clouds](#segment-several-clouds)).
 3. Adjust the parameters if needed (hover the **?** beside any parameter for
    a quick explanation). The parameters are seeded automatically from the
    cloud's size **and shape** each time you open the panel — a few centimeters
@@ -91,6 +94,35 @@ original points are never deleted.
     the scene contains other above-ground objects they'll land in the same
     class. Crop them out first (see [Clean a point
     cloud](clean-point-cloud.md#crop)) if you need a plant-only result.
+
+### Segment several clouds
+
+The **Clouds** list at the top of the panel decides what is segmented. It
+starts with the clouds selected in the Scans pane checked — with nothing
+selected, nothing is checked and the panel asks you to check one. Once the
+panel is open, clicking in the Scans pane no longer changes the set; only the
+checkboxes do. Checking a hidden cloud shows it for as long as it stays
+checked.
+
+With more than one checked, the button reads **Segment N Clouds** and the run
+works through them one after another:
+
+- **Each cloud is segmented on its own**, with its own cloth. They are not
+  merged, and each gets its own **Ground Class** column (and its own ground
+  and non-ground clouds when **Split** is on).
+- **One set of parameters runs on all of them.** The values are seeded from the
+  widest checked cloud, so check clouds of a similar scale together; a pot
+  scan and an orchard tile want different cloths and are better run
+  separately. With **Measure from the scan** on, each cloud still measures its
+  own tolerance.
+- The panel names the cloud it is on, and each one is unchecked as it
+  finishes. **Cancel** stops the current cloud and skips the ones not started;
+  the ones already finished keep their result.
+- A cloud that fails does not stop the others. The panel stays open with the
+  failed clouds still checked and says what went wrong with each.
+- The [large-cloud advisory](#large-clouds) is raised per cloud: the run
+  pauses at the cloud that needs it, and **Segment Anyway** carries on from
+  there without redoing the clouds already finished.
 
 ### Large clouds
 
