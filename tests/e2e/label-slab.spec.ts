@@ -573,7 +573,9 @@ test('the keyboard steps the section: , and ← back, . and → forward', async 
   await expect.poll(async () => panel.getAttribute('data-coverage')).toBe(start);
 
   // Not while typing: a `.` in the thickness field is a decimal point.
-  const field = panel.locator('input').first();
+  // The thickness field by name: the panel's first input is its cloud picker's
+  // checkbox, and a focused checkbox is (rightly) not typing.
+  const field = panel.getByTestId('section-thickness');
   await field.focus();
   await page.keyboard.press('.');
   await page.keyboard.press('ArrowRight');

@@ -4,7 +4,7 @@ import {
   paletteToScheme, paletteToIndexScheme, paletteIndexMaps,
   makePreset, makeEmptyPalette, parsePalette, parsePaletteList, defaultSlugForPreset,
   ASPRS_CLASSES, UNCLASSIFIED_VALUE, USER_CLASS_MIN,
-  PALETTE_SOFT_MAX, withPendingLabelColumn, isLasFlagColumn, lasFlagPalette,
+  PALETTE_SOFT_MAX, withPendingLabelColumn, mergeLabelableColumns, isLasFlagColumn, lasFlagPalette,
   type ClassPalette, type LabelableColumn,
 } from './classPalettes';
 import { buildCategoricalGradientStops, categoricalSchemeForCloud } from './classification';
@@ -765,5 +765,51 @@ describe('LAS flag columns', () => {
     const p = lasFlagPalette('flag_withheld', 0);
     expect(p.classes.map((c) => [c.value, c.label])).toEqual([[0, 'Off'], [1, 'Withheld']]);
     expect(validatePalette(p).filter((i) => i.level === 'error')).toEqual([]);
+  });
+});
+
+describe('mergeLabelableColumns', () => {
+  const a: LabelableColumn[] = [
+    { slug: 'manual_class', label: 'Hand labels', kind: 'manual', missing: true },
+    { slug: 'wood_class', label: 'Wood class', kind: 'categorical', missing: false, observed: [0, 1], range: [0, 1] },
+  ];
+  const b: LabelableColumn[] = [
+    { slug: 'manual_class', label: 'Hand labels', kind: 'manual', missing: false, observed: [0, 3, 64], range: [0, 64] },
+    { slug: 'tree_instance', label: 'Tree instance', kind: 'categorical', missing: false, observed: [1, 300], range: [1, 300] },
+    { slug: 'wood_class', label: 'Wood class', kind: 'scalar', missing: false, observed: [2], range: [2, 2] },
+  ];
+
+  it('returns one cloud\'s list unchanged', () => {
+    expect(mergeLabelableColumns([a])).toEqual(a);
+  });
+
+  it('offers a column only the SECOND cloud carries', () => {
+    // The motivating case: the first checked cloud was never segmented, the
+    // second has a tree_instance to correct. It must be in the picker.
+    const out = mergeLabelableColumns([a, b]);
+    expect(out.map((c) => c.slug)).toEqual(['manual_class', 'wood_class', 'tree_instance']);
+    expect(out[2].missing).toBe(false);
+  });
+
+  it('is missing only when every cloud lacks the column', () => {
+    expect(mergeLabelableColumns([a, b])[0].missing).toBe(false);
+    expect(mergeLabelableColumns([a, a])[0].missing).toBe(true);
+  });
+
+  it('unions the observed classes and spans the ranges', () => {
+    const wood = mergeLabelableColumns([a, b]).find((c) => c.slug === 'wood_class')!;
+    expect(wood.observed).toEqual([0, 1, 2]);
+    expect(wood.range).toEqual([0, 2]);
+    // A classification on any cloud is a classification for the set.
+    expect(wood.kind).toBe('categorical');
+    const manual = mergeLabelableColumns([a, b])[0];
+    expect(manual.observed).toEqual([0, 3, 64]);
+    expect(manual.range).toEqual([0, 64]);
+  });
+
+  it('does not mutate its inputs', () => {
+    const before = JSON.stringify([a, b]);
+    mergeLabelableColumns([a, b]);
+    expect(JSON.stringify([a, b])).toBe(before);
   });
 });

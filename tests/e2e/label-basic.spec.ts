@@ -607,9 +607,11 @@ for (const how of ['panel button', 'Cmd+Z'] as const) {
 }
 
 test('pending strokes belong to their cloud, not to the tool', async () => {
-  // The tool held ONE stroke list, cleared only by Commit. Selecting another
-  // cloud handed it cloud A's strokes: B's overlay replayed them over B's
+  // The tool held ONE stroke list, cleared only by Commit. Moving it to another
+  // cloud handed that cloud A's strokes: B's overlay replayed them over B's
   // points, and B's Undo sent A's stroke ids to B's session.
+  //
+  // The tool's target is the panel's own picker now, so that is what moves it.
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
@@ -637,8 +639,21 @@ test('pending strokes belong to their cloud, not to the tool', async () => {
     (cid) => (window as any).__labelOverlayByCloud?.[cid]?.painted ?? 0, id);
   await expect.poll(() => overlay(idA), { timeout: 15_000 }).toBe(60);
 
+  const target = (name: string) =>
+    panel.locator(`[data-testid="label-target-row"][data-label="${name}"]`).locator('input');
+  await expect(target('tiny')).toBeChecked();
+  await expect(target('tiny-offset')).not.toBeChecked();
+  // A click in the Scans pane no longer retargets an open tool.
   await rowB.getByTestId('scan-row-name').click();
   await expect(rowB).toHaveAttribute('data-selected', 'true');
+  await expect(target('tiny')).toBeChecked();
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+
+  await target('tiny').uncheck();
+  await expect(panel).toHaveAttribute('data-target-count', '0');
+  await expect(page.getByTestId('label-none-checked')).toBeVisible();
+  await target('tiny-offset').check();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
   await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 10_000 });
   await expect(page.getByTestId('label-undo')).toBeDisabled();
   await expect(panel).toHaveAttribute('data-labeled-count', '0', { timeout: 15_000 });
@@ -647,8 +662,8 @@ test('pending strokes belong to their cloud, not to the tool', async () => {
   expect(await overlay(idB)).toBe(0);
   expect(await overlay(idA)).toBe(60);
 
-  await rowA.getByTestId('scan-row-name').click();
-  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await target('tiny-offset').uncheck();
+  await target('tiny').check();
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 10_000 });
   await expect(page.getByTestId('label-undo')).toBeEnabled();
   await expect(panel).toHaveAttribute('data-labeled-count', '60', { timeout: 15_000 });
@@ -746,10 +761,10 @@ test('the quit confirmation knows which clouds have unexported labels', async ()
   await expect.poll(mainCount, { timeout: 10_000 }).toBe(0);
 });
 
-test('with two clouds selected the Label button says why it will not open', async () => {
-  // Label Points paints ONE cloud, but the button only required "a cloud": with
-  // two selected it stayed live, and the click opened a panel that rendered
-  // nothing, with no word about why.
+test('with two clouds checked, one stroke labels both and one Undo takes both back', async () => {
+  // Label Points painted ONE cloud: with two selected its button was blocked.
+  // It now has its own picker, seeded from the selection, and a stroke lands in
+  // every checked cloud's session as a single undo step.
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
@@ -757,21 +772,80 @@ test('with two clouds selected the Label button says why it will not open', asyn
   await completeImportWizard(page);
   const rowA = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   const rowB = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
-  await expect(rowB).toHaveAttribute('data-selected', 'true', { timeout: 20_000 });
-  await rowA.getByTestId('scan-row-name').click({ modifiers: ['ControlOrMeta'] });
+  await expect(rowA).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await expect(rowB).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  // Select BOTH in the Scans pane, from a known state: which rows an import
+  // leaves selected is not this test's business.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await rowA.getByTestId('scan-row-name').click();
+  await rowB.getByTestId('scan-row-name').click({ modifiers: ['ControlOrMeta'] });
   await expect(rowA).toHaveAttribute('data-selected', 'true');
   await expect(rowB).toHaveAttribute('data-selected', 'true');
+  const idA = (await rowA.getAttribute('data-scan-id'))!;
+  const idB = (await rowB.getAttribute('data-scan-id'))!;
 
+  await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
   const button = page.getByTestId('tool-label');
-  await expect(button).toBeDisabled();
-  await expect(button).toHaveAttribute('title', /one point cloud at a time/);
-
-  // One cloud selected again: the button works.
-  await rowA.getByTestId('scan-row-name').click();
-  await expect(rowB).toHaveAttribute('data-selected', 'false');
   await expect(button).toBeEnabled();
   await button.click();
-  await expect(page.getByTestId('label-panel')).toBeVisible();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  const target = (name: string) =>
+    panel.locator(`[data-testid="label-target-row"][data-label="${name}"]`).locator('input');
+  await expect(target('tiny')).toBeChecked();
+  await expect(target('tiny-offset')).toBeChecked();
+  const overlay = (id: string) => page.evaluate(
+    (cid) => (window as any).__labelOverlayByCloud?.[cid]?.painted ?? 0, id);
+
+  // Before any stroke the counts are both clouds' points, all unclassified.
+  await expect.poll(async () => (await counts(panel))['0'] ?? 0, { timeout: 15_000 }).toBe(120);
+
+  // ONE stroke: each session reports its own 60, and the panel shows the sum.
+  const first = Number(await panel.getAttribute('data-active-class'));
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
+    { timeout: 15_000 }).toBe(120);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  await expect.poll(() => overlay(idA), { timeout: 15_000 }).toBe(60);
+  await expect.poll(() => overlay(idB), { timeout: 15_000 }).toBe(60);
+
+  // Unchecking a cloud takes it out of the NEXT stroke (and out of the counts),
+  // without touching what it already carries.
+  await target('tiny-offset').uncheck();
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  await expect.poll(async () => await counts(panel), { timeout: 15_000 })
+    .toEqual({ [String(first)]: 60 });
+  const second = await otherClass(page, first);
+  await page.getByTestId(`label-class-${second}`).click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => await counts(panel), { timeout: 15_000 })
+    .toEqual({ [String(second)]: 60 });
+  // Checked again, its own labels are as the two-cloud stroke left them.
+  await target('tiny-offset').check();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  await expect.poll(async () => await counts(panel), { timeout: 15_000 })
+    .toEqual({ [String(first)]: 60, [String(second)]: 60 });
+  // The class list did not reset when the checked set changed.
+  await expect(panel).toHaveAttribute('data-active-class', String(second));
+
+  // Undo the one-cloud stroke, then the two-cloud stroke: ONE step clears both.
+  await page.getByTestId('label-undo').click();
+  await expect.poll(async () => await counts(panel), { timeout: 15_000 })
+    .toEqual({ [String(first)]: 120 });
+  await page.getByTestId('label-undo').click();
+  await expect.poll(async () => await counts(panel), { timeout: 15_000 }).toEqual({ '0': 120 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+  await expect.poll(() => overlay(idA), { timeout: 15_000 }).toBe(0);
+  await expect.poll(() => overlay(idB), { timeout: 15_000 }).toBe(0);
+
+  // ...and one redo paints both again, in both sessions.
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect.poll(async () => await counts(panel), { timeout: 15_000 })
+    .toEqual({ [String(first)]: 120 });
+  await expect.poll(() => overlay(idA), { timeout: 15_000 }).toBe(60);
+  await expect.poll(() => overlay(idB), { timeout: 15_000 }).toBe(60);
 });
 
 

@@ -3,6 +3,8 @@ import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, Sh
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import type { ProfileLineSide } from '../../../lib/profileLine';
 import { defaultPrelabelMap } from '../../../lib/prelabel';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 export type LabelTool = 'lasso' | 'brush' | 'rect' | 'line' | 'pick';
 import type { ClassDef } from '../../../lib/classification';
@@ -13,6 +15,10 @@ import type { LabelableColumn } from '../../../lib/classPalettes';
 // backend calls live in PointCloudViewer; this renders the class list, the
 // active-class selection, the From-class gate and the commit/undo actions from
 // derived props — the same split ErasePanel uses.
+//
+// WHICH clouds are labeled is the `picker`'s checked set, seeded from the
+// Scans-pane selection when the tool opens (as Crop, Erase and Filter do). A
+// stroke paints every checked cloud, so the counts shown are their sum.
 //
 // The data-* attributes are the E2E seam: the DOM cannot show what the GPU
 // painted, so the panel publishes the parent's own counts (see also the narrow
@@ -31,7 +37,80 @@ const COLUMN_GROUP_LABEL: Record<LabelableColumn['kind'], string> = {
   scalar: 'Other columns',
 };
 
+/** The panel's cloud picker: every point cloud in the scene, the ones to label checked. */
+export interface LabelPanelPicker {
+  items: PickerItem[];
+  selectedIds: Set<string>;
+  onChange: (next: Set<string>) => void;
+}
+
+const PANEL_ROOT =
+  'absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20 max-h-[calc(100%-2rem)] overflow-y-auto';
+
+function LabelPanelHeader({ onClose }: { onClose: () => void }) {
+  return (
+    <div className={`text-xs font-medium text-neutral-300 flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
+      <span className="flex items-center gap-2">
+        <Brush className="w-3 h-3" />
+        Label Points
+      </span>
+      <button
+        onClick={onClose}
+        aria-label="Close"
+        title="Close"
+        className="p-1 hover:bg-neutral-700 rounded"
+      >
+        <X className="w-3 h-3 text-neutral-400" />
+      </button>
+    </div>
+  );
+}
+
+function LabelTargetPicker({ picker, targetCount }: { picker: LabelPanelPicker; targetCount: number }) {
+  return (
+    <div className="mb-3">
+      <ObjectPicker
+        items={picker.items}
+        selectedIds={picker.selectedIds}
+        onChange={picker.onChange}
+        label="Clouds"
+        emptyMessage="No point clouds in the scene."
+        rowTestId="label-target-row"
+        data-testid="label-targets"
+      />
+      {targetCount === 0 && picker.items.length > 0 && (
+        <p className="mt-1 text-[10px] text-neutral-500" data-testid="label-none-checked">
+          Check the clouds to label.
+        </p>
+      )}
+      {targetCount > 1 && (
+        <p className="mt-1 text-[10px] text-neutral-500" data-testid="label-multi-hint">
+          Each stroke labels all {targetCount} clouds. The counts below are their totals.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The Label panel with nothing checked: the picker and nothing else. The tool
+ * is open (its toolbar button is lit) but disarmed, since there is no cloud
+ * for a stroke to land on.
+ */
+export function LabelPanelNoTargets({ picker, onClose }: { picker: LabelPanelPicker; onClose: () => void }) {
+  return (
+    <div data-testid="label-panel" data-target-count={0} className={PANEL_ROOT}>
+      <LabelPanelHeader onClose={onClose} />
+      <LabelTargetPicker picker={picker} targetCount={0} />
+    </div>
+  );
+}
+
 export interface LabelPanelProps {
+  /** Every point cloud in the scene, with the ones to label checked. */
+  picker?: LabelPanelPicker;
+  /** How many clouds are checked (and so painted by each stroke). */
+  targetCount?: number;
   /** Classes from the cloud's bound palette, in display order. */
   classes: ClassDef[];
   paletteName: string;
@@ -128,6 +207,8 @@ export interface LabelPanelProps {
   /** Save the column's strokes to a file, or replay a saved file (F10). */
   onSaveStrokes?: () => void;
   onLoadStrokes?: () => void;
+  /** Why stroke files are unavailable right now (several clouds checked). */
+  strokeFilesBlockedReason?: string | null;
   /** Pick tool: how the cloud is cut into pieces, and the piece size (0 = auto). */
   pickMode?: 'pieces' | 'connected';
   onPickModeChange?: (m: 'pieces' | 'connected') => void;
@@ -176,6 +257,8 @@ export interface LabelPanelProps {
 }
 
 export function LabelPanel({
+  picker,
+  targetCount = 1,
   classes,
   paletteName,
   paletteWarning,
@@ -216,6 +299,7 @@ export function LabelPanel({
   onPrelabel,
   onSaveStrokes,
   onLoadStrokes,
+  strokeFilesBlockedReason = null,
   pickMode = 'pieces',
   onPickModeChange,
   pickSize = 0,
@@ -280,27 +364,16 @@ export function LabelPanel({
       // Serialized counts, so a spec can assert on per-class totals without
       // reaching into the scene graph.
       data-label-counts={JSON.stringify(classCounts)}
+      data-target-count={targetCount}
       // z-20 keeps the panel above the polygon lasso overlay (z-10), which fills
       // the whole viewport while drawing. WITHOUT IT the overlay renders on top
       // and swallows every click here — the panel becomes unusable and even its
       // close button just drops another lasso vertex. Same reason CropPanel
       // carries z-20; the labeling tool borrows that same overlay.
-      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20"
+      className={PANEL_ROOT}
     >
-      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
-        <span className="flex items-center gap-2">
-          <Brush className="w-3 h-3" />
-          Label Points
-        </span>
-        <button
-          onClick={onClose}
-          aria-label="Close"
-          title="Close"
-          className="p-1 hover:bg-neutral-700 rounded"
-        >
-          <X className="w-3 h-3 text-neutral-400" />
-        </button>
-      </div>
+      <LabelPanelHeader onClose={onClose} />
+      {picker && <LabelTargetPicker picker={picker} targetCount={targetCount} />}
 
       {/* Arm/disarm, mirroring the Erase tool's toggle. ON freezes the view and
           makes clicks place lasso vertices; OFF hands the viewport back so the
@@ -991,13 +1064,15 @@ export function LabelPanel({
       {(onSaveStrokes || onLoadStrokes) && (
         <div className="mt-2 flex items-center gap-1 text-[10px]">
           <button data-testid="label-save-strokes" onClick={onSaveStrokes}
-            title="Save this column's strokes to a file, to replay on a re-imported scan or share"
-            className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200">
+            disabled={!!strokeFilesBlockedReason}
+            title={strokeFilesBlockedReason ?? "Save this column's strokes to a file, to replay on a re-imported scan or share"}
+            className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed">
             Save strokes…
           </button>
           <button data-testid="label-load-strokes" onClick={onLoadStrokes}
-            title="Replay a saved stroke file onto this column (one undo step)"
-            className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200">
+            disabled={!!strokeFilesBlockedReason}
+            title={strokeFilesBlockedReason ?? 'Replay a saved stroke file onto this column (one undo step)'}
+            className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed">
             Load strokes…
           </button>
         </div>

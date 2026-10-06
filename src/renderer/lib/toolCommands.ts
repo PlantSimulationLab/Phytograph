@@ -61,10 +61,11 @@ export interface ToolCommand {
   isDisabled?: () => boolean;
   /**
    * Why the command cannot act although `requires` is met, or null when it
-   * can. For a tool whose own panel is stricter than `requires` (Label Points
-   * works on exactly ONE cloud with an editable session): without this the
-   * button stayed live, the click opened a panel that then rendered nothing,
-   * and the user got no feedback at all. The reason becomes the tooltip.
+   * can. For a tool whose own panel is stricter than `requires` (one that
+   * works on exactly ONE cloud, say): without this the button stays live, the
+   * click opens a panel that then renders nothing, and the user gets no
+   * feedback at all. The reason becomes the tooltip. Prefer giving the tool
+   * its own picker (`multiInput`), as Label Points now has.
    */
   blockedReason?: () => string | null;
   /**

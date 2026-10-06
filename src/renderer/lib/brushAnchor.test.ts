@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
-import { brushAnchorAt, type PickableOctree } from './brushAnchor';
+import { brushAnchorAt, nearestBrushAnchor, type PickableOctree } from './brushAnchor';
 
 /** A plane of points at height y, x,z in [-1, 1]. */
 function plane(y: number): THREE.Points {
@@ -59,5 +59,28 @@ describe('brushAnchorAt', () => {
     const target = octreeOf([plane(0)]);
     target.updateMatrixWorld(true);
     expect(brushAnchorAt({ ...args(target), cpuPointBudget: 10 })).toBeNull();
+  });
+});
+
+describe('nearestBrushAnchor', () => {
+  const { octree: _unused, ...rest } = args(null);
+  void _unused;
+  const hitAt = (y: number) => octreeOf([], vi.fn<Pick>(() => ({ position: { x: 0, y, z: 0 } })));
+
+  it('takes the surface nearest the camera, whichever target it is on', () => {
+    // The camera looks down from y=10: y=4 is in front of y=1. Listed second,
+    // so "the first target's anchor" would park the sphere on the hidden cloud.
+    const hit = nearestBrushAnchor([hitAt(1), hitAt(4)], rest);
+    expect(hit?.y).toBe(4);
+    expect(nearestBrushAnchor([hitAt(4), hitAt(1)], rest)?.y).toBe(4);
+  });
+
+  it('skips targets with nothing under the cursor', () => {
+    expect(nearestBrushAnchor([octreeOf([]), null, hitAt(2)], rest)?.y).toBe(2);
+  });
+
+  it('is null when no target is under the cursor', () => {
+    expect(nearestBrushAnchor([octreeOf([]), null], rest)).toBeNull();
+    expect(nearestBrushAnchor([], rest)).toBeNull();
   });
 });

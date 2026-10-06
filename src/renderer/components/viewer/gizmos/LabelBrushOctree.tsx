@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
 import { pickPixelForNdc, rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
 import { isSceneOverlay } from '../../../lib/sceneOverlay';
-import { brushAnchorAt, type PickableOctree } from '../../../lib/brushAnchor';
+import { nearestBrushAnchor, type PickableOctree } from '../../../lib/brushAnchor';
 
 // Same bound DepthProbe uses: above this the CPU raycast is too slow, and a
 // cloud this dense is one where the GPU pick works anyway.
@@ -69,12 +69,12 @@ export interface BrushSphereStroke {
 // speck when zoomed out and swallow the cloud when zoomed in.
 export interface LabelBrushOctreeProps {
   /**
-   * The octree to pick against, resolved WHEN CALLED rather than passed as a
-   * value. The parent holds octrees in a ref that registration mutates without
-   * re-rendering, so a value prop is null on the mounting render and may never
-   * be refreshed.
+   * The octrees to pick against (every cloud being labeled), resolved WHEN
+   * CALLED rather than passed as a value. The parent holds octrees in a ref
+   * that registration mutates without re-rendering, so a value prop is empty
+   * on the mounting render and may never be refreshed.
    */
-  getOctree: () => PointCloudOctree | null;
+  getOctrees: () => PointCloudOctree[];
   /** Brush radius in CANVAS PIXELS — constant on screen, as a brush should be. */
   brushRadiusPx: number;
   cloudCenter: { x: number; y: number; z: number };
@@ -87,7 +87,7 @@ export interface LabelBrushOctreeProps {
 }
 
 export function LabelBrushOctree({
-  getOctree,
+  getOctrees,
   brushRadiusPx,
   cloudCenter,
   onStroke,
@@ -103,8 +103,8 @@ export function LabelBrushOctree({
   // repeatedly.
   const radiusPxRef = useRef(brushRadiusPx);
   radiusPxRef.current = brushRadiusPx;
-  const getOctreeRef = useRef(getOctree);
-  getOctreeRef.current = getOctree;
+  const getOctreesRef = useRef(getOctrees);
+  getOctreesRef.current = getOctrees;
   const onStrokeRef = useRef(onStroke);
   onStrokeRef.current = onStroke;
   const onCursorRef = useRef(onCursorChange);
@@ -165,18 +165,20 @@ export function LabelBrushOctree({
      * (a cross-section) the camera is still a PerspectiveCamera instance, and
      * setFromCamera would collapse every pick toward the view center.
      */
-    const anchorAt = (ndc: THREE.Vector2): THREE.Vector3 | null => brushAnchorAt({
-      octree: getOctreeRef.current() as unknown as PickableOctree | null,
-      gl, camera, ray: rayForNdc(camera, ndc),
-      // The pick window, given rather than left to potree to derive from the
-      // ray — its derivation collapses to the view center under the
-      // cross-section's ortho override. See `pickPixelForNdc`.
-      pixelPosition: pickPixelForNdc(gl, ndc),
-      viewDist: camera.position.distanceTo(
-        new THREE.Vector3(centerRef.current.x, centerRef.current.y, centerRef.current.z)),
-      cpuPointBudget: CPU_RAYCAST_POINT_BUDGET,
-      isOverlay: isSceneOverlay,
-    });
+    const anchorAt = (ndc: THREE.Vector2): THREE.Vector3 | null => nearestBrushAnchor(
+      getOctreesRef.current() as unknown as PickableOctree[],
+      {
+        gl, camera, ray: rayForNdc(camera, ndc),
+        // The pick window, given rather than left to potree to derive from the
+        // ray — its derivation collapses to the view center under the
+        // cross-section's ortho override. See `pickPixelForNdc`.
+        pixelPosition: pickPixelForNdc(gl, ndc),
+        viewDist: camera.position.distanceTo(
+          new THREE.Vector3(centerRef.current.x, centerRef.current.y, centerRef.current.z)),
+        cpuPointBudget: CPU_RAYCAST_POINT_BUDGET,
+        isOverlay: isSceneOverlay,
+      },
+    );
 
     /** Pixel radius → world radius AT THE STAMP'S DEPTH. */
     const worldRadiusAt = (world: THREE.Vector3): number => {

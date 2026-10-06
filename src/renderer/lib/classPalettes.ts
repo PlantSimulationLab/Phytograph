@@ -807,3 +807,52 @@ export function parsePaletteList(raw: unknown): ClassPalette[] {
   }
   return out;
 }
+
+/**
+ * One column list for SEVERAL clouds labeled together: every column any of
+ * them carries, in the first cloud's order with the others' extras after.
+ *
+ * A stroke on several clouds paints the same column on each, and the backend
+ * creates the column on a cloud that lacks it — so a column one cloud has is
+ * paintable on all of them, and leaving it out would hide a `tree_instance`
+ * from the picker just because the first checked cloud was never segmented.
+ *
+ * Per slug: `missing` only when EVERY cloud lacks it, `observed` is the union
+ * of the clouds' classes (the palette derived from it must name the classes of
+ * all of them), `range` spans them, and a column that is a classification on
+ * any cloud is one here (a scalar reading of class ids is the unsafe one).
+ */
+export function mergeLabelableColumns(
+  perCloud: ReadonlyArray<ReadonlyArray<LabelableColumn>>,
+): LabelableColumn[] {
+  if (perCloud.length === 1) return [...perCloud[0]];
+  const out: LabelableColumn[] = [];
+  const at = new Map<string, number>();
+  for (const columns of perCloud) {
+    for (const col of columns) {
+      const i = at.get(col.slug);
+      if (i === undefined) {
+        at.set(col.slug, out.length);
+        out.push({ ...col });
+        continue;
+      }
+      const prev = out[i];
+      const observed = prev.observed || col.observed
+        ? [...new Set([...(prev.observed ?? []), ...(col.observed ?? [])])].sort((a, b) => a - b)
+        : undefined;
+      const range: [number, number] | undefined = prev.range && col.range
+        ? [Math.min(prev.range[0], col.range[0]), Math.max(prev.range[1], col.range[1])]
+        : prev.range ?? col.range;
+      out[i] = {
+        slug: prev.slug,
+        label: prev.missing && !col.missing ? col.label : prev.label,
+        kind: prev.kind === 'manual' || col.kind === 'manual' ? 'manual'
+          : prev.kind === 'categorical' || col.kind === 'categorical' ? 'categorical' : 'scalar',
+        missing: prev.missing && col.missing,
+        ...(observed ? { observed } : {}),
+        ...(range ? { range } : {}),
+      };
+    }
+  }
+  return out;
+}

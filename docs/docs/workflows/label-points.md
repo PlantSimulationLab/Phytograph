@@ -11,9 +11,12 @@ label anything you like.
 
 ## Label
 
-1. Select a single point cloud.
+1. Select the point cloud (or clouds) you want to label.
 2. Click **Label Points** (the brush icon in the **Tools** › Segmentation
-   group), or open the command palette and choose **Label Points**.
+   group), or open the command palette and choose **Label Points**. Under
+   **Clouds**, the panel lists every point cloud in the scene with the ones
+   you had selected checked; check or uncheck them there (see
+   [Label several clouds at once](#label-several-clouds-at-once)).
 3. Pick the class you want to paint by clicking it in the class list. The
    number keys `1`–`9` and `0` pick the first ten classes, in the order the
    panel numbers them.
@@ -61,6 +64,36 @@ does not do what you expect.
     changed since this cloud was last exported*, and closing the app or
     **File › New** names how many clouds have labels that would be lost. An
     export clears it for the label columns it wrote.
+
+## Label several clouds at once
+
+The **Clouds** list at the top of the panel decides what a stroke paints. It
+starts with the clouds selected in the Scans pane checked — with nothing
+selected, nothing is checked and the panel asks you to check one. Once the
+panel is open, clicking in the Scans pane no longer changes what you are
+labeling; only the checkboxes do.
+
+With more than one cloud checked:
+
+- **Every stroke labels all of them.** A lasso, rectangle or brush stroke
+  paints the points it covers in each checked cloud, in the same column and
+  with the same class, and **Undo** takes the whole stroke back from all of
+  them in one step. This is the way to label overlapping scans of the same
+  plants without repeating every stroke per scan.
+- **The counts are totals.** Each class row shows how many points carry it
+  across the checked clouds.
+- **They share one column and one class list**: the ones shown in the panel.
+  The column list offers every column any checked cloud carries; a cloud that
+  does not have the chosen column yet gets it on the first stroke.
+- **Pick** labels the piece under the click in each checked cloud that has
+  points there. The **Line** tool paints only the checked clouds that the
+  cross-section cuts.
+- **Save strokes…** and **Load strokes…** are for one cloud at a time, and are
+  disabled until only one is checked.
+
+Unchecking a cloud takes it out of the *next* stroke; the labels it already
+has stay on it. Checking a hidden cloud shows it for as long as it stays
+checked. A cloud with no editable session is listed but cannot be checked.
 
 ## Lasso, rectangle or brush?
 
@@ -150,7 +183,9 @@ recomputed.
   [Create a new classification](#create-a-new-classification).
 
 When you open the tool on a cloud that carries exactly one classification, it
-opens on that column with its real classes and counts already listed.
+opens on that column with its real classes and counts already listed. With
+several clouds checked, the first one in the list decides which column the
+tool opens on.
 
 !!! example "Fixing a tree segmentation by hand"
     [Separate trees](segment-trees.md) sometimes merges two trees into one, or
@@ -175,7 +210,7 @@ opens on that column with its real classes and counts already listed.
     it reads 0 points until you use it.
 
 !!! note "Strokes stay with their column and cloud"
-    Strokes belong to the column and the cloud you painted them on. Switching column, or selecting another cloud, starts that
+    Strokes belong to the column and the cloud you painted them on. Switching column, or checking a different cloud in the panel, starts that
     one clean; switching back finds your strokes still pending, and **Undo**
     only ever undoes strokes on the column and cloud in front of you.
 
@@ -418,9 +453,9 @@ panel is clipped to the same slab, and the slab is sized to all of them
 together. A cloud you leave unchecked is drawn whole. You can check or
 uncheck clouds after the section is drawn, and the set is kept while the
 section exists, even with the panel closed. Checking a hidden cloud shows it
-until you uncheck it or the section ends. Painting still labels one cloud at
-a time — the one selected for **Label Points** — and it must be one of the
-checked clouds for the section to bound the stroke.
+until you uncheck it or the section ends. **Label Points** has its own
+**Clouds** list: a stroke is bounded by the section on every cloud checked in
+*both* panels, and paints a cloud checked only for labeling at every depth.
 
 A small **map** in the lower-left corner of the viewport shows the cloud from
 above with the section as a blue band, so you can tell where you are while every

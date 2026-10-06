@@ -140,14 +140,14 @@ import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOver
 import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
-  labelableColumnsFor, withPendingLabelColumn, derivePaletteForColumn, makeEmptyPalette,
+  labelableColumnsFor, withPendingLabelColumn, mergeLabelableColumns, derivePaletteForColumn, makeEmptyPalette,
   validatePalette, forkPaletteForSave, type ClassPalette, type LabelableColumn, type PalettePreset,
   isLasFlagColumn, lasFlagPalette,
 } from '../lib/classPalettes';
 import { isInstanceColumnSlug, withNewInstance, WHOLE_CLOUD } from '../lib/instances';
 import { parseStrokeFile, renumberStrokes, serializeStrokes } from '../lib/strokeFile';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
-import { LabelPanel, type LabelTool } from './viewer/panels/LabelPanel';
+import { LabelPanel, LabelPanelNoTargets, type LabelPanelPicker, type LabelTool } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
@@ -2752,6 +2752,10 @@ export default function PointCloudViewer({
   const [slabLocked, setSlabLocked] = useState(true);
 
   const [showLabelPanel, setShowLabelPanel] = useState(false);
+  // The clouds the Label panel has checked — the tool's own picker, seeded from
+  // the Scans-pane selection when it opens, like Crop/Erase/Filter. A stroke
+  // paints every one of them (its own session each, one undo step together).
+  const [labelTargets, setLabelTargets] = useState<Set<string>>(() => new Set());
   // Drawing MODE within the open Label tool, mirroring `eraseActive`. The tool
   // can be open with the panel visible while the view stays interactive;
   // toggling this ON freezes the view and makes clicks place lasso vertices.
@@ -2885,12 +2889,29 @@ export default function PointCloudViewer({
     // very column while the new result lands: re-read its counts, or it goes on
     // showing the old result's.
     const sessionId = cloudsRef.current.find((c) => c.id === cloudId)?.data.octree?.sessionId;
-    if (sessionId && labelTargetCloudRef.current?.id === cloudId
+    if (sessionId && labelTargetIdsRef.current.has(cloudId)
         && labelPaletteRef.current?.slug === slug) {
-      void refreshLabelCounts(sessionId, slug);
+      void refreshLabelCounts(cloudId, sessionId, slug);
     }
   }, []);
-  const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
+  // Per-class counts of the column the panel shows, PER CLOUD: each session
+  // reports its own, and the panel shows their sum over the checked clouds.
+  const [labelCountsByCloud, setLabelCountsByCloud] =
+    useState<ReadonlyMap<string, Record<number, number>>>(() => new Map());
+  const setCloudLabelCounts = useCallback((
+    cloudId: string, counts: Record<string, number> | null,
+  ) => setLabelCountsByCloud((prev) => {
+    if (!counts && !prev.has(cloudId)) return prev;
+    const next = new Map(prev);
+    if (counts) {
+      next.set(cloudId, Object.fromEntries(
+        Object.entries(counts).map(([k, v]) => [Number(k), Number(v)]),
+      ) as Record<number, number>);
+    } else {
+      next.delete(cloudId);
+    }
+    return next;
+  }), []);
   // Label requests run one at a time PER CLOUD, in the order they were drawn
   // (lib/keyedSerialQueue): strokes are order-dependent and painted before
   // their request is sent, so two in flight could otherwise reach the backend
@@ -3727,6 +3748,8 @@ export default function PointCloudViewer({
   // Forward ref to the cloud being labeled — declared here because the window
   // seams above are registered before labelTargetCloud exists.
   const labelTargetCloudRef = useRef<{ id: string } | null>(null);
+  // Every cloud the label tool has checked (see `labelTargetClouds`).
+  const labelTargetIdsRef = useRef<ReadonlySet<string>>(new Set());
 
   // Expose viewer-scoped actions on window so the application menu (wired in
   // src/main/menu.ts) can dispatch to them via App.tsx without prop-drilling.
@@ -5884,23 +5907,42 @@ export default function PointCloudViewer({
 
   // ── Manual labeling ──────────────────────────────────────────────────────
 
-  // The cloud being labeled (single selection, session-backed).
-  const labelTargetCloud = useMemo(() => {
-    if (!showLabelPanel || selectedIds.size !== 1) return null;
-    const cloud = clouds.find(c => selectedIds.has(c.id));
-    return cloud?.data.octree?.sessionId ? cloud : null;
-  }, [showLabelPanel, selectedIds, clouds]);
-  // The line tool draws in a section, so it needs one on the cloud being labeled.
-  const labelLineAvailable = !!labelTargetCloud && !!slab && sectionTargetIds.has(labelTargetCloud.id);
-  // World Z extent of the labeled cloud: the limiting box spans it by default.
-  const labelTargetZ = useMemo(() => {
-    const b = labelTargetCloud?.data.bounds;
-    const tz = labelTargetCloud ? getEditState(labelTargetCloud.id).translation.z : 0;
-    return b ? { min: b.min.z + tz, max: b.max.z + tz } : { min: 0, max: 0 };
+  // The clouds being labeled: the ones checked in the panel's picker that have
+  // an editable session, in scene order. Every stroke paints all of them.
+  const labelTargetClouds = useMemo(
+    () => (showLabelPanel
+      ? clouds.filter(c => labelTargets.has(c.id) && c.data.octree?.sessionId)
+      : []),
+    [showLabelPanel, labelTargets, clouds],
+  );
+  const labelTargetCloudsRef = useRef(labelTargetClouds);
+  labelTargetCloudsRef.current = labelTargetClouds;
+  const labelTargetKey = labelTargetClouds.map(c => c.id).join('\u0000');
+  const labelTargetIdSet = useMemo(
+    () => new Set(labelTargetClouds.map(c => c.id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [labelTargetCloud, editStates]);
-  const labelPendingEntry = pendingFor(labelPending, labelTargetCloud?.id, labelPalette?.slug);
-  // Palette POSITIONS of the classes the eye has hidden, for the target cloud's
+    [labelTargetKey],
+  );
+  // The FIRST checked cloud. It stands in wherever one cloud has to answer for
+  // the set (which column the tool opens on, the file name a saved palette or
+  // stroke file is named after); anything a stroke touches goes through
+  // `labelTargetClouds` instead.
+  const labelTargetCloud = labelTargetClouds[0] ?? null;
+  // The line tool draws in a section, so it needs one on a cloud being labeled.
+  const labelSectionActive = !!slab && labelTargetClouds.some(c => sectionTargetIds.has(c.id));
+  const labelLineAvailable = labelSectionActive;
+  // World Z extent of the labeled clouds: the limiting box spans it by default.
+  const labelTargetZ = useMemo(() => {
+    let min = Infinity; let max = -Infinity;
+    for (const c of labelTargetClouds) {
+      const tz = getEditState(c.id).translation.z;
+      min = Math.min(min, c.data.bounds.min.z + tz);
+      max = Math.max(max, c.data.bounds.max.z + tz);
+    }
+    return min <= max ? { min, max } : { min: 0, max: 0 };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labelTargetClouds, editStates]);
+  // Palette POSITIONS of the classes the eye has hidden, for the target clouds'
   // visibility mask (the overlay buffer holds positions, not class values).
   const labelHiddenIndices = useMemo(() => {
     if (!labelTargetCloud || !labelPalette) return null;
@@ -5908,42 +5950,68 @@ export default function PointCloudViewer({
       .map((c, i) => (labelVisibleClasses.has(c.value) ? -1 : i)).filter((i) => i >= 0);
     return hidden.length ? hidden : null;
   }, [labelTargetCloud, labelPalette, labelVisibleClasses]);
-  const labelStrokes = labelPendingEntry.strokes;
-  const labelDirty = labelPendingEntry.dirty;
+  // What the checked clouds have pending on the column in front of the user.
+  // Strokes are counted as GESTURES: one stroke over three clouds is three
+  // session edits and one thing the user did, so the largest per-cloud count is
+  // the number to show.
+  const labelPendingSummary = useMemo(() => {
+    let strokes = 0; let dirty = false;
+    for (const c of labelTargetClouds) {
+      const e = pendingFor(labelPending, c.id, labelPalette?.slug);
+      strokes = Math.max(strokes, e.strokes.length);
+      dirty = dirty || e.dirty;
+    }
+    return { strokes, dirty };
+  }, [labelTargetClouds, labelPending, labelPalette?.slug]);
+  // The panel's per-class counts: each checked cloud's own, summed.
+  const labelClassCounts = useMemo(() => {
+    const out: Record<number, number> = {};
+    for (const c of labelTargetClouds) {
+      const counts = labelCountsByCloud.get(c.id);
+      if (!counts) continue;
+      for (const [k, v] of Object.entries(counts)) out[Number(k)] = (out[Number(k)] ?? 0) + v;
+    }
+    return out;
+  }, [labelTargetClouds, labelCountsByCloud]);
 
   /**
-   * The columns of the labeled cloud the tool can paint into.
+   * The columns of the labeled clouds the tool can paint into.
    *
    * Enumerated from the SAME `octreeScalarFieldOptions` the Color-by and Filter
    * pickers use, so the three cannot disagree about which columns a cloud has.
    * Before this the tool could only reach four columns named by its presets,
    * which made a cloud's own classification (a `tree_instance` from a failed
    * tree segmentation) impossible to correct by hand.
+   *
+   * With several clouds checked it is every column ANY of them carries (see
+   * `mergeLabelableColumns`): a stroke creates the column on a cloud without it.
    */
-  const labelColumns = useMemo<LabelableColumn[]>(() => {
-    const oct = labelTargetCloud?.data.octree;
-    if (!oct) return [];
-    const columns = labelableColumnsFor({
-      columnOptions: octreeScalarFieldOptions(oct.attributeRanges, oct.attributeLabels),
-      attributeRanges: oct.attributeRanges,
-      observedClasses: oct.observedClasses,
-      classPalettes: oct.classPalettes,
-      manualSlug: MANUAL_CLASS_ATTRIBUTE,
-      isCategorical: isCategoricalAttribute,
-    });
-    // A column committed but not yet baked is real everywhere except the octree
-    // metadata this list is built from, so add it — otherwise a user who
-    // creates a classification and saves it watches their own column stay
-    // missing from the picker for the length of a converter run. The palette's
-    // class list stands in for `observed` until the backend reports which
-    // classes actually own points.
-    const hold = labelTargetCloud ? labelCommitHolds.get(labelTargetCloud.id) : null;
-    return withPendingLabelColumn(columns, hold ? {
-      slug: hold.palette.slug,
-      label: hold.palette.name,
-      observed: hold.palette.classes.map((c) => c.value),
-    } : null);
-  }, [labelTargetCloud, labelCommitHolds]);
+  const labelColumns = useMemo<LabelableColumn[]>(() => mergeLabelableColumns(
+    labelTargetClouds.flatMap((cloud) => {
+      const oct = cloud.data.octree;
+      if (!oct) return [];
+      const columns = labelableColumnsFor({
+        columnOptions: octreeScalarFieldOptions(oct.attributeRanges, oct.attributeLabels),
+        attributeRanges: oct.attributeRanges,
+        observedClasses: oct.observedClasses,
+        classPalettes: oct.classPalettes,
+        manualSlug: MANUAL_CLASS_ATTRIBUTE,
+        isCategorical: isCategoricalAttribute,
+      });
+      // A column committed but not yet baked is real everywhere except the octree
+      // metadata this list is built from, so add it — otherwise a user who
+      // creates a classification and saves it watches their own column stay
+      // missing from the picker for the length of a converter run. The palette's
+      // class list stands in for `observed` until the backend reports which
+      // classes actually own points.
+      const hold = labelCommitHolds.get(cloud.id);
+      return [withPendingLabelColumn(columns, hold ? {
+        slug: hold.palette.slug,
+        label: hold.palette.name,
+        observed: hold.palette.classes.map((c) => c.value),
+      } : null)];
+    }),
+  ), [labelTargetClouds, labelCommitHolds]);
 
   // Wire the undo/redo backend sync declared near handleUndo. What the session
   // must do is decided by `planSessionSync` from the transaction itself (see
@@ -5993,13 +6061,11 @@ export default function PointCloudViewer({
             markLabelsChanged(op.cloudId, op.slug);
             // The panel's counts describe the column it is showing; a replay on
             // another cloud or column must not overwrite them.
-            const shown = labelTargetCloudRef.current?.id === op.cloudId
+            const shown = labelTargetIdsRef.current.has(op.cloudId)
               && labelPaletteRef.current?.slug === op.slug;
             if (!shown) return;
-            labelCountsSeqRef.current++;
-            setLabelClassCounts(Object.fromEntries(
-              Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
-            ) as Record<number, number>);
+            bumpLabelCountsSeq(op.cloudId);
+            setCloudLabelCounts(op.cloudId, res.class_counts);
           };
           if (op.op === 'resetLabels') {
             // Send the WHOLE surviving id list, newest first. A gesture that
@@ -6031,10 +6097,18 @@ export default function PointCloudViewer({
     labelModeRef.current = !!labelTargetCloud;
     labelTargetCloudRef.current = labelTargetCloud ? { id: labelTargetCloud.id } : null;
   }, [labelTargetCloud]);
+  // Render-time: the undo sync and the column-retire path read it from
+  // callbacks that can run before an effect would have updated it.
+  labelTargetIdsRef.current = labelTargetIdSet;
 
-  // Monotonic stamp so a slow label-summary read can never overwrite a newer
-  // paint/undo/commit result.
-  const labelCountsSeqRef = useRef(0);
+  // Monotonic stamp PER CLOUD so a slow label-summary read can never overwrite
+  // a newer paint/undo/commit result on that cloud.
+  const labelCountsSeqRef = useRef(new Map<string, number>());
+  const bumpLabelCountsSeq = useCallback((cloudId: string) => {
+    const n = (labelCountsSeqRef.current.get(cloudId) ?? 0) + 1;
+    labelCountsSeqRef.current.set(cloudId, n);
+    return n;
+  }, []);
   const labelPaletteRef = useRef<ClassPalette | null>(null);
   // Render-time, not an effect: paintLabelStroke reads this synchronously via
   // the ref, so a post-paint effect could hand it the previous palette.
@@ -6223,27 +6297,31 @@ export default function PointCloudViewer({
    * reappearing as Unknown/Leaf/Petiole under the organ palette).
    */
   const refreshLabelCounts = useCallback(async (
-    sessionId: string, slug: string, canceled?: () => boolean,
+    cloudId: string, sessionId: string, slug: string, canceled?: () => boolean,
   ) => {
     // Stamp the request. A summary fetch is a READ of state that a paint may be
     // about to change, so a slow reply must never clobber a newer write: paint
     // while the open-fetch is still in flight and the stale {0: all} reply would
     // land after it and reset the counts to zero. Monotonic counter, newest
     // wins — the same discipline the stroke list uses against the backend.
-    const seq = ++labelCountsSeqRef.current;
+    const seq = bumpLabelCountsSeq(cloudId);
+    const current = () => seq === labelCountsSeqRef.current.get(cloudId);
     try {
       const res = await getCloudLabelSummary(sessionId, slug);
-      if (canceled?.() || seq !== labelCountsSeqRef.current) return;
-      setLabelClassCounts(
-        Object.fromEntries(
-          Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
-        ) as Record<number, number>,
-      );
+      if (canceled?.() || !current()) return;
+      setCloudLabelCounts(cloudId, res.class_counts);
     } catch {
       // Only costs the readout; the next stroke's response repopulates it.
-      if (!canceled?.() && seq === labelCountsSeqRef.current) setLabelClassCounts({});
+      if (!canceled?.() && current()) setCloudLabelCounts(cloudId, null);
     }
-  }, []);
+  }, [bumpLabelCountsSeq, setCloudLabelCounts]);
+  /** Re-read the counts of every checked cloud for `slug`. */
+  const refreshAllLabelCounts = useCallback((slug: string, canceled?: () => boolean) => {
+    for (const cloud of labelTargetCloudsRef.current) {
+      const sessionId = cloud.data.octree?.sessionId;
+      if (sessionId) void refreshLabelCounts(cloud.id, sessionId, slug, canceled);
+    }
+  }, [refreshLabelCounts]);
 
   /**
    * Make `next` the live palette.
@@ -6267,10 +6345,9 @@ export default function PointCloudViewer({
         : next.classes.find(c => c.value !== UNCLASSIFIED_VALUE)?.value ?? UNCLASSIFIED_VALUE
     ));
     setLabelFromClasses(null);
-    setLabelClassCounts({});
-    const sid = labelTargetCloud?.data.octree?.sessionId;
-    if (sid) void refreshLabelCounts(sid, next.slug);
-  }, [refreshLabelCounts, labelTargetCloud]);
+    setLabelCountsByCloud(new Map());
+    refreshAllLabelCounts(next.slug);
+  }, [refreshAllLabelCounts]);
 
   /**
    * The palette to open a column with, when the cloud has none bound.
@@ -6348,15 +6425,17 @@ export default function PointCloudViewer({
    * pending. (This used to be blocked, when the renderer held one list.)
    */
   const handleSelectLabelColumn = useCallback((slug: string) => {
-    if (!labelTargetCloud) return;
+    if (labelTargetClouds.length === 0) return;
     if (slug === labelPalette?.slug) return;
     const column = labelColumns.find(c => c.slug === slug);
     if (!column) return;
-    const bound = labelTargetCloud.data.octree?.classPalettes?.[slug];
+    // The first checked cloud that has its own class set for this column wins.
+    const bound = labelTargetClouds
+      .map(c => c.data.octree?.classPalettes?.[slug]).find(Boolean);
     const next = bound ?? paletteForColumn(column, slug);
-    labelColumnByCloudRef.current.set(labelTargetCloud.id, slug);
+    for (const c of labelTargetClouds) labelColumnByCloudRef.current.set(c.id, slug);
     applyLabelPalette(next);
-  }, [labelTargetCloud, labelPalette?.slug, labelColumns, applyLabelPalette, paletteForColumn]);
+  }, [labelTargetClouds, labelPalette?.slug, labelColumns, applyLabelPalette, paletteForColumn]);
 
   // Load the saved-palette library when the editor opens. On demand rather than
   // at mount: it is a disk read that only this panel needs.
@@ -6389,10 +6468,12 @@ export default function PointCloudViewer({
     // labeling tool, and `robustScalarRange` would percentile-trim it — which
     // drops its rarest class off the color ramp.
     registerCategoricalSlug(next.slug);
-    const cloud = labelTargetCloud;
-    const octreeInfo = cloud?.data.octree;
-    if (cloud) labelColumnByCloudRef.current.set(cloud.id, next.slug);
-    if (cloud && octreeInfo) {
+    // Bound to EVERY checked cloud: they are being labeled with this one
+    // class set, so each must reopen on it.
+    for (const cloud of labelTargetClouds) {
+      const octreeInfo = cloud.data.octree;
+      labelColumnByCloudRef.current.set(cloud.id, next.slug);
+      if (!octreeInfo) continue;
       onUpdateCloud(cloud.id, {
         ...cloud.data,
         octree: {
@@ -6410,7 +6491,7 @@ export default function PointCloudViewer({
     } catch (err) {
       showToast({ title: describeBackendError(err, 'Saving palette').message, type: 'error' });
     }
-  }, [applyLabelPalette, labelTargetCloud, onUpdateCloud, showToast]);
+  }, [applyLabelPalette, labelTargetCloud, labelTargetClouds, onUpdateCloud, showToast]);
 
   /** Write the whole library to a JSON file, for sharing between collaborators. */
   const handleExportPalettes = useCallback(async () => {
@@ -6455,8 +6536,26 @@ export default function PointCloudViewer({
   // Seed the palette when the tool opens on a cloud: prefer one already bound to
   // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
   // preset — the common correction case for this app's data.
+  //
+  // With several clouds checked the FIRST one decides, and the choice then
+  // stays put while any cloud of that set is still checked: checking a second
+  // scan, or unchecking the first, must not swap the class list out from under
+  // the user mid-session. A wholly new set (the tool reopened, or everything
+  // unchecked and something else checked) seeds afresh.
+  const labelSeededIdsRef = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
+    const seededFor = labelSeededIdsRef.current;
+    labelSeededIdsRef.current = labelTargetIdSet;
     if (!labelTargetCloud) return;
+    const current = labelPaletteRef.current;
+    if (current && labelTargetClouds.some(c => seededFor.has(c.id))) {
+      // Same working set, grown or shrunk: keep the column, and read the counts
+      // of whatever is checked now (a newly checked cloud has none yet).
+      for (const c of labelTargetClouds) labelColumnByCloudRef.current.set(c.id, current.slug);
+      let canceled = false;
+      refreshAllLabelCounts(current.slug, () => canceled);
+      return () => { canceled = true; };
+    }
     const oct = labelTargetCloud.data.octree;
     const palettes = oct?.classPalettes;
 
@@ -6487,11 +6586,12 @@ export default function PointCloudViewer({
     const column = labelColumns.find(c => c.slug === slug);
     const palette = palettes?.[slug] ?? paletteForColumn(column, slug);
 
-    labelColumnByCloudRef.current.set(labelTargetCloud.id, palette.slug);
+    for (const c of labelTargetClouds) labelColumnByCloudRef.current.set(c.id, palette.slug);
     setLabelPalette(palette);
     setLabelVisibleClasses(new Set(palette.classes.map(c => c.value)));
     setLabelLockedClasses(new Set());
     setLabelFinder(null);
+    setLabelCountsByCloud(new Map());
     // Start on the first non-Unclassified class: painting "Unclassified" by
     // accident is a silent no-op the user would have to debug.
     setLabelActiveClass(palette.classes.find(c => c.value !== 0)?.value ?? 0);
@@ -6504,42 +6604,49 @@ export default function PointCloudViewer({
     // Fetched rather than derived from data.pointCount: the backend counts only
     // EDITABLE points (no deleted rows, no sky/miss), so a locally-computed
     // total would disagree with every later update.
-    const sessionId = labelTargetCloud.data.octree?.sessionId;
-    if (sessionId) {
-      let canceled = false;
-      void refreshLabelCounts(sessionId, palette.slug, () => canceled);
-      // Guard against a late reply landing after the user switched clouds.
-      return () => { canceled = true; };
-    }
-    // Only when the TARGET changes — re-running on every palette edit would
+    let canceled = false;
+    refreshAllLabelCounts(palette.slug, () => canceled);
+    // Guard against a late reply landing after the user switched clouds.
+    return () => { canceled = true; };
+    // Only when the TARGETS change — re-running on every palette edit would
     // clobber the user's in-progress class list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [labelTargetCloud?.id]);
+  }, [labelTargetKey]);
 
   /**
-   * Paint one stroke: POST it, then record it locally.
+   * Paint one stroke on every checked cloud: POST it, then record it locally.
    *
    * The order matters — the stroke is only appended to the renderer's list on
    * SUCCESS, so the invariant `strokes.length === backend label_edit_count`
    * cannot drift on a failed request (the backend applies a batch under one
    * lock, so there is no partial-apply case to reconcile).
+   *
+   * SEVERAL CLOUDS. A region is world-space (or a frozen world camera), so the
+   * one the user drew means the same thing in every session, exactly as an
+   * erase stamp does. Each checked cloud gets its own stroke — its own id, its
+   * own session request on its own queue, its own rollback — and the ones that
+   * landed are recorded as ONE undo step, because the user made one gesture. A
+   * cloud whose request fails drops out of that step and says so; the others
+   * keep their paint.
+   *
+   * `region` is a map when the gesture resolved to a different region per
+   * cloud (the Pick tool: each cloud's own piece under the cursor, and the
+   * line tool: only the clouds in the section). Clouds absent from it are not
+   * painted.
    */
   const paintLabelStroke = useCallback(async (
-    region: PendingDeleteRegion,
+    region: PendingDeleteRegion | ReadonlyMap<string, PendingDeleteRegion>,
     // An instance action (merge, delete): its own class and From gate, and
     // none of the painting bounds — it means "every point of this instance".
     override?: { toClass: number; fromClasses?: number[]; fromColumn?: LabelStroke['fromColumn'] },
   ) => {
-    const cloud = labelTargetCloud;
-    const sessionId = cloud?.data.octree?.sessionId;
     const palette = labelPaletteRef.current;
-    if (!cloud || !sessionId || !palette) return;
+    const regionFor = (cloudId: string): PendingDeleteRegion | undefined =>
+      (region instanceof Map ? region.get(cloudId) : region as PendingDeleteRegion);
+    const targets = labelTargetClouds.filter(c => c.data.octree?.sessionId && regionFor(c.id));
+    if (!palette || targets.length === 0) return;
 
-    const strokeId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-    // A stroke drawn inside a cross-section is bounded by it. Captured on the
-    // stroke (not read live) so undo/redo replays the section the user actually
-    // painted in, even after they have stepped the slab on.
-    const activeSlab = !override && sectionTargetIds.has(cloud.id) ? slab : null;
+    const gestureId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
     // Never repaint what the user cannot see: a hidden class is protected, so
     // "any visible class" means exactly that (the eye used to do nothing). A
     // LOCKED class is protected whether shown or not.
@@ -6559,154 +6666,189 @@ export default function PointCloudViewer({
           max: [labelLimitBox.max.x, labelLimitBox.max.y, labelLimitBox.max.z] as [number, number, number],
         }
       : undefined;
+    // A stroke drawn inside a cross-section is bounded by it. Captured on the
+    // stroke (not read live) so undo/redo replays the section the user actually
+    // painted in, even after they have stepped the slab on. Per cloud: the
+    // section cuts only the clouds checked in ITS picker.
+    const slabFor = (cloudId: string) => (!override && sectionTargetIds.has(cloudId) ? slab : null);
     // Front: the surface the user can see inside the outline, from the points
     // actually drawn at the frozen camera. Points the slab clips are not drawn,
-    // so they must not hide anything either.
-    const depthLimit = !override && labelDepthMode === 'front' && region.kind === 'polygon'
+    // so they must not hide anything either. ONE surface for the gesture, from
+    // every checked cloud together: a point of one scan hidden behind another
+    // scan's surface is not on the front.
+    const outline = region instanceof Map ? null : region as PendingDeleteRegion;
+    const depthLimit = !override && labelDepthMode === 'front' && outline?.kind === 'polygon'
       ? buildDepthLimit(
-          region.points, region.projection, region.view, region.canvas,
-          forEachDrawnPoint(
-            (octreeRegistryRef.current.get(cloud.id) as any)?.root,
-            displayOffsetRef.current,
-            activeSlab ? slabPredicate(activeSlab) : undefined,
-          ),
+          outline.points, outline.projection, outline.view, outline.canvas,
+          (visit) => {
+            for (const cloud of targets) {
+              const cut = slabFor(cloud.id);
+              forEachDrawnPoint(
+                (octreeRegistryRef.current.get(cloud.id) as any)?.root,
+                displayOffsetRef.current,
+                cut ? slabPredicate(cut) : undefined,
+              )(visit);
+            }
+          },
           labelDepthTolerance,
         ) ?? undefined
       : undefined;
-    const stroke: LabelStroke = {
-      strokeId,
-      region,
-      toClass: override ? override.toClass : labelActiveClass,
-      fromClasses: override ? override.fromClasses : labelFromClasses ? [...labelFromClasses] : undefined,
-      ...(override?.fromColumn ? { fromColumn: override.fromColumn } : {}),
-      ...(excludeClasses.length ? { excludeClasses } : {}),
-      slab: activeSlab ? slabToPayload(activeSlab) : undefined,
-      ...(depthLimit ? { depthLimit } : {}),
-      ...(limitBox ? { limitBox } : {}),
-    };
-    const before: LabelEditState = {
-      strokes: labelStrokes,
-      activeClass: labelActiveClass,
-      visibleClasses: [...labelVisibleClasses],
-      paletteId: palette.id,
-      dirty: labelDirty,
-    };
-    const nextStrokes = [...labelStrokes, stroke];
     // Instance columns can set a semantic class in the same stroke (F7): the
     // same selection, sent to the paired column as its own stroke, recorded in
-    // ONE undo step with this one.
+    // the same undo step.
     const pair = !override && isInstanceColumnSlug(palette.slug) ? labelPairRef.current : null;
-    const pairStroke: LabelStroke | null = pair
-      ? { ...stroke, strokeId: `${strokeId}p`, toClass: pair.value, fromClasses: undefined, excludeClasses: undefined }
-      : null;
-    const pairEntry = pair ? pendingFor(labelPendingRef.current, cloud.id, pair.slug) : null;
-
-    // PAINT FIRST, confirm after.
-    //
-    // The overlay is driven by `labelStrokes` and is entirely client-side, so
-    // appending here makes the preview appear on the next frame — a ~16 ms pass
-    // over the loaded tiles. Waiting for the backend first (as this did
-    // originally) meant the user stared at an unchanged viewport for the whole
-    // HTTP round trip PLUS a full-resolution O(N) projection of the entire
-    // cloud: on a 50 M-point scan that is ~25x the work the renderer does, since
-    // the renderer only ever touches the ~2 M loaded points. That defeated the
-    // entire purpose of having a client-side overlay.
-    //
-    // The backend stays the source of truth: its reply supplies the authoritative
-    // class counts, and a failure rolls the stroke back below.
-    // Keyed by the cloud and column captured HERE, so a reply that lands after
-    // the user moved to another cloud still updates the one it belongs to.
     const slug = palette.slug;
-    updateLabelPending(cloud.id, slug, (e) => ({
-      strokes: [...e.strokes, stroke], dirty: true, palette,
-    }));
-    // Roll the optimistic paint back so the viewport can never show a stroke
-    // the session does not actually carry. Every path that ends without the
-    // backend applying the stroke goes through here.
-    const rollbackStroke = () => updateLabelPending(cloud.id, slug, (e) => ({
-      ...e, strokes: e.strokes.filter((x) => x.strokeId !== strokeId), dirty: before.dirty ?? false,
-    }));
-    if (pair && pairStroke) {
-      updateLabelPending(cloud.id, pair.slug, (e) => ({
-        strokes: [...e.strokes, pairStroke], dirty: true, palette: pair.palette,
-      }));
-    }
-    const rollbackPair = () => {
-      if (pair) updateLabelPending(cloud.id, pair.slug, (e) => ({
-        ...e, strokes: e.strokes.filter((x) => x.strokeId !== `${strokeId}p`),
-      }));
-    };
-    // Screen-space stroke: the octree must be in the session's frame first. A
-    // failed refresh has already said "the edit was not applied", so the paint
-    // must go too — it used to stay on screen as if it had.
-    // Queued behind this cloud's earlier strokes, so the backend applies them
-    // in the order they were drawn (and scene.commit records them in it too).
-    await labelQueue.run(cloud.id, async () => {
-      if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) {
-        rollbackStroke();
-        rollbackPair();
-        return;
-      }
-      try {
-        // `label` names the column in extra_dims_meta when the backend CREATES
-        // it. Without it every hand-made column exported as "Manual Class",
-        // whatever the user called it.
-        const res = await labelCloudRegion(
-          sessionId, [labelStrokeRequest(stroke)], palette.slug, palette.name);
-        let pairAction: SceneAction | null = null;
-        if (pair && pairStroke && pairEntry) {
-          try {
-            await labelCloudRegion(sessionId, [labelStrokeRequest(pairStroke)], pair.slug, pair.palette.name);
-            const pairBefore: LabelEditState = {
-              strokes: pairEntry.strokes, activeClass: pair.value,
-              visibleClasses: pair.palette.classes.map((c: { value: number }) => c.value),
-              paletteId: pair.palette.id, dirty: pairEntry.dirty,
-            };
-            pairAction = { t: 'labelEdit', id: cloud.id, slug: pair.slug, before: pairBefore,
-              after: { ...pairBefore, strokes: [...pairEntry.strokes, pairStroke], dirty: true } };
-            markLabelsChanged(cloud.id, pair.slug);
-            registerCategoricalSlug(pair.slug);
-          } catch (pairErr) {
-            rollbackPair();
-            showToast({ title: describeBackendError(pairErr, `Setting ${pair.palette.name}`).message, type: 'error' });
-          }
-        }
+    const many = targets.length > 1;
+    const nameOf = (cloud: PointCloudEntry) => cloud.data.fileName ?? 'point cloud';
 
-        const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
-        labelCountsSeqRef.current++;   // any in-flight summary read is now stale
-        setLabelClassCounts(
-          Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
-        );
-        // Do NOT reconcile the stroke list against `label_edit_count` here.
-        //
-        // The two counts measure different things: the renderer's list is USER
-        // GESTURES, the backend's history is UNDOABLE CHANGES. A stroke that
-        // changes nothing — e.g. the From-class gate matched no points — is
-        // correctly not recorded server-side, so the counts legitimately diverge
-        // by one. Truncating on that difference deleted the user's own stroke
-        // right after they drew it, and made the next lasso appear to do nothing.
-        //
-        // Eviction (the byte-bounded history dropping OLD entries) is a real case,
-        // but it trims the FRONT of the stack, so comparing lengths cannot detect
-        // it and slicing the tail is the wrong repair regardless.
-        scene.commit({
-          label: 'label points',
-          actions: [
+    // The gesture's undo step, assembled as the clouds report in. Committed by
+    // whichever request finishes LAST, from inside its queue job: the queue is
+    // then still busy, so an Undo waiting on it cannot run before the step it
+    // is meant to undo exists. Actions go in scene order, not arrival order.
+    const landed: SceneAction[][] = targets.map(() => []);
+    let outstanding = targets.length;
+    const settle = () => {
+      if (--outstanding > 0) return;
+      const actions = landed.flat();
+      if (actions.length > 0) scene.commit({ label: 'label points', actions });
+    };
+
+    await Promise.all(targets.map((cloud, index) => {
+      const sessionId = cloud.data.octree!.sessionId!;
+      const strokeId = index === 0 ? gestureId : `${gestureId}c${index}`;
+      const activeSlab = slabFor(cloud.id);
+      const stroke: LabelStroke = {
+        strokeId,
+        region: regionFor(cloud.id)!,
+        toClass: override ? override.toClass : labelActiveClass,
+        fromClasses: override ? override.fromClasses : labelFromClasses ? [...labelFromClasses] : undefined,
+        ...(override?.fromColumn ? { fromColumn: override.fromColumn } : {}),
+        ...(excludeClasses.length ? { excludeClasses } : {}),
+        slab: activeSlab ? slabToPayload(activeSlab) : undefined,
+        ...(depthLimit ? { depthLimit } : {}),
+        ...(limitBox ? { limitBox } : {}),
+      };
+      const entry = pendingFor(labelPendingRef.current, cloud.id, slug);
+      const before: LabelEditState = {
+        strokes: entry.strokes,
+        activeClass: labelActiveClass,
+        visibleClasses: [...labelVisibleClasses],
+        paletteId: palette.id,
+        dirty: entry.dirty,
+      };
+      const pairStroke: LabelStroke | null = pair
+        ? { ...stroke, strokeId: `${strokeId}p`, toClass: pair.value, fromClasses: undefined, excludeClasses: undefined }
+        : null;
+      const pairEntry = pair ? pendingFor(labelPendingRef.current, cloud.id, pair.slug) : null;
+
+      // PAINT FIRST, confirm after.
+      //
+      // The overlay is driven by the pending strokes and is entirely
+      // client-side, so appending here makes the preview appear on the next
+      // frame — a ~16 ms pass over the loaded tiles. Waiting for the backend
+      // first (as this did originally) meant the user stared at an unchanged
+      // viewport for the whole HTTP round trip PLUS a full-resolution O(N)
+      // projection of the entire cloud: on a 50 M-point scan that is ~25x the
+      // work the renderer does, since the renderer only ever touches the ~2 M
+      // loaded points. That defeated the entire purpose of having a client-side
+      // overlay.
+      //
+      // The backend stays the source of truth: its reply supplies the
+      // authoritative class counts, and a failure rolls the stroke back below.
+      // Keyed by the cloud and column captured HERE, so a reply that lands
+      // after the user moved to another cloud still updates the one it belongs
+      // to.
+      updateLabelPending(cloud.id, slug, (e) => ({
+        strokes: [...e.strokes, stroke], dirty: true, palette,
+      }));
+      // Roll the optimistic paint back so the viewport can never show a stroke
+      // the session does not actually carry. Every path that ends without the
+      // backend applying the stroke goes through here.
+      const rollbackStroke = () => updateLabelPending(cloud.id, slug, (e) => ({
+        ...e, strokes: e.strokes.filter((x) => x.strokeId !== strokeId), dirty: before.dirty ?? false,
+      }));
+      if (pair && pairStroke) {
+        updateLabelPending(cloud.id, pair.slug, (e) => ({
+          strokes: [...e.strokes, pairStroke], dirty: true, palette: pair.palette,
+        }));
+      }
+      const rollbackPair = () => {
+        if (pair) updateLabelPending(cloud.id, pair.slug, (e) => ({
+          ...e, strokes: e.strokes.filter((x) => x.strokeId !== `${strokeId}p`),
+        }));
+      };
+      // Screen-space stroke: the octree must be in the session's frame first. A
+      // failed refresh has already said "the edit was not applied", so the paint
+      // must go too — it used to stay on screen as if it had.
+      // Queued behind this cloud's earlier strokes, so the backend applies them
+      // in the order they were drawn (and scene.commit records them in it too).
+      return labelQueue.run(cloud.id, async () => {
+        try {
+          if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) {
+            rollbackStroke();
+            rollbackPair();
+            return;
+          }
+          // `label` names the column in extra_dims_meta when the backend CREATES
+          // it. Without it every hand-made column exported as "Manual Class",
+          // whatever the user called it.
+          const res = await labelCloudRegion(
+            sessionId, [labelStrokeRequest(stroke)], palette.slug, palette.name);
+          let pairAction: SceneAction | null = null;
+          if (pair && pairStroke && pairEntry) {
+            try {
+              await labelCloudRegion(sessionId, [labelStrokeRequest(pairStroke)], pair.slug, pair.palette.name);
+              const pairBefore: LabelEditState = {
+                strokes: pairEntry.strokes, activeClass: pair.value,
+                visibleClasses: pair.palette.classes.map((c: { value: number }) => c.value),
+                paletteId: pair.palette.id, dirty: pairEntry.dirty,
+              };
+              pairAction = { t: 'labelEdit', id: cloud.id, slug: pair.slug, before: pairBefore,
+                after: { ...pairBefore, strokes: [...pairEntry.strokes, pairStroke], dirty: true } };
+              markLabelsChanged(cloud.id, pair.slug);
+              registerCategoricalSlug(pair.slug);
+            } catch (pairErr) {
+              rollbackPair();
+              showToast({ title: describeBackendError(pairErr, `Setting ${pair.palette.name}`).message, type: 'error' });
+            }
+          }
+
+          const after: LabelEditState = { ...before, strokes: [...entry.strokes, stroke], dirty: true };
+          bumpLabelCountsSeq(cloud.id);   // any in-flight summary read is now stale
+          setCloudLabelCounts(cloud.id, res.class_counts);
+          // Do NOT reconcile the stroke list against `label_edit_count` here.
+          //
+          // The two counts measure different things: the renderer's list is USER
+          // GESTURES, the backend's history is UNDOABLE CHANGES. A stroke that
+          // changes nothing — e.g. the From-class gate matched no points — is
+          // correctly not recorded server-side, so the counts legitimately diverge
+          // by one. Truncating on that difference deleted the user's own stroke
+          // right after they drew it, and made the next lasso appear to do nothing.
+          //
+          // Eviction (the byte-bounded history dropping OLD entries) is a real case,
+          // but it trims the FRONT of the stack, so comparing lengths cannot detect
+          // it and slicing the tail is the wrong repair regardless.
+          landed[index] = [
             { t: 'labelEdit', id: cloud.id, slug: res.slug, before, after },
             ...(pairAction ? [pairAction] : []),
-          ],
-        });
-        markLabelsChanged(cloud.id, res.slug);
-      } catch (err) {
-        rollbackStroke();
-        rollbackPair();
-        showToast({ title: describeBackendError(err, 'Labeling').message, type: 'error' });
-      }
-    });
-  }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
-      labelVisibleClasses, labelLockedClasses, labelDirty, scene, showToast, updateLabelPending,
-      labelQueue,
-      // `slab`/`sectionTargetIds` are READ in the body (activeSlab), so they
+          ];
+          markLabelsChanged(cloud.id, res.slug);
+        } catch (err) {
+          rollbackStroke();
+          rollbackPair();
+          showToast({
+            title: describeBackendError(err, many ? `Labeling ${nameOf(cloud)}` : 'Labeling').message,
+            type: 'error',
+          });
+        } finally {
+          settle();
+        }
+      });
+    }));
+  }, [labelTargetClouds, labelActiveClass, labelFromClasses,
+      labelVisibleClasses, labelLockedClasses, scene, showToast, updateLabelPending,
+      labelQueue, bumpLabelCountsSeq, setCloudLabelCounts,
+      // `slab`/`sectionTargetIds` are READ in the body (slabFor), so they
       // must be dependencies. Omitting them froze `slab` at its first-render
       // value — null — so every stroke drawn inside a section shipped WITHOUT
       // its slab. The overlay reads the live slab, so the preview showed the
@@ -6804,9 +6946,8 @@ export default function PointCloudViewer({
       try {
         if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) throw new Error('The cloud could not be refreshed.');
         const res = await labelCloudRegion(sessionId, strokes.map(labelStrokeRequest), slug, palette.name);
-        labelCountsSeqRef.current++;
-        setLabelClassCounts(Object.fromEntries(
-          Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>);
+        bumpLabelCountsSeq(cloud.id);
+        setCloudLabelCounts(cloud.id, res.class_counts);
         scene.commit({
           label: 'load label strokes',
           actions: [{ t: 'labelEdit', id: cloud.id, slug, before,
@@ -6841,15 +6982,15 @@ export default function PointCloudViewer({
       for (const c of next.classes) if (!prevValues.has(c.value)) out.add(c.value);
       return out;
     });
-    const cloud = labelTargetCloud;
-    const oct = cloud?.data.octree;
-    if (cloud && oct) {
+    for (const cloud of labelTargetClouds) {
+      const oct = cloud.data.octree;
+      if (!oct) continue;
       onUpdateCloud(cloud.id, {
         ...cloud.data,
         octree: { ...oct, classPalettes: { ...(oct.classPalettes ?? {}), [next.slug]: next } },
       });
     }
-  }, [labelTargetCloud, onUpdateCloud]);
+  }, [labelTargetClouds, onUpdateCloud]);
   const handleNewInstance = useCallback(() => {
     const palette = labelPaletteRef.current;
     if (!palette) return;
@@ -6868,17 +7009,23 @@ export default function PointCloudViewer({
     void paintLabelStrokeRef.current?.(WHOLE_CLOUD, { toClass: UNCLASSIFIED_VALUE, fromClasses: [labelActiveClass] });
   }, [labelActiveClass]);
   const handleFrameInstance = useCallback(async () => {
-    const sessionId = labelTargetCloud?.data.octree?.sessionId;
     const palette = labelPaletteRef.current;
-    if (!sessionId || !palette) return;
+    if (labelTargetClouds.length === 0 || !palette) return;
     try {
-      const ext = await getLabelExtent(sessionId, palette.slug, labelActiveClass);
-      if (!ext.count) {
+      // The instance's extent over every checked cloud that carries it.
+      const extents = await Promise.all(labelTargetClouds.map(
+        (c) => getLabelExtent(c.data.octree!.sessionId!, palette.slug, labelActiveClass)));
+      const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+      const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+      for (const ext of extents) {
+        if (!ext.count) continue;
+        min.min(new THREE.Vector3(...ext.min));
+        max.max(new THREE.Vector3(...ext.max));
+      }
+      if (min.x > max.x) {
         showToast({ type: 'info', title: 'No points carry this instance' });
         return;
       }
-      const min = new THREE.Vector3(...ext.min);
-      const max = new THREE.Vector3(...ext.max);
       (window as any).__frameSelection?.({
         center: min.clone().add(max).multiplyScalar(0.5),
         size: max.clone().sub(min),
@@ -6886,7 +7033,7 @@ export default function PointCloudViewer({
     } catch (err) {
       showToast({ type: 'error', title: describeBackendError(err, 'Framing').message });
     }
-  }, [labelTargetCloud, labelActiveClass, showToast]);
+  }, [labelTargetClouds, labelActiveClass, showToast]);
 
   // Semantic columns an instance stroke can also set, each with its palette.
   const labelPairOptions = useMemo(() => {
@@ -6929,24 +7076,41 @@ export default function PointCloudViewer({
    */
   const labelPickRef = useRef<(clientX: number, clientY: number, grow: boolean) => void>(() => {});
   labelPickRef.current = (clientX, clientY, grow) => {
-    const cloud = labelTargetCloud;
-    const sessionId = cloud?.data.octree?.sessionId;
+    const targets = labelTargetClouds;
     const probe = depthProbeRef.current;
-    if (!cloud || !sessionId || !probe || labelPickBusy) return;
+    if (targets.length === 0 || !probe || labelPickBusy) return;
     const hit = probe(clientX, clientY);
     if (!hit) return;   // pointed at nothing: nothing to pick, and nothing to say
     const off = displayOffsetRef.current;
     const seed: [number, number, number] = [hit.x + (off?.x ?? 0), hit.y + (off?.y ?? 0), hit.z + (off?.z ?? 0)];
     setLabelPickBusy(true);
-    segmentPick(sessionId, {
+    // Each checked cloud is segmented on its own, so each answers with ITS
+    // piece at the clicked point — or with nothing, when the click landed on
+    // another scan and this one has no points there. The pieces found are
+    // painted together as one stroke; a cloud with none is simply left alone.
+    void Promise.allSettled(targets.map((cloud) => segmentPick(cloud.data.octree!.sessionId!, {
       seed, mode: labelPickMode, size: labelPickSize > 0 ? labelPickSize : null, grow,
-    })
-      .then((res) => {
+    })))
+      .then((results) => {
+        const regions = new Map<string, PendingDeleteRegion>();
+        let size: number | null = null;
+        let firstError: unknown = null;
+        results.forEach((r, i) => {
+          if (r.status === 'fulfilled') {
+            regions.set(targets[i].id, r.value.region);
+            size ??= r.value.size;
+          } else {
+            firstError ??= r.reason;
+          }
+        });
+        if (regions.size === 0) {
+          showToast({ type: 'error', title: describeBackendError(firstError, 'Picking').message });
+          return;
+        }
         // Show the automatic size, sent back exactly so it hits the same cache.
-        if (!(labelPickSize > 0)) setLabelPickSize(res.size);
-        return paintLabelStrokeRef.current?.(res.region);
+        if (!(labelPickSize > 0) && size !== null) setLabelPickSize(size);
+        return paintLabelStrokeRef.current?.(regions);
       })
-      .catch((err) => showToast({ type: 'error', title: describeBackendError(err, 'Picking').message }))
       .finally(() => setLabelPickBusy(false));
   };
   const labelPickActive = !!labelTargetCloud && labelDrawing && labelTool === 'pick';
@@ -6998,7 +7162,12 @@ export default function PointCloudViewer({
         // 'near' needs a band; without one, the section's own thickness is a
         // scale the user has already chosen for this cloud.
         const band = labelLineSide === 'near' && !(labelLineBand > 0) ? slab.depth : labelLineBand;
-        void paintLabelStrokeRef.current?.(profileLineRegion(slab, line, labelLineSide, band));
+        // Drawn in the section's own frame, so it is meaningless on a checked
+        // cloud the section does not cut: only the clouds in it are painted.
+        const lineRegion = profileLineRegion(slab, line, labelLineSide, band);
+        void paintLabelStrokeRef.current?.(new Map(
+          labelTargetClouds.filter(c => sectionTargetIds.has(c.id)).map(c => [c.id, lineRegion]),
+        ));
         setPolygonInProgress([]);
         setCropDrawState('idle');
         return true;
@@ -7205,7 +7374,7 @@ export default function PointCloudViewer({
     // per cloud: the held one, else the column the user last painted there.
     const others = new Set([...labelCommitHolds.keys(), ...labelPending.keys()]);
     for (const cloudId of others) {
-      if (labelTargetCloud?.id === cloudId) continue;   // merged below
+      if (labelTargetIdSet.has(cloudId)) continue;   // merged below
       const hold = labelCommitHolds.get(cloudId);
       const bySlug = labelPending.get(cloudId);
       const slug = hold?.palette.slug ?? labelColumnByCloudRef.current.get(cloudId)
@@ -7220,17 +7389,23 @@ export default function PointCloudViewer({
         slug,
       });
     }
-    if (labelTargetCloud && labelPalette) {
-      const hold = labelCommitHolds.get(labelTargetCloud.id);
-      const held = hold && hold.palette.slug === labelPalette.slug ? hold.strokes : [];
-      out.set(labelTargetCloud.id, {
-        state: buildLabelOverlayState(labelPalette, [...held, ...labelStrokes]),
-        scheme: paletteToIndexScheme(labelPalette),
-        slug: labelPalette.slug,
-      });
+    // Every checked cloud shows the column and class set the panel is on, with
+    // its own strokes: they are painted together but each holds its own list.
+    if (labelPalette) {
+      const scheme = paletteToIndexScheme(labelPalette);
+      for (const cloud of labelTargetClouds) {
+        const hold = labelCommitHolds.get(cloud.id);
+        const held = hold && hold.palette.slug === labelPalette.slug ? hold.strokes : [];
+        const pending = pendingFor(labelPending, cloud.id, labelPalette.slug).strokes;
+        out.set(cloud.id, {
+          state: buildLabelOverlayState(labelPalette, [...held, ...pending]),
+          scheme,
+          slug: labelPalette.slug,
+        });
+      }
     }
     return out;
-  }, [labelCommitHolds, labelPending, labelTargetCloud, labelPalette, labelStrokes, buildLabelOverlayState]);
+  }, [labelCommitHolds, labelPending, labelTargetClouds, labelTargetIdSet, labelPalette, buildLabelOverlayState]);
 
   /**
    * Stable per-cloud ref boxes for the overlay the renderer reads each frame.
@@ -7275,6 +7450,25 @@ export default function PointCloudViewer({
     });
   }, [clouds]);
 
+  // The panel's cloud picker. A cloud without a session is listed but cannot
+  // be checked: labels are columns of the session, and it has none.
+  const labelPicker = useMemo<LabelPanelPicker>(() => ({
+    items: clouds.map((c) => {
+      const sc = scans.find(x => x.id === c.id);
+      return {
+        id: c.id,
+        label: sc ? scanDisplayName(sc) : (c.data.fileName ?? 'Point cloud'),
+        color: c.color,
+        detail: `${c.data.pointCount.toLocaleString()} pts`,
+        ...(c.data.octree?.sessionId ? {} : {
+          disabledReason: 'Labels are stored in an imported cloud’s session; this cloud has none.',
+        }),
+      };
+    }),
+    selectedIds: labelTargets,
+    onChange: (next) => setLabelTargets(new Set(next)),
+  }), [clouds, scans, labelTargets]);
+
   /**
    * How the column the panel is showing stands with its background bake.
    *
@@ -7286,10 +7480,15 @@ export default function PointCloudViewer({
    * that has not happened.
    */
   const labelHold = useMemo(() => {
-    const hold = labelTargetCloud ? labelCommitHolds.get(labelTargetCloud.id) : null;
-    const mine = hold && labelPalette && hold.palette.slug === labelPalette.slug ? hold : null;
-    return { baking: !!mine && !mine.failed, failed: !!mine?.failed };
-  }, [labelTargetCloud, labelPalette, labelCommitHolds]);
+    // Over the checked clouds: any still converting, any that failed.
+    let baking = false; let failed = false;
+    for (const cloud of labelTargetClouds) {
+      const hold = labelCommitHolds.get(cloud.id);
+      if (!hold || !labelPalette || hold.palette.slug !== labelPalette.slug) continue;
+      if (hold.failed) failed = true; else baking = true;
+    }
+    return { baking, failed };
+  }, [labelTargetClouds, labelPalette, labelCommitHolds]);
 
   /**
    * The panel's Undo is Cmd+Z: ONE undo system, not two that disagree.
@@ -7306,9 +7505,9 @@ export default function PointCloudViewer({
    */
   const labelUndoAvailable = useMemo(() => {
     const top = scene.state.past[scene.state.past.length - 1];
-    return !!top && !!labelTargetCloud && !!labelPalette && top.actions.some(
-      (a) => a.t === 'labelEdit' && a.id === labelTargetCloud.id && a.slug === labelPalette.slug);
-  }, [scene.state.past, labelTargetCloud, labelPalette]);
+    return !!top && !!labelPalette && top.actions.some(
+      (a) => a.t === 'labelEdit' && labelTargetIdSet.has(a.id) && a.slug === labelPalette.slug);
+  }, [scene.state.past, labelTargetIdSet, labelPalette]);
   const handleLabelUndo = useCallback(() => {
     if (labelUndoAvailable) handleUndo();
   }, [labelUndoAvailable, handleUndo]);
@@ -7321,12 +7520,16 @@ export default function PointCloudViewer({
    * a mostly-labeled cloud (Alt-click a class to bring the rest back).
    */
   const stepLabelFinder = useCallback(async (dir: 1 | -1) => {
-    const cloud = labelTargetCloud;
-    const sessionId = cloud?.data.octree?.sessionId;
     const palette = labelPaletteRef.current;
-    if (!cloud || !sessionId || !palette) return;
+    if (labelTargetClouds.length === 0 || !palette) return;
     try {
-      const { clusters, total, estimated = false } = await getUnlabeledClusters(sessionId, palette.slug);
+      // Every checked cloud's unlabeled places, one after another: the finder
+      // walks all of them before it comes round again.
+      const found = await Promise.all(labelTargetClouds.map(
+        (c) => getUnlabeledClusters(c.data.octree!.sessionId!, palette.slug)));
+      const clusters = found.flatMap((f) => f.clusters);
+      const total = found.reduce((n, f) => n + f.total, 0);
+      const estimated = found.some((f) => f.estimated);
       if (clusters.length === 0) {
         setLabelFinder({ clusters, index: -1, total, estimated });
         return;
@@ -7348,7 +7551,7 @@ export default function PointCloudViewer({
     } catch (err) {
       showToast({ title: describeBackendError(err, 'Finding unlabeled points').message, type: 'error' });
     }
-  }, [labelTargetCloud, labelFinder, showToast]);
+  }, [labelTargetClouds, labelFinder, showToast]);
   const labelFinderStepRef = useRef(stepLabelFinder);
   labelFinderStepRef.current = stepLabelFinder;
 
@@ -7367,7 +7570,7 @@ export default function PointCloudViewer({
   const labelPanelOpenRef = useRef(false);
   labelPanelOpenRef.current = showLabelPanel;
   labelKeyRef.current = (e: KeyboardEvent) => {
-    if (!showLabelPanel || !labelPalette || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (!showLabelPanel || !labelTargetCloud || !labelPalette || e.ctrlKey || e.metaKey || e.altKey) return false;
     if (/^[0-9]$/.test(e.key)) {
       const row = e.key === '0' ? 9 : Number(e.key) - 1;
       const cls = labelPalette.classes[row];
@@ -7439,7 +7642,7 @@ export default function PointCloudViewer({
     // that failed (retried here, since there is no button to ask again).
     if (entry.strokes.length === 0 && !entry.dirty && !heldHere?.failed) return;
     const palette = entry.palette ?? heldHere?.palette
-      ?? (labelTargetCloudRef.current?.id === cloudId && labelPaletteRef.current?.slug === slug
+      ?? (labelTargetIdsRef.current.has(cloudId) && labelPaletteRef.current?.slug === slug
         ? labelPaletteRef.current : null);
     if (!cloud || !octreeInfo || !sessionId || !palette) return;
     const seq = ++labelCommitSeqRef.current;
@@ -7503,15 +7706,20 @@ export default function PointCloudViewer({
   // hundreds of strokes through the overlay. Restarted by every change to the
   // column's pending strokes.
   useEffect(() => {
-    const cloudId = labelTargetCloud?.id;
     const slug = labelPalette?.slug;
-    if (!cloudId || !slug) return;
-    if (labelPendingEntry.strokes.length === 0 && !labelPendingEntry.dirty) return;
+    if (!slug || labelTargetKey === '') return;
+    const cloudIds = labelTargetKey.split('\u0000').filter((id) => {
+      const e = pendingFor(labelPending, id, slug);
+      return e.strokes.length > 0 || e.dirty;
+    });
+    if (cloudIds.length === 0) return;
     // E2E shortens the wait through `__labelIdleBakeMs`; the behavior is the same.
     const ms = Number((window as any).__labelIdleBakeMs) || LABEL_IDLE_BAKE_MS;
-    const t = setTimeout(() => { void bakeLabelColumn(cloudId, slug); }, ms);
+    const t = setTimeout(() => {
+      for (const cloudId of cloudIds) void bakeLabelColumn(cloudId, slug);
+    }, ms);
     return () => clearTimeout(t);
-  }, [labelTargetCloud?.id, labelPalette?.slug, labelPendingEntry, bakeLabelColumn]);
+  }, [labelTargetKey, labelPalette?.slug, labelPending, bakeLabelColumn]);
 
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated
@@ -10536,18 +10744,15 @@ export default function PointCloudViewer({
         }
         setShowSectionPanel(true);
       }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
-      { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel,
-        // The panel paints ONE cloud's session. Never blocks while open, so the
-        // button can still close it.
-        blockedReason: () => {
-          if (showLabelPanel) return null;
-          const picked = clouds.filter(c => selectedIds.has(c.id));
-          if (picked.length > 1) return 'labels one point cloud at a time; select just one';
-          if (picked.length === 1 && !picked[0].data.octree?.sessionId) {
-            return 'this cloud has no editable session to label';
-          }
-          return null;
-        } },
+      { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => {
+        if (showLabelPanel) { setShowLabelPanel(false); return; }
+        closeAllToolPanels('label');
+        // Seed the picker from the Scans pane (nothing selected → nothing
+        // checked). Session-backed clouds only: labels live in the session.
+        setLabelTargets(seedFromSelection(
+          clouds.filter(c => c.data.octree?.sessionId).map(c => c.id), selectedIds));
+        setShowLabelPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: WoodLeafIcon, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
       { id: 'cloud-organ-segment', name: 'Segment Plant Organs', keywords: ['organ', 'organs', 'leaflet', 'leaflets', 'stem', 'petiole', 'soil', 'pot', 'herbaceous', 'plantcloudfit', 'classify', 'classification', 'instance'], action: () => { closeAllToolPanels('organ-segment'); setShowOrganSegmentPanel(!showOrganSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Clover, testId: 'tool-organ-segment', isActive: () => showOrganSegmentPanel },
@@ -10616,7 +10821,7 @@ export default function PointCloudViewer({
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, openTransformTool, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered,
-      // Label Points' isActive and blockedReason read these.
+      // Label Points' isActive and its picker seed read these.
       showLabelPanel, clouds]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
@@ -11839,11 +12044,13 @@ export default function PointCloudViewer({
     setResampleTargets(prune);
     setNormalsTargets(prune);
     setSectionTargets(prune);
+    setLabelTargets(prune);
     // Nothing left to act on: close, or File → New leaves an empty panel open
     // with its toolbar button toggled ON.
     if (clouds.length === 0) {
       setShowComputeNormalsPanel(false);
       setShowSectionPanel(false);
+      setShowLabelPanel(false);
       clearSlabSection();
     }
   }, [clouds, clearSlabSection]);
@@ -11866,6 +12073,7 @@ export default function PointCloudViewer({
     if (showComputeNormalsPanel) for (const id of normalsTargets) ids.add(id);
     // A section outlives its panel, so its clouds stay shown while it exists.
     if (showSectionPanel || slab) for (const id of sectionTargets) ids.add(id);
+    if (showLabelPanel) for (const id of labelTargets) ids.add(id);
     if (editMode === 'translate') {
       for (const key of transformTargets) {
         const t = parseTargetKey(key);
@@ -11873,8 +12081,8 @@ export default function PointCloudViewer({
       }
     }
     return ids;
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, slab,
-      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, transformTargets]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, showLabelPanel, slab,
+      cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, labelTargets, transformTargets]);
   const toolCheckedMeshes = useMemo(() => {
     const ids = new Set<string>();
     if (editMode === 'crop') for (const id of cropMeshTargets) ids.add(id);
@@ -23395,7 +23603,7 @@ export default function PointCloudViewer({
           // are overlays on a cloud the tool is not open on, and under the
           // user's own color mode they were uploaded and never drawn, so the
           // labels looked undone the moment the panel closed.
-          const isLabelTarget = labelTargetCloud?.id === cloud.id;
+          const isLabelTarget = labelTargetIdSet.has(cloud.id);
           const overlaySlug = labelOverlayByCloud.get(cloud.id)?.slug;
           const { mode: cloudColorMode, field: cloudScalarField } = isLabelTarget
             ? { mode: 'scalar' as const, field: labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE }
@@ -23574,7 +23782,7 @@ export default function PointCloudViewer({
                   // user hits Save. See `labelOverlayByCloud`.
                   labelOverlayRef={labelOverlayBoxesRef.current.get(cloud.id) ?? null}
                   labelStatsId={cloud.id}
-                  labelHiddenIndices={labelTargetCloud?.id === cloud.id ? labelHiddenIndices : null}
+                  labelHiddenIndices={labelTargetIdSet.has(cloud.id) ? labelHiddenIndices : null}
                   labelCommittedSlug={
                     labelOverlayByCloud.get(cloud.id)?.slug
                     ?? labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE
@@ -24622,10 +24830,10 @@ export default function PointCloudViewer({
         {labelTargetCloud && labelBoxDraw !== 'idle' && (
           <BoxDrawRaycaster
             groundZ={labelTargetZ.min - displayOffset.z}
-            octrees={(() => {
-              const oct = octreeRegistryRef.current.get(labelTargetCloud.id);
+            octrees={labelTargetClouds.flatMap((c) => {
+              const oct = octreeRegistryRef.current.get(c.id);
               return oct ? [oct] : [];
-            })()}
+            })}
             onMove={(x, y) => {
               labelBoxCursorRef.current = { x: x + displayOffset.x, y: y + displayOffset.y };
               setLabelBoxCursorTick((t) => t + 1);
@@ -24836,17 +25044,27 @@ export default function PointCloudViewer({
             lasso, so slab bounding, the From-class gate, the live overlay and
             undo all work on it with no extra wiring. */}
         {labelBrushActive && labelTargetCloud && (() => {
-          const b = labelTargetCloud.data.bounds;
-          const cloudId = labelTargetCloud.id;
+          // Center of everything being labeled: it only scales the CPU pick's
+          // point threshold by the camera's distance to the work.
+          const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
+          const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+          for (const c of labelTargetClouds) {
+            const { min, max } = c.data.bounds;
+            lo.min(new THREE.Vector3(min.x, min.y, min.z));
+            hi.max(new THREE.Vector3(max.x, max.y, max.z));
+          }
+          const b = { center: lo.add(hi).multiplyScalar(0.5) };
           return (
             <LabelBrushOctree
-              // Keyed on the CLOUD, not on the surrounding IIFE's identity. The
-              // gizmo registers DOM listeners on the canvas in an effect, so a
-              // remount that overlaps its predecessor leaves two live listener
-              // sets on the same element: the outgoing one keeps handling moves
-              // and nulls the cursor the incoming one just resolved, and the
-              // brush looks dead while every pick is succeeding.
-              key={labelTargetCloud.id}
+              // A CONSTANT key, not the surrounding IIFE's identity and not the
+              // checked set. The gizmo registers DOM listeners on the canvas in
+              // an effect, so a remount that overlaps its predecessor leaves two
+              // live listener sets on the same element: the outgoing one keeps
+              // handling moves and nulls the cursor the incoming one just
+              // resolved, and the brush looks dead while every pick is
+              // succeeding. It reads the checked clouds at event time (below),
+              // so checking another scan needs no remount.
+              key="label-brush"
               // Resolved at EVENT time, not at render time.
               //
               // `onOctreeReady` writes octreeRegistryRef, which is a ref — so
@@ -24857,7 +25075,10 @@ export default function PointCloudViewer({
               // picked up an octree if some unrelated state change re-rendered
               // the viewer afterwards, which is why the brush worked on some
               // scenes and not others with no visible difference between them.
-              getOctree={() => octreeRegistryRef.current.get(cloudId) ?? null}
+              getOctrees={() => labelTargetCloudsRef.current.flatMap((c) => {
+                const oct = octreeRegistryRef.current.get(c.id);
+                return oct ? [oct] : [];
+              })}
               brushRadiusPx={labelBrushPx}
               cloudCenter={{
                 x: b.center.x - displayOffset.x,
@@ -27638,7 +27859,7 @@ export default function PointCloudViewer({
             selectedIds: sectionTargets,
             onChange: (next) => setSectionTargets(new Set(next)),
           }}
-          stacked={!!labelTargetCloud}
+          stacked={showLabelPanel}
           hasSlab={!!slab}
           drawing={slabDrawState !== 'idle'}
           thickness={slab?.depth ?? 0}
@@ -27701,7 +27922,7 @@ export default function PointCloudViewer({
             // Loading a library palette keeps ITS column, which may differ from
             // the one on screen — so remember it like any other column switch.
             setNewColumnDraft(null);
-            if (labelTargetCloud) labelColumnByCloudRef.current.set(labelTargetCloud.id, p.slug);
+            for (const c of labelTargetClouds) labelColumnByCloudRef.current.set(c.id, p.slug);
             applyLabelPalette(p);
             setShowPaletteEditor(false);
           }}
@@ -27712,8 +27933,15 @@ export default function PointCloudViewer({
         />
       )}
 
+      {/* No selection-size gate: the panel owns its own cloud picker. With
+          nothing checked it is the picker alone. */}
+      {showLabelPanel && !(labelTargetCloud && labelPalette) && (
+        <LabelPanelNoTargets picker={labelPicker} onClose={() => setShowLabelPanel(false)} />
+      )}
       {labelTargetCloud && labelPalette && (
         <LabelPanel
+          picker={labelPicker}
+          targetCount={labelTargetClouds.length}
           classes={labelPalette.classes}
           paletteName={labelPalette.name}
           // Size only: the per-class notes (reserved range…) belong to the editor.
@@ -27723,14 +27951,14 @@ export default function PointCloudViewer({
           classCounts={labelClassCounts}
           visibleClasses={labelVisibleClasses}
           fromClasses={labelFromClasses}
-          pendingStrokes={labelStrokes.length}
+          pendingStrokes={labelPendingSummary.strokes}
           canUndo={labelUndoAvailable}
-          unexported={(labelsUnexported.get(labelTargetCloud.id)?.size ?? 0) > 0}
-          dirty={labelDirty || labelHold.failed}
+          unexported={labelTargetClouds.some(c => (labelsUnexported.get(c.id)?.size ?? 0) > 0)}
+          dirty={labelPendingSummary.dirty || labelHold.failed}
           baking={labelHold.baking}
           bakeFailed={labelHold.failed}
-          // Undo and Commit wait for this cloud's queued strokes to land.
-          busy={labelTargetCloud ? labelQueue.pending(labelTargetCloud.id) > 0 : false}
+          // Undo waits for the checked clouds' queued strokes to land.
+          busy={labelTargetClouds.some(c => labelQueue.pending(c.id) > 0)}
           onSelectClass={setLabelActiveClass}
           onToggleVisible={(v) => setLabelVisibleClasses(prev => {
             const next = new Set(prev);
@@ -27813,6 +28041,11 @@ export default function PointCloudViewer({
           onPrelabel={handlePrelabel}
           onSaveStrokes={() => { void handleSaveStrokes(); }}
           onLoadStrokes={() => { void handleLoadStrokes(); }}
+          // A stroke file is one cloud's history, and replaying it is one
+          // cloud's undo step: with several checked there is no single list to
+          // write or to append to.
+          strokeFilesBlockedReason={labelTargetClouds.length > 1
+            ? 'Stroke files belong to one cloud: check just one to save or load.' : null}
           pickMode={labelPickMode}
           onPickModeChange={(m) => { setLabelPickMode(m); setLabelPickSize(0); }}
           pickSize={labelPickSize}
@@ -27838,7 +28071,7 @@ export default function PointCloudViewer({
           brushPx={labelBrushPx}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
-          sectionActive={!!slab && sectionTargetIds.has(labelTargetCloud.id)}
+          sectionActive={labelSectionActive}
           onClearSection={clearSlabSection}
           onClose={() => setShowLabelPanel(false)}
         />

@@ -80,3 +80,25 @@ export function brushAnchorAt(a: BrushAnchorArgs): THREE.Vector3 | null {
   // selects nothing, where refusing to stamp at least hides the cursor.
   return null;
 }
+
+/**
+ * The anchor when SEVERAL clouds are being labeled together: each target's own
+ * anchor, and of those the one nearest the camera along the ray — the surface
+ * the user is actually pointing at. Taking the first target's would park the
+ * sphere on a cloud hidden behind another checked one.
+ */
+export function nearestBrushAnchor(
+  octrees: ReadonlyArray<PickableOctree | null>,
+  args: Omit<BrushAnchorArgs, 'octree'>,
+): THREE.Vector3 | null {
+  let best: THREE.Vector3 | null = null;
+  let bestT = Infinity;
+  const toHit = new THREE.Vector3();
+  for (const octree of octrees) {
+    const hit = brushAnchorAt({ ...args, octree });
+    if (!hit) continue;
+    const t = toHit.subVectors(hit, args.ray.origin).dot(args.ray.direction);
+    if (t < bestT) { bestT = t; best = hit; }
+  }
+  return best;
+}
