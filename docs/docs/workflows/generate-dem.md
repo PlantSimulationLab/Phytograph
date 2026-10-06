@@ -43,7 +43,21 @@ you write any subset of these layers to `.asc` / GeoTIFF.
 
 ## Generate
 
-1. Select a single point cloud.
+1. Select the point cloud (or clouds) you want surfaces for. When the panel
+   opens (step 3), its **Clouds** list shows every point cloud in the scene
+   with the ones you had selected checked; check or uncheck them there. Once
+   the panel is open, clicking in the Scans pane no longer changes the set,
+   and a hidden cloud you check is shown for as long as it stays checked.
+
+    With more than one checked, **each cloud gets its own surfaces**, one cloud
+    after another, named after it (`<cloud> DEM`, `<cloud> DSM`, …). They are
+    not merged into one raster; to grid several scans as one terrain, merge
+    them into one cloud first. One cell size runs on all of them, seeded from
+    the widest checked cloud, and the grid estimate (and the too-fine limit)
+    reads the largest grid any of them would make. The ground notice appears
+    if any checked cloud has no ground classification. **Cancel** stops the
+    current cloud and skips the ones not started; a cloud that fails does not
+    stop the others.
 2. (Recommended, for DTM/CHM) Run [**Segment Ground**](segment-ground.md) first.
    The DEM tool is **ground-class aware**: if the cloud carries a ground
    classification, only the ground points are gridded, giving a true bare-earth

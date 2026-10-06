@@ -1,10 +1,19 @@
 import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 import { GitBranch, Loader2, ChevronRight, X } from 'lucide-react';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
 
 // Presentational tool panel for BFS-graph skeleton extraction. State and the
 // `onExtract` handler live in PointCloudViewer; the parent gates rendering on
-// `showSkeletonPanel && selectedIds.size === 1`.
+// `showSkeletonPanel` alone. WHICH clouds are skeletonized is the `picker`'s
+// checked set, seeded from the Scans-pane selection on open; each cloud gets
+// its own skeleton, one after another, with these settings.
 interface SkeletonExtractionPanelProps {
+  /** Every point cloud in the scene, with the ones to skeletonize checked. */
+  picker: CloudPicker;
+  /** How many clouds are checked; with none, only the picker is shown. */
+  targetCount: number;
+  /** "name (i/N)" while a run works through several clouds. */
+  progress?: string | null;
   removeOutliers: boolean;
   smooth: boolean;
   searchRadius: number;
@@ -33,6 +42,9 @@ interface SkeletonExtractionPanelProps {
 }
 
 export function SkeletonExtractionPanel({
+  picker,
+  targetCount,
+  progress = null,
   removeOutliers,
   smooth,
   searchRadius,
@@ -60,7 +72,7 @@ export function SkeletonExtractionPanel({
   onCancel,
 }: SkeletonExtractionPanelProps) {
   return (
-    <div data-testid="skeleton-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
+    <div data-testid="skeleton-panel" data-target-count={targetCount} className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
       <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <GitBranch className="w-3 h-3" />
@@ -68,11 +80,26 @@ export function SkeletonExtractionPanel({
         </div>
         <button
           onClick={onClose}
+          aria-label="Close"
+          title="Close"
           className="p-1 hover:bg-neutral-700 rounded"
         >
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={targetCount}
+        testIdPrefix="skeleton"
+        noneHint="Check the clouds to extract skeletons from."
+        locked={inProgress}
+      />
+      {targetCount > 1 && (
+        <p className="-mt-2 mb-3 text-[10px] text-neutral-500" data-testid="skeleton-multi-hint">
+          Each cloud gets its own skeleton, with the settings below.
+        </p>
+      )}
+      {targetCount > 0 && (<>
 
       {/* Description */}
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
@@ -240,11 +267,16 @@ export function SkeletonExtractionPanel({
 
       {/* Error Message */}
       {error && (
-        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300 whitespace-pre-line">
           {error}
         </div>
       )}
 
+      {inProgress && progress && (
+        <div data-testid="skeleton-progress" className="mb-2 text-[10px] text-neutral-400 truncate" title={progress}>
+          {progress}
+        </div>
+      )}
       {/* Extract / Cancel buttons */}
       {inProgress ? (
         <div className="flex gap-2">
@@ -272,9 +304,10 @@ export function SkeletonExtractionPanel({
           className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-amber-600 hover:bg-amber-500 text-white"
         >
           <GitBranch className="w-3 h-3" />
-          Extract Skeleton
+          {targetCount > 1 ? `Extract ${targetCount} Skeletons` : 'Extract Skeleton'}
         </button>
       )}
+      </>)}
     </div>
   );
 }

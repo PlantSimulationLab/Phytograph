@@ -1,13 +1,27 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { mkdtempSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
+import { resetToFreshScene } from './helpers/resetApp';
 import { importFiles } from './helpers/importFiles';
 import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
+
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts).
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
 
 // Drives the BFS skeleton extraction workflow end-to-end against the live
 // backend. The fixture is a Y-shaped synthetic plant (stem + two branches,
@@ -15,9 +29,8 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 // skeleton, which lets us assert on metrics that prove the algorithm
 // actually ran (not just "no error").
 test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
-  const { app, page, close } = await launchApp();
-
-  try {
+  const { app, page } = session;
+  {
 
     // Import as point cloud (not auto) — exercises the non-default menu item.
     // The handler calls react-dropzone's open() which fires a real OS file
@@ -109,7 +122,69 @@ test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
     for (const c of ['x', 'y', 'z'] as const) {
       expect(Number.isFinite(exported.nodes[0][c])).toBe(true);
     }
-  } finally {
-    await close();
   }
+});
+
+// The panel has its own Clouds picker, seeded from the Scans-pane selection,
+// and extracts one skeleton per checked cloud. It used to require exactly ONE
+// selected scan: with two selected the panel never mounted and the toolbar
+// button was a dead click.
+//
+// The second cloud is the same plant moved 5 m in X, written at test time.
+test('extracts one skeleton per checked cloud', async () => {
+  const { app, page } = session;
+  const SHIFTED = join(mkdtempSync(join(tmpdir(), 'phytograph-skel-')), 'tree_shifted.xyz');
+  writeFileSync(SHIFTED, readFileSync(FIXTURE, 'utf8').split('\n').filter((l) => l.trim()).map((l) => {
+    const [x, ...rest] = l.trim().split(/\s+/);
+    // Comment and header lines pass through untouched.
+    if (!Number.isFinite(Number(x))) return l;
+    return [(Number(x) + 5).toFixed(4), ...rest].join(' ');
+  }).join('\n') + '\n');
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
+  await expect(rowA).toHaveAttribute('data-point-count', '900', { timeout: 20_000 });
+  await importFiles(app, page, 'import-point-cloud', SHIFTED);
+  await completeImportWizard(page);
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="tree_shifted"]');
+  await expect(rowB).toHaveAttribute('data-point-count', '900', { timeout: 20_000 });
+
+  // Nothing selected: the tool still opens, on the picker alone.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await page.getByTestId('tool-skeleton').click();
+  const panel = page.getByTestId('skeleton-panel');
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId('skeleton-none-checked')).toBeVisible();
+  await expect(page.getByTestId('skeleton-extract-button')).toHaveCount(0);
+
+  const target = (name: string) =>
+    panel.locator(`[data-testid="skeleton-target-row"][data-label="${name}"]`).locator('input');
+  await target('tree').check();
+  await expect(page.getByTestId('skeleton-extract-button')).toHaveText('Extract Skeleton');
+  await target('tree_shifted').check();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  await expect(page.getByTestId('skeleton-extract-button')).toHaveText('Extract 2 Skeletons');
+
+  // The same fixture-tuned settings as the single-cloud test above.
+  await page.getByTestId('skeleton-search-radius').fill('0.04');
+  await page.getByTestId('skeleton-min-points').fill('1');
+  await page.getByTestId('skeleton-extract-button').click();
+
+  // One skeleton each, both real.
+  const rows = page.getByTestId('skeleton-row');
+  await expect(rows).toHaveCount(2, { timeout: 120_000 });
+  for (let i = 0; i < 2; i++) {
+    const length = parseFloat((await rows.nth(i).getAttribute('data-total-length')) ?? '0');
+    const pts = parseInt((await rows.nth(i).getAttribute('data-point-count')) ?? '0', 10);
+    expect(length).toBeGreaterThan(0.3);
+    expect(length).toBeLessThan(10);
+    expect(pts).toBeGreaterThan(5);
+    expect(pts).toBeLessThan(900);
+  }
+  // A clean run closes the panel, and one summary names both clouds.
+  await expect(panel).toHaveCount(0);
+  const toast = page.getByTestId('toast-success').filter({ hasText: '2 Skeletons Extracted' }).last();
+  await expect(toast).toContainText('tree: Length');
+  await expect(toast).toContainText('tree_shifted: Length');
 });

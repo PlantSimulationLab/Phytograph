@@ -1,19 +1,27 @@
 import { Mountain, Loader2, X, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
+import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
 export type DemSurfaceType = 'dtm' | 'dsm' | 'chm';
 
 // Presentational tool panel for DEM (Digital Elevation Model) generation. The
 // `onGenerate` handler and all state live in PointCloudViewer; the parent gates
-// rendering on `showDEMPanel && selectedIds.size === 1`.
+// rendering on `showDEMPanel` alone. WHICH clouds get surfaces is the `picker`'s
+// checked set, seeded from the Scans-pane selection on open; each cloud gets
+// its own, one cloud after another, with these settings.
 // Hard cap on grid cells (nx*ny) — mirrors the backend's _DEM_MAX_CELLS. A finer
 // cell than this on the current extent is rejected server-side, so the panel
 // flags it up front.
 const DEM_MAX_CELLS = 4_000_000;
 
 interface DEMPanelProps {
+  /** Every point cloud in the scene, with the ones to build surfaces for checked. */
+  picker: CloudPicker;
+  /** How many clouds are checked; with none, only the picker is shown. */
+  targetCount: number;
   // Which surface products to build. One run generates all of them (in order),
   // each as its own mesh — so DTM, DSM and CHM can be produced in one click.
   selectedSurfaces: Set<DemSurfaceType>;
@@ -22,8 +30,9 @@ interface DEMPanelProps {
   fillVoids: boolean;
   computeHeightAboveGround: boolean;
   hasGroundClass: boolean;
-  // Horizontal extent (m) of the selected cloud's X/Y spans, used to estimate the
-  // DEM grid dimensions for the chosen cell size. Undefined when unknown.
+  // Horizontal extent (m) of the checked cloud's X/Y spans (the largest, with
+  // several), used to estimate the DEM grid dimensions for the chosen cell size.
+  // Undefined when unknown.
   extentX?: number;
   extentY?: number;
   inProgress: boolean;
@@ -75,6 +84,8 @@ export function DEMPanel({
   method,
   fillVoids,
   computeHeightAboveGround,
+  picker,
+  targetCount,
   hasGroundClass,
   extentX,
   extentY,
@@ -114,16 +125,29 @@ export function DEMPanel({
   const tooFine = totalCells > DEM_MAX_CELLS;
 
   return (
-    <div data-testid="dem-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-      <div className="flex items-center justify-between mb-3">
+    <div data-testid="dem-panel" data-target-count={targetCount} className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[calc(100%-2rem)] overflow-y-auto">
+      <div className={`flex items-center justify-between ${STICKY_PANEL_HEADER}`}>
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Mountain className="w-3 h-3" />
           Generate surfaces
         </div>
-        <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
+        <button onClick={onClose} aria-label="Close" title="Close" className="p-1 hover:bg-neutral-700 rounded">
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={targetCount}
+        testIdPrefix="dem"
+        noneHint="Check the clouds to build surfaces for."
+        locked={inProgress}
+      />
+      {targetCount > 1 && (
+        <p className="-mt-2 mb-3 text-[10px] text-neutral-500" data-testid="dem-multi-hint">
+          Each cloud gets its own surfaces, with the settings below.
+        </p>
+      )}
+      {targetCount > 0 && (<>
 
       {/* Surface types — tick each product to build; one run generates them all. */}
       <div className="mb-3">
@@ -272,7 +296,7 @@ export function DEMPanel({
       )}
 
       {error && (
-        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+        <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300 whitespace-pre-line">
           {error}
         </div>
       )}
@@ -311,6 +335,7 @@ export function DEMPanel({
           {runLabel}
         </button>
       )}
+      </>)}
     </div>
   );
 }

@@ -1333,6 +1333,13 @@ export default function PointCloudViewer({
   // each time the DEM panel opens (guarded by a ref so it only fires on the open
   // transition and never clobbers a manual tweak). The user can override it.
   const [showDEMPanel, setShowDEMPanel] = useState(false);
+  // The clouds the DEM and Skeleton panels have checked — their own pickers,
+  // seeded from the Scans-pane selection when they open. Each cloud gets its
+  // own result, one after another.
+  const [demTargets, setDemTargets] = useState<Set<string>>(() => new Set());
+  const [skeletonTargets, setSkeletonTargets] = useState<Set<string>>(() => new Set());
+  // "name (i/N)" while a skeleton run works through several clouds.
+  const [skeletonProgress, setSkeletonProgress] = useState<string | null>(null);
   const [demInProgress, setDemInProgress] = useState(false);
   const [demError, setDemError] = useState<string | null>(null);
   // Which surface products to build. One run generates each checked surface as its
@@ -1351,14 +1358,23 @@ export default function PointCloudViewer({
   const [demProgress, setDemProgress] = useState<{ label: string; value: number | null } | null>(null);
   const demPanelWasOpen = useRef(false);
   useEffect(() => {
+    // Once per opening, from the WIDEST checked cloud (one cell size runs on
+    // all of them), and only once something is checked — as for the CSF seed.
     if (showDEMPanel && !demPanelWasOpen.current) {
-      const sel = clouds.find((c) => selectedIds.has(c.id));
-      // Hits-only extent — same reason as the CSF seed above.
-      const size = sel ? extentForParameterSeeding(sel.data) : null;
-      if (size) setDemCellSize(demDefaultsForExtent(Math.max(size.x, size.y)).cellSize);
+      let size: { x: number; y: number; z: number } | null = null;
+      for (const sel of clouds) {
+        if (!demTargets.has(sel.id)) continue;
+        // Hits-only extent — same reason as the CSF seed above.
+        const s = extentForParameterSeeding(sel.data);
+        if (s && (!size || Math.max(s.x, s.y) > Math.max(size.x, size.y))) size = s;
+      }
+      if (size) {
+        setDemCellSize(demDefaultsForExtent(Math.max(size.x, size.y)).cellSize);
+        demPanelWasOpen.current = true;
+      }
     }
-    demPanelWasOpen.current = showDEMPanel;
-  }, [showDEMPanel, clouds, selectedIds]);
+    if (!showDEMPanel) demPanelWasOpen.current = false;
+  }, [showDEMPanel, clouds, demTargets]);
   // Plant-organ segmentation state (ML: soil / stem / leaf + leaflet ids).
   const [showOrganSegmentPanel, setShowOrganSegmentPanel] = useState(false);
   // The clouds each segmentation panel has checked — its own picker, seeded
@@ -10848,8 +10864,20 @@ export default function PointCloudViewer({
       // current selection but not requiring one), so it stays clickable whenever
       // any cloud exists in the scene — like the other picker-driven tools.
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', multiInput: true, isActive: () => showTriangulationPopup },
-      { id: 'cloud-dem', name: 'Generate DEM', keywords: ['dem', 'dtm', 'dsm', 'chm', 'terrain', 'elevation', 'ground', 'surface', 'heightmap', 'bare earth', 'digital elevation model', 'digital surface model', 'canopy height', 'canopy height model'], action: () => { closeAllToolPanels('dem'); setShowDEMPanel(!showDEMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Mountain, testId: 'tool-dem', isActive: () => showDEMPanel },
-      { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
+      { id: 'cloud-dem', name: 'Generate DEM', keywords: ['dem', 'dtm', 'dsm', 'chm', 'terrain', 'elevation', 'ground', 'surface', 'heightmap', 'bare earth', 'digital elevation model', 'digital surface model', 'canopy height', 'canopy height model'], action: () => {
+        if (showDEMPanel) { setShowDEMPanel(false); return; }
+        closeAllToolPanels('dem');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setDemTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setShowDEMPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'reconstruct', icon: Mountain, testId: 'tool-dem', isActive: () => showDEMPanel },
+      { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => {
+        if (showSkeletonPanel) { setShowSkeletonPanel(false); return; }
+        closeAllToolPanels('skeleton');
+        // Seed the picker from the Scans pane (nothing selected → nothing checked).
+        setSkeletonTargets(seedFromSelection(clouds.map(c => c.id), selectedIds));
+        setShowSkeletonPanel(true);
+      }, category: 'Point Cloud', multiInput: true, multiInputKind: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', multiInput: true, isActive: () => showQSMPopup },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setLadReopenSelection(null); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
       { id: 'fit-crown', name: 'Fit Crown & Metrics', keywords: ['crown', 'canopy', 'shape', 'ellipsoid', 'prism', 'cone', 'alpha', 'volume', 'height', 'metrics', 'tree'], action: () => { closeAllToolPanels(); setShowCrownFitPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: TreeDeciduous, testId: 'tool-fit-crown', multiInput: true, isActive: () => showCrownFitPopup },
@@ -12134,6 +12162,8 @@ export default function PointCloudViewer({
     setWoodTargets(prune);
     setOrganTargets(prune);
     setTreeTargets(prune);
+    setDemTargets(prune);
+    setSkeletonTargets(prune);
     // Nothing left to act on: close, or File → New leaves an empty panel open
     // with its toolbar button toggled ON.
     if (clouds.length === 0) {
@@ -12144,6 +12174,8 @@ export default function PointCloudViewer({
       setShowWoodSegmentPanel(false);
       setShowOrganSegmentPanel(false);
       setShowTreeSegmentPanel(false);
+      setShowDEMPanel(false);
+      setShowSkeletonPanel(false);
       clearSlabSection();
     }
   }, [clouds, clearSlabSection]);
@@ -12171,6 +12203,8 @@ export default function PointCloudViewer({
     if (showWoodSegmentPanel) for (const id of woodTargets) ids.add(id);
     if (showOrganSegmentPanel) for (const id of organTargets) ids.add(id);
     if (showTreeSegmentPanel) for (const id of treeTargets) ids.add(id);
+    if (showDEMPanel) for (const id of demTargets) ids.add(id);
+    if (showSkeletonPanel) for (const id of skeletonTargets) ids.add(id);
     if (editMode === 'translate') {
       for (const key of transformTargets) {
         const t = parseTargetKey(key);
@@ -12179,9 +12213,9 @@ export default function PointCloudViewer({
     }
     return ids;
   }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showSectionPanel, showLabelPanel, showGroundSegmentPanel,
-      showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, slab,
+      showWoodSegmentPanel, showOrganSegmentPanel, showTreeSegmentPanel, showDEMPanel, showSkeletonPanel, slab,
       cropTargets, eraseTargets, filterTargets, resampleTargets, normalsTargets, sectionTargets, labelTargets, groundTargets,
-      woodTargets, organTargets, treeTargets, transformTargets]);
+      woodTargets, organTargets, treeTargets, demTargets, skeletonTargets, transformTargets]);
   const toolCheckedMeshes = useMemo(() => {
     const ids = new Set<string>();
     if (editMode === 'crop') for (const id of cropMeshTargets) ids.add(id);
@@ -15893,10 +15927,12 @@ export default function PointCloudViewer({
   // (kept on the mesh's demGrid for raster export). Optionally writes a
   // height_above_ground scalar onto the source cloud (a CHM precursor).
   const handleGenerateDEM = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    // Every checked cloud gets its own surfaces, one cloud after another.
+    // Clouds are read through `cloudsRef` each iteration: the callback is not
+    // re-created while it runs.
+    const targetIds = cloudsRef.current.filter(c => demTargets.has(c.id)).map(c => c.id);
+    if (targetIds.length === 0) return;
+    const multi = targetIds.length > 1;
 
     // The surfaces to build this run, in a stable bottom-up order (terrain, then
     // top-of-canopy, then the canopy height derived from them). One run generates
@@ -15913,177 +15949,178 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     demAbortRef.current = abort;
     const onDemRunId = (runId: string) => { demRunIdRef.current = runId; };
-    const baseName = cloud.data.fileName ?? id;
+    // One cloud's whole run: every checked surface, in order. Resolves with
+    // what the summary says about it; throws on failure or cancel.
+    const generateForCloud = async (
+      cloud: PointCloudEntry, position: string,
+    ): Promise<{ cells: number; warning?: string }> => {
+      const id = cloud.id;
+      const baseName = cloud.data.fileName ?? id;
 
-    // Build a per-surface mesh from a generate result and register it.
-    const finishMesh = (result: Awaited<ReturnType<typeof generateDEM>>, surface: DemSurfaceType) => {
-      const productLabel = labelFor(surface);
-      const meshData: MeshData = {
-        vertices: result.vertices,
-        indices: result.triangles,
-        normals: result.normals,
-        vertexCount: result.numVertices,
-        triangleCount: result.numTriangles,
-        surfaceArea: result.surfaceArea,
+      // Build a per-surface mesh from a generate result and register it.
+      const finishMesh = (result: Awaited<ReturnType<typeof generateDEM>>, surface: DemSurfaceType) => {
+        const productLabel = labelFor(surface);
+        const meshData: MeshData = {
+          vertices: result.vertices,
+          indices: result.triangles,
+          normals: result.normals,
+          vertexCount: result.numVertices,
+          triangleCount: result.numTriangles,
+          surfaceArea: result.surfaceArea,
+        };
+        const meshEntry: MeshEntry = {
+          id: crypto.randomUUID(),
+          sourceCloudId: id,
+          data: meshData,
+          visible: true,
+          color: '#8c6643',
+          method: 'dem',
+          name: `${baseName} ${productLabel}`,
+          demSurfaceType: surface,
+          demGrid: result.grid
+            ? { ...result.grid, crsEpsg: result.grid.crsEpsg ?? null }
+            : undefined,
+          demLayers: result.layers,
+        };
+        addMesh(meshEntry, undefined, `Generate ${productLabel}`);
+        // A DTM defaults to coloring by its elevation LAYER; DSM/CHM (no layers)
+        // fall back to solid (their geometry IS the value; a colorbar isn't needed).
+        if (result.layers?.elevation) {
+          setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'layer'));
+          setSelectedMeshLayer(prev => new Map(prev).set(meshEntry.id, 'elevation'));
+        } else {
+          setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'solid'));
+        }
+        return meshEntry;
       };
-      const meshEntry: MeshEntry = {
-        id: crypto.randomUUID(),
-        sourceCloudId: id,
-        data: meshData,
-        visible: true,
-        color: '#8c6643',
-        method: 'dem',
-        name: `${baseName} ${productLabel}`,
-        demSurfaceType: surface,
-        demGrid: result.grid
-          ? { ...result.grid, crsEpsg: result.grid.crsEpsg ?? null }
-          : undefined,
-        demLayers: result.layers,
-      };
-      addMesh(meshEntry, undefined, `Generate ${productLabel}`);
-      // A DTM defaults to coloring by its elevation LAYER; DSM/CHM (no layers)
-      // fall back to solid (their geometry IS the value; a colorbar isn't needed).
-      if (result.layers?.elevation) {
-        setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'layer'));
-        setSelectedMeshLayer(prev => new Map(prev).set(meshEntry.id, 'elevation'));
-      } else {
-        setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'solid'));
+
+      // Precompute the flat-cloud point arrays ONCE (shared across every surface in
+      // the batch) — the miss/ground/first-return extraction is identical per run.
+      const ps = await buildPointSource(cloud);
+      let flat: {
+        displayData: typeof cloud.data;
+        rawCount: number;
+        points: number[][];
+        groundLabels?: number[];
+        firstReturnLabels?: number[];
+        intensity?: number[];
+        hitIndices: number[];
+        count: number;
+      } | null = null;
+      if (ps.kind !== 'source') {
+        // --- Flat cloud: EXCLUDE sky/miss points (is_miss != 0): a miss is a ray
+        // that hit nothing, projected ~1 km out, so it both has no place in a ground
+        // surface AND inflates the extent by ~1000× (making auto-CSF/gridding
+        // pathological). Filter here (the session path already gets hits-only). ---
+        const displayData = ps.data;
+        const rawCount = displayData.pointCount;
+        // Use the SHARED helper rather than a local miss loop: a hand-rolled copy
+        // is exactly how the filtered and unfiltered twins drifted apart across
+        // this file. `aligned` keeps each per-point array in lockstep with the
+        // positions, which is the part that is easy to get wrong by hand.
+        //
+        // First-return index (0 = first return) drives the DSM / CHM top-of-canopy
+        // surface AND the DTM's return-density layer; per-point intensity feeds the
+        // DTM's intensity layer. Both are collected whenever their column exists.
+        const intensityBuf = displayData.intensities;
+        const wantIntensity = demSurfaces.has('dtm');
+        const hits = collectHitPoints(displayData, {
+          ground: displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE]?.values,
+          firstReturn: displayData.scalarFields?.['target_index']?.values,
+          intensity: wantIntensity ? intensityBuf : undefined,
+        });
+        const points = hits.points;
+        const hitIndices = hits.hitIndices;
+        const groundLabels = hits.aligned.ground?.map(v => Math.round(v));
+        const firstReturnLabels = hits.aligned.firstReturn?.map(v => Math.round(v));
+        const intensity = hits.aligned.intensity;
+        flat = { displayData, rawCount, points, groundLabels, firstReturnLabels, intensity, hitIndices, count: points.length };
+        if (flat.count < 3) {
+          throw new Error('DEM needs at least 3 hit points (all points are sky/misses).');
+        }
       }
-      return meshEntry;
-    };
 
-    // Precompute the flat-cloud point arrays ONCE (shared across every surface in
-    // the batch) — the miss/ground/first-return extraction is identical per run.
-    const ps = await buildPointSource(cloud);
-    let flat: {
-      displayData: typeof cloud.data;
-      rawCount: number;
-      points: number[][];
-      groundLabels?: number[];
-      firstReturnLabels?: number[];
-      intensity?: number[];
-      hitIndices: number[];
-      count: number;
-    } | null = null;
-    if (ps.kind !== 'source') {
-      // --- Flat cloud: EXCLUDE sky/miss points (is_miss != 0): a miss is a ray
-      // that hit nothing, projected ~1 km out, so it both has no place in a ground
-      // surface AND inflates the extent by ~1000× (making auto-CSF/gridding
-      // pathological). Filter here (the session path already gets hits-only). ---
-      const displayData = ps.data;
-      const rawCount = displayData.pointCount;
-      // Use the SHARED helper rather than a local miss loop: a hand-rolled copy
-      // is exactly how the filtered and unfiltered twins drifted apart across
-      // this file. `aligned` keeps each per-point array in lockstep with the
-      // positions, which is the part that is easy to get wrong by hand.
-      //
-      // First-return index (0 = first return) drives the DSM / CHM top-of-canopy
-      // surface AND the DTM's return-density layer; per-point intensity feeds the
-      // DTM's intensity layer. Both are collected whenever their column exists.
-      const intensityBuf = displayData.intensities;
-      const wantIntensity = demSurfaces.has('dtm');
-      const hits = collectHitPoints(displayData, {
-        ground: displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE]?.values,
-        firstReturn: displayData.scalarFields?.['target_index']?.values,
-        intensity: wantIntensity ? intensityBuf : undefined,
-      });
-      const points = hits.points;
-      const hitIndices = hits.hitIndices;
-      const groundLabels = hits.aligned.ground?.map(v => Math.round(v));
-      const firstReturnLabels = hits.aligned.firstReturn?.map(v => Math.round(v));
-      const intensity = hits.aligned.intensity;
-      flat = { displayData, rawCount, points, groundLabels, firstReturnLabels, intensity, hitIndices, count: points.length };
-      if (flat.count < 3) {
-        setDemInProgress(false);
-        setDemProgress(null);
-        demAbortRef.current = null;
-        setDemError('DEM needs at least 3 hit points (all points are sky/misses).');
-        showToast({ type: 'error', title: 'DEM Generation Failed', message: 'All points are sky/misses.' });
-        return;
-      }
-    }
+      // Generate ONE surface (session or flat). Returns its result (throws on
+      // failure / cancel). The HAG side-effect only applies to a DTM.
+      const generateOne = async (surface: DemSurfaceType): Promise<Awaited<ReturnType<typeof generateDEM>>> => {
+        const wantHAG = surface === 'dtm' && demComputeHAG;
+        const onDemProgress = (value: number | null, label: string) => setDemProgress({ label, value });
 
-    // Generate ONE surface (session or flat). Returns its result (throws on
-    // failure / cancel). The HAG side-effect only applies to a DTM.
-    const generateOne = async (surface: DemSurfaceType): Promise<Awaited<ReturnType<typeof generateDEM>>> => {
-      const wantHAG = surface === 'dtm' && demComputeHAG;
-      const onDemProgress = (value: number | null, label: string) => setDemProgress({ label, value });
+        if (ps.kind === 'source') {
+          const octreeInfo = cloud.data.octree;
+          if (!octreeInfo?.sessionId) throw new Error('Octree cloud is missing its editable session.');
+          const result = await generateSessionDEM(octreeInfo.sessionId, {
+            surface_type: surface,
+            cell_size: demCellSize,
+            method: demMethod,
+            fill_voids: demFillVoids,
+            add_height_column: wantHAG,
+          }, abort.signal, onDemProgress, onDemRunId);
+          if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
+          if (wantHAG) retireLabelColumn(id, HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+          finishMesh(result, surface);
+          // The HAG column was baked into the rebuilt octree; refresh + recolor.
+          if (wantHAG && result.cacheId && result.rawMeta) {
+            onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
+            registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+            setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
+          }
+          return result;
+        }
 
-      if (ps.kind === 'source') {
-        const octreeInfo = cloud.data.octree;
-        if (!octreeInfo?.sessionId) throw new Error('Octree cloud is missing its editable session.');
-        const result = await generateSessionDEM(octreeInfo.sessionId, {
+        // Flat cloud: reuse the precomputed hits-only arrays.
+        const f = flat!;
+        const result = await generateDEM({
+          points: f.points,
+          ground_labels: f.groundLabels,
+          first_return_labels: f.firstReturnLabels,
+          intensity: f.intensity,
           surface_type: surface,
+          auto_segment_ground: !f.groundLabels,
           cell_size: demCellSize,
           method: demMethod,
           fill_voids: demFillVoids,
-          add_height_column: wantHAG,
+          compute_height_above_ground: wantHAG,
         }, abort.signal, onDemProgress, onDemRunId);
         if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
-        if (wantHAG) retireLabelColumn(id, HEIGHT_ABOVE_GROUND_ATTRIBUTE);
         finishMesh(result, surface);
-        // The HAG column was baked into the rebuilt octree; refresh + recolor.
-        if (wantHAG && result.cacheId && result.rawMeta) {
-          onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
+
+        if (wantHAG && result.heightAboveGround && result.heightAboveGround.length === f.count) {
+          // Scatter the hit-aligned HAG buffer back to full cloud length (misses → 0).
+          const hitHag = result.heightAboveGround;
+          const hag = new Float32Array(f.rawCount);
+          let hmin = Infinity, hmax = -Infinity;
+          for (let k = 0; k < f.count; k++) {
+            const h = hitHag[k];
+            hag[f.hitIndices[k]] = h;
+            if (h < hmin) hmin = h;
+            if (h > hmax) hmax = h;
+          }
+          if (!Number.isFinite(hmin)) { hmin = 0; hmax = 1; }
+          if (f.count < f.rawCount) { hmin = Math.min(hmin, 0); hmax = Math.max(hmax, 0); }
           registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+          onUpdateCloud(id, {
+            ...f.displayData,
+            scalarFields: {
+              ...(f.displayData.scalarFields ?? {}),
+              [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
+            },
+          });
           setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
         }
         return result;
-      }
+      };
 
-      // Flat cloud: reuse the precomputed hits-only arrays.
-      const f = flat!;
-      const result = await generateDEM({
-        points: f.points,
-        ground_labels: f.groundLabels,
-        first_return_labels: f.firstReturnLabels,
-        intensity: f.intensity,
-        surface_type: surface,
-        auto_segment_ground: !f.groundLabels,
-        cell_size: demCellSize,
-        method: demMethod,
-        fill_voids: demFillVoids,
-        compute_height_above_ground: wantHAG,
-      }, abort.signal, onDemProgress, onDemRunId);
-      if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
-      finishMesh(result, surface);
-
-      if (wantHAG && result.heightAboveGround && result.heightAboveGround.length === f.count) {
-        // Scatter the hit-aligned HAG buffer back to full cloud length (misses → 0).
-        const hitHag = result.heightAboveGround;
-        const hag = new Float32Array(f.rawCount);
-        let hmin = Infinity, hmax = -Infinity;
-        for (let k = 0; k < f.count; k++) {
-          const h = hitHag[k];
-          hag[f.hitIndices[k]] = h;
-          if (h < hmin) hmin = h;
-          if (h > hmax) hmax = h;
-        }
-        if (!Number.isFinite(hmin)) { hmin = 0; hmax = 1; }
-        if (f.count < f.rawCount) { hmin = Math.min(hmin, 0); hmax = Math.max(hmax, 0); }
-        registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
-        onUpdateCloud(id, {
-          ...f.displayData,
-          scalarFields: {
-            ...(f.displayData.scalarFields ?? {}),
-            [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
-          },
-        });
-        setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
-      }
-      return result;
-    };
-
-    try {
       let totalCells = 0;
       let lastWarning: string | undefined;
       for (let i = 0; i < order.length; i++) {
         const surface = order[i];
         // Batch phase label ("Generating CHM (2/3)…") so the user sees progress
-        // across the whole run, not just within one surface.
-        const phase = order.length > 1
+        // across the whole run, not just within one surface — and, with several
+        // clouds, which cloud it is on.
+        const phase = `${multi ? `${position}: ` : ''}${order.length > 1
           ? `Generating ${labelFor(surface)} (${i + 1}/${order.length})…`
-          : `Generating ${labelFor(surface)}…`;
+          : `Generating ${labelFor(surface)}…`}`;
         setDemBatchLabel(phase);
         setDemProgress({ label: phase, value: null });
         demRunIdRef.current = null;
@@ -16091,22 +16128,55 @@ export default function PointCloudViewer({
         totalCells += result.numTriangles;
         if (result.warning) lastWarning = result.warning;
       }
-      setShowDEMPanel(false);
-      const title = order.length > 1 ? `${order.length} surfaces generated` : `${labelFor(order[0])} Generated`;
-      showToast({
-        type: 'success',
-        title,
-        message: `${totalCells.toLocaleString()} cells${lastWarning ? ` — ${lastWarning}` : ''}`,
-      });
-    } catch (error) {
-      // User canceled (Cancel button → fetch abort or a terminal `canceled`
-      // stream marker) — not a failure, no error toast/banner. Surfaces produced
-      // before the cancel stay in the scene.
-      if (abort.signal.aborted || error instanceof ScanCanceledError) return;
-      console.error('DEM generation error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'DEM generation failed';
-      setDemError(errorMessage);
-      showToast({ type: 'error', title: 'DEM Generation Failed', message: errorMessage });
+      return { cells: totalCells, warning: lastWarning };
+    };
+
+    const failures: Array<{ name: string; message: string }> = [];
+    const summaries: Array<{ name: string; cells: number; warning?: string }> = [];
+    try {
+      for (const [i, id] of targetIds.entries()) {
+        if (abort.signal.aborted) return;
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        if (!cloud) continue;
+        const name = cloud.data.fileName ?? id;
+        try {
+          summaries.push({ name, ...(await generateForCloud(cloud, `${name} (${i + 1}/${targetIds.length})`)) });
+        } catch (error) {
+          // User canceled (Cancel button → fetch abort or a terminal `canceled`
+          // stream marker) — not a failure, no error toast/banner, and it ends
+          // the whole run. Surfaces produced before the cancel stay in the scene.
+          if (abort.signal.aborted || error instanceof ScanCanceledError) return;
+          // One cloud failing does not stop the others.
+          console.error('DEM generation error:', error);
+          failures.push({
+            name,
+            message: error instanceof Error ? error.message : 'DEM generation failed',
+          });
+        }
+      }
+
+      if (failures.length > 0) {
+        // Say which clouds failed, and leave the panel open on them.
+        const errorMessage = multi
+          ? failures.map(f => `${f.name}: ${f.message}`).join('\n')
+          : failures[0].message;
+        setDemError(errorMessage);
+        showToast({ type: 'error', title: 'DEM Generation Failed', message: errorMessage });
+      } else {
+        setShowDEMPanel(false);
+      }
+      if (summaries.length > 0) {
+        const line = (r: { cells: number; warning?: string }) =>
+          `${r.cells.toLocaleString()} cells${r.warning ? ` — ${r.warning}` : ''}`;
+        const surfaces = order.length > 1 ? `${order.length} surfaces generated` : `${labelFor(order[0])} Generated`;
+        showToast({
+          type: 'success',
+          title: multi ? `${surfaces} for ${summaries.length} clouds` : surfaces,
+          message: multi
+            ? summaries.map(r => `${r.name}: ${line(r)}`).join('\n')
+            : line(summaries[0]),
+        });
+      }
     } finally {
       setDemInProgress(false);
       setDemProgress(null);
@@ -16114,7 +16184,7 @@ export default function PointCloudViewer({
       demAbortRef.current = null;
       demRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demSurfaces, demCellSize, demMethod, demFillVoids, demComputeHAG]);
+  }, [demTargets, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demSurfaces, demCellSize, demMethod, demFillVoids, demComputeHAG]);
 
   // "Snap to ground": displace a voxel grid's columns to follow a DEM. The backend
   // (/api/lad/snap-grid) computes the per-column offsets ONCE from the DEM; we
@@ -18390,18 +18460,22 @@ export default function PointCloudViewer({
   }, [scene, commitProperty]);
 
   // Extract skeleton from selected point cloud
+  // One skeleton per checked cloud, one cloud after another. Clouds are read
+  // through `cloudsRef` each iteration: the callback is not re-created while
+  // it runs.
   const handleExtractSkeleton = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    const targetIds = cloudsRef.current.filter(c => skeletonTargets.has(c.id)).map(c => c.id);
+    if (targetIds.length === 0) return;
+    const multi = targetIds.length > 1;
 
     setSkeletonInProgress(true);
     setSkeletonError(null);
     const abort = new AbortController();
     skeletonAbortRef.current = abort;
 
-    try {
+    // One cloud's skeleton. Resolves with what the summary says about it;
+    // throws on failure or cancel.
+    const extractOne = async (cloud: PointCloudEntry): Promise<string> => {
       const MAX_SKELETON_POINTS = 20000;
       const ps = await buildPointSource(cloud);
 
@@ -18526,30 +18600,59 @@ export default function PointCloudViewer({
         visible: true,
         color: '#f59e0b',  // Amber color for skeleton
       };
-
       addSkeleton(skeletonEntry, 'Extract skeleton');
-      setShowSkeletonPanel(false);
-      showToast({
-        type: 'success',
-        title: 'Skeleton Extracted',
-        message: `Length: ${skeletonData.totalLength.toFixed(2)}m, ${skeletonData.pointCount} points`,
-      });
-    } catch (error) {
-      // User canceled (Cancel button aborted the fetch) — not a failure.
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      console.error('Skeleton extraction error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Skeleton extraction failed';
-      setSkeletonError(errorMessage);
-      showToast({
-        type: 'error',
-        title: 'Skeleton Extraction Failed',
-        message: errorMessage,
-      });
+      return `Length: ${skeletonData.totalLength.toFixed(2)}m, ${skeletonData.pointCount} points`;
+    };
+
+    const failures: Array<{ name: string; message: string }> = [];
+    const summaries: Array<{ name: string; message: string }> = [];
+    try {
+      for (const [i, id] of targetIds.entries()) {
+        if (abort.signal.aborted) return;
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        if (!cloud) continue;
+        const name = cloud.data.fileName ?? id;
+        setSkeletonProgress(multi ? `${name} (${i + 1}/${targetIds.length})` : null);
+        try {
+          summaries.push({ name, message: await extractOne(cloud) });
+        } catch (error) {
+          // User canceled (Cancel button aborted the fetch) — not a failure,
+          // and it ends the whole run: the clouds not yet started are skipped.
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          // One cloud failing does not stop the others.
+          console.error('Skeleton extraction error:', error);
+          failures.push({
+            name,
+            message: error instanceof Error ? error.message : 'Skeleton extraction failed',
+          });
+        }
+      }
+
+      if (failures.length > 0) {
+        // Say which clouds failed, and leave the panel open on them.
+        const errorMessage = multi
+          ? failures.map(f => `${f.name}: ${f.message}`).join('\n')
+          : failures[0].message;
+        setSkeletonError(errorMessage);
+        showToast({ type: 'error', title: 'Skeleton Extraction Failed', message: errorMessage });
+      } else {
+        setShowSkeletonPanel(false);
+      }
+      if (summaries.length > 0) {
+        showToast({
+          type: 'success',
+          title: multi ? `${summaries.length} Skeletons Extracted` : 'Skeleton Extracted',
+          message: multi
+            ? summaries.map(r => `${r.name}: ${r.message}`).join('\n')
+            : summaries[0].message,
+        });
+      }
     } finally {
       setSkeletonInProgress(false);
+      setSkeletonProgress(null);
       skeletonAbortRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, skeletonRemoveOutliers, skeletonSearchRadius, skeletonRootThreshold, skeletonQuantizationLevels, skeletonUseNonlinearQuant, skeletonThresholdFilter, skeletonUseProportionFilter, skeletonProportionThreshold, skeletonSmooth, skeletonSmoothIterations]);
+  }, [skeletonTargets, buildPointSource, addSkeleton, showToast, skeletonRemoveOutliers, skeletonSearchRadius, skeletonRootThreshold, skeletonQuantizationLevels, skeletonUseNonlinearQuant, skeletonThresholdFilter, skeletonUseProportionFilter, skeletonProportionThreshold, skeletonSmooth, skeletonSmoothIterations]);
 
   // Build a QSM from the selected point cloud. The backend pipeline does all the
   // preprocessing/skeleton/fit/correction; the renderer just hands it points (a
@@ -22285,6 +22388,7 @@ export default function PointCloudViewer({
     skeletonAbortRef.current?.abort();
     skeletonAbortRef.current = null;
     setSkeletonInProgress(false);
+    setSkeletonProgress(null);
   }, []);
 
   const removeLadResult = useCallback((id: string) => {
@@ -28489,20 +28593,36 @@ export default function PointCloudViewer({
       )}
 
       {/* DEM (Digital Elevation Model) Panel */}
-      {showDEMPanel && selectedIds.size === 1 && (() => {
-        const sel = clouds.find((c) => selectedIds.has(c.id));
-        const hasGroundClass = !!(
-          sel?.data.scalarFields?.[GROUND_CLASS_ATTRIBUTE] ||
-          sel?.data.octree?.attributeRanges?.[GROUND_CLASS_ATTRIBUTE]
-        );
+      {/* No selection-size gate: the panel owns its own cloud picker. */}
+      {showDEMPanel && (() => {
+        const checked = clouds.filter((c) => demTargets.has(c.id));
+        // The "no ground classification" notice is about ANY checked cloud that
+        // would have its ground auto-detected.
+        const hasGroundClass = checked.length > 0 && checked.every((sel) => !!(
+          sel.data.scalarFields?.[GROUND_CLASS_ATTRIBUTE] ||
+          sel.data.octree?.attributeRanges?.[GROUND_CLASS_ATTRIBUTE]
+        ));
         // Hits-only extent, for the same reason the cell-size seed above uses it.
         // The panel divides these by the cell size to ESTIMATE the raster grid
         // and disables Generate when nx*ny exceeds DEM_MAX_CELLS, so a miss-set
         // extent doesn't just mislead the readout — it locks the user out of a
         // legitimate DEM with "too fine; increase cell size".
-        const demExtent = sel ? extentForParameterSeeding(sel.data) : null;
+        //
+        // With several clouds it is the LARGEST grid any of them would make:
+        // the one that decides whether the cell size is workable.
+        let demExtent: { x: number; y: number } | null = null;
+        for (const sel of checked) {
+          const e = extentForParameterSeeding(sel.data);
+          if (e && (!demExtent || e.x * e.y > demExtent.x * demExtent.y)) demExtent = e;
+        }
         return (
           <DEMPanel
+            picker={{
+              items: cloudPickerItems,
+              selectedIds: demTargets,
+              onChange: (next) => setDemTargets(new Set(next)),
+            }}
+            targetCount={checked.length}
             selectedSurfaces={demSurfaces}
             cellSize={demCellSize}
             method={demMethod}
@@ -28653,8 +28773,15 @@ export default function PointCloudViewer({
       )}
 
       {/* Skeleton Extraction Panel */}
-      {showSkeletonPanel && selectedIds.size === 1 && (
+      {showSkeletonPanel && (
         <SkeletonExtractionPanel
+          picker={{
+            items: cloudPickerItems,
+            selectedIds: skeletonTargets,
+            onChange: (next) => setSkeletonTargets(new Set(next)),
+          }}
+          targetCount={clouds.filter(c => skeletonTargets.has(c.id)).length}
+          progress={skeletonProgress}
           removeOutliers={skeletonRemoveOutliers}
           smooth={skeletonSmooth}
           searchRadius={skeletonSearchRadius}

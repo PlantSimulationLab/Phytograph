@@ -329,3 +329,57 @@ test('a DTM carries color-by layers and exports the selected one as a raster', a
     if (existsSync(ascPath)) rmSync(ascPath);
   }
 });
+
+// The panel has its own Clouds picker, seeded from the Scans-pane selection,
+// and builds each checked cloud its own surfaces. It used to require exactly
+// ONE selected scan: with two selected the panel never mounted and the toolbar
+// button was a dead click.
+//
+// ground_plants_sparse.xyz is ground_plants.xyz moved 3 m in X with half the
+// plant points dropped: the SAME 40×40 ground grid, so at the same cell size
+// the two terrains must come out as the same number of triangles — each from
+// its own cloud, under its own name.
+test('generates a DEM for every checked cloud', async () => {
+  const { app, page } = session;
+  const SPARSE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants_sparse.xyz');
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
+  await expect(rowA).toHaveAttribute('data-point-count', '2200', { timeout: 20_000 });
+  await importFiles(app, page, 'import-point-cloud', SPARSE);
+  await completeImportWizard(page);
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants_sparse"]');
+  await expect(rowB).toHaveAttribute('data-point-count', '1900', { timeout: 20_000 });
+
+  // Nothing selected: the tool still opens, on the picker alone.
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
+  await page.getByTestId('tool-dem').click();
+  const panel = page.getByTestId('dem-panel');
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId('dem-none-checked')).toBeVisible();
+  await expect(page.getByTestId('dem-run-button')).toHaveCount(0);
+
+  const target = (name: string) =>
+    panel.locator(`[data-testid="dem-target-row"][data-label="${name}"]`).locator('input');
+  await target('ground_plants').check();
+  await target('ground_plants_sparse').check();
+  await expect(panel).toHaveAttribute('data-target-count', '2');
+  // The grid estimate (and the too-fine lockout) now has clouds to read.
+  await expect(page.getByTestId('dem-grid-estimate')).toContainText(/Estimated grid: [\d,]+ × [\d,]+ cells/);
+  await page.getByTestId('dem-cell-size').fill('0.5');
+  await page.getByTestId('dem-run-button').click();
+
+  const demA = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
+  const demB = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants_sparse DEM"]');
+  await expect(demA).toBeVisible({ timeout: 120_000 });
+  await expect(demB).toBeVisible({ timeout: 120_000 });
+  const trisA = parseInt((await demA.getAttribute('data-triangle-count')) ?? '0', 10);
+  const trisB = parseInt((await demB.getAttribute('data-triangle-count')) ?? '0', 10);
+  expect(trisA).toBeGreaterThan(0);
+  expect(trisB, 'the same ground grid must make the same terrain').toBe(trisA);
+  // A clean run closes the panel, and one summary names both clouds.
+  await expect(panel).toHaveCount(0);
+  const toast = page.getByTestId('toast-success').filter({ hasText: 'for 2 clouds' }).last();
+  await expect(toast).toContainText('ground_plants:');
+  await expect(toast).toContainText('ground_plants_sparse:');
+});

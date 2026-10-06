@@ -2,7 +2,7 @@ import { AlertTriangle, Loader2, X } from 'lucide-react';
 import { GroundSegmentIcon } from '../../icons/GroundSegmentIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
-import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
 import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 // Presentational tool panel for ground (cloth-simulation) segmentation. The
@@ -12,11 +12,7 @@ import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 // each is segmented on its own, one after another, with these parameters.
 interface GroundSegmentPanelProps {
   /** Every point cloud in the scene, with the ones to segment checked. */
-  picker: {
-    items: PickerItem[];
-    selectedIds: Set<string>;
-    onChange: (next: Set<string>) => void;
-  };
+  picker: CloudPicker;
   /** How many clouds are checked; with none, only the picker is shown. */
   targetCount: number;
   /** "name (i/N)" while a run works through several clouds. */
@@ -91,27 +87,18 @@ export function GroundSegmentPanel({
         </button>
       </div>
 
-      <div className="mb-3">
-        <ObjectPicker
-          items={picker.items}
-          selectedIds={picker.selectedIds}
-          onChange={inProgress ? () => {} : picker.onChange}
-          label="Clouds"
-          emptyMessage="No point clouds in the scene."
-          rowTestId="ground-target-row"
-          data-testid="ground-targets"
-        />
-        {targetCount === 0 && picker.items.length > 0 && (
-          <p className="mt-1 text-[10px] text-neutral-500" data-testid="ground-none-checked">
-            Check the clouds to segment.
-          </p>
-        )}
-        {targetCount > 1 && (
-          <p className="mt-1 text-[10px] text-neutral-500" data-testid="ground-multi-hint">
-            Each cloud is segmented on its own, with the settings below.
-          </p>
-        )}
-      </div>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={targetCount}
+        testIdPrefix="ground"
+        noneHint="Check the clouds to segment."
+        locked={inProgress}
+      />
+      {targetCount > 1 && (
+        <p className="-mt-2 mb-3 text-[10px] text-neutral-500" data-testid="ground-multi-hint">
+          Each cloud is segmented on its own, with the settings below.
+        </p>
+      )}
       {targetCount > 0 && (<>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">

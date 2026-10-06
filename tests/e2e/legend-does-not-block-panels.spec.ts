@@ -56,6 +56,9 @@ test('a legend card cannot swallow a tool panel button', async () => {
       const card = document.querySelector('[data-legend-key]') as HTMLElement | null;
       const overlay = document.querySelector('[data-testid="scalar-overlay"]') as HTMLElement | null;
       if (!btn || !card || !overlay) return false;
+      // The panel scrolls (it lists the scene's clouds above its settings), so
+      // on a short window the Run button can start below the fold.
+      btn.scrollIntoView({ block: 'center' });
       const b = btn.getBoundingClientRect();
       const c = card.getBoundingClientRect();
       overlay.style.transform =

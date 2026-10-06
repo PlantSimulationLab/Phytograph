@@ -21,11 +21,21 @@ classification field), do so first.
 
 ## Run extraction
 
-1. Select the cloud in the Scene panel.
+1. Select the cloud (or clouds) in the Scene panel.
 2. Click **Extract Skeleton** (the DNA-helix icon in the **Tools** ›
    Reconstruction group).
 3. The **Skeleton Extraction (BFS Graph)** panel opens on the right. There is
-   one algorithm — a BFS graph method — so there's no method to choose.
+   one algorithm — a BFS graph method — so there's no method to choose. Under
+   **Clouds**, the panel lists every point cloud in the scene with the ones
+   you had selected checked; check or uncheck them there. Once the panel is
+   open, clicking in the Scene panel no longer changes the set, and a hidden
+   cloud you check is shown for as long as it stays checked.
+
+    With more than one checked, the button reads **Extract N Skeletons**: each
+    cloud gets its own skeleton, one after another, with the same options. The
+    panel names the cloud it is on; **Cancel** stops the current cloud and
+    skips the ones not started, and a cloud that fails does not stop the
+    others — the panel stays open and says what went wrong with each.
 4. Set the options you need:
 
     - **Remove outlier points** — checkbox; drops isolated noise before

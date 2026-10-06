@@ -3,7 +3,7 @@ import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, Sh
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import type { ProfileLineSide } from '../../../lib/profileLine';
 import { defaultPrelabelMap } from '../../../lib/prelabel';
-import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
+import { CloudTargetPicker, type CloudPicker } from './CloudTargetPicker';
 import { STICKY_PANEL_HEADER } from './stickyPanelHeader';
 
 export type LabelTool = 'lasso' | 'brush' | 'rect' | 'line' | 'pick';
@@ -38,11 +38,7 @@ const COLUMN_GROUP_LABEL: Record<LabelableColumn['kind'], string> = {
 };
 
 /** The panel's cloud picker: every point cloud in the scene, the ones to label checked. */
-export interface LabelPanelPicker {
-  items: PickerItem[];
-  selectedIds: Set<string>;
-  onChange: (next: Set<string>) => void;
-}
+export type LabelPanelPicker = CloudPicker;
 
 const PANEL_ROOT =
   'absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20 max-h-[calc(100%-2rem)] overflow-y-auto';
@@ -68,27 +64,19 @@ function LabelPanelHeader({ onClose }: { onClose: () => void }) {
 
 function LabelTargetPicker({ picker, targetCount }: { picker: LabelPanelPicker; targetCount: number }) {
   return (
-    <div className="mb-3">
-      <ObjectPicker
-        items={picker.items}
-        selectedIds={picker.selectedIds}
-        onChange={picker.onChange}
-        label="Clouds"
-        emptyMessage="No point clouds in the scene."
-        rowTestId="label-target-row"
-        data-testid="label-targets"
+    <>
+      <CloudTargetPicker
+        picker={picker}
+        targetCount={targetCount}
+        testIdPrefix="label"
+        noneHint="Check the clouds to label."
       />
-      {targetCount === 0 && picker.items.length > 0 && (
-        <p className="mt-1 text-[10px] text-neutral-500" data-testid="label-none-checked">
-          Check the clouds to label.
-        </p>
-      )}
       {targetCount > 1 && (
-        <p className="mt-1 text-[10px] text-neutral-500" data-testid="label-multi-hint">
+        <p className="-mt-2 mb-3 text-[10px] text-neutral-500" data-testid="label-multi-hint">
           Each stroke labels all {targetCount} clouds. The counts below are their totals.
         </p>
       )}
-    </div>
+    </>
   );
 }
 
