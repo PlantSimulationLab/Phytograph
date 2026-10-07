@@ -147,7 +147,7 @@ def test_ascii_file_of_only_misses_errors_legibly():
 def test_helios_ascii_and_inline_branches_are_guarded():
     """Pin both call sites inside the triangulation input assembly."""
     src = open(main.__file__, encoding="utf-8").read()
-    start = src.index("Points mode (fallback): write inline points to a temp file")
+    start = src.index("Points mode (fallback): inline points, fed to Helios in RAM")
     inline_block = src[start:start + 1200]
     assert "_drop_far_outliers(" in inline_block, "inline points mode lost its guard"
 

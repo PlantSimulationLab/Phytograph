@@ -4,8 +4,8 @@ These cover the pure XML/grid/bounds helpers and the request-shaping logic of
 `_do_helios_computation` that decides per-scan resolution, angular bounds, and
 the grid. To avoid requiring a compiled pyhelios in CI, the test that exercises
 `_do_helios_computation` monkeypatches the pyhelios entry points and captures
-the arguments passed to `_generate_helios_xml` — asserting on what *would* be
-fed to Helios, which is exactly the integration this change fixes.
+the arguments passed to `_load_triangulation_scan` — asserting on what *would*
+be fed to Helios, which is exactly the integration this change fixes.
 """
 
 import os
@@ -253,6 +253,18 @@ class _FakeCloud:
     def loadXML(self, path):
         pass
 
+    def addScan(self, **kwargs):
+        return 0
+
+    def reserveHitPoints(self, n):
+        pass
+
+    def addHitPointsBulk(self, scan_id, xyz, **kwargs):
+        pass
+
+    def addGrid(self, **kwargs):
+        pass
+
     def triangulateHitPoints(self, lmax, aspect):
         pass
 
@@ -266,30 +278,32 @@ class _FakeCloud:
 
 @pytest.fixture
 def captured_xml(monkeypatch):
-    """Capture the args passed to _generate_helios_xml, and stub pyhelios so the
+    """Capture the args passed to _load_triangulation_scan (the one place a scan
+    and the grid reach Helios, in RAM or via XML), and stub pyhelios so the
     computation runs without a compiled native lib."""
     captured = {}
 
-    real = main._generate_helios_xml
+    real = main._load_triangulation_scan
 
     # Per-scan triangulation calls this once per scan with a single-element
     # scans_info; accumulate them so single-scan tests still read [0] and the
     # grid (shared across calls) is captured from the last call.
     captured.setdefault("scans_info", [])
 
-    def spy(tmpdir, scans_info, grid_center, grid_size,
+    def spy(cloud, tmpdir, scan_info, grid_center, grid_size,
             grid_nx=1, grid_ny=1, grid_nz=1, xml_name="helios_config.xml",
             grid_rotation_deg=0.0):
-        captured["scans_info"].extend(scans_info)
+        # A copy: the caller drops `arrays` from its own dict once loaded.
+        captured["scans_info"].append(dict(scan_info))
         captured["grid_center"] = grid_center
         captured["grid_size"] = grid_size
         captured["grid_nxyz"] = (grid_nx, grid_ny, grid_nz)
         captured["grid_rotation_deg"] = grid_rotation_deg
-        return real(tmpdir, scans_info, grid_center, grid_size,
+        return real(cloud, tmpdir, scan_info, grid_center, grid_size,
                     grid_nx, grid_ny, grid_nz, xml_name,
                     grid_rotation_deg=grid_rotation_deg)
 
-    monkeypatch.setattr(main, "_generate_helios_xml", spy)
+    monkeypatch.setattr(main, "_load_triangulation_scan", spy)
 
     # Stub the pyhelios import inside _do_helios_computation.
     import sys
@@ -317,7 +331,7 @@ class TestDoHeliosComputationShaping:
             ),
         ])
         # The fake cloud reports zero triangles, so the run "fails"; this test
-        # only cares about what geometry was fed to _generate_helios_xml.
+        # only cares about what geometry was fed to _load_triangulation_scan.
         main._do_helios_computation(req)
         si = captured_xml["scans_info"][0]
         # The supplied values are used verbatim — not the count-based guess.
@@ -367,7 +381,7 @@ class TestDoHeliosComputationShaping:
     def test_grid_rotation_is_passed_through(self, captured_xml):
         # Regression: HeliosGrid.rotation was dropped by the model, so a rotated
         # UI grid cropped its axis-aligned extent and leaked points past the
-        # rotated walls. The rotation must reach _generate_helios_xml.
+        # rotated walls. The rotation must reach _load_triangulation_scan.
         pts = [[0, 0, 0], [1, 1, 1]]
         req = main.HeliosTriangulationRequest(
             scans=[_points_scan(pts, origin=[0, 0, 5])],
@@ -404,6 +418,10 @@ class TestHeliosSnappedGridDropsOutOfGrid:
             def __exit__(self, *a): return False
             def disableMessages(self): pass
             def loadXML(self, p): pass
+            def addScan(self, **k): return 0
+            def reserveHitPoints(self, n): pass
+            def addHitPointsBulk(self, sid, xyz, **k): pass
+            def addGrid(self, **k): pass
             def triangulateHitPoints(self, l, a): pass
             def getTriangleCount(self): return tris.shape[0]
             def getTriangulationStats(self):
@@ -725,3 +743,156 @@ class TestTriangulationStaleSession:
         ])
         main._do_helios_computation(req)
         assert captured_xml["scans_info"][0]["filepath"] == str(f)
+        # An ASCII file stays with Helios's own loader, never the in-RAM path.
+        assert captured_xml["scans_info"][0]["arrays"] is None
+
+
+# ---------------------------------------------------------------------------
+# In-RAM ingest: no text file between the points and Helios.
+# ---------------------------------------------------------------------------
+
+def _wavy_scan(n=120, origin=(0.0, 0.0, 1.5)):
+    """A wavy surface 5-7 m out, sampled on an n x n angular grid."""
+    th = np.radians(np.linspace(60, 120, n))
+    ph = np.radians(np.linspace(0, 90, n))
+    T, P = np.meshgrid(th, ph, indexing="ij")
+    r = 6 + np.sin(T * 9) * np.cos(P * 7)
+    d = np.stack([np.sin(T) * np.sin(P), np.sin(T) * np.cos(P), np.cos(T)], -1)
+    return (np.asarray(origin) + r[..., None] * d).reshape(-1, 3), d.reshape(-1, 3)
+
+
+class TestInMemoryIngest:
+    def test_inline_points_never_touch_a_text_file(self, captured_xml, monkeypatch):
+        def no_text(*a, **k):
+            raise AssertionError("inline points were written to a text file")
+        monkeypatch.setattr(np, "savetxt", no_text)
+        monkeypatch.setattr(main, "_read_file_all_columns", no_text)
+        pts = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 0.0, 1.0], [9.0, 9.0, 9.0]]
+        req = main.HeliosTriangulationRequest(
+            scans=[_points_scan(pts, origin=[0, 0, 5])],
+            grid=main.HeliosGrid(center=[1, 0.5, 0.5], size=[3, 3, 3]),
+        )
+        main._do_helios_computation(req)
+        si = captured_xml["scans_info"][0]
+        assert si["filepath"] is None
+        # The grid crop ran on the arrays: the point at (9,9,9) is outside.
+        assert si["arrays"]["xyz"].tolist() == pts[:3]
+
+    def test_grid_crop_keeps_data_columns_aligned(self, captured_xml, monkeypatch):
+        """The multi-return columns ride along with xyz through the crop — a
+        row-shifted target_index would make Helios read later returns as first."""
+        xyz = np.array([[0.0, 0.0, 0.0], [9.0, 9.0, 9.0], [1.0, 1.0, 1.0],
+                        [8.0, 8.0, 8.0], [2.0, 0.0, 1.0]])
+        cols = {"target_index": np.array([0.0, 1.0, 0.0, 1.0, 0.0]),
+                "target_count": np.array([2.0, 2.0, 1.0, 2.0, 1.0]),
+                "timestamp": np.array([10.0, 10.0, 11.0, 12.0, 13.0])}
+        monkeypatch.setattr(main, "_resolve_scan_session", lambda e, what: object())
+        monkeypatch.setattr(main, "_session_hit_positions_for_triangulation",
+                            lambda sid: xyz.copy())
+        monkeypatch.setattr(main, "_session_multireturn_columns_for_triangulation",
+                            lambda sid: cols)
+        req = main.HeliosTriangulationRequest(
+            scans=[main.HeliosScanEntry(session_id="s", origin=[0, 0, 5])],
+            grid=main.HeliosGrid(center=[1, 0.5, 0.5], size=[3, 3, 3]),
+        )
+        main._do_helios_computation(req)
+        a = captured_xml["scans_info"][0]["arrays"]
+        assert a["labels"] == ["target_index", "target_count", "timestamp"]
+        assert a["xyz"].tolist() == xyz[[0, 2, 4]].tolist()
+        assert a["vals"].tolist() == [[0.0, 2.0, 10.0], [0.0, 1.0, 11.0], [0.0, 1.0, 13.0]]
+
+    def test_scan_angles_reach_addscan_in_radians(self):
+        """The XML took degrees; addScan takes radians."""
+        calls = {}
+
+        class _Recorder:
+            def addScan(self, **kwargs):
+                calls["scan"] = kwargs
+                return 0
+            def reserveHitPoints(self, n): pass
+            def addHitPointsBulk(self, sid, xyz, **kwargs): calls["hits"] = kwargs
+            def addGrid(self, **kwargs): calls["grid"] = kwargs
+
+        main._load_triangulation_scan(
+            _Recorder(), "", {
+                "arrays": {"xyz": np.zeros((2, 3)), "labels": [], "vals": None},
+                "origin": [1, 2, 3], "n_theta": 33, "n_phi": 44,
+                "theta_min": 30, "theta_max": 120, "phi_min": 0, "phi_max": 180},
+            [0, 0, 0], [1, 1, 1], 2, 3, 4, grid_rotation_deg=61.0)
+        assert calls["scan"]["theta_range"] == pytest.approx((np.pi / 6, 2 * np.pi / 3))
+        assert calls["scan"]["phi_range"] == pytest.approx((0.0, np.pi))
+        assert (calls["scan"]["Ntheta"], calls["scan"]["Nphi"]) == (33, 44)
+        # None: Helios derives each direction from the origin, as its loader does.
+        assert calls["hits"]["dir_spherical"] is None
+        assert calls["grid"]["ndiv"] == [2, 3, 4]
+        assert calls["grid"]["rotation"] == 61.0
+
+    @pytest.mark.parametrize("grid", [
+        None,
+        dict(center=[4.0, 4.0, 1.5], size=[3.0, 3.0, 4.0], n=(2, 2, 2), rot=30.0),
+    ])
+    @pytest.mark.parametrize("multi", [False, True])
+    def test_matches_the_text_file_path_it_replaced(self, tmp_path, grid, multi):
+        """Same points through Helios's ASCII loader and through the bulk FFI
+        give the same mesh: same candidates, same triangle count, same
+        triangles. Covers the derived hit directions, a rotated multi-cell
+        grid (addGrid takes degrees), and the multi-return first-return
+        filter. The mesh does not depend on the scan's angular range, so that
+        is pinned separately above."""
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+        origin = [0.0, 0.0, 1.5]
+        xyz, d = _wavy_scan()
+        labels, vals = [], None
+        if multi:
+            n = xyz.shape[0]
+            second = np.arange(n) % 3 == 0
+            ts = 345678901.0 + np.arange(n) * 1e-5
+            xyz = np.vstack([xyz, xyz[second] + 0.5 * d[second]])
+            labels = ["target_index", "target_count", "timestamp"]
+            vals = np.column_stack([
+                np.r_[np.zeros(n), np.ones(second.sum())],
+                np.r_[np.where(second, 2.0, 1.0), np.full(second.sum(), 2.0)],
+                np.r_[ts, ts[second]]])
+        if grid is None:
+            lo, hi = xyz.min(0), xyz.max(0)
+            g = (((lo + hi) / 2).tolist(), ((hi - lo) * 1.1).tolist(), 1, 1, 1)
+            rot = 0.0
+        else:
+            g = (grid["center"], grid["size"], *grid["n"])
+            rot = grid["rot"]
+        base = dict(origin=origin, n_theta=120, n_phi=120,
+                    theta_min=60, theta_max=120, phi_min=0, phi_max=90)
+
+        def run(scan_info):
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            main._load_triangulation_scan(cloud, str(tmp_path), scan_info, *g,
+                                          grid_rotation_deg=rot)
+            cloud.triangulateHitPoints(0.5, 5.0)
+            flat, _ = cloud.getTriangleVerticesAll()
+            return (cloud.isMultiReturnData(), cloud.getTriangulationStats()["candidates"],
+                    np.asarray(flat, dtype=np.float64).reshape(-1, 9))
+
+        text_file = tmp_path / "scan.txt"
+        np.savetxt(text_file, xyz if vals is None else np.column_stack([xyz, vals]),
+                   fmt="%.10g")
+        text = run({**base, "filepath": str(text_file), "arrays": None,
+                    "ascii_format": " ".join(["x", "y", "z"] + labels)})
+        ram = run({**base, "filepath": None, "ascii_format": "",
+                   "arrays": {"xyz": xyz, "labels": labels, "vals": vals}})
+
+        assert ram[0] is multi and text[0] is multi
+        assert ram[1] == text[1] > 1000
+        assert ram[2].shape == text[2].shape and ram[2].shape[0] > 1000
+        # Triangle for triangle, in order. The ASCII loader reads coordinates
+        # as float32 and the bulk path keeps float64, so a handful of
+        # near-cocircular quads take the other diagonal; everything else is
+        # the same triangle, and the surface area agrees.
+        same = np.all(np.abs(ram[2] - text[2]) < 2e-5, axis=1)
+        assert same.mean() > 0.999
+
+        def area(t):
+            a, b, c = t[:, 0:3], t[:, 3:6], t[:, 6:9]
+            return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1).sum()
+        assert area(ram[2]) == pytest.approx(area(text[2]), rel=1e-5)

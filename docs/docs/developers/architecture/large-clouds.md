@@ -591,12 +591,22 @@ zero. `TestTriangulationSink` pins exact per-cell equality with the retained
 mesh and that the streamed cloud holds no triangles. Helios triangulation
 itself still retains its mesh, since the mesh is what that endpoint returns.
 
-**Hits are ingested in bulk at float64.** Leaf area, scan export and miss
-backfill call `addHitPointsBulk` through `_add_hits_bulk`, after one
-`reserveHitPoints` for the whole cloud. `addHitPointsWithData` cast
+**Hits are ingested in bulk at float64.** Leaf area, scan export, miss
+backfill and Helios triangulation call `addHitPointsBulk` through
+`_add_hits_bulk`, after one `reserveHitPoints` for the whole cloud. `addHitPointsWithData` cast
 coordinates to float32 and grew the hit array by reallocation, holding old and
 new buffers at once. A NaN value now leaves that label absent on that hit,
 where the old path stored a NaN the C++ read as present.
+
+Triangulation was the last to move. It wrote each scan to a text file with
+`np.savetxt` and had Helios parse it back, and with a grid box it first re-read
+that file line by line in Python to crop it. At 10 M points the write and parse
+measured 15 s against 11 s for the triangulation itself, and the crop another
+12 s and 3.4 GB. `_load_triangulation_scan` now hands a session, a decoded
+binary file or inline points to Helios in RAM (0.07 s) and the crop is an array
+mask. Only an ASCII scan file still goes through Helios's own loader, because
+its format string may name columns only that loader interprets.
+`TestInMemoryIngest` pins that the two paths build the same mesh.
 
 **Large grids invert a block at a time.** `calculateLeafAreaBlock` sizes the
 per-voxel accumulators, and their per-thread copies, to a block of the

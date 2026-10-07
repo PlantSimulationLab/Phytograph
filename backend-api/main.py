@@ -9937,8 +9937,8 @@ def _read_file_all_columns(file_path: str, ascii_format: Optional[str] = None):
     can rewrite an in-grid subset WITHOUT dropping ancillary columns (notably
     target_index/target_count, which the multi-return triangulation filter needs).
     Rows are kept only when they have at least `need` columns AND all parse as
-    floats — non-numeric ancillary tokens (there are none in the temp files this
-    reads) would drop the row. Returns (array (N, C), (xi, yi, zi)) or
+    floats — a non-numeric ancillary token drops the row. Only ASCII scan files
+    reach this; scans already in RAM are cropped as arrays. Returns (array (N, C), (xi, yi, zi)) or
     (None, indices) when the file yields no usable rows.
     """
     import numpy as np
@@ -9960,7 +9960,7 @@ def _read_file_all_columns(file_path: str, ascii_format: Optional[str] = None):
     if not rows:
         return None, (xi, yi, zi)
     # Ragged rows (differing column counts) can't stack; truncate to the shortest
-    # so the array is rectangular. In practice the temp files are uniform.
+    # so the array is rectangular. In practice scan files are uniform.
     width = min(len(r) for r in rows)
     arr = np.asarray([r[:width] for r in rows], dtype=np.float64)
     return arr, (xi, yi, zi)
@@ -10151,6 +10151,52 @@ def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
     return xml_path
 
 
+def _load_triangulation_scan(cloud, tmpdir: str, scan_info: dict, grid_center: list,
+                             grid_size: list, grid_nx: int = 1, grid_ny: int = 1,
+                             grid_nz: int = 1, xml_name: str = "helios_config.xml",
+                             grid_rotation_deg: float = 0.0) -> None:
+    """Load one scan and the triangulation grid into ``cloud``.
+
+    A scan that already lives in RAM (``scan_info["arrays"]``: a session, a
+    decoded binary file, inline points) goes in through the bulk FFI. It used to
+    be written to a text file that Helios then parsed back, which cost more time
+    than the triangulation itself and formatted every coordinate to 8 significant
+    figures on the way. A scan that is an ASCII file on disk (``arrays`` is
+    None) is still read by Helios's own loader via an XML config, because its
+    ASCII_format may name columns only that loader interprets (zenith/azimuth,
+    row/column, colors).
+
+    The two paths describe the same scan: ``addScan`` takes the angles in
+    radians where the XML takes degrees, hit directions are derived from the
+    scan origin in both, and ``addGrid`` takes its rotation in DEGREES, as the
+    XML ``<rotation>`` does.
+    """
+    import math
+
+    arrays = scan_info.get("arrays")
+    if arrays is None:
+        cloud.loadXML(_generate_helios_xml(
+            tmpdir, [scan_info], grid_center, grid_size, grid_nx, grid_ny, grid_nz,
+            xml_name=xml_name, grid_rotation_deg=grid_rotation_deg))
+        return
+    sid = cloud.addScan(
+        origin=[float(v) for v in scan_info["origin"]],
+        Ntheta=int(scan_info["n_theta"]),
+        theta_range=(math.radians(scan_info["theta_min"]), math.radians(scan_info["theta_max"])),
+        Nphi=int(scan_info["n_phi"]),
+        phi_range=(math.radians(scan_info["phi_min"]), math.radians(scan_info["phi_max"])),
+        exit_diameter=0.0, beam_divergence=0.0,
+    )
+    cloud.reserveHitPoints(int(arrays["xyz"].shape[0]))
+    # dirs=None: Helios derives each direction from the scan origin, which is
+    # what its ASCII loader does for a file with no zenith/azimuth columns.
+    _add_hits_bulk(cloud, sid, arrays["xyz"], None, arrays["labels"], arrays["vals"])
+    cloud.addGrid(center=[float(v) for v in grid_center],
+                  size=[float(v) for v in grid_size],
+                  ndiv=[int(grid_nx), int(grid_ny), int(grid_nz)],
+                  rotation=float(grid_rotation_deg))
+
+
 def _triangulation_zero_message(diag: dict, lmax: float, max_aspect: float) -> str:
     """Human-readable explanation for a 0-triangle result, derived from the
     filter breakdown so the user can tell a data problem from a filter problem.
@@ -10248,10 +10294,10 @@ def _session_multireturn_columns_for_triangulation(session_id: str):
     Why triangulation needs these: C++ triangulateHitPoints auto-detects
     multi-return via isMultiReturnData() (any hit with target_count > 1) and, when
     true, triangulates FIRST RETURNS ONLY with an adaptive separation filter —
-    yielding the correct leaf surface. If the temp file we hand Helios is bare
-    `x y z`, isMultiReturnData() is False and it triangulates ALL returns as
+    yielding the correct leaf surface. If the hits we hand Helios are bare
+    x/y/z, isMultiReturnData() is False and it triangulates ALL returns as
     single-return, producing a sparse/biased mesh (~1/3 the true leaf area) whose
-    G(theta) is wrong. So we carry these columns into the temp file + ASCII_format
+    G(theta) is wrong. So we carry these columns into the cloud as hit data
     to keep a reused triangulation consistent with the inversion's own
     (_do_lad_computation) triangulation.
 
@@ -10430,11 +10476,10 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
     triangulator. On large clouds the dedup + `.tolist()` round-trips dominate
     that path, so this is the bulk of the suggest cost, not the triangulation.
 
-    Supports two modes:
-    - **File-path mode** (preferred): scans provide `file_path` pointing to scan
-      files on disk. PyHelios reads them directly — no JSON point transfer overhead.
-    - **Points mode** (fallback): scans provide `points` arrays sent over JSON.
-      Works for small point clouds but too slow for large scans (680K+ points).
+    Each scan's points come from its session, else its file, else inline
+    `points` (see the source-priority comment in the loop below). Only an ASCII
+    file is read by Helios's own loader; everything else is handed over in RAM
+    (see `_load_triangulation_scan`).
 
     Output vertices are deduplicated and indexed to minimize response size.
     """
@@ -10493,7 +10538,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # never re-read once a session exists:
         #   1. session_id — a session-backed (octree) cloud: triangulate its
         #      surviving in-RAM HIT positions (deletions honored, MISSES EXCLUDED).
-        #      Written to a temp x-y-z file so Helios reconstructs theta/phi from
+        #      Handed to Helios in RAM; it reconstructs theta/phi from
         #      (pos - origin) exactly as for any scan file.
         #   2. file_path — a file-backed cloud with no session: Helios reads it
         #      directly from disk (no huge JSON, original columns preserved).
@@ -10508,6 +10553,9 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
 
             session_id = scan_entry.session_id
+            # In-RAM hits for a scan that is fed to Helios without a file (see
+            # _load_triangulation_scan); None for a scan Helios reads from disk.
+            arrays = None
             # Raises on a STALE session (id set, session gone) rather than letting
             # control fall through to the `file_path` branch below, which would
             # silently triangulate the pre-edit file. Returns None only when the
@@ -10524,9 +10572,8 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                         "triangulate (all points deleted or only misses remain).")
                 bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
                 bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
-                pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
                 # Preserve multi-return columns (target_index/target_count) so the
-                # temp file Helios triangulates from is detected as multi-return
+                # cloud Helios triangulates is detected as multi-return
                 # (isMultiReturnData()) and gets the first-return + adaptive
                 # separation filter — matching the inversion's own triangulation.
                 # Without them a full-waveform cloud triangulates as single-return
@@ -10534,34 +10581,24 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 # _session_multireturn_columns_for_triangulation). Aligned 1:1 with
                 # xyz (same mask/order).
                 mr_cols = _session_multireturn_columns_for_triangulation(session_id)
-                # %.8g, not %.6g: world coords can sit near z~100 m, where 6
-                # sig-figs rounds to ~1 mm and quantizes the angular structure the
-                # spherical-projection Delaunay depends on — coarse enough to
-                # shatter leaf surfaces (most candidates then exceed Lmax). 8
-                # sig-figs keeps ~µm precision at 100 m.
                 if mr_cols:
-                    # Order the columns to match the ASCII_format string below.
                     # timestamp is required by isMultiReturnData() once
                     # target_count > 1 (it groups returns into beams).
-                    out = np.column_stack([
-                        xyz,
-                        mr_cols["target_index"],
-                        mr_cols["target_count"],
-                        mr_cols["timestamp"],
-                    ])
-                    np.savetxt(pts_path, out, fmt="%.8g", delimiter=" ")
+                    labels = ["target_index", "target_count", "timestamp"]
+                    arrays = {"xyz": xyz, "labels": labels,
+                              "vals": np.column_stack([mr_cols[k] for k in labels])}
                     fmt = "x y z target_index target_count timestamp"
                 else:
-                    np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
+                    arrays = {"xyz": xyz, "labels": [], "vals": None}
                     fmt = "x y z"
                 n_theta, n_phi = _resolution(
                     scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
-                fp = pts_path
+                fp = None
             elif scan_entry.file_path:
                 # File-path mode. Helios itself can only read ASCII scan files,
                 # so a BINARY container (.las/.laz/.ply/.pcd) can't be handed to
-                # it directly — it has to be decoded to a temp x-y-z file first,
-                # exactly as the session branch above does.
+                # it directly — it is decoded to in-RAM hits first, exactly as
+                # the session branch above does.
                 #
                 # This branch is the restart fallback: it runs when a scan's
                 # session is gone (backend restarted since import) but the entry
@@ -10587,12 +10624,10 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                             "triangulate (empty file, or only sky/miss returns).")
                     bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
                     bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
-                    pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
-                    # %.8g for the same precision reason as the session branch.
-                    np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
+                    arrays = {"xyz": xyz, "labels": [], "vals": None}
                     fmt = "x y z"
                     n_points = xyz.shape[0]
-                    fp = pts_path
+                    fp = None
                 else:
                     fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
                     # ASCII sibling of the binary branch above, and it needs the
@@ -10613,7 +10648,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 n_theta, n_phi = _resolution(
                     scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
             else:
-                # Points mode (fallback): write inline points to a temp file.
+                # Points mode (fallback): inline points, fed to Helios in RAM.
                 points = scan_entry.points
                 if not points:
                     raise ValueError("Scan entry has no points, file_path, or session_id")
@@ -10626,17 +10661,16 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                     raise ValueError("Scan entry has no hit points to triangulate.")
                 bb_lo = np.minimum(bb_lo, pts_arr_scan[:, :3].min(axis=0))
                 bb_hi = np.maximum(bb_hi, pts_arr_scan[:, :3].max(axis=0))
-                pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
-                # %.8g for the same precision reason as the session branch above.
-                np.savetxt(pts_path, pts_arr_scan[:, :3], fmt="%.8g", delimiter=" ")
+                arrays = {"xyz": pts_arr_scan[:, :3], "labels": [], "vals": None}
                 n_theta, n_phi = _resolution(
                     scan_entry, pts_arr_scan.shape[0],
                     theta_max - theta_min, phi_max - phi_min)
                 fmt = "x y z"
-                fp = pts_path
+                fp = None
 
             scans_info.append({
                 "filepath": fp,
+                "arrays": arrays,
                 "ascii_format": fmt,
                 "origin": origin,
                 "n_theta": n_theta,
@@ -10692,6 +10726,22 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             _crop_bg = request.bin_grid if request.bin_grid is not None else request.grid
             for _si, scan_info in enumerate(scans_info):
                 _ckpt()
+                _arrays = scan_info["arrays"]
+                if _arrays is not None:
+                    # In-RAM scan: mask the arrays, data columns in lockstep.
+                    cell_ids = bin_points_to_cells_terrain(
+                        _arrays["xyz"], _crop_bg.center, _crop_bg.size,
+                        _crop_bg.nx, _crop_bg.ny, _crop_bg.nz,
+                        column_offsets=getattr(_crop_bg, "column_offsets", None),
+                        rotation_deg=float(getattr(_crop_bg, "rotation", 0.0) or 0.0),
+                        kept_columns=getattr(_crop_bg, "kept_columns", None),
+                    )
+                    in_grid = np.asarray(cell_ids) >= 0
+                    if not in_grid.all():
+                        _arrays["xyz"] = _arrays["xyz"][in_grid]
+                        if _arrays["vals"] is not None:
+                            _arrays["vals"] = _arrays["vals"][in_grid]
+                    continue
                 # Read ALL columns (not just xyz) so the in-grid subset can be
                 # rewritten WITHOUT dropping ancillary columns the triangulation
                 # needs — notably target_index/target_count, which drive Helios's
@@ -10716,8 +10766,9 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 # Rewrite this scan to a temp file of only its in-voxel points,
                 # keeping ALL columns and the original ASCII_format. For a
                 # file_path scan this deliberately points AWAY from the original on
-                # disk (never overwrite it); %.8g keeps ~µm precision at 100 m, the
-                # same as the session/points writers above.
+                # disk (never overwrite it). %.8g, not %.6g: world coords can sit
+                # near z~100 m, where 6 sig-figs rounds to ~1 mm and quantizes the
+                # angular structure the spherical-projection Delaunay depends on.
                 pts_path = os.path.join(tmpdir, f"scan_crop_{_si}.txt")
                 np.savetxt(pts_path, rows_in[in_grid], fmt="%.8g", delimiter=" ")
                 scan_info["filepath"] = pts_path
@@ -10751,16 +10802,17 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             _report(0.1 + 0.7 * scan_idx / max(n_scans, 1),
                     f"Triangulating scan {scan_idx + 1} of {n_scans}"
                     if n_scans > 1 else "Triangulating")
-            xml_path = _generate_helios_xml(
-                tmpdir, [scan_info], grid_center, grid_size,
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            _load_triangulation_scan(
+                cloud, tmpdir, scan_info, grid_center, grid_size,
                 grid_nx, grid_ny, grid_nz,
                 xml_name=f"helios_config_{scan_idx}.xml",
                 grid_rotation_deg=grid_rotation_deg,
             )
-
-            cloud = LiDARCloud()
-            cloud.disableMessages()
-            cloud.loadXML(xml_path)
+            # The cloud holds its own copy now; drop ours before the Delaunay
+            # pass, which is the memory peak.
+            scan_info["arrays"] = None
             cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
             tri_count = cloud.getTriangleCount()
 
