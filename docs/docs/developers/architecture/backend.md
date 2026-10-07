@@ -100,6 +100,17 @@ loop from first statement to last. `tests/test_event_loop_not_blocked.py` fails
 the build on one, and measures the property directly against a live uvicorn
 (a 1 s handler must not delay a concurrent `/health`).
 
+An `await` somewhere in the body does not make the rest of it safe. A handler
+that awaits `_run_killable` still runs everything before and after that await
+on the loop, and the usual pattern there — snapshot the session's points, run
+the worker, write the result column back — is two full-length gathers under
+`_cloud_session_lock`. Taking that `threading.Lock` on the loop thread is the
+worse half: the loop blocks for as long as any worker thread holds it, so
+`/health`, `/api/cancel/{run_id}` and every progress stream freeze behind an
+unrelated request. Put each locked section in a nested `def` and
+`await run_in_threadpool(...)` it; the same test file fails the build on an
+`async def` that takes the session lock directly.
+
 This was learned the hard way. Every handler used to be `async def` with its
 compute inline, so the backend served exactly one request at a time: a 7 M-point
 LAZ export whose real cost is ~1–2 s died on its 2-minute client deadline, and

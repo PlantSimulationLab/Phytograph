@@ -13,6 +13,7 @@ worker threadpool. These tests pin the property (a slow request does not delay a
 fast one) and the rule that produces it (no `async def` handler without awaits).
 """
 
+import ast
 import concurrent.futures
 import re
 import time
@@ -98,6 +99,52 @@ def test_expensive_probes_are_never_called_inline_from_an_async_handler():
     assert offenders == [], (
         "these hold the event loop across an expensive probe; wrap them in "
         "`await run_in_threadpool(fn, ...)`:\n  " + "\n  ".join(offenders)
+    )
+
+
+def _loop_thread_statements(fn):
+    """Every node that runs on the event loop inside `async def fn` - i.e. not
+    inside a nested `def`/lambda, which is how a block gets handed to
+    `run_in_threadpool`."""
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def test_no_async_function_takes_the_session_lock_on_the_event_loop():
+    """`with _cloud_session_lock:` directly in an `async def` body stalls twice.
+
+    The block under it is a full-length gather or column write, which the loop
+    cannot serve anything during. Worse, a `threading.Lock` acquired on the loop
+    thread BLOCKS the loop for as long as any worker thread holds it - and
+    workers hold this one for seconds (an erase mask, a bake's stats). So
+    /health, POST /api/cancel/{run_id} and every progress stream freeze behind a
+    request that has nothing to do with them.
+
+    The no-await check above cannot see this: these handlers do await (the
+    killable worker), and the blocking sections hide on either side of it. That
+    is how ground, normals, denoise and tree segmentation kept the stall after
+    wood and organ segmentation were fixed. Put the locked section in a nested
+    `def` and `await run_in_threadpool(...)` it.
+    """
+    tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.AsyncFunctionDef):
+            continue
+        for node in _loop_thread_statements(fn):
+            if isinstance(node, ast.With) and any(
+                "_cloud_session_lock" in ast.unparse(item.context_expr)
+                for item in node.items
+            ):
+                offenders.append(f"{fn.name} (line {node.lineno})")
+    assert offenders == [], (
+        "these take _cloud_session_lock on the event loop thread:\n  "
+        + "\n  ".join(offenders)
     )
 
 

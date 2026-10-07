@@ -24314,11 +24314,8 @@ def _do_point_cloud_export(
         # deselecting `timestamp` still omits it.
         export_timestamps = export_extras.pop('timestamp', None)
         if export_timestamps is not None and request.source is not None:
-            _ts_sid = getattr(request.source, "session_id", None)
-            with _cloud_session_lock:
-                _ts_sess = _cloud_sessions.get(_ts_sid) if _ts_sid else None
-                _ts_encoding = getattr(_ts_sess, "gps_time_encoding", None)
-            if _ts_encoding == 'adjusted_standard':
+            _ts_sess = _peek_cloud_session(getattr(request.source, "session_id", None))
+            if getattr(_ts_sess, "gps_time_encoding", None) == 'adjusted_standard':
                 _mark_gps_time_absolute(header)
         class_source = _las_class_source(list(export_extras), request.classification_column)
         dim_extras = [sl for sl in export_extras if sl not in _LAS_FLAG_COLUMNS]
@@ -32463,9 +32460,27 @@ def _squares_union_mask(
     px = pixels[:, 0]
     py = pixels[:, 1]
     mask = np.zeros(pixels.shape[0], dtype=bool)
+    if centers.shape[0] == 0:
+        return mask
+    # Cull to the stamps' union bounding box before the per-stamp test. An
+    # erase session accumulates stamps without limit, and testing each against
+    # every point cost stamps x N (200 stamps on 10 M points: ~4 s). A point
+    # outside the union box is inside no stamp, and the exact `<=` test below
+    # is unchanged, so membership is identical to the renderer's preview.
+    lo_x = (centers[:, 0] - half_sizes).min()
+    hi_x = (centers[:, 0] + half_sizes).max()
+    lo_y = (centers[:, 1] - half_sizes).min()
+    hi_y = (centers[:, 1] + half_sizes).max()
+    cand = np.flatnonzero((px >= lo_x) & (px <= hi_x) & (py >= lo_y) & (py <= hi_y))
+    if cand.size == 0:
+        return mask
+    cx = px[cand]
+    cy = py[cand]
+    inside = np.zeros(cand.size, dtype=bool)
     for i in range(centers.shape[0]):
         h = half_sizes[i]
-        mask |= (np.abs(px - centers[i, 0]) <= h) & (np.abs(py - centers[i, 1]) <= h)
+        inside |= (np.abs(cx - centers[i, 0]) <= h) & (np.abs(cy - centers[i, 1]) <= h)
+    mask[cand[inside]] = True
     return mask
 
 
@@ -37022,8 +37037,23 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     # applied). The points to DELETE are exactly those the region selects —
     # i.e. the True entries of the (un-inverted) selection. We OR them into the
     # session's deleted mask so deletions accumulate.
+    #
+    # The SELECTION is geometry only, so it is computed WITHOUT the global lock,
+    # exactly as `label_region` does: it is the whole cost of a delete (a
+    # projection of every point for the screen-space kinds), and held under the
+    # lock it stalled every other session request on every cloud. The array
+    # reference and the edit generation are captured under the lock and checked
+    # after re-acquiring it; if any edit landed in between (a transform moves
+    # the geometry, a compacting bake replaces `positions`), the selection is
+    # recomputed under the lock, as before. Everything that reads or writes
+    # the mask stays under the lock.
     with _cloud_session_lock:
-        select = _region_mask(sess.positions, region_dict)
+        positions = sess.positions
+        gen = sess.octree_stale_gen
+    select = _region_mask(positions, region_dict)
+    with _cloud_session_lock:
+        if sess.positions is not positions or sess.octree_stale_gen != gen:
+            select = _region_mask(sess.positions, region_dict)
         # NEVER crop sky/miss points. A crop box is drawn around hits; a miss
         # point falling inside it (its far-field/projected coords landing in the
         # box) is a coordinate accident, not user intent — and deleting it would
@@ -37749,22 +37779,6 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest,
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
-def _bake_display_stats_locked(sess: "CloudSession") -> dict:
-    """The per-edit display metadata `_session_rebuild` attaches, for `bake`.
-
-    `bake` builds its octree through `_build_octree_from_las` directly rather than
-    `_session_rebuild`, so it does not pass the chokepoint that attaches the exact
-    class lists and the outlier-resistant colorbar domains. The renderer's
-    background refresh queue bakes after every crop and every filter commit, and
-    rebuilds its cloud data from that response, so without these the colorbar fell
-    back to raw extrema and the class list went stale after the edit. Caller holds
-    the lock."""
-    return {
-        "observed_classes": _session_observed_classes_locked(sess),
-        **_session_robust_color_stats_locked(sess),
-    }
-
-
 def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True) -> dict:
     """Worker for POST .../bake — see the endpoint docstring.
 
@@ -37815,9 +37829,11 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
         if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
             meta = _read_octree_metadata_and_mark_used(cache_dir)
             with _cloud_session_lock:
-                display_stats = _bake_display_stats_locked(sess)
                 history_len = len(sess.deleted_history)
                 pending = _pending_deleted_count_locked(sess)
+            # The class lists and colorbar domains the renderer rebuilds its
+            # cloud data from; `_session_rebuild` attaches the same pair.
+            display_stats = _session_display_stats(sess)
             return {
                 "session_id": session_id, "point_count": survivors,
                 "baked": False, "cache_id": sess.octree_cache_id,
@@ -37831,14 +37847,22 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "baked.las"
         with _cloud_session_lock:
-            # Octree is hits-only (misses stay in the session for LAD/overlay).
-            _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
-            # The mask this octree was built from, taken in the same critical
-            # section as the write. A non-compacting refresh compares it after
-            # the build to tell whether an edit raced the converter.
+            # The mask this octree is built from, and the edit generation at
+            # that moment. A non-compacting refresh compares BOTH after the
+            # build to tell whether an edit raced it. The generation is needed
+            # now that the write below drops the lock between blocks: a delete
+            # and its undo landing mid-write leave the mask equal while the
+            # blocks written in between are missing those points.
             built_mask = None if compact else np.array(sess.deleted, dtype=bool, copy=True)
+            built_gen = sess.octree_stale_gen
             built_point_count = int((~np.asarray(sess.deleted)).sum())
+        # Octree is hits-only (misses stay in the session for LAD/overlay). The
+        # lock is taken per BLOCK rather than across the whole encode, as
+        # `_session_rebuild` does: held for the write (~1 s per 10 M points) it
+        # stalled every other session request behind a BACKGROUND refresh.
+        _session_to_las(sess, las_path, exclude_misses=True,
+                        block_lock=_cloud_session_lock)
         cache_key, cache_dir, meta = _build_octree_from_las(
             las_path, extra_dims_meta, progress=progress, cancel_event=cancel_event,
         )
@@ -37853,7 +37877,8 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
 
     if not compact:
         with _cloud_session_lock:
-            if np.array_equal(np.asarray(sess.deleted), built_mask):
+            if (sess.octree_stale_gen == built_gen
+                    and np.array_equal(np.asarray(sess.deleted), built_mask)):
                 # Nothing raced the build: this octree IS the session's display.
                 # End undo at the mask (the renderer drops its delete stack when
                 # this lands) and keep every deleted row.
@@ -37960,7 +37985,7 @@ def _finish_bake(sess: "CloudSession", session_id: str, remaining: int,
         # would desynchronize the two and misaddress a later undo.
         history_len = len(sess.deleted_history)
         pending = _pending_deleted_count_locked(sess)
-        display_stats = _bake_display_stats_locked(sess)
+    display_stats = _session_display_stats(sess)
 
     return {
         "session_id": session_id,
@@ -38146,11 +38171,16 @@ def _session_observed_classes_locked(sess: "CloudSession") -> dict:
     `_label_class_summary_locked` is: sky/miss points are 0 in every class
     column, so including them would resurrect a phantom class 0 ("Unassigned")
     on exactly the filtered scans this is meant to fix."""
-    editable = _session_editable_mask_locked(sess)
+    return _observed_classes(_session_editable_mask_locked(sess), sess.extras)
+
+
+def _observed_classes(editable: np.ndarray, extras: dict) -> dict:
+    """`_session_observed_classes_locked` on arrays, so it can run outside the
+    session lock on references captured under it (`_session_display_stats`)."""
     out: dict = {}
     if not editable.any():
         return out
-    for slug, col in sess.extras.items():
+    for slug, col in extras.items():
         if slug == _MISS_SLUG or col is None:
             continue
         vals = col[editable]
@@ -38204,22 +38234,55 @@ def _session_robust_color_stats_locked(sess: "CloudSession") -> dict:
     along the beam and would dominate a percentile exactly as it dominates the
     raw box, and a deleted point is not on screen.
     """
-    editable = _session_editable_mask_locked(sess)
+    return _robust_color_stats(_session_editable_mask_locked(sess), sess.positions,
+                               sess.intensity, sess.extras)
+
+
+def _robust_color_stats(editable: np.ndarray, positions: np.ndarray,
+                        intensity: "Optional[np.ndarray]", extras: dict) -> dict:
+    """`_session_robust_color_stats_locked` on arrays; see `_observed_classes`."""
     if not editable.any():
         return {}
     out: dict = {}
-    bounds = _robust_aabb(sess.positions[editable])
+    bounds = _robust_aabb(positions[editable])
     if bounds is not None:
         out["robust_bounds"] = bounds
     ranges = _robust_attribute_ranges(
-        sess.intensity[editable] if sess.intensity is not None else None,
-        {k: v[editable] for k, v in sess.extras.items()
+        intensity[editable] if intensity is not None else None,
+        {k: v[editable] for k, v in extras.items()
          if v is not None and np.asarray(v).ndim == 1
          and np.asarray(v).shape[0] == editable.shape[0]},
     )
     if ranges:
         out["robust_attribute_ranges"] = ranges
     return out
+
+
+def _session_display_stats(sess: "CloudSession") -> dict:
+    """{"observed_classes", "robust_bounds", "robust_attribute_ranges"} for the
+    session as it stands. Caller must NOT hold `_cloud_session_lock`.
+
+    The lock is held only to capture the array references and the editable
+    mask (a fresh array). The measurement itself - a gather of positions and
+    every column, a `np.unique` per integer column and percentiles per scalar,
+    ~2.4 s at 10 M points with ten columns - runs outside it. Computed under
+    the lock, as it used to be, every background display refresh stalled label
+    strokes, deletes, previews and exports on EVERY cloud for that long.
+
+    A column written in place meanwhile (a label stroke) may be read half
+    old, half new. These are display metadata, and the result is the same as
+    if the stroke had landed just after this returned; a bake that compacts
+    replaces the arrays, and the references captured here stay self-consistent
+    with the mask."""
+    with _cloud_session_lock:
+        editable = _session_editable_mask_locked(sess)
+        positions = sess.positions
+        intensity = sess.intensity
+        extras = dict(sess.extras)
+    return {
+        "observed_classes": _observed_classes(editable, extras),
+        **_robust_color_stats(editable, positions, intensity, extras),
+    }
 
 
 # ── Compact scalar columns ─────────────────────────────────────────────────
@@ -38557,12 +38620,8 @@ def _session_rebuild(
         # at the same chokepoint — see `_session_robust_color_stats_locked`.
         # Without this every edit drops them and the colorbar silently reverts to
         # raw extrema, i.e. back to being set by a single noise point.
-        meta = {
-            **meta,
-            "observed_classes": _session_observed_classes_locked(sess),
-            **_session_robust_color_stats_locked(sess),
-            "octree_stale": not current,
-        }
+        # (Measured after the lock is released: see `_session_display_stats`.)
+    meta = {**meta, **_session_display_stats(sess), "octree_stale": not current}
     return cache_key, cache_dir, meta
 
 
@@ -39903,15 +39962,21 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     The CSF compute runs in a KILLABLE subprocess (see `_run_killable`) so the
     panel's Cancel button can SIGKILL it. The column write + octree rebuild run in
     the parent AFTER the compute returns, so a cancel during the long compute
-    leaves the session pristine."""
+    leaves the session pristine. The snapshot and the write run off the event
+    loop: each is a full-length gather, and taking `_cloud_session_lock` on the
+    loop thread parks every other request behind whichever worker holds it."""
     sess = _get_cloud_session(session_id)
-    with _cloud_session_lock:
-        # Compute on HIT survivors only — feeding misses (is_miss != 0, ~1 km out)
-        # to CSF inflates the extent ~1000× and hangs the cloth. Scatter labels
-        # back over all survivors (misses default 0, dropped from the octree at
-        # rebuild). See _session_survivor_hit_mask.
-        hit = _session_survivor_hit_mask(sess)
-        pts = _session_hit_positions_locked(sess, hit)
+
+    def _snapshot():
+        with _cloud_session_lock:
+            # Compute on HIT survivors only — feeding misses (is_miss != 0, ~1 km out)
+            # to CSF inflates the extent ~1000× and hangs the cloth. Scatter labels
+            # back over all survivors (misses default 0, dropped from the octree at
+            # rebuild). See _session_survivor_hit_mask.
+            hit = _session_survivor_hit_mask(sess)
+            return hit, _session_hit_positions_locked(sess, hit)
+
+    hit, pts = await run_in_threadpool(_snapshot)
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
     # Cost gate, BEFORE the worker is spawned: a cloth too fine for the extent
@@ -39955,15 +40020,18 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     # Scatter hit-labels back over ALL survivors (misses → 0). `len(hit)` is the
     # survivor count captured under the first lock, so this stays aligned with the
     # snapshot the compute ran on.
-    labels = np.zeros(len(hit), dtype=np.int64)
-    labels[hit] = np.asarray(hit_labels)
-    with _cloud_session_lock:
-        _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
-        if request.defer_octree:
-            # The cached octree predates the column. Say so, or the background
-            # bake that follows a split takes its no-deletions fast path and
-            # hands back that pre-column octree as current.
-            _mark_octree_stale_locked(sess)
+    def _write():
+        labels = np.zeros(len(hit), dtype=np.int64)
+        labels[hit] = np.asarray(hit_labels)
+        with _cloud_session_lock:
+            _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
+            if request.defer_octree:
+                # The cached octree predates the column. Say so, or the background
+                # bake that follows a split takes its no-deletions fast path and
+                # hands back that pre-column octree as current.
+                _mark_octree_stale_locked(sess)
+
+    await run_in_threadpool(_write)
     common = {"session_id": session_id, "point_count": int(len(pts)),
               "class_threshold_used": gmeta.get("class_threshold"),
               "class_threshold_method": gmeta.get("method"),
@@ -40075,16 +40143,22 @@ async def session_compute_normals(session_id: str,
     The compute runs in a KILLABLE subprocess (see `_run_killable`), which is
     also the only context where the tile pool may open (`tiled.worker_count`).
     The column write + octree rebuild run in the parent AFTER the compute
-    returns, so a cancel during the long compute leaves the session pristine."""
+    returns, so a cancel during the long compute leaves the session pristine.
+    The snapshot and the write run off the event loop (see the ground handler)."""
     sess = _get_cloud_session(session_id)
-    with _cloud_session_lock:
-        # HIT survivors only. A miss is a ray that hit nothing, projected ~1 km
-        # out; including them would wreck the KD-tree balance and every spacing
-        # heuristic (the collar is measured from the k-th neighbor distance).
-        hit = _session_survivor_hit_mask(sess)
-        pts = _session_hit_positions_locked(sess, hit)
-        origin, origin_source = _session_normal_origins_locked(
-            sess, hit, request.viewpoint)
+
+    def _snapshot():
+        with _cloud_session_lock:
+            # HIT survivors only. A miss is a ray that hit nothing, projected ~1 km
+            # out; including them would wreck the KD-tree balance and every spacing
+            # heuristic (the collar is measured from the k-th neighbor distance).
+            hit = _session_survivor_hit_mask(sess)
+            pts = _session_hit_positions_locked(sess, hit)
+            origin, origin_source = _session_normal_origins_locked(
+                sess, hit, request.viewpoint)
+            return hit, pts, origin, origin_source
+
+    hit, pts, origin, origin_source = await run_in_threadpool(_snapshot)
     if len(pts) < normals_mod.MIN_POINTS:
         raise HTTPException(
             status_code=400,
@@ -40145,15 +40219,18 @@ async def session_compute_normals(session_id: str,
     # Scatter the hit-aligned result back over ALL survivors (misses → 0).
     # `len(hit)` is the survivor count captured under the first lock, so this
     # stays aligned with the snapshot the compute ran on.
-    full = np.zeros((len(hit), normals_mod.N_COLUMNS), dtype=np.float32)
-    full[hit] = values
-    with _cloud_session_lock:
-        for col, (slug, label) in enumerate(normals_mod.COLUMNS):
-            _session_add_extra_column(sess, slug, label, full[:, col])
-        # These normals describe the geometry as it stands right now.
-        sess.normals_stale = False
-        if request.defer_octree:
-            _mark_octree_stale_locked(sess)
+    def _write():
+        full = np.zeros((len(hit), normals_mod.N_COLUMNS), dtype=np.float32)
+        full[hit] = values
+        with _cloud_session_lock:
+            for col, (slug, label) in enumerate(normals_mod.COLUMNS):
+                _session_add_extra_column(sess, slug, label, full[:, col])
+            # These normals describe the geometry as it stands right now.
+            sess.normals_stale = False
+            if request.defer_octree:
+                _mark_octree_stale_locked(sess)
+
+    await run_in_threadpool(_write)
     # `analyzed_points`, not `point_count`: the octree metadata merged in below
     # carries its OWN `point_count` (the octree's), which would shadow this one.
     # Same naming as the denoise endpoint, for the same reason.
@@ -40218,15 +40295,19 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
             status_code=400,
             detail=f"Unknown noise method {request.method!r}; expected one of "
                    f"{', '.join(denoise.METHODS)}.")
-    with _cloud_session_lock:
-        # Compute on HIT survivors only. A miss is a ray that hit nothing,
-        # projected ~1 km out along its beam: it would blow up the KD-tree's
-        # extent AND poison the nearest-neighbor spacing the auto parameters are
-        # derived from (measured elsewhere in this file at ~2,500x). See
-        # _session_survivor_hit_mask.
-        hit = _session_survivor_hit_mask(sess)
-        pts = _session_hit_positions_locked(sess, hit)
-        already_denoised = denoise.NOISE_CLASS_SLUG in sess.extras
+    # Snapshot and write run off the event loop (see the ground handler).
+    def _snapshot():
+        with _cloud_session_lock:
+            # Compute on HIT survivors only. A miss is a ray that hit nothing,
+            # projected ~1 km out along its beam: it would blow up the KD-tree's
+            # extent AND poison the nearest-neighbor spacing the auto parameters are
+            # derived from (measured elsewhere in this file at ~2,500x). See
+            # _session_survivor_hit_mask.
+            hit = _session_survivor_hit_mask(sess)
+            pts = _session_hit_positions_locked(sess, hit)
+            return hit, pts, denoise.NOISE_CLASS_SLUG in sess.extras
+
+    hit, pts, already_denoised = await run_in_threadpool(_snapshot)
     if int(hit.sum()) < denoise.MIN_POINTS:
         raise HTTPException(
             status_code=400,
@@ -40251,11 +40332,14 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
     # kept side, but labeling them "clean" means no future refactor of that
     # guard can move a miss into a noise cloud and silently cost the parent its
     # Beer's-law transmission denominator for LAD.
-    labels = np.full(len(hit), denoise.NOISE_CLEAN, dtype=np.int64)
-    labels[hit] = np.asarray(hit_labels)
-    with _cloud_session_lock:
-        _session_add_extra_column(sess, denoise.NOISE_CLASS_SLUG,
-                                  denoise.NOISE_CLASS_LABEL, labels)
+    def _write():
+        labels = np.full(len(hit), denoise.NOISE_CLEAN, dtype=np.int64)
+        labels[hit] = np.asarray(hit_labels)
+        with _cloud_session_lock:
+            _session_add_extra_column(sess, denoise.NOISE_CLASS_SLUG,
+                                      denoise.NOISE_CLASS_LABEL, labels)
+
+    await run_in_threadpool(_write)
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     # `**meta` supplies `point_count` — the REBUILT OCTREE's count, which is what
     # `buildSessionOctreeData` consumes. The number of points actually analyzed
@@ -41171,8 +41255,8 @@ def _chm_param_dict(request: TreeSegmentationRequest) -> dict:
 
 
 async def _session_segment_trees_chm(session_id: str, sess, request, http_request,
-                                     *, pts, plant_mask, ground_pts, seeds,
-                                     no_ground_labels):
+                                     *, n_survivors, plant_pts, plant_mask,
+                                     ground_pts, seeds, no_ground_labels):
     """The method='chm' branch of `session_segment_trees`: the same inputs
     (ground and misses excluded, labels scattered back onto every survivor),
     minus what only TreeIso needs. No cost prompt or tiling — the CHM is one
@@ -41182,22 +41266,33 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
     meta: dict = {}
     try:
         plant_labels = await _run_killable(
-            "trees", pts[plant_mask], _chm_param_dict(request),
+            "trees", plant_pts, _chm_param_dict(request),
             http_request=http_request, seeds=seeds,
             ground=ground_pts if len(ground_pts) else None, meta_out=meta,
         )
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
-    labels = np.zeros(len(pts), dtype=np.int64)
-    labels[plant_mask] = np.asarray(plant_labels)
-    with _cloud_session_lock:
-        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
+    labels = await run_in_threadpool(
+        _session_write_tree_labels, sess, n_survivors, plant_mask, plant_labels)
     cache_key, cache_dir, rebuild_meta = await run_in_threadpool(_session_rebuild, sess)
     num_trees = int(labels.max()) if labels.size else 0
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
+    return {"session_id": session_id, "point_count": int(n_survivors), "cache_id": cache_key,
             "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": None,
             "tiling": None, "chm": meta or None, "ground_warning": no_ground_labels,
             **rebuild_meta}
+
+
+def _session_write_tree_labels(sess: "CloudSession", n_survivors: int,
+                               plant_mask: np.ndarray, plant_labels) -> np.ndarray:
+    """Scatter the plant tree ids back onto every survivor (ground and misses
+    stay 0) and write the `tree_instance` column. Returns the survivor-aligned
+    labels. Blocking - a full-length scatter plus a write under
+    `_cloud_session_lock` - so the async handlers call it in the threadpool."""
+    labels = np.zeros(n_survivors, dtype=np.int64)
+    labels[plant_mask] = np.asarray(plant_labels)
+    with _cloud_session_lock:
+        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
+    return labels
 
 
 @app.post("/api/cloud/session/{session_id}/segment_trees")
@@ -41214,34 +41309,50 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     If the cloud carries a `ground_class` column (from a prior ground
     segmentation that was *labeled* but not removed), the ground points are
     excluded from TreeIso and assigned tree id 0 (unassigned) — TreeIso only
-    sees the plant points, so ground never gets clustered into a "tree"."""
+    sees the plant points, so ground never gets clustered into a "tree".
+
+    Every full-length gather here runs off the event loop (see the ground
+    handler): the snapshot under the lock, the plant/ground subsets, and the
+    label write."""
     sess = _get_cloud_session(session_id)
-    with _cloud_session_lock:
-        keep = ~sess.deleted
-        pts = sess.positions[keep].copy()
-        # Survivor-aligned ground mask: True where a prior ground segmentation
-        # tagged the point as ground. Absent column ⇒ no exclusion.
-        ground_col = sess.extras.get(GROUND_CLASS_SLUG)
-        is_ground = (
-            ground_col[keep] == GROUND_CLASS_GROUND
-            if ground_col is not None else np.zeros(len(pts), dtype=bool)
-        )
-        # Survivor-aligned HIT mask: exclude misses (is_miss != 0, ~1 km out) —
-        # feeding them to cut-pursuit inflates the extent ~1000× and hangs it.
-        # Folded into plant_mask so misses stay tree id 0 (and are dropped at
-        # rebuild). See _session_survivor_hit_mask.
-        is_hit = _session_survivor_hit_mask(sess)
+
+    def _snapshot():
+        with _cloud_session_lock:
+            keep = ~sess.deleted
+            pts = sess.positions[keep].copy()
+            # Survivor-aligned ground mask: True where a prior ground segmentation
+            # tagged the point as ground. Absent column ⇒ no exclusion.
+            ground_col = sess.extras.get(GROUND_CLASS_SLUG)
+            is_ground = (
+                ground_col[keep] == GROUND_CLASS_GROUND
+                if ground_col is not None else np.zeros(len(pts), dtype=bool)
+            )
+            # Survivor-aligned HIT mask: exclude misses (is_miss != 0, ~1 km out) —
+            # feeding them to cut-pursuit inflates the extent ~1000× and hangs it.
+            # Folded into plant_mask so misses stay tree id 0 (and are dropped at
+            # rebuild). See _session_survivor_hit_mask.
+            is_hit = _session_survivor_hit_mask(sess)
+        # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
+        plant_mask = (~is_ground) & is_hit
+        n_plant = int(plant_mask.sum())
+        # The subsets are full-length gathers too. Skipped for a request that
+        # is about to be refused, and the ground one for TreeIso, which has no
+        # use for it.
+        plant_pts = pts[plant_mask] if n_plant >= 10 else None
+        ground_pts = (pts[is_ground & is_hit]
+                      if n_plant >= 10 and request.method == "chm" else None)
+        return pts, ground_col is None, plant_mask, n_plant, plant_pts, ground_pts
+
+    pts, no_ground_labels, plant_mask, n_plant, plant_pts, ground_pts = (
+        await run_in_threadpool(_snapshot))
     # The ground reminder: set when Ground Segmentation has never run on this
     # cloud. Deliberately a FACT, not a guess from the geometry — the old
     # geometric heuristic it replaces flagged the ground-removed
     # poplar tile and missed plain ground on a synthetic cloud. The column
     # survives deletion and splitting, so a cloud whose ground was segmented
     # and removed is not reminded; one whose file arrived ground-free is, and
-    # the message is worded as a reminder for that reason.
-    no_ground_labels = ground_col is None
-    # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
-    plant_mask = (~is_ground) & is_hit
-    n_plant = int(plant_mask.sum())
+    # the message is worded as a reminder for that reason. (`no_ground_labels`,
+    # from the snapshot.)
     if n_plant < 10:
         raise HTTPException(
             status_code=400,
@@ -41251,13 +41362,12 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         np.asarray(request.seed_points, dtype=np.float64)
         if request.seed_points else None
     )
-    plant_pts = pts[plant_mask]
 
     if request.method == "chm":
         return await _session_segment_trees_chm(
-            session_id, sess, request, http_request, pts=pts, plant_mask=plant_mask,
-            ground_pts=pts[is_ground & is_hit], seeds=seeds,
-            no_ground_labels=no_ground_labels,
+            session_id, sess, request, http_request, n_survivors=len(pts),
+            plant_pts=plant_pts, plant_mask=plant_mask, ground_pts=ground_pts,
+            seeds=seeds, no_ground_labels=no_ground_labels,
         )
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
@@ -41295,9 +41405,6 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         # Client gave up before the octree rebuild; the worker was killed and the
         # session is left untouched (no tree_instance column written).
         raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
-    # Scatter the plant tree ids back onto all survivors; ground stays 0.
-    labels = np.zeros(len(pts), dtype=np.int64)
-    labels[plant_mask] = np.asarray(plant_labels)
     # Multi-trunk advisory, on the points TreeIso saw (see
     # `_treeiso_row_fusion_warning`). This is the path the Segment Trees panel
     # uses, and the reported 5-trees-as-2 failure surfaced here with nothing to
@@ -41306,8 +41413,9 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         _treeiso_row_fusion_warning, plant_pts, np.asarray(plant_labels),
         bool(tiling_meta.get("stage1_collapsed")),
     )
-    with _cloud_session_lock:
-        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
+    # Scatter the plant tree ids back onto all survivors; ground stays 0.
+    labels = await run_in_threadpool(
+        _session_write_tree_labels, sess, len(pts), plant_mask, plant_labels)
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     # Number of distinct trees (max tree id; ground/misses are 0). The renderer
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
@@ -42052,14 +42160,10 @@ def session_scalar_field_manage(session_id: str,
                 # octree it replaced.
                 if sess.octree_cache_id == relabel_from:
                     sess.octree_cache_id = cache_key
-                    oct_meta = {
-                        **oct_meta,
-                        "observed_classes": _session_observed_classes_locked(sess),
-                        **_session_robust_color_stats_locked(sess),
-                    }
                 else:
                     relabeled = None
             if relabeled is not None:
+                oct_meta = {**oct_meta, **_session_display_stats(sess)}
                 return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir),
                         "octree_relabeled": True, **oct_meta}
         if request.defer_octree:

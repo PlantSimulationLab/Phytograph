@@ -512,6 +512,31 @@ can differ between blocks, which the next rebuild reconciles and the renderer
 masks in the meantime. Pinned by racing a slowed write against a request on
 another session.
 
+A bake and the background display refresh (`bake?compact=false`) build their
+octree through `_build_octree_from_las` directly and now write the same way.
+Because the write is no longer one critical section, a non-compacting refresh
+decides whether an edit raced it from the session's edit generation
+(`octree_stale_gen`) as well as the mask: a delete and its undo landing between
+blocks leave the mask equal while the octree is missing points.
+
+### What else left the session lock
+
+`_cloud_session_lock` is one lock for every cloud, so a long hold on one cloud
+stalls strokes, deletes, previews and exports on all of them.
+
+- **Display stats.** The class lists and robust colorbar domains attached to
+  every rebuild and bake (`_session_display_stats`: a gather of every column,
+  a `np.unique` per integer column, percentiles per scalar) are measured on
+  references captured under the lock, not under it.
+- **`delete_region`'s selection.** The projection and region test run outside
+  the lock on a captured `positions` reference, as `label_region`'s do, and are
+  redone under it only if an edit landed in between.
+- **Erase stamps.** `_squares_union_mask` culls to the stamps' union bounding
+  box before the per-stamp test, so an erase costs one pass over the cloud plus
+  stamps × candidates instead of stamps × N.
+
+Pinned by `backend-api/tests/test_session_lock_holds.py`.
+
 ### Filter commits rebuild in the background
 
 `Remove points` on a session cloud used to await the reconversion inline:
