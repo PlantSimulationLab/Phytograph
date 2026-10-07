@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   setSceneDirty,
   resetSceneDirty,
@@ -161,5 +161,27 @@ describe('quit confirmation wiring', () => {
     // tests/e2e/quit-confirm.spec.ts could never drive the real handler.
     expect(s).toMatch(/if \(quitConfirmArmed\)\s*\{\s*mainWindow\.on\('close'/);
     expect(s).toMatch(/quitConfirmArmed && !quitConfirmed/);
+  });
+
+  it('no renderer code registers a beforeunload handler', () => {
+    // Electron shows no dialog for beforeunload: preventDefault() silently
+    // refuses the unload, and it runs AFTER 'before-quit' has asked the user
+    // and called stopBackend(). The handler that used to veto on unbaked
+    // deletions left the window open over a dead sidecar with no way to quit
+    // but Force Quit. It was disabled under navigator.webdriver, so no E2E
+    // spec could see it — hence a source check.
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+          const text = readFileSync(full, 'utf-8');
+          if (/addEventListener\(\s*['"`]beforeunload|onbeforeunload\s*=/.test(text)) offenders.push(full);
+        }
+      }
+    };
+    walk(resolve(__dirname, '../renderer'));
+    expect(offenders).toEqual([]);
   });
 });

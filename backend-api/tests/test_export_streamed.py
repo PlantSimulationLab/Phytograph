@@ -108,7 +108,7 @@ def test_streamed_file_matches_the_generic_export(client, edited_session, monkey
         np.testing.assert_allclose(np.asarray(getattr(streamed, ax)), np.asarray(getattr(ref, ax)), atol=1.5e-3)
     # World coordinates came back (shift + translation), not session-frame ones.
     assert streamed.x.min() > 500000.0
-    for dim in ("classification", "reflectance", "is_miss", "timestamp"):
+    for dim in ("classification", "reflectance", "is_miss", "gps_time"):
         np.testing.assert_array_equal(np.asarray(streamed[dim]), np.asarray(ref[dim]), err_msg=dim)
     # The generic path round-trips intensity and RGB through float32 (/65535,
     # *65535) and truncates one unit off about half the values; the streamed
@@ -126,6 +126,40 @@ def test_streamed_file_matches_the_generic_export(client, edited_session, monkey
     assert np.asarray(streamed.is_miss).sum() > 0
     # Header bounds cover the data.
     assert streamed.header.mins[0] <= streamed.x.min() and streamed.header.maxs[2] >= streamed.z.max()
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_timestamps_export_at_full_float64_precision(client, edited_session, streamed):
+    """Per-pulse times ride the standard float64 gps_time field, never a
+    float32 extra dim. At the fixture's 1e9 s magnitude float32 steps 64 s, so
+    its 10 ms pulse spacing collapses to ONE value - and "streamed equals
+    generic" cannot see that, because both paths were equally quantized."""
+    sid, las, tmp = edited_session
+    if streamed:
+        dest = tmp / "ts.las"
+        _export(client, sid, las, "las", dest=dest)
+        f = _read(dest)
+    else:
+        f = _read(base64.b64decode(_export(client, sid, las, "las")["data"]))
+    sess = main._get_cloud_session(sid)
+    expected = np.asarray(sess.timestamps[~sess.deleted], dtype=np.float64)
+    assert np.unique(expected).size == expected.size  # the fixture is one time per point
+    got = np.asarray(f.gps_time)
+    assert got.dtype == np.float64
+    np.testing.assert_array_equal(got, expected)
+    assert np.unique(got).size == expected.size
+    assert "timestamp" not in list(f.point_format.extra_dimension_names)
+    # The clock identity survives too, or a re-import misreads the encoding.
+    assert bool(f.header.global_encoding.gps_time_type) == (
+        sess.gps_time_encoding == "adjusted_standard")
+
+
+def test_deselecting_timestamp_leaves_gps_time_empty(client, edited_session):
+    sid, las, tmp = edited_session
+    for dest, streamed in ((tmp / "nots.las", True), (None, False)):
+        out = _export(client, sid, las, "las", dest=dest, columns=["x", "y", "z", "reflectance"])
+        f = _read(dest) if streamed else _read(base64.b64decode(out["data"]))
+        assert not np.asarray(f.gps_time).any()
 
 
 def test_column_selection_drops_rgb_to_format_6_and_filters_scalars(client, edited_session):

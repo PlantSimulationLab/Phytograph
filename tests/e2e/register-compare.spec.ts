@@ -167,6 +167,38 @@ test('Cloud-to-Mesh Distance reports the KNOWN offset between cloud and mesh', a
   expect(offsetMm).toBeGreaterThan(baselineMm * 5); // and far above the aligned baseline
 });
 
+test('Cloud-to-Mesh Distance measures the mesh as DRAWN, rotation included', async () => {
+  const { page } = session;
+  const { meshRow } = await importCloudAndTriangulate(page);
+
+  await deselectAll(page);
+  await computeDistance(page);
+  const baselineMm = await readRmseMm(page);
+  expect(baselineMm).toBeLessThan(10);
+  await page.getByTestId('alignment-panel-close').click();
+
+  // Rotate the mesh 90° about X and leave its position alone. The distance
+  // used to be computed from `vertex + position`, which ignores rotation and
+  // scale, so it kept reporting the ~0 baseline for a mesh visibly tipped off
+  // the cloud — and, after Snap to Fit wrote a rotation, described the
+  // un-snapped mesh.
+  const toggle = meshRow.getByTestId('mesh-transform-toggle');
+  await toggle.click();
+  const rotX = page.getByTestId('mesh-rot-x');
+  await expect(rotX).toBeVisible();
+  await rotX.fill('90');
+  await rotX.press('Enter');
+  await expect(rotX).toHaveValue('90.0');
+  await toggle.click();
+  await expect(page.getByTestId('mesh-rot-x')).toHaveCount(0);
+  await deselectAll(page);
+
+  await computeDistance(page);
+  const rotatedMm = await readRmseMm(page);
+  expect(rotatedMm).toBeGreaterThan(60);
+  expect(rotatedMm).toBeGreaterThan(baselineMm * 5);
+});
+
 test('Snap to Fit (ICP) REMOVES a known cloud↔mesh offset', async () => {
   const { page } = session;
   const { meshRow } = await importCloudAndTriangulate(page);

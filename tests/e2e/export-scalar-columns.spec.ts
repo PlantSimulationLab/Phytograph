@@ -53,6 +53,23 @@ test.beforeEach(async () => {
   await resetToFreshScene(session.app, session.page);
 });
 
+/**
+ * Per-point GPS times out of an uncompressed LAS written with point format 6
+ * or 7, where gps_time is the float64 at byte 22 of each record. The export
+ * writes the `timestamp` column there rather than to a float32 extra
+ * dimension, which would round pulse times together at real GPS magnitudes.
+ */
+function readLasGpsTimes(buf: Buffer): number[] {
+  const format = buf.readUInt8(104) & 0x3f;
+  expect([6, 7]).toContain(format);
+  const offsetToPoints = buf.readUInt32LE(96);
+  const recordLength = buf.readUInt16LE(105);
+  const count = Number(buf.readBigUInt64LE(247));
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) out.push(buf.readDoubleLE(offsetToPoints + i * recordLength + 22));
+  return out;
+}
+
 async function importAndOpenExport(outName: string) {
   const { app, page } = session;
   const outDir = mkdtempSync(join(tmpdir(), 'phytograph-scalar-export-'));
@@ -295,9 +312,17 @@ test('LAS offers a field picker and writes every scalar by default', async () =>
   const buf = readFileSync(savePath);
   const ascii = buf.toString('latin1');
   expect(ascii.slice(0, 4)).toBe('LASF');
-  for (const name of ['Deviation', 'timestamp', 'target_index']) {
+  for (const name of ['Deviation', 'target_index']) {
     expect(ascii).toContain(name);
   }
+  // The timestamp is NOT an extra dimension: it rides the standard float64
+  // gps_time field, with the fixture's values (100.0 stepping 2.5, 60 points).
+  expect(ascii).not.toContain('timestamp');
+  const times = readLasGpsTimes(buf).sort((x, y) => x - y);
+  expect(times).toHaveLength(60);
+  expect(times[0]).toBe(100.0);
+  expect(times[1]).toBe(102.5);
+  expect(new Set(times).size).toBe(60);
 });
 
 test('deselecting a scalar omits it from the LAS file', async () => {
@@ -326,10 +351,13 @@ test('deselecting a scalar omits it from the LAS file', async () => {
 
   // Extra-dimension names live in the header VLRs as ASCII: the deselected one
   // must be absent while a kept one is still there.
-  const ascii = readFileSync(savePath).toString('latin1');
+  const buf = readFileSync(savePath);
+  const ascii = buf.toString('latin1');
   expect(ascii.slice(0, 4)).toBe('LASF');
   expect(ascii).not.toContain('Deviation');
-  expect(ascii).toContain('timestamp');
+  expect(ascii).toContain('target_index');
+  // The timestamp was left checked, and lives in the standard gps_time field.
+  expect(new Set(readLasGpsTimes(buf)).size).toBe(60);
 });
 
 test('re-importing an exported LAS restores the scalar fields', async () => {
@@ -350,7 +378,7 @@ test('re-importing an exported LAS restores the scalar fields', async () => {
 
   // Import the file we just wrote, then open Export on it: its picker must offer
   // the same scalars, which is only possible if they round-tripped as named LAS
-  // extra dimensions.
+  // extra dimensions (and, for the timestamp, the standard gps_time field).
   await importFiles(session.app, page, 'import-point-cloud', savePath);
   await completeImportWizard(page);
 

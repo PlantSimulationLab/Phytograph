@@ -279,29 +279,13 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // plants are meshes, so this — not just scans — must gate the empty-state hint.
   const [viewerHasContent, setViewerHasContent] = useState(false);
 
-  // Count of clouds with unbaked deletions (session in-RAM mask not yet baked).
-  // Held in a ref so the beforeunload handler reads the latest value without
-  // re-binding the listener on every change.
-  const pendingDeletesRef = useRef(0);
-  const handlePendingDeletesChange = useCallback((count: number) => {
-    pendingDeletesRef.current = count;
-  }, []);
-
-  // Warn before quit when deletions are unbaked — closing discards them (they
-  // live only in the backend session's in-RAM mask until "Permanently apply").
-  // Suppressed under automation (navigator.webdriver) so the E2E harness's
-  // app.close() isn't blocked by a native dialog it can't dismiss.
-  useEffect(() => {
-    if (navigator.webdriver) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (pendingDeletesRef.current > 0) {
-        e.preventDefault();
-        e.returnValue = '';  // triggers the native confirm
-      }
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, []);
+  // There is deliberately NO `beforeunload` handler here. Electron shows no
+  // dialog for one: a preventDefault() silently refuses the unload, and it does
+  // so AFTER main's 'before-quit' has confirmed with the user and stopped the
+  // backend. A handler that vetoed on unbaked deletions therefore left the
+  // window open over a dead sidecar, and every later quit was vetoed the same
+  // way. Unsaved work is guarded from the main process instead (the SceneDirty
+  // push below + src/main/quitConfirm.ts), where canceling leaves a working app.
 
   // Auto-select the current value when any numeric input gains focus so
   // the user can type to replace it. Paired with the
@@ -2361,7 +2345,6 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onAddScans={handleAddScans}
           onStitchScans={handleStitchScans}
           importRefsCallback={handleImportRefsCallback}
-          onPendingDeletesChange={handlePendingDeletesChange}
           onUnexportedLabelsChange={setUnexportedLabelClouds}
           onViewerContentChange={setViewerHasContent}
           onRequestImportWizard={openImportWizard}

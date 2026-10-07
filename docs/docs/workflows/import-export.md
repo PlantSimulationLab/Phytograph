@@ -520,6 +520,10 @@ need to pick fields or keep other scalars.
     instead of 7, which has no RGB dimension. Both carry GPS time and a full
     classification byte (classes 0–255).
 
+    The **timestamp** column is written to the standard 64-bit GPS time field,
+    not to an extra dimension, so pulse times keep their full precision.
+    Unchecking it leaves that field at zero.
+
     **Classification byte from** chooses which class column fills that byte:
     *Automatic* uses the hand labels, then an imported classification, then
     ground and wood/leaf results; *None* leaves it at 0; or pick any class

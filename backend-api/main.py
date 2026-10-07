@@ -23925,8 +23925,9 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
     Column semantics match the generic path exactly: misses included, world
     shift and the source translation added back, `columns` selecting the
     scalar extra dims / RGB / intensity, the `timestamp` float64 field written
-    as a float32 `timestamp` extra dim (as the generic path does), and the
-    first class column populating the standard classification byte.
+    to the standard float64 `gps_time` field (as the generic path does - never
+    a float32 extra dim, see `_split_timestamp_extra_dim`), and the first class
+    column populating the standard classification byte.
     """
     import laspy
 
@@ -23980,8 +23981,11 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
     header.scales = [0.001, 0.001, 0.001]
     for slug in dim_slugs:
         header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
-    if write_timestamp:
-        header.add_extra_dim(laspy.ExtraBytesParams(name="timestamp", type=np.float32))
+    # The timestamp rides the standard float64 gps_time field (formats 6 and 7
+    # both carry it), not a float32 extra dim: float32 steps 0.03 s at GPS
+    # week-seconds and 32 s at adjusted-standard GPS, which merges pulses.
+    if write_timestamp and getattr(sess, "gps_time_encoding", None) == 'adjusted_standard':
+        _mark_gps_time_absolute(header)
     for v in palette_vlrs:
         header.vlrs.append(v)
     for v in palette_evlrs:
@@ -24005,7 +24009,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                     bcol = sess.colors[block] if want_color else None
                     bint = sess.intensity[block] if want_intensity else None
                     bext = {sl: np.asarray(sess.extras[sl][block], dtype=np.float32) for sl in export_slugs}
-                    bts = (np.asarray(sess.timestamps[block], dtype=np.float32)
+                    bts = (np.asarray(sess.timestamps[block], dtype=np.float64)
                            if write_timestamp else None)
                 _stage(base + 0.3 * share, "Packing coordinates")
                 record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
@@ -24022,7 +24026,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                     else:
                         record[sl] = col
                 if bts is not None:
-                    record["timestamp"] = bts
+                    record.gps_time = bts
                 if class_source is not None:
                     vals = np.rint(np.asarray(bext[class_source], dtype=np.float64))
                     record.classification = np.clip(vals, 0, 255).astype(np.uint8)
@@ -24302,6 +24306,20 @@ def _do_point_cloud_export(
         # Declare every scalar as a float32 extra dimension, named by slug —
         # identical to `_xyz_to_las`, so our own importer reads them back as the
         # same named scalars (and PotreeConverter carries them into the octree).
+        # The per-pulse timestamp leaves the float32 extra dims and rides the
+        # standard float64 gps_time field (formats 6 and 7 both carry it).
+        # float32 steps 0.03 s at GPS week-seconds and 32 s at adjusted-standard
+        # GPS, so a float32 `timestamp` dim merges pulses - see
+        # `_split_timestamp_extra_dim`. Popped AFTER the column selection so
+        # deselecting `timestamp` still omits it.
+        export_timestamps = export_extras.pop('timestamp', None)
+        if export_timestamps is not None and request.source is not None:
+            _ts_sid = getattr(request.source, "session_id", None)
+            with _cloud_session_lock:
+                _ts_sess = _cloud_sessions.get(_ts_sid) if _ts_sid else None
+                _ts_encoding = getattr(_ts_sess, "gps_time_encoding", None)
+            if _ts_encoding == 'adjusted_standard':
+                _mark_gps_time_absolute(header)
         class_source = _las_class_source(list(export_extras), request.classification_column)
         dim_extras = [sl for sl in export_extras if sl not in _LAS_FLAG_COLUMNS]
         for slug in dim_extras:
@@ -24344,6 +24362,9 @@ def _do_point_cloud_export(
             _stage(0.72, "Packing intensity")
             inten = np.clip(np.asarray(src_intensity, dtype=np.float64), 0, 1)
             las.intensity = (inten * 65535).astype(np.uint16)
+
+        if export_timestamps is not None:
+            las.gps_time = np.asarray(export_timestamps, dtype=np.float64)
 
         # Scalars into their declared extra dimensions, by slug.
         if export_extras:

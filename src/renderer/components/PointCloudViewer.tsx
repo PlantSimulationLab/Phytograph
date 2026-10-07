@@ -547,10 +547,6 @@ interface PointCloudViewerProps {
   onStitchScans?: (ids: string[], opts?: { retainOriginals?: boolean }) => void;
   className?: string;
   importRefsCallback?: (refs: ImportRefs) => void;
-  // Fired when the number of session clouds with UNBAKED deletions changes, so
-  // App can warn before quit (the deletions live only in the backend session's
-  // in-RAM mask until baked; closing without baking discards them).
-  onPendingDeletesChange?: (count: number) => void;
   /** How many clouds have hand labels changed since they were last exported,
    *  whenever it changes, for the quit and File > New confirmations. */
   onUnexportedLabelsChange?: (count: number) => void;
@@ -694,7 +690,6 @@ export default function PointCloudViewer({
   onStitchScans,
   className = '',
   importRefsCallback,
-  onPendingDeletesChange,
   onUnexportedLabelsChange,
   onViewerContentChange,
   onRequestImportWizard,
@@ -4387,25 +4382,6 @@ export default function PointCloudViewer({
     );
   }
 
-  // Report the count of clouds with unbaked deletions up to App (drives the
-  // before-quit warning).
-  //
-  // Clouds awaiting a BACKGROUND rebuild are excluded: an applied crop is
-  // unbaked for a few seconds by design, and the app is already baking it. The
-  // warning exists for deletions that will stay unbaked until the user acts —
-  // the erase brush's, which sit behind "Permanently apply deletions" — so
-  // counting a crop mid-rebuild would tell the user to go and do something the
-  // app is doing for them.
-  useEffect(() => {
-    if (!onPendingDeletesChange) return;
-    const rebuilding = new Set(octreeRefreshIds);
-    let count = 0;
-    for (const [id, st] of editStates.entries()) {
-      if ((st.pendingDeletes?.length ?? 0) > 0 && !rebuilding.has(id)) count++;
-    }
-    onPendingDeletesChange(count);
-  }, [editStates, octreeRefreshIds, onPendingDeletesChange]);
-
   // Bring a cloud's octree back into the same frame as its geometry, if a
   // committed transform is still being rendered as a pose.
   //
@@ -6186,10 +6162,11 @@ export default function PointCloudViewer({
   //
   // Guard the exits we can. Real autosave/session restore is separate design
   // work; this is the cheap part that prevents the worst outcome.
-  // Deliberately NOT a `beforeunload` handler. In Electron that raises a native
-  // Chromium dialog which the app cannot style, cannot dismiss programmatically,
-  // and which wedges an automated quit (it hung Playwright's worker teardown for
-  // the full 180 s timeout).
+  // Deliberately NOT a `beforeunload` handler. Electron shows no dialog for
+  // one: preventDefault() silently refuses the unload, after main has already
+  // confirmed the quit and stopped the backend — which strands the user in a
+  // window with a dead sidecar, and wedged Playwright's worker teardown for the
+  // full 180 s timeout. Pinned by src/main/quitConfirm.test.ts.
   //
   // Window close IS now guarded, but from the main process instead: App.tsx
   // pushes this count (with the scene's emptiness) over IPC.SceneDirty, and
@@ -17256,18 +17233,17 @@ export default function PointCloudViewer({
 
     try {
       // Resolve the cloud to inline points (flat clouds) or a source descriptor
-      // (octree clouds). Mesh vertices/indices are always inline — offset by the
-      // mesh's current display transform so the distance reflects where the mesh
-      // actually sits in the viewport (a user may have moved it), not its
-      // untransformed base vertices. Mirrors handleICPSnapToFit.
+      // (octree clouds). Mesh vertices/indices are always inline, as DRAWN:
+      // position, rotation and scale. `vertex + position` alone dropped
+      // rotation and scale, so the distance was measured to a shape other than
+      // the one on screen — after Snap to Fit (which writes a rotation) the
+      // reported RMSE described the un-snapped mesh. Same matrix as
+      // handleICPSnapToFit, so the two tools agree about where the mesh is.
       const ps = await buildPointSource(cloud);
-      const meshPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
-      const meshVertices: number[] = [];
-      for (let i = 0; i < mesh.data.vertexCount; i++) {
-        meshVertices.push(mesh.data.vertices[i * 3] + meshPos.x);
-        meshVertices.push(mesh.data.vertices[i * 3 + 1] + meshPos.y);
-        meshVertices.push(mesh.data.vertices[i * 3 + 2] + meshPos.z);
-      }
+      const meshTransform = meshDeltaInput(mesh);
+      const meshVertices: number[] = Array.from(meshWorldVertices(
+        mesh.data.vertices, mesh.data.vertexCount,
+        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)));
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
       const response = await computeAlignmentDistance(
@@ -17305,7 +17281,7 @@ export default function PointCloudViewer({
       alignDistAbortRef.current = null;
       alignDistRunIdRef.current = null;
     }
-  }, [clouds, meshes, meshPositions, buildPointSource]);
+  }, [clouds, meshes, buildPointSource, meshDeltaInput]);
 
   // ICP (Iterative Closest Point) snap-to-fit - align mesh to point cloud.
   // Inputs are picked in the MeshCloudAlignDialog and passed in explicitly.
