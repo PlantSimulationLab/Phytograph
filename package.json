@@ -92,6 +92,7 @@
     "appId": "com.phytograph.app",
     "productName": "Phytograph",
     "copyright": "© 2026 Phytograph",
+    "afterPack": "scripts/after-pack-win-sign.cjs",
     "afterSign": "scripts/notarize.cjs",
     "directories": {
       "output": "release",

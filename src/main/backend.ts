@@ -80,8 +80,11 @@ export function getBackendStderrTail(): string[] {
  * glibc 2.38+, so on Ubuntu 22.04 / RHEL 8-9 the window opens and the backend
  * dies instantly with a loader error. Before this, the user saw an app that
  * silently did nothing, and the crash dialog offered a Reload that could never
- * succeed. Pure string → cause so it is unit-testable; returns null when the
- * failure is an ordinary crash.
+ * succeed. A Windows application control block is the same kind of failure,
+ * though not a permanent one: an administrator can lift it, which is why the
+ * dialog's headline says the backend cannot START rather than that Phytograph
+ * cannot run here. Pure string → cause so it is unit-testable; returns null
+ * when the failure is an ordinary crash.
  */
 export function classifyBackendFailure(stderr: string[]): string | null {
   const text = stderr.join('\n');
@@ -110,6 +113,36 @@ export function classifyBackendFailure(stderr: string[]): string | null {
   const missingLib = /error while loading shared libraries: ([^:]+):/.exec(text);
   if (missingLib) {
     return `A system library Phytograph depends on is missing: ${missingLib[1]}.`;
+  }
+
+  // Windows application control (Smart App Control on Windows 11, or a
+  // WDAC/AppLocker policy on a managed machine) vetoes libraries one at a time
+  // as they load, so the signed sidecar starts and then dies at whichever
+  // import reaches a refused file. Issue #6 was exactly this — `import pandas`,
+  // identically on all eight attempts, the last four after a Reload that could
+  // not have helped.
+  //
+  // The ImportError carries Windows' message text and no error code, so the
+  // text is all there is to match, and it differs by mechanism and by Windows
+  // version: the first is current WDAC / Smart App Control (and the only one
+  // seen in the field); the Device Guard and "Windows Defender Application
+  // Control" wordings are what older Windows 10 builds said for the same
+  // error; the last is AppLocker and Software Restriction Policies. Windows
+  // also localizes all of them, so a non-English system falls through to the
+  // generic dialog.
+  const appControl =
+    /(?:DLL load failed while importing ([\w.]+): )?(?:An Application Control policy has blocked this file|Your organization used (?:Device Guard|Windows Defender Application Control) to block this app|This program is blocked by group policy)/i.exec(
+      text,
+    );
+  if (appControl) {
+    const component = appControl[1] ? ` (the "${appControl[1]}" module)` : '';
+    return (
+      `Windows blocked one of Phytograph's components${component} from loading: ` +
+      `an application control policy on this PC refused the file.\n\n` +
+      `Restarting will not help. On a work or university PC, ask your IT administrator ` +
+      `to allow Phytograph. On a personal PC, check Windows Security > App & browser ` +
+      `control > Smart App Control.`
+    );
   }
 
   return null;

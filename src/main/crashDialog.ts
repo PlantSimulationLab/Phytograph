@@ -223,16 +223,19 @@ let childProcessHandlerInstalled = false;
  * when the supervisor recognized one. It changes the dialog in two ways, both
  * deliberate: the reason is shown instead of the generic "try reloading" copy,
  * and **no Reload button is offered**. These causes (an OS too old for the
- * build, a missing system library) cannot be fixed by retrying, and a button
+ * build, a missing system library, a policy that refuses one of our files)
+ * cannot be fixed by retrying, and a button
  * that silently does nothing is worse than no button — it sends the user round
  * a loop instead of telling them the truth.
  */
 export function showBackendFailedDialog(reload: () => void, cause?: string | null): void {
   if (cause) {
     void showCrashDialog({
-      message: 'Phytograph cannot run on this system.',
+      // Says what happened, not that it is permanent: the cause below may be
+      // an OS too old for this build, or a policy an administrator can lift.
+      message: "Phytograph's compute backend cannot start on this system.",
       detail: `${cause}\n\nUse View Logs for the full error, or Report to send it to us.`,
-      reportContext: 'backend failed (unsupported system)',
+      reportContext: 'backend failed (blocked by the system)',
       // No onReload: reloading cannot resolve an environment mismatch.
     });
     return;

@@ -77,6 +77,10 @@ Common causes:
   ```bash
   xattr -dr com.apple.quarantine /Applications/Phytograph.app
   ```
+- A Windows application control policy refusing a bundled library — the log
+  shows `ImportError: DLL load failed while importing …: An Application Control
+  policy has blocked this file`. Restarting cannot fix it; see
+  [Native libraries are signed separately](development/releasing.md#native-libraries-are-signed-separately).
 - First-launch cold start (~30s with onedir, longer on slower disks)
 - An orphaned backend from a previous session (it won't block the new
   instance, which picks its own port, but it does consume memory):

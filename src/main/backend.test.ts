@@ -135,6 +135,60 @@ describe('classifyBackendFailure', () => {
     expect(cause).toContain('libGL.so.1');
   });
 
+  // Verbatim from issue #6 (Windows, v0.94.0): the signed sidecar started, then
+  // an unsigned pandas extension module was refused by policy at import.
+  const REAL_APP_CONTROL_FAILURE = [
+    'Traceback (most recent call last):',
+    '  File "backend_wrapper.py", line 245, in <module>',
+    '  File "main.py", line 6, in <module>',
+    '  File "pandas\\__init__.py", line 58, in <module>',
+    '  File "pandas\\core\\dtypes\\dtypes.py", line 28, in <module>',
+    'ImportError: DLL load failed while importing lib: An Application Control policy has blocked this file.',
+    "[PYI-19116:ERROR] Failed to execute script 'backend_wrapper' due to unhandled exception!",
+  ];
+
+  it('recognizes a Windows application control block and names the refused module', () => {
+    const cause = classifyBackendFailure(REAL_APP_CONTROL_FAILURE);
+    expect(cause).toBeTruthy();
+    expect(cause).toMatch(/application control/i);
+    expect(cause).toContain('"lib"');
+  });
+
+  it('tells the user a blocked component cannot be fixed by restarting, and where to look', () => {
+    // The reporter clicked Reload and got the same four failures again.
+    const cause = classifyBackendFailure(REAL_APP_CONTROL_FAILURE);
+    expect(cause).toMatch(/will not help/i);
+    expect(cause).toContain('Smart App Control');
+    expect(cause).toMatch(/IT administrator/i);
+  });
+
+  it('recognizes the policy block without the Python import wrapper', () => {
+    // The same Windows error can surface from a native loader with no module name.
+    const cause = classifyBackendFailure(['An Application Control policy has blocked this file.']);
+    expect(cause).toMatch(/application control/i);
+    expect(cause).not.toContain('module)');
+  });
+
+  // The same refusal is worded differently by other mechanisms and older
+  // Windows builds. Each still means "a restart cannot help".
+  it.each([
+    ['AppLocker / Software Restriction Policies', 'This program is blocked by group policy. For more information, contact your system administrator.'],
+    ['older Windows 10 (Device Guard)', 'Your organization used Device Guard to block this app. Contact your support person for more info.'],
+    ['Windows 10 (WDAC)', 'Your organization used Windows Defender Application Control to block this app.'],
+  ])('recognizes the block as worded by %s', (_label, message) => {
+    const cause = classifyBackendFailure([`ImportError: DLL load failed while importing _multiarray_umath: ${message}`]);
+    expect(cause).toMatch(/will not help/i);
+    expect(cause).toContain('"_multiarray_umath"');
+  });
+
+  it('does not treat an ordinary missing-DLL import error as a policy block', () => {
+    expect(
+      classifyBackendFailure([
+        'ImportError: DLL load failed while importing lib: The specified module could not be found.',
+      ]),
+    ).toBeNull();
+  });
+
   it('returns null for an ordinary crash, leaving the normal restart path alone', () => {
     // Must NOT hijack a real crash: those are retryable and the generic dialog
     // (with its Reload button) is the right response.

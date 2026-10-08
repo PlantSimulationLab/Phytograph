@@ -50,8 +50,8 @@ releases keep their tag, release notes, and the small updater metadata
 meaningful and electron-updater manifests remain readable.
 
 Prereleases and drafts are never pruned and never consume a "keep" slot.
-Signing bring-up runs (`signing_test`) skip pruning entirely, since they
-don't publish. The job is `continue-on-error` — reclaiming storage must
+Signing bring-up runs (`signing_test`) and rehearsals (`dry_run`) skip
+pruning entirely, since they don't publish. The job is `continue-on-error` — reclaiming storage must
 never fail a release that already built successfully; a missed prune is
 picked up by the next release.
 
@@ -129,16 +129,20 @@ Trusted Signing"). Signing is optional — with the `AZURE_*` secrets unset the
 build still succeeds and produces an unsigned installer, which is what local
 `npm run package:win` does.
 
-The configuration lives in `scripts/run-electron-builder.mjs`
-(`azureSigningArgs()`), not in `package.json`, because it must be conditional:
-electron-builder's Azure path throws when the credentials are absent.
+The configuration is injected by `scripts/run-electron-builder.mjs`
+(`azureSigningArgs()`), not written in `package.json`, because it must be
+conditional: electron-builder's Azure path throws when the credentials are
+absent. The signing account itself (endpoint, account, certificate profile,
+publisher, timestamp server) is defined once in `scripts/azure-sign-config.mjs`
+and read by both signers described below.
 
 Three things about this setup are easy to break:
 
-- **Signing must stay inside electron-builder.** Do not move it to a separate
-  `azure/artifact-signing-action` step after the build. electron-builder signs
-  the installer, *then* hashes it into `latest.yml`; signing afterwards changes
-  the hash and electron-updater rejects every update as corrupt.
+- **Signing the installer must stay inside electron-builder.** Do not move it
+  to a separate `azure/artifact-signing-action` step after the build.
+  electron-builder signs the installer, *then* hashes it into `latest.yml`;
+  signing afterwards changes the hash and electron-updater rejects every update
+  as corrupt.
 - **Timestamps are passed explicitly.** electron-builder 25.1.8 sends no
   timestamp parameters to Azure ([#8626]). Azure's certificates live only 72
   hours, so an untimestamped signature expires within days. Upgrading to
@@ -149,6 +153,83 @@ Three things about this setup are easy to break:
   signature" workflow step asserts both the timestamp and the CN.
 
 [#8626]: https://github.com/electron-userland/electron-builder/issues/8626
+
+### Native libraries are signed separately
+
+electron-builder signs `.exe` files and nothing else. The backend sidecar is a
+PyInstaller bundle holding several hundred `.pyd` and `.dll` files, Electron
+adds DLLs of its own beside `Phytograph.exe`, and Windows application control
+(Smart App Control on Windows 11, WDAC or AppLocker on a managed machine)
+judges each one as it is loaded. Up to v0.94.0 they shipped unsigned: the
+signed `phytograph_backend.exe` started, then died at `import pandas` with
+*"An Application Control policy has blocked this file"* on every launch
+([issue #6]).
+
+`scripts/sign-win-natives.ps1` closes that. It finds every PE image in the
+trees it is given (by reading the file header, not by extension), signs the
+ones with no valid signature in one batched `Invoke-TrustedSigning` call, and
+re-reads each to confirm. It runs three times in a release:
+
+| Where | Over | Why there |
+| --- | --- | --- |
+| **Sign bundled native libraries (Windows)** step | `resources/phytograph_backend/`, `resources/potree_converter/` | Before electron-builder, so the backend smoke test that follows launches the signed bundle. |
+| `scripts/after-pack-win-sign.cjs` (electron-builder `afterPack`) | the whole unpacked app | The only moment Electron's own DLLs exist and the installer does not. Also the last check before anything is published. |
+| **Verify Windows signature** step | the whole unpacked app, `-VerifyOnly -IncludeExe` | Reads what actually shipped, executables included. |
+
+All of it happens before the installer is built, so the installer's hash chain
+is computed over signed bytes.
+
+- **Do not replace it with `win.signDlls` / `win.signExts`.** electron-builder
+  makes one Azure round trip per file, which for this bundle does not fit in
+  the build step's timeout. Setting them *as well* signs everything twice.
+- **Files a vendor already signed are left alone**, timestamped or not, and
+  keep the vendor's name. Re-signing would replace a better-known publisher
+  with ours, and some redistributable licenses grant copying but not
+  modifying. Every run prints which files were left under whose signature;
+  that list is what an IT administrator has to allow besides our publisher.
+- **A file with no valid embedded signature gets ours, whoever wrote it.**
+  That includes copies of Windows system DLLs that PyInstaller pulls in:
+  Windows vouches for those through a catalog, which stays on the build
+  machine. The script lists them separately so this is visible.
+- **Nothing on the runner can detect a regression by running the app.** The
+  build machine enforces no such policy, so the smoke tests load unsigned
+  libraries without complaint. The signature of every packaged file is
+  therefore *read*, and `scripts/win-native-signing.test.mjs` pins that the
+  steps and the hook are still there.
+- **"Signed" is asked of `signtool verify /pa /tw`, not
+  `Get-AuthenticodeSignature`.** For a file Windows also knows through a
+  catalog the PowerShell cmdlet reports the catalog's signer and ignores the
+  signature embedded in the file. Only the embedded signature ships.
+- **Signing resumes after a failed request.** signtool signs the list in order
+  and abandons the rest at the first file Azure fails; on the first rehearsal
+  one failed request left 354 of 372 files unsigned. The script goes again on
+  whatever is still unsigned, raises a warning on the run for each pass that
+  was cut short, and gives up when two passes in a row sign nothing.
+- **Measured cost** (rehearsal, 2026-10-08): 460 libraries in the sidecars, 372
+  signed by us in 10 minutes, plus Electron's 5 from the hook. The other 88
+  stay under Microsoft, Python Software Foundation and Intel signatures.
+
+### Rehearse a release without publishing
+
+Run the **Release** workflow by hand with **`dry_run`** ticked. It does
+everything a tag does (native builds, the platform gate, signing, notarization,
+every verification and smoke test) with `--publish never`, and skips the
+manifest merge and storage pruning. Use it after changing anything in the
+signing or packaging steps: a tag is otherwise the first time the real bundle
+meets a release-only step, and with `fail-fast: false` a Windows job that fails
+on the tag leaves a published release with no Windows installer.
+
+`signing_test` is the faster, narrower tool: it stubs the sidecars and skips
+the native build, so it proves the signing path in about five minutes but says
+nothing about the real bundle. Both sign real files and count against the
+Azure signing quota.
+
+Signing satisfies Smart App Control. An organization's own policy can still
+refuse any publisher it has not allowed, which no build can fix; the app
+recognizes that failure at startup (`classifyBackendFailure` in
+`src/main/backend.ts`) and says so instead of offering a Reload.
+
+[issue #6]: https://github.com/PlantSimulationLab/Phytograph/issues/6
 
 !!! note "The client secret expires"
     Unlike the OIDC-based Azure integrations, electron-builder authenticates

@@ -14,6 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { AZURE_SIGN, azureSigningDecision } from './azure-sign-config.mjs';
 import { resolveBuildOutputDir } from './build-output-dir.mjs';
 
 const LSREGISTER =
@@ -79,15 +80,13 @@ function unregisterUnpackedApps(outputDir) {
 // certificates are valid for only 72 hours, so an untimestamped signature goes
 // invalid within days of release. These extra keys reach the PowerShell cmdlet
 // verbatim via the `[k: string]: string` passthrough on azureSignOptions.
-const AZURE_SIGN = {
-  endpoint: 'https://wus2.codesigning.azure.net/',
-  codeSigningAccountName: 'GitHubPackageSigning',
-  certificateProfileName: 'phytograph-package-signing',
-  // Must match the CN on the issued certificate EXACTLY. electron-updater
-  // compares this against the downloaded installer's signature; if it is unset
-  // it silently SKIPS verification, and if it is wrong it rejects every update.
-  publisherName: 'Brian Bailey',
-};
+//
+// electron-builder signs .exe files ONLY. Every other native library is signed
+// by scripts/sign-win-natives.ps1: the sidecar bundles in a release.yml step
+// BEFORE this runs, and Electron's own DLLs from the afterPack hook
+// (scripts/after-pack-win-sign.cjs). Both happen before the installer is built,
+// so neither disturbs the hash chain above. The account itself lives in
+// azure-sign-config.mjs so the signers cannot drift apart.
 
 // electron-builder is spawned with `shell: true` on Windows (see the spawnSync
 // call below), which means cmd.exe re-tokenizes the argument list and splits any
@@ -101,19 +100,9 @@ function quoteIfNeeded(arg) {
 }
 
 function azureSigningArgs() {
-  const haveCreds =
-    process.env.AZURE_TENANT_ID &&
-    process.env.AZURE_CLIENT_ID &&
-    (process.env.AZURE_CLIENT_SECRET || process.env.AZURE_CLIENT_CERTIFICATE_PATH);
-
-  if (process.env.SKIP_WIN_SIGNING === '1' || process.env.SKIP_WIN_SIGNING === 'true') {
-    console.log('[win-sign] SKIP_WIN_SIGNING set — Windows signing disabled.');
-    return [];
-  }
-  if (!haveCreds) {
-    console.log(
-      '[win-sign] no AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET — Windows signing skipped.',
-    );
+  const decision = azureSigningDecision(process.env);
+  if (!decision.enabled) {
+    console.log(`[win-sign] Windows signing skipped: ${decision.reason}`);
     return [];
   }
 
@@ -127,8 +116,8 @@ function azureSigningArgs() {
     `-c.win.azureSignOptions.endpoint=${AZURE_SIGN.endpoint}`,
     `-c.win.azureSignOptions.codeSigningAccountName=${AZURE_SIGN.codeSigningAccountName}`,
     `-c.win.azureSignOptions.certificateProfileName=${AZURE_SIGN.certificateProfileName}`,
-    '-c.win.azureSignOptions.TimestampRfc3161=http://timestamp.acs.microsoft.com',
-    '-c.win.azureSignOptions.TimestampDigest=SHA256',
+    `-c.win.azureSignOptions.TimestampRfc3161=${AZURE_SIGN.timestampRfc3161}`,
+    `-c.win.azureSignOptions.TimestampDigest=${AZURE_SIGN.timestampDigest}`,
   ];
 }
 

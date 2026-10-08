@@ -26,6 +26,21 @@ on:
         description: 'Signing bring-up: stub the sidecars, skip the native build, do not publish'
         type: boolean
         default: false
+      # A full release that stops short of publishing: the real native chain,
+      # the real sidecars, real signing and notarization, every verification
+      # step — built with `--publish never`.
+      #
+      # It exists because a tag is otherwise the FIRST time the real bundle
+      # meets a release-only step. signing_test proves the signing path on two
+      # stub files; it cannot say whether several hundred real libraries sign
+      # inside the step's timeout, or whether the backend still starts once
+      # they are. With `fail-fast: false`, a Windows job that fails on the tag
+      # leaves a published release with no Windows installer. Run this first
+      # after changing anything in the signing or packaging steps.
+      dry_run:
+        description: 'Rehearsal: full build, sign and verify with the real sidecars, do not publish'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -549,45 +564,9 @@ jobs:
           fi
           echo "PASS: packaged backend launched and reported version $got"
 
-      - name: Smoke-test backend (Windows)
-        if: runner.os == 'Windows' && !inputs.signing_test
-        shell: pwsh
-        env:
-          PHYTOGRAPH_BACKEND_PORT: '8123'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $expected = (Get-Content package.json | ConvertFrom-Json).version
-          Write-Host "Expected backend version: $expected"
-          $exe = "resources/${{ matrix.backend_name }}/${{ matrix.backend_name }}.exe"
-          $proc = Start-Process -FilePath $exe -PassThru
-          try {
-            $got = $null
-            foreach ($i in 1..60) {
-              if ($proc.HasExited) {
-                Write-Host "FAIL: backend process exited before serving (crash on startup)"
-                exit 1
-              }
-              try {
-                $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$env:PHYTOGRAPH_BACKEND_PORT/version" -TimeoutSec 2
-                $got = $resp.version
-                Write-Host "Backend responded after ~${i}s: version $got"
-                break
-              } catch {
-                Start-Sleep -Seconds 1
-              }
-            }
-          } finally {
-            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-          }
-          if (-not $got) {
-            Write-Host "FAIL: backend never answered /version within 60s"
-            exit 1
-          }
-          if ($got -ne $expected) {
-            Write-Host "FAIL: backend version '$got' != package.json '$expected'"
-            exit 1
-          }
-          Write-Host "PASS: packaged backend launched and reported version $got"
+      # The Windows twin of this test runs further down, after "Sign bundled
+      # native libraries (Windows)": signing rewrites every library the backend
+      # loads, so the bytes worth launching are the signed ones.
 
       # ---------------- PotreeConverter build ----------------
       # PotreeConverter converts XYZ/LAS to the Potree 2.0 octree format the
@@ -769,6 +748,16 @@ jobs:
             resources/phytograph_backend/phytograph_backend.exe
           Copy-Item "$env:SystemRoot\System32\where.exe" `
             resources/potree_converter/PotreeConverter.exe
+          # Stand-ins for the .pyd/.dll files a real bundle carries, so the
+          # "Sign bundled native libraries" step and its verification have
+          # something to act on. Same donor: where.exe has no EMBEDDED
+          # signature (Windows vouches for it through a catalog), which is the
+          # state an unsigned wheel's extension module is in.
+          New-Item -ItemType Directory -Force -Path resources/phytograph_backend/_internal | Out-Null
+          Copy-Item "$env:SystemRoot\System32\where.exe" `
+            resources/phytograph_backend/_internal/stub_native.pyd
+          Copy-Item "$env:SystemRoot\System32\where.exe" `
+            resources/potree_converter/stub_native.dll
           Write-Host 'Stub sidecars created:'
           Get-ChildItem -Recurse resources/phytograph_backend, resources/potree_converter |
             Select-Object FullName, Length | Format-Table -AutoSize
@@ -873,6 +862,109 @@ jobs:
           }
           Write-Host "signtool.exe present: $st"
 
+      # ---------------- Sign the sidecars' native libraries ----------------
+      # electron-builder signs .exe files and nothing else (winPackager
+      # shouldSignFile), so the installer and both sidecar executables were
+      # signed while every .pyd and .dll INSIDE the PyInstaller bundle shipped
+      # unsigned. Windows application control (Smart App Control on Windows 11,
+      # WDAC/AppLocker on a managed machine) judges each loaded library on its
+      # own: issue #6 was a user whose signed phytograph_backend.exe started
+      # fine and then died at `import pandas` with "An Application Control
+      # policy has blocked this file" — on every launch, because no restart can
+      # change a policy verdict.
+      #
+      # Nothing on the build side could see it. The runner enforces no such
+      # policy, so the backend and packaged-app smoke tests load the unsigned
+      # libraries without complaint; it only breaks on someone else's machine.
+      # Same shape as the glibc floor: a property of the artifact that has to be
+      # READ, because running it here proves nothing.
+      #
+      # The work is in scripts/sign-win-natives.ps1, shared with the afterPack
+      # hook that signs Electron's own DLLs (scripts/after-pack-win-sign.cjs)
+      # and with "Verify Windows signature" below — read its header for what
+      # counts as signed and why vendor-signed files are left alone.
+      #
+      # Why a separate step rather than electron-builder's signDlls / signExts:
+      # electron-builder makes one Invoke-TrustedSigning call PER FILE (a fresh
+      # PowerShell, module load and Azure login each time), and the bundle holds
+      # several hundred of them — inside a step with a 45-minute timeout. One
+      # call with a catalog hands signtool the whole list instead. Do not ALSO
+      # set signDlls/signExts in package.json: it would sign everything a second
+      # time, the slow way.
+      #
+      # Why here and not only in the afterPack hook, which scans these files
+      # too: the backend smoke test below has to launch the SIGNED bundle, and
+      # it has to do that before electron-builder starts publishing.
+      #
+      # Signing here, BEFORE electron-builder, is safe where signing after it is
+      # not (see run-electron-builder.mjs): these files are inputs to the
+      # installer, so the installer's own hash chain is computed over the signed
+      # bytes.
+      #
+      # Measured on the real bundle (dry_run, 2026-10-08): 460 libraries, 372 to
+      # sign, 10 minutes — Azure signs about one file every 1.6 s. The timeout
+      # leaves room for the resumed passes the script makes when Azure fails a
+      # request mid-list, which it did on the first rehearsal.
+      - name: Sign bundled native libraries (Windows)
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        timeout-minutes: 40
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        shell: pwsh
+        run: |
+          ./scripts/sign-win-natives.ps1 -Roots resources/phytograph_backend, resources/potree_converter
+          exit $LASTEXITCODE
+
+      # Launch the backend AFTER its libraries were signed, because those are the
+      # bytes that ship. It used to run straight after the PyInstaller build,
+      # which tested a bundle that no longer existed by the time it was
+      # packaged: signing appends to every .pyd/.dll, and a file that does not
+      # survive that would first be noticed by the packaged-app smoke test —
+      # which runs after `--publish always`. Same assertions as the Unix test
+      # above. Not gated on the signing step having run: with no Azure secrets
+      # the bundle is unsigned and still has to start.
+      - name: Smoke-test backend (Windows)
+        if: runner.os == 'Windows' && !inputs.signing_test
+        shell: pwsh
+        env:
+          PHYTOGRAPH_BACKEND_PORT: '8123'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = (Get-Content package.json | ConvertFrom-Json).version
+          Write-Host "Expected backend version: $expected"
+          $exe = "resources/${{ matrix.backend_name }}/${{ matrix.backend_name }}.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          try {
+            $got = $null
+            foreach ($i in 1..60) {
+              if ($proc.HasExited) {
+                Write-Host "FAIL: backend process exited before serving (crash on startup)"
+                exit 1
+              }
+              try {
+                $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$env:PHYTOGRAPH_BACKEND_PORT/version" -TimeoutSec 2
+                $got = $resp.version
+                Write-Host "Backend responded after ~${i}s: version $got"
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+          if (-not $got) {
+            Write-Host "FAIL: backend never answered /version within 60s"
+            exit 1
+          }
+          if ($got -ne $expected) {
+            Write-Host "FAIL: backend version '$got' != package.json '$expected'"
+            exit 1
+          }
+          Write-Host "PASS: packaged backend launched and reported version $got"
+
       - name: Build & publish app
         timeout-minutes: 45
         env:
@@ -918,14 +1010,15 @@ jobs:
         # signing_test builds with `--publish never` (npm run release hardcodes
         # `--publish always`, which would create a GitHub Release that
         # electron-updater then offers to users as "Latest" — from a build whose
-        # sidecars are stubs).
+        # sidecars are stubs). dry_run does the same with the real sidecars, via
+        # `npm run package`, which is `npm run release` minus the publish flag.
         #
         # Must go through an npm script: `node scripts/run-electron-builder.mjs`
         # invoked directly does not get node_modules/.bin on PATH, so the
         # spawned `electron-builder` is not found.
         run: ${{ inputs.signing_test
           && 'npm run package:win -- --publish never'
-          || format('npm run release {0}', startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '') }}
+          || format('npm run {0} {1}', inputs.dry_run && 'package -- --publish never' || 'release --', startsWith(matrix.platform, 'macos') && format('--mac --{0}', matrix.arch) || '') }}
 
       # Each macOS job's electron-builder publish writes a `latest-mac.yml`
       # updater manifest listing ONLY that job's arch files, and both jobs
@@ -937,7 +1030,8 @@ jobs:
       # assets are already uploaded by this point, so the merge must happen
       # even if a later step in this job fails.)
       - name: Stash latest-mac.yml for merge (macOS)
-        if: startsWith(matrix.platform, 'macos')
+        # Not in a dry_run: there is no release to merge a manifest into.
+        if: startsWith(matrix.platform, 'macos') && !inputs.dry_run
         uses: actions/upload-artifact@v4
         with:
           name: latest-mac-${{ matrix.arch }}
@@ -1024,7 +1118,13 @@ jobs:
               Write-Error "FAIL: signtool verify exited $code for $label"
               return $false
             }
-            $cn = (Get-AuthenticodeSignature $path).SignerCertificate.Subject
+            # The EMBEDDED signer, read from the file. Not
+            # Get-AuthenticodeSignature: for a file Windows also knows through
+            # a catalog it reports the CATALOG's signer and ignores the
+            # signature in the file — the signing_test stubs are copies of
+            # where.exe, and it answered "CN=Microsoft Windows" for one that
+            # signtool had just verified as ours.
+            $cn = [System.Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($path).Subject
             Write-Host "   subject: $cn"
             if ($cn -notmatch [regex]::Escape($expectedCn)) {
               Write-Error "FAIL: $label has unexpected subject '$cn' — update win.publisherName in scripts/run-electron-builder.mjs to match."
@@ -1069,6 +1169,18 @@ jobs:
             }
             if (-not (Assert-Signed $full $s.label)) { $ok = $false }
           }
+
+          # Every native library in the packaged app, executables included.
+          # Each is loaded — and judged by Windows application control —
+          # individually, so one unsigned file is enough to stop the backend at
+          # import (issue #6) or the viewer at its first WebGL call. Checked in
+          # the packaged tree because that is what ships, and by reading PE
+          # headers rather than matching extensions or directories: an earlier
+          # version looked only inside the two sidecars and printed "all
+          # artifacts signed" over five unsigned Electron DLLs beside them.
+          # The script prints who signed each file it did not.
+          ./scripts/sign-win-natives.ps1 -Roots $unpacked -VerifyOnly -IncludeExe
+          if ($LASTEXITCODE -ne 0) { $ok = $false }
 
           if (-not $ok) { exit 1 }
           Write-Host 'All Windows artifacts signed, timestamped, and correctly attributed.'
@@ -1166,7 +1278,8 @@ jobs:
   # release for a missing half.
   merge-latest-mac:
     needs: build
-    if: always()
+    # A dry_run publishes nothing, so there is no release to upload to.
+    if: always() && !inputs.dry_run
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1251,13 +1364,13 @@ jobs:
   # ones, leaving their tags, notes, and updater manifests intact.
   #
   # `needs: merge-latest-mac` so pruning is the last thing to happen, and the
-  # signing_test guard keeps a non-publishing bring-up run from deleting
+  # signing_test / dry_run guard keeps a non-publishing run from deleting
   # anything. `continue-on-error` because reclaiming storage must never fail a
   # release that already built and published successfully — a missed prune is
   # picked up by the next one.
   prune-old-releases:
     needs: merge-latest-mac
-    if: always() && !inputs.signing_test
+    if: always() && !inputs.signing_test && !inputs.dry_run
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true

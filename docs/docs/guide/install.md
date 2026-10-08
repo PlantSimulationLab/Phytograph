@@ -68,6 +68,33 @@ it opens with a normal double-click — no security warning.
     the bottom of the General tab → **Apply**, then run it. This is only needed
     when the **More info → Run anyway** link is hidden by a managed policy.
 
+!!! note "If Phytograph opens but says a component was blocked"
+    The window opens, then a dialog reports that Windows blocked one of
+    Phytograph's components and the compute backend cannot start. The log
+    shows *"An Application Control policy has blocked this file"*. Windows is
+    refusing to load one of the libraries Phytograph ships with, and
+    restarting or reinstalling the same version will not change that.
+
+    **Update first.** Versions up to 0.94.0 signed the installer and the
+    program files but not the libraries inside the compute backend, which is
+    what this check rejects. Later versions ship every library signed, so
+    installing the current release is usually the whole fix.
+
+    If the current release is still blocked:
+
+    - **Work or university PC** — the policy is set by your organization.
+      Ask your IT administrator to allow Phytograph. Every program file and
+      library in it carries a signature: most are signed by the publisher
+      named on the installer's security prompt, and third-party components
+      that arrive already signed keep their original vendor's signature:
+      Microsoft, the Python Software Foundation and Intel. A rule that
+      allows only Phytograph's publisher also needs those three allowed.
+    - **Personal PC** — open **Windows Security → App & browser control →
+      Smart App Control** to see whether it is on. It can only be switched
+      off as a whole, and Windows will not let you turn it back on without
+      resetting the PC, so please [report the problem](https://github.com/PlantSimulationLab/Phytograph/issues)
+      before doing that.
+
 ## Install on Linux
 
 Phytograph ships as a single **AppImage** — nothing to install, but it does
