@@ -443,7 +443,7 @@ describe('importTexturedMesh', () => {
       [
         { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0] },
         { name: 'indices', dtype: 'u32', data: [0, 1, 2, 0, 2, 3] },
-        { name: 'colors', dtype: 'f32', data: [1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0] },
+        { name: 'colors', dtype: 'f32', data: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.5, 0] },
       ],
     );
     const res = await importTexturedMesh('/abs/path/model.ply');
@@ -460,7 +460,11 @@ describe('importTexturedMesh', () => {
     expect(res.data.indices).toBeInstanceOf(Uint32Array);
     expect(Array.from(res.data.vertices)).toEqual([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]);
     expect(Array.from(res.data.indices)).toEqual([0, 1, 2, 0, 2, 3]);
-    expect(Array.from(res.data.vertexColors!)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0]);
+    // A PLY's 8-bit color is sRGB and is decoded to linear: 0.5 -> 0.214.
+    const c = Array.from(res.data.vertexColors!);
+    expect(c.slice(0, 9)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    expect(c[9]).toBeCloseTo(0.21404, 4);
+    expect(c[10]).toBeCloseTo(0.21404, 4);
   });
 
   it('maps materials/textures from meta onto plantMaterials', async () => {
@@ -478,9 +482,14 @@ describe('importTexturedMesh', () => {
         { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 0, 1, 0] },
         { name: 'indices', dtype: 'u32', data: [0, 1, 2] },
         { name: 'uv_coordinates', dtype: 'f32', data: [0, 0, 1, 0, 0, 1] },
+        { name: 'colors', dtype: 'f32', data: [0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.5, 0.25, 0.125] },
       ],
     );
     const res = await importTexturedMesh('/abs/path/tree.obj');
+    // An MTL Kd is LINEAR (the Blender/Helios convention) and passes through
+    // untouched; decoding it as sRGB would turn 0.5 into 0.214.
+    expect(res.plantMaterials![0].color).toEqual([0.5, 0.25, 0.1]);
+    expect(Array.from(res.data.vertexColors!)).toEqual([0.5, 0.25, 0.125, 0.5, 0.25, 0.125, 0.5, 0.25, 0.125]);
     expect(res.hasTextures).toBe(true);
     expect(res.plantMaterials).toHaveLength(1);
     expect(res.plantMaterials![0]).toMatchObject({

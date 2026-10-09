@@ -3337,27 +3337,23 @@ export async function importPointCloudByPath(
 // ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
 
 /**
- * An MTL's `Kd` is an **sRGB** display color — that's what the format means, and
- * what every other tool writes there. three.js's working space is LINEAR, and the
- * two places an imported mesh's color lands both treat their input as already
- * linear:
+ * Which imported mesh colors are sRGB and need decoding into three.js's LINEAR
+ * working space. Both places an imported color lands treat their input as
+ * already linear: `MeshData.vertexColors` (a `color` BufferAttribute, encoded to
+ * sRGB at output) and `PlantMaterialDef.color` (`new THREE.Color(r, g, b)`,
+ * whose numeric form applies no conversion).
  *
- *   - `MeshData.vertexColors` -> a `color` BufferAttribute, which three.js encodes
- *     to sRGB at output (`outputColorSpace`).
- *   - `PlantMaterialDef.color` -> `new THREE.Color(r, g, b)` in TexturedPlantMesh,
- *     whose NUMERIC form applies no conversion (unlike the `'#hex'` string form,
- *     which does decode sRGB).
- *
- * So an unconverted `Kd` gets encoded to sRGB a second time on the way to the
- * framebuffer and renders lighter and desaturated. Measured on a QSM round-trip
- * (export to OBJ, re-import): the rank-0 trunk went from 176,141,87 to
- * 216,196,158 — visibly washed out, and drifting further on every extra trip.
- *
- * Converting here, at the single point where imported mesh colors enter the
- * renderer, fixes both consumers at once. This is the same fix `srgbToLinear` in
- * renderers/PointCloud.tsx applies to generated point-cloud colors, for the same
- * reason; see renderers/pointCloudColorSpace.test.ts for the pipeline comparison.
+ *   - **PLY**: an 8-bit vertex color is a display color, so it is decoded.
+ *     Unconverted it gets encoded a second time and renders washed out.
+ *   - **OBJ**: an MTL `Kd` is taken as LINEAR and passed through untouched. The
+ *     format never says, and tools split; we match Blender and Helios, whose
+ *     `writeOBJ` writes linear reflectances (see linearChannelToSrgb in
+ *     lib/meshExport.ts, the writer this must stay the inverse of). Decoding a
+ *     Helios `Kd 0.15 0.2 0.1` as sRGB rendered it near-black.
  */
+export const importedMeshColorsAreSrgb = (filePath: string): boolean =>
+  filePath.toLowerCase().endsWith('.ply');
+
 export const srgbChannelToLinear = (c: number): number =>
   c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 
@@ -3416,14 +3412,16 @@ export async function importTexturedMesh(
   const materialGroups = (meta.material_groups as PlantMaterialGroup[] | null) ?? undefined;
   const textures = (meta.textures as Record<string, string> | null) ?? undefined;
 
+  const decode = importedMeshColorsAreSrgb(filePath);
   let plantMaterials: PlantMaterialDef[] | undefined;
   if (materials && materialGroups) {
     plantMaterials = materials.map((mat) => {
       const group = materialGroups.find((g) => g.material_name === mat.name);
       const textureData = mat.texture_name && textures ? textures[mat.texture_name] : undefined;
+      const color = mat.color as [number, number, number] | undefined;
       return {
         name: mat.name,
-        color: srgbTripleToLinear(mat.color as [number, number, number] | undefined),
+        color: decode ? srgbTripleToLinear(color) : color,
         textureData,
         hasAlpha: mat.has_alpha,
         triangleIndices: group?.triangle_indices ?? [],
@@ -3437,7 +3435,9 @@ export async function importTexturedMesh(
       vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
       indices: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
       normals: buffers.normals as Float32Array | undefined,
-      vertexColors: srgbBufferToLinear(buffers.colors as Float32Array | undefined),
+      vertexColors: decode
+        ? srgbBufferToLinear(buffers.colors as Float32Array | undefined)
+        : (buffers.colors as Float32Array | undefined),
       uvCoordinates: buffers.uv_coordinates as Float32Array | undefined,
       vertexCount: meta.vertex_count as number,
       triangleCount: meta.triangle_count as number,

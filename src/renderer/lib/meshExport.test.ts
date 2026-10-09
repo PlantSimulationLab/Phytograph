@@ -10,16 +10,14 @@ import {
 } from './meshExport';
 import type { MeshData, PlantMaterialDef } from './pointCloudTypes';
 
-// `Kd` in an MTL is an sRGB display color, while MeshData.vertexColors and
-// PlantMaterialDef.color are held in three.js's LINEAR working space. So the
-// writer encodes on the way out, and these tests state the LINEAR color they
-// set and let the helper compute the sRGB text to look for — asserting the
-// conversion happens, rather than hardcoding numbers that would still pass if
-// the encode were silently dropped.
+// `Kd` is written LINEAR, exactly as MeshData.vertexColors and
+// PlantMaterialDef.color hold it — the convention Blender and Helios read and
+// write. An sRGB-encoded Kd (what this writer used to emit) renders ~3x too
+// bright in Blender. Only the PLY uchar color is sRGB-encoded.
 const linearToSrgb = (c: number): number =>
   c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
 const kdLine = (...linear: number[]): string =>
-  `Kd ${linear.map(c => linearToSrgb(c).toFixed(6)).join(' ')}`;
+  `Kd ${linear.map(c => c.toFixed(6)).join(' ')}`;
 // Same, but for a color the writer read back out of a Float32Array (a mesh's
 // vertexColors). The f32 round-trip shifts the value by an ulp, which is enough
 // to move the 6th decimal place — so match what the code actually computes.

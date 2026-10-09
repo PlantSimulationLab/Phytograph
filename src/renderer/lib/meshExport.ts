@@ -247,22 +247,21 @@ export function resolveMaterials(
 const f6 = (n: number): string => (Number.isFinite(n) ? n : 0).toFixed(6);
 
 /**
- * linear -> sRGB, for a color on its way into an MTL `Kd`.
+ * linear -> sRGB, for a color on its way into a PLY's `uchar` vertex color.
  *
- * `MeshData.vertexColors` and `PlantMaterialDef.color` are held in three.js's
- * LINEAR working space (the import path converts them on the way in — see
- * `srgbChannelToLinear` in utils/backendApi.ts — and that is what three.js
- * expects of a `color` BufferAttribute). An MTL's `Kd`, by contrast, is an sRGB
- * display color. Writing the linear value straight out makes the exported model
- * darker and over-saturated, and re-importing it compounds the error on every
- * trip. This is the exact inverse of the import conversion, so a round-trip is
- * now color-stable.
+ * NOT applied to an MTL `Kd`, which is written LINEAR, exactly as held. The MTL
+ * format never says which space `Kd` is in and tools split: Blender copies it
+ * straight into Base Color and Helios's `writeOBJ` writes its `RGBcolor`
+ * untouched (both linear), while three.js's MTLLoader decodes it as sRGB. We
+ * side with Blender and Helios because those are the tools plant models travel
+ * between, and the Helios library colors are linear reflectances: the cowpea
+ * internode `make_RGBcolor(0.15, 0.2, 0.1)` used to leave here as
+ * `Kd 0.4236 0.4845 0.3492` and render ~3x too bright in Blender. The importer
+ * (`importTexturedMesh` in utils/backendApi.ts) reads `Kd` the same way, so a
+ * round-trip is still color-stable.
  */
 const linearChannelToSrgb = (c: number): number =>
   c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
-
-/** Format a linear color channel as an sRGB `Kd`/`Ka` component. */
-const kd6 = (n: number): string => f6(linearChannelToSrgb(Number.isFinite(n) ? n : 0));
 
 /**
  * Serialize a mesh to an OBJ bundle: the `.obj` itself, plus — when the mesh
@@ -412,11 +411,11 @@ function serializeMtl(materials: ResolvedMaterial[], includeDefault: boolean): s
   const lines: string[] = ['# Material library exported from Phytograph', ''];
   for (const mat of materials) {
     lines.push(`newmtl ${mat.mtlName}`);
-    // A resolved color is LINEAR and gets encoded to sRGB; the fallback gray is
-    // already an sRGB display value (it matches the `default` material below and
-    // the 0.8 the importer fills in), so it is written through untouched.
+    // `Kd` is written LINEAR, as held (see linearChannelToSrgb for why). The
+    // fallback gray matches the `default` material below and the 0.8 the
+    // importer fills in.
     const kd = mat.color
-      ? mat.color.map(kd6)
+      ? mat.color.map(f6)
       : [f6(0.8), f6(0.8), f6(0.8)];
     lines.push(`Ka ${kd[0]} ${kd[1]} ${kd[2]}`);
     lines.push(`Kd ${kd[0]} ${kd[1]} ${kd[2]}`);
@@ -449,8 +448,8 @@ function serializeMtl(materials: ResolvedMaterial[], includeDefault: boolean): s
  *
  * Color is written as `uchar red/green/blue`, the spelling every reader
  * (open3d, MeshLab, Blender, CloudCompare) recognizes, and encoded linear ->
- * sRGB for the same reason `Kd` is: `vertexColors` is held linear, the file
- * means display color, and the importer decodes it back.
+ * sRGB: `vertexColors` is held linear, an 8-bit PLY color is a display color
+ * (unlike an MTL `Kd`, which we write linear), and the importer decodes it back.
  */
 export function serializeMeshPly(
   data: MeshData,

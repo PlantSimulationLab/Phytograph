@@ -331,13 +331,17 @@ Keep the three together: an `.obj` moved away from its `.mtl` and images
 re-imports as untextured geometry. Meshes without materials (a triangulated
 point cloud, a DEM surface) export as a single `.obj`, with no `.mtl`.
 
-!!! note "Colors round-trip exactly"
-    `Kd` is written as an **sRGB** display color, which is what the MTL format
-    means by it and what other tools expect. Export a model and re-import it and
-    the colors are unchanged — including after repeated trips. (Earlier versions
-    wrote and read this value without converting between sRGB and the renderer's
-    internal linear space, so a re-imported model came back progressively lighter
-    and desaturated.)
+!!! note "`Kd` is a linear color"
+    The MTL format does not say which color space `Kd` is in, and tools
+    disagree. Phytograph writes and reads it as a **linear** reflectance, with
+    no conversion — the same convention as Blender and Helios, so a generated
+    plant's organ colors are exactly the values in the Helios plant library and
+    look the same in Blender under equal lighting. Export a model and re-import
+    it and the colors are unchanged. Tools that read `Kd` as sRGB (three.js, for
+    one) will show these colors darker.
+
+    Earlier versions wrote and read `Kd` as sRGB. An OBJ exported by one of
+    them imports lighter in this version, and renders too bright in Blender.
 
 A [DEM](../workflows/generate-dem.md) is stored as a surface mesh, so it
 exports through the same OBJ / PLY / STL formats.

@@ -13,8 +13,8 @@ import {
 import { buildShootPolylines, buildTubeFrame, sweepTube } from './qsmTube';
 import type { QSMEntry } from './pointCloudTypes';
 import type { QSMCylinder } from '../utils/backendApi';
-import { rankColorRgb, shootColorSrgb, hexToRgb } from './qsmColors';
-import { srgbChannelToLinear } from '../utils/backendApi';
+import { rankColorRgb, rankColorLinear, shootColorRgb, hexToRgb, srgbToLinear } from './qsmColors';
+import { importedMeshColorsAreSrgb } from '../utils/backendApi';
 
 const TUBE_SEGMENTS = 12;
 const RING_STRIDE = TUBE_SEGMENTS + 1; // duplicated seam vertex per ring
@@ -515,12 +515,10 @@ describe('OBJ materials', () => {
     const kd = kdByMaterial(mtlOf(bundle({ colorMode: 'rank' })));
     // The fixture has rank 0 (trunk) and rank 1 (scaffold) -> two materials.
     expect(Object.keys(kd).sort()).toEqual(['rank_0', 'rank_1']);
-    expect(kd.rank_0).toEqual(rankColorRgb(0).map(c => +c.toFixed(6)));
-    expect(kd.rank_1).toEqual(rankColorRgb(1).map(c => +c.toFixed(6)));
+    expect(kd.rank_0).toEqual(rankColorLinear(0).map(c => +c.toFixed(6)));
+    expect(kd.rank_1).toEqual(rankColorLinear(1).map(c => +c.toFixed(6)));
     // And they must be visibly different, or the export loses the distinction the
-    // palette exists to draw. Threshold is lower than QSM3D's matching assertion
-    // because that one measures in three.js's LINEAR space while an MTL's Kd is
-    // sRGB, where the same pair sits closer together.
+    // palette exists to draw.
     const dist = Math.hypot(...kd.rank_0.map((c, i) => c - kd.rank_1[i]));
     expect(dist).toBeGreaterThan(0.3);
   });
@@ -528,16 +526,16 @@ describe('OBJ materials', () => {
   it('shoot mode gives each shoot its own distinct material', () => {
     const kd = kdByMaterial(mtlOf(bundle({ colorMode: 'shoot' })));
     expect(Object.keys(kd).sort()).toEqual(['shoot_0', 'shoot_1']);
-    expect(kd.shoot_0).toEqual(shootColorSrgb(0).map(c => +c.toFixed(6)));
+    expect(kd.shoot_0).toEqual(shootColorRgb(0).map(c => +c.toFixed(6)));
     expect(kd.shoot_0).not.toEqual(kd.shoot_1);
   });
 
-  it("color mode writes the user's picked color as Kd, in sRGB", () => {
+  it("color mode writes the user's picked color as Kd, in linear", () => {
     const kd = kdByMaterial(mtlOf(bundle({ colorMode: 'color', solidColor: '#8b6f47' })));
     expect(Object.keys(kd)).toEqual(['qsm_color']);
-    // sRGB, NOT three.js's linearized channels: 0x8b/255 = 0.545, not 0.256.
-    expect(kd.qsm_color).toEqual(hexToRgb('#8b6f47').map(c => +c.toFixed(6)));
-    expect(kd.qsm_color[0]).toBeCloseTo(0.545098, 5);
+    // Linear, NOT the hex swatch's sRGB channels: 0x8b/255 = 0.545 decodes to 0.258.
+    expect(kd.qsm_color).toEqual(hexToRgb('#8b6f47').map(c => +srgbToLinear(c).toFixed(6)));
+    expect(kd.qsm_color[0]).toBeCloseTo(0.258183, 5);
   });
 
   it('defaults to rank mode when no appearance is supplied', () => {
@@ -616,8 +614,8 @@ describe('OBJ bark texture', () => {
       const mtl = files.find(f => f.name.endsWith('.mtl'))!.text!;
       expect(mtl).not.toContain('map_Kd');
       expect(mtl).toContain('newmtl bark');
-      // A plausible wood brown rather than white.
-      expect(mtl).toMatch(/Kd 0\.545098 0\.435294 0\.278431/);
+      // A plausible wood brown rather than white (#8b6f47, written linear).
+      expect(mtl).toMatch(/Kd 0\.258183 0\.158961 0\.063010/);
     }
   });
 });
@@ -791,85 +789,46 @@ describe('OBJ leaves', () => {
 });
 
 
-// The reported bug: import a QSM CSV -> export to OBJ -> re-import, and the tree
-// came back lighter and desaturated. `Kd` in an MTL is an **sRGB** display color,
-// but three.js treats both landing spots (a `color` BufferAttribute, and
-// `new THREE.Color(r,g,b)`'s numeric form) as LINEAR and encodes them to sRGB at
-// output — so an unconverted Kd was encoded twice. Measured on the rank-0 trunk:
-// 176,141,87 became 216,196,158, drifting further on every extra trip.
+// `Kd` is LINEAR on both sides of the OBJ round-trip: the writer emits the
+// working-space value and the importer passes it through. That is the convention
+// Blender and Helios use, so a QSM exported here renders in Blender at the
+// brightness the viewport shows under equal light, and re-imports unchanged.
+// (It used to be sRGB on both sides, which round-tripped here but rendered ~3x
+// too bright in Blender.)
 describe('OBJ color round-trip', () => {
-  // three.js's output encode (WebGLRenderer outputColorSpace) — the last step
-  // before the framebuffer, for a color held in the linear working space.
-  const linearToSrgbOut = (v: number) =>
-    v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
-  // The REAL importer conversion, imported from utils/backendApi rather than
-  // reimplemented here. That matters: a local copy would keep agreeing with the
-  // exporter even if the shipped importer stopped converting — which is exactly
-  // the bug this suite is about, so the test would have gone green through it.
-  const importKd = srgbChannelToLinear;
-  const toByte = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255);
-
   const kdOf = (mtl: string, material: string): number[] => {
     const block = mtl.slice(mtl.indexOf(`newmtl ${material}`));
     const m = block.match(/^Kd (\S+) (\S+) (\S+)$/m)!;
     return [+m[1], +m[2], +m[3]];
   };
+  const rankMtl = () => qsmToCylinderMeshObjBundle(fixtureQsm(), {
+    baseName: 'tree',
+    colorMode: 'rank',
+  }).find(f => f.name.endsWith('.mtl'))!.text!;
 
-  it('renders a re-imported QSM in the same pixels as the original', () => {
-    const mtl = qsmToCylinderMeshObjBundle(fixtureQsm(), {
-      baseName: 'tree',
-      colorMode: 'rank',
-    }).find(f => f.name.endsWith('.mtl'))!.text!;
-
-    for (const rank of [0, 1]) {
-      // What the VIEWPORT draws: QSM3D holds the palette linear (three.js's hex
-      // parser decodes sRGB), and three.js encodes at output.
-      const original = rankColorRgb(rank)
-        .map(c => importKd(c))          // same transfer three.js's hex parse uses
-        .map(linearToSrgbOut)
-        .map(toByte);
-
-      // What a RE-IMPORT draws: Kd -> importer converts to linear -> encoded out.
-      const reimported = kdOf(mtl, `rank_${rank}`)
-        .map(importKd)
-        .map(linearToSrgbOut)
-        .map(toByte);
-
-      expect(reimported).toEqual(original);
-    }
+  it('writes Kd as the linear color the viewport holds', () => {
+    // The trunk swatch is 0xb0/255 = 0.690196 in sRGB; three.js holds it as
+    // 0.434154 linear, and that is what Kd must carry.
+    const [r, g, b] = kdOf(rankMtl(), 'rank_0');
+    expect(r).toBeCloseTo(0.434154, 5);
+    expect(g).toBeCloseTo(srgbToLinear(rankColorRgb(0)[1]), 5);
+    expect(b).toBeCloseTo(srgbToLinear(rankColorRgb(0)[2]), 5);
+    expect(r).not.toBeCloseTo(0.690196, 2);
   });
 
-  it('writes Kd in sRGB, not three.js linear', () => {
-    // The concrete regression guard: the trunk's Kd is the palette's own sRGB
-    // value (0xb0/255 = 0.690196). Writing the LINEAR channel (0.434) instead is
-    // what made the re-imported tree wash out.
-    const mtl = qsmToCylinderMeshObjBundle(fixtureQsm(), {
-      baseName: 'tree',
-      colorMode: 'rank',
-    }).find(f => f.name.endsWith('.mtl'))!.text!;
-    const [r, g, b] = kdOf(mtl, 'rank_0');
-    expect(r).toBeCloseTo(0.690196, 5);
-    expect(g).toBeCloseTo(0.552941, 5);
-    expect(b).toBeCloseTo(0.341176, 5);
+  it('is read back by the importer without conversion', () => {
+    // The shipped importer's own predicate, not a local copy: if it started
+    // decoding OBJ colors again, a re-imported tree would come back darker.
+    expect(importedMeshColorsAreSrgb('/abs/tree.obj')).toBe(false);
+    expect(importedMeshColorsAreSrgb('/abs/TREE.OBJ')).toBe(false);
+    expect(importedMeshColorsAreSrgb('/abs/tree.ply')).toBe(true);
   });
 
-  it('survives repeated round-trips without drifting', () => {
-    // The failure compounds: each unconverted trip lightens the color again. Ten
-    // simulated round-trips must land exactly where one does.
-    const start = rankColorRgb(0);
-    let kd = [...start];
-    for (let i = 0; i < 10; i++) {
-      // import (sRGB Kd -> linear store), then export (linear -> sRGB Kd).
-      kd = kd.map(importKd).map(linearToSrgbOut);
-    }
-    for (let i = 0; i < 3; i++) expect(kd[i]).toBeCloseTo(start[i], 6);
-  });
-
-  it('encodes leaf colors, which are stored linear, back to sRGB', () => {
+  it('writes leaf colors, which are stored linear, through untouched', () => {
     // Leaf materials come from meshExport's resolveMaterials, reading LINEAR
-    // vertexColors — the opposite convention from the tube palette. Writing them
-    // raw would make the foliage too dark and over-saturated (the same bug
-    // mirrored), so the writer must encode exactly these and not the tube colors.
+    // vertexColors — the opposite convention from the tube palette, which is
+    // defined in sRGB. The writer must decode exactly the tube colors and not
+    // these.
     const LEAF_LINEAR = 0.216;
     const q = {
       ...fixtureQsm(),
@@ -890,11 +849,7 @@ describe('OBJ color round-trip', () => {
 
     const mtl = qsmToCylinderMeshObjBundle(q, { baseName: 'tree', colorMode: 'rank' })
       .find(f => f.name.endsWith('.mtl'))!.text!;
-    // 0.216 linear encodes to ~0.5 sRGB. Unconverted it would still read 0.216.
-    // Compared at 4 dp: the color is stored in a Float32Array, and that ulp of
-    // rounding reaches the 6th decimal place of the encoded value.
     const [r] = kdOf(mtl, 'leaf');
-    expect(r).toBeCloseTo(linearToSrgbOut(LEAF_LINEAR), 4);
-    expect(r).not.toBeCloseTo(LEAF_LINEAR, 3);
+    expect(r).toBeCloseTo(LEAF_LINEAR, 5);
   });
 });

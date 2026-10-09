@@ -242,11 +242,12 @@ test.describe('QSM CSV import', () => {
   });
 
   test('a QSM CSV -> OBJ -> mesh round trip keeps the colors it was exported with', async () => {
-    // The reported bug: import a QSM, export it to OBJ, re-import, and the tree
-    // came back lighter and desaturated. An MTL's `Kd` is an sRGB display color,
-    // but three.js treats a `color` BufferAttribute as LINEAR and encodes it to
-    // sRGB at output — so an unconverted Kd was encoded a second time, and the
-    // error compounded on every trip.
+    // An MTL's `Kd` is LINEAR on both sides here — the convention Blender and
+    // Helios use. The exporter writes the working-space color and the importer
+    // passes it through, so a re-imported tree holds exactly the colors the MTL
+    // declares. (Both sides used to treat Kd as sRGB, which round-tripped here
+    // but rendered ~3x too bright in Blender; a mismatch between the two sides
+    // is what makes a re-import come back lighter or darker.)
     //
     // This drives the whole chain through the real UI: import the CSV, export
     // OBJ, re-import the exported file as a mesh, then compare the colors that
@@ -266,13 +267,13 @@ test.describe('QSM CSV import', () => {
       await expect(page.getByTestId('qsm-export-panel')).toHaveCount(0, { timeout: 30_000 });
 
       // What the exporter declared for the trunk. Default color mode is rank, so
-      // rank_0 is the palette's wood tan — an sRGB value near 0.69/0.55/0.34.
+      // rank_0 is the palette's wood tan: sRGB 0.690/0.553/0.341, which three.js
+      // holds as linear 0.434/0.266/0.095.
       const mtl = readFileSync(join(outDir, 'roundtrip.mtl'), 'utf-8');
       const trunkBlock = mtl.slice(mtl.indexOf('newmtl rank_0'));
       const kd = trunkBlock.match(/^Kd (\S+) (\S+) (\S+)$/m)!.slice(1, 4).map(Number);
-      // Guard the premise: Kd really is the sRGB palette value, not the linear one
-      // (0.434...), which is what made the re-import wash out.
-      expect(kd[0]).toBeCloseTo(0.690196, 4);
+      // Guard the premise: Kd is the LINEAR value, not the sRGB swatch (0.690...).
+      expect(kd[0]).toBeCloseTo(0.434154, 4);
 
       // Re-import the exported OBJ as a mesh.
       await importFiles(app, page, 'import-mesh', objPath);
@@ -284,37 +285,36 @@ test.describe('QSM CSV import', () => {
       expect(palette, '__meshVertexColorPalette hook missing').not.toBeNull();
       expect(palette.length).toBeGreaterThan(0);
 
-      // The renderer holds vertex colors LINEAR, so the trunk's stored color is
-      // the linear form of the Kd we exported. If the importer skipped the
-      // conversion it would still be 0.690 here, and three.js would then encode
-      // it a second time on the way to the screen — the washed-out tree.
-      const srgbToLinear = (c: number) =>
-        c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-      const expected = kd.map(srgbToLinear);
+      // The renderer holds vertex colors LINEAR and Kd is linear, so the trunk's
+      // stored color is the Kd itself.
       const match = palette.find(
-        ([r, g, b]: number[]) =>
-          Math.abs(r - expected[0]) < 0.01 &&
-          Math.abs(g - expected[1]) < 0.01 &&
-          Math.abs(b - expected[2]) < 0.01,
-      );
-      expect(
-        match,
-        `no re-imported color matched the exported trunk Kd. expected linear ` +
-          `[${expected.map(v => v.toFixed(3))}], got ${JSON.stringify(palette.slice(0, 8))}`,
-      ).toBeDefined();
-
-      // And the un-converted value must NOT be present — that is the bug's
-      // signature, and asserting its absence is what makes this test fail if the
-      // conversion is dropped.
-      const unconverted = palette.find(
         ([r, g, b]: number[]) =>
           Math.abs(r - kd[0]) < 0.005 &&
           Math.abs(g - kd[1]) < 0.005 &&
           Math.abs(b - kd[2]) < 0.005,
       );
       expect(
-        unconverted,
-        'a vertex color still holds the raw sRGB Kd — it will be encoded twice and render washed out',
+        match,
+        `no re-imported color matched the exported trunk Kd ` +
+          `[${kd.map(v => v.toFixed(3))}], got ${JSON.stringify(palette.slice(0, 8))}`,
+      ).toBeDefined();
+
+      // And an sRGB-DECODED Kd must NOT be present — that is the signature of
+      // the importer converting a value that was never encoded, which renders
+      // the tree too dark. Asserting its absence is what fails this test if the
+      // importer and exporter stop agreeing.
+      const srgbToLinear = (c: number) =>
+        c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      const decoded = kd.map(srgbToLinear);
+      const darkened = palette.find(
+        ([r, g, b]: number[]) =>
+          Math.abs(r - decoded[0]) < 0.005 &&
+          Math.abs(g - decoded[1]) < 0.005 &&
+          Math.abs(b - decoded[2]) < 0.005,
+      );
+      expect(
+        darkened,
+        'a vertex color holds an sRGB-decoded Kd — the importer converted a linear value and it will render too dark',
       ).toBeUndefined();
     } finally {
       rmSync(outDir, { recursive: true, force: true });

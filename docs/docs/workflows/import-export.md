@@ -377,7 +377,9 @@ materials applied, as long as the `.mtl` and any image files it names sit in the
 same folder as the `.obj`. Phytograph reads the diffuse texture (`map_Kd`) and
 diffuse color (`Kd`) for each material: textured faces get the image, and faces
 with only a `Kd` color get that color (so a multi-material livery with no
-textures imports with each part's color, not flat). An `.obj` with no `.mtl`
+textures imports with each part's color, not flat). `Kd` is read as a linear
+color, as Blender and Helios write it — see
+[File formats](../reference/file-formats.md). An `.obj` with no `.mtl`
 (and `.stl`, which has no materials) imports as plain geometry. See
 [Meshes: Textures](../concepts/meshes.md#textures). Meshes imported from a file
 default to fully opaque.

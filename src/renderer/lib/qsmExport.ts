@@ -36,9 +36,9 @@ import {
 } from './meshExport';
 import {
   rankColorRgb,
-  shootColorSrgb,
+  shootColorRgb,
   hexToRgb,
-  linearToSrgb,
+  srgbToLinear,
   type QSMColorMode,
 } from './qsmColors';
 
@@ -227,12 +227,13 @@ interface QsmMaterial {
    */
   hasAlpha?: boolean;
   /**
-   * Whether `color` is in three.js's LINEAR working space and must be encoded to
-   * sRGB before it is written to `Kd`.
+   * Whether `color` is already in three.js's LINEAR working space. `Kd` is
+   * written linear (see linearChannelToSrgb in meshExport.ts for why), so a
+   * color that is NOT linear must be decoded from sRGB first.
    *
    * The two sources genuinely differ, so this can't be assumed either way: the
    * tube colors come from lib/qsmColors, which defines the palette directly in
-   * **sRGB** (the space a hex swatch and a `Kd` are both written in), while the
+   * **sRGB** (the space a hex swatch is written in), while the
    * leaf colors come from meshExport's resolveMaterials, which reads them off
    * `MeshData.vertexColors` — held **linear**, because that is what three.js
    * requires of a `color` BufferAttribute. Getting this wrong is invisible in
@@ -285,7 +286,9 @@ function materialsForTubes(
       tubes.forEach((t, i) => {
         materialOfTube[i] = claim(`shoot_${t.shootId}`, () => ({
           mtlName: `shoot_${t.shootId}`,
-          color: shootColorSrgb(t.shootId),
+          // setHSL output is held verbatim by three.js, i.e. already linear.
+          color: shootColorRgb(t.shootId),
+          colorIsLinear: true,
         }));
       });
       break;
@@ -337,10 +340,10 @@ function materialsForTubes(
 function serializeQsmMtl(materials: QsmMaterial[]): string {
   const lines: string[] = ['# Material library exported from Phytograph', ''];
   for (const mat of materials) {
-    // `Kd` is always sRGB; encode only the sources that are held linear.
+    // `Kd` is always linear; decode only the sources that are held in sRGB.
     const c = mat.colorIsLinear
-      ? (mat.color.map(linearToSrgb) as [number, number, number])
-      : mat.color;
+      ? mat.color
+      : (mat.color.map(srgbToLinear) as [number, number, number]);
     lines.push(`newmtl ${mat.mtlName}`);
     lines.push(`Ka ${f6(c[0])} ${f6(c[1])} ${f6(c[2])}`);
     lines.push(`Kd ${f6(c[0])} ${f6(c[1])} ${f6(c[2])}`);

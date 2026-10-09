@@ -124,9 +124,9 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
       expect(mtl).toContain(`newmtl ${name}`);
     }
     // Default rank mode -> the trunk material carries the palette's wood tan
-    // (sRGB 0xb0/0x8d/0x57), not a placeholder gray.
+    // (sRGB 0xb0/0x8d/0x57, written LINEAR as Kd), not a placeholder gray.
     expect(mtl).toContain('newmtl rank_0');
-    expect(mtl).toMatch(/Kd 0\.690196 0\.552941 0\.341176/);
+    expect(mtl).toMatch(/Kd 0\.434154 0\.26635\d 0\.09530\d/);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
     await close();
