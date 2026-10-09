@@ -99,6 +99,55 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   await expect(page.getByTestId('colorbar')).toBeHidden();
 });
 
+test('a column of text imports as named classes', async () => {
+  // text-labels.xyz carries two columns of WORDS (category: leaf / stem /
+  // embryonic_leaf; plant: p-1 / p-2 / p-10). A carried column is a float32
+  // extra dimension, so this import used to die in the cast with "could not
+  // convert string to float". It must instead arrive as class columns whose
+  // legend shows the file's own names.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'text-labels.xyz'));
+
+  const wizard = page.getByTestId('import-wizard');
+  await expect(wizard).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('import-wizard-column')).toHaveCount(5, { timeout: 30_000 });
+
+  const roleAt = (colIndex: number) =>
+    page.locator(`[data-testid="import-wizard-column"][data-col-index="${colIndex}"]`)
+      .getByTestId('import-wizard-role');
+  await roleAt(3).selectOption('label');
+  await roleAt(4).selectOption('label');
+
+  await page.getByTestId('import-wizard-import').click();
+  await expect(wizard).toBeHidden();
+
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="text-labels"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  // All 30 rows: none lost to the text, none eaten as a header.
+  await expect(row).toHaveAttribute('data-point-count', '30');
+  await expect(row).toHaveAttribute('data-selected', 'true');
+
+  await page.getByRole('button', { name: 'Display' }).click();
+  const colorMode = page.getByTestId('display-color-mode');
+  await expect(colorMode).toBeVisible();
+
+  const legend = page.getByTestId('class-legend');
+  await colorMode.selectOption('scalar:category');
+  await expect(legend).toHaveAttribute('data-legend-attribute', 'category');
+  for (const name of ['embryonic_leaf', 'leaf', 'stem']) {
+    await expect(legend).toContainText(name);
+  }
+  // Named by the file, not numbered by us.
+  await expect(legend).not.toContainText('Class 1');
+  await expect(page.getByTestId('colorbar')).toBeHidden();
+
+  await colorMode.selectOption('scalar:plant');
+  await expect(legend).toHaveAttribute('data-legend-attribute', 'plant');
+  for (const name of ['p-1', 'p-2', 'p-10']) {
+    await expect(legend).toContainText(name);
+  }
+});
+
 test('mapping columns to Scan Row/Column Index carries the raster grid', async () => {
   // raster-grid.xyz is a 3x3 rasterized scan whose last two columns (idx_a,
   // idx_b) are the integer (row, column) position within the scanner grid. Their

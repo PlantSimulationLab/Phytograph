@@ -209,7 +209,9 @@ You can also **mark a column as categorical yourself** in the
 to **Label** (rather than **Scalar**) for a column that holds class labels (a
 custom classification, a region id, …). It then colors with the same discrete
 per-class scheme (Class 0, Class 1, …) and legend instead of a continuous
-gradient.
+gradient. A column of **text** in an ASCII file is always a label, whichever
+role it is given, and its classes carry the file's own names rather than
+Class 1, Class 2, ….
 
 ## Per-mesh color modes
 

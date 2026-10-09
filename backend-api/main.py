@@ -23881,8 +23881,11 @@ def _las_palette_vlrs(class_palettes: "Optional[dict]", slugs, class_source):
     import struct
     import laspy
     vlrs, evlrs = [], []
+    # Case-blind: palettes are keyed in lowercase (see the create response),
+    # while a column keeps the capitals its file gave it.
+    low = {str(x).lower() for x in slugs}
     pals = {sl: p for sl, p in (class_palettes or {}).items()
-            if isinstance(p, dict) and (sl in slugs or sl == class_source)}
+            if isinstance(p, dict) and (sl.lower() in low or sl == class_source)}
     src_pal = pals.get(class_source) if class_source else None
     if src_pal:
         rec = bytearray()
@@ -25653,17 +25656,30 @@ def _is_header_row(line: str, delimiter: Optional[str] = None) -> bool:
     Delimiter-aware because a comma/semicolon file splits into one whitespace
     token, which would make every such row a single unparseable blob. Callers
     that already know the delimiter pass it; the default splits on whitespace.
+
+    One unparseable token is necessary, not sufficient: a data row of a file
+    with a TEXT column ('1.2 0.4 3.1 leaf') has one too. What tells it from a
+    legend is that it still carries its coordinates, so a row with three or more
+    numbers is data - unless one of its words names an axis, which is how a
+    legend with numeric column names ('x y z 450 550 650', spectral bands) is
+    still told from a point. Without the first half a headerless labeled file
+    lost its first point and had that point's values used as its column names.
     """
     toks = _split_ascii_row(line, delimiter)
     toks = [t for t in toks if t.strip()]
     if not toks:
         return False
+    words = []
     for t in toks:
         try:
             float(t)
         except ValueError:
-            return True
-    return False
+            words.append(t)
+    if not words:
+        return False
+    if len(toks) - len(words) < 3:
+        return True
+    return any(_role_from_header_name(w) in ('x', 'y', 'z') for w in words)
 
 
 def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
@@ -25709,11 +25725,40 @@ def _role_from_header_name(name: str) -> Optional[str]:
     m = re.match(r'\s*xyz\s*\[\s*([0-2])\s*\]', name.strip(), re.IGNORECASE)
     if m:
         return ('x', 'y', 'z')[int(m.group(1))]
+    # An axis with its unit spelled into the name: 'x_mm', 'Y (m)', 'z-cm'.
+    # The separator is required ('xm' is a word, not x in meters), and 'in' is
+    # left out because 'x_in' reads as "x input" at least as often as inches.
+    m = re.fullmatch(r'([xyz])(?:[\s_\-]+(?:mm|cm|m|km|ft)|\s*\((?:mm|cm|m|km|ft)\))',
+                     name.strip(), re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
     return _canonical_slug_for_name(name)
 
 
 def _autodetect_xyz_columns(file_path: str) -> List[str]:
+    """`_autodetect_xyz_columns_raw`, with two guesses it must never make undone:
+    a column of words given a numeric role (the positional rules read values,
+    and a word has none - a headerless 'x y z leaf' came back with 'leaf' as
+    Intensity), and an axis named twice ('x y z x_mm y_mm z_mm'), which pandas
+    refuses outright. Either column is left 'skip', i.e. a carried scalar."""
+    text_cols: "set[int]" = set()
+    roles = _autodetect_xyz_columns_raw(file_path, text_cols)
+    seen_axes: "set[str]" = set()
+    for i, role in enumerate(roles):
+        if role in ('x', 'y', 'z'):
+            if role in seen_axes:
+                roles[i] = 'skip'
+            seen_axes.add(role)
+        elif i in text_cols:
+            roles[i] = 'skip'
+    return roles
+
+
+def _autodetect_xyz_columns_raw(file_path: str, text_cols: "set[int]") -> List[str]:
     """Pick a column layout when the caller didn't supply <ASCII_format>.
+
+    `text_cols` is filled with the indices of columns that held a word in the
+    sampled rows (headerless files only).
 
     When the file has a header row (comma- or whitespace-delimited names with
     letters), map each header name to a known role via `_role_from_header_name`
@@ -25768,12 +25813,22 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
                 continue
             if ncols == 0:
                 ncols = len(toks)
-            try:
-                sample.append([float(t) for t in toks])
-            except ValueError:
-                # Ragged/garbage row — keep going; the count from the first
-                # clean row still drives the layout.
-                pass
+            row: List[float] = []
+            words: List[int] = []
+            for i, t in enumerate(toks):
+                try:
+                    row.append(float(t))
+                except ValueError:
+                    # A word. Stand in a 0 so the row still samples its OTHER
+                    # columns; the wrapper overrides whatever this column gets.
+                    row.append(0.0)
+                    words.append(i)
+            # A row that still carries three numbers is a point with labels;
+            # anything else is a ragged/garbage row - keep going, the count from
+            # the first clean row still drives the layout.
+            if len(toks) - len(words) >= 3:
+                sample.append(row)
+                text_cols.update(words)
             if len(sample) >= 64:
                 break
 
@@ -28160,6 +28215,128 @@ class _PositionSink:
         return self.array
 
 
+# ---- Text columns in an ASCII cloud ------------------------------------------
+#
+# A carried column is a float32 LAS extra dimension, so a column of WORDS
+# ('leaf', 'stem', a plant id like 'A-12') has nowhere to go as written: the
+# cast raised, and the import died blaming the column format. Such a column is
+# a label, and a label is what the class machinery already models - an integer
+# per point plus a palette naming each integer. So a text column is coded
+# 1..N (0 stays "Unclassified", as in every palette) and its names travel as a
+# palette on the column's extra-dim entry, the same channel a Phytograph LAS
+# export's palettes arrive by (see `_las_file_palettes`).
+#
+# Codes follow the NATURAL-SORTED distinct values of the whole column, not
+# first appearance, so the same set of names gets the same codes however the
+# rows are ordered. That is as far as a single file can go: two files with
+# DIFFERENT name sets still number them differently.
+
+# Rows sampled to decide whether a column holds text. A column that reads as
+# numbers this far and then turns to text is refused by name in the stream
+# rather than detected here - an exact answer would mean parsing every carried
+# column of every file twice.
+_TEXT_COLUMN_SNIFF_ROWS = 1000
+
+# Most names one text column may carry. Class values are one byte (0 reserved),
+# except in an `<name>_instance` column, which numbers objects and is bounded by
+# the renderer's class texture. MIRRORS PALETTE_HARD_MAX /
+# INSTANCE_PALETTE_HARD_MAX in src/renderer/lib/classPalettes.ts.
+_TEXT_COLUMN_MAX_CLASSES = 255
+_TEXT_COLUMN_MAX_INSTANCES = 16383
+
+
+def _natural_sort_key(text: str) -> list:
+    """Sort key ordering embedded numbers by value: 'p-2' before 'p-10'."""
+    return [(0, int(t), '') if t.isdigit() else (1, 0, t.lower())
+            for t in re.split(r'(\d+)', text) if t != '']
+
+
+def _ascii_text_columns(source_path: _Path, names: List[str], cols: List[str],
+                        skiprows: int, sep: str) -> "set[str]":
+    """The subset of `cols` (entries of `names`) whose leading rows hold a token
+    that is not a number."""
+    pos = {names.index(c): c for c in cols if c in names}
+    if not pos:
+        return set()
+    try:
+        head = pd.read_csv(
+            source_path, sep=sep, header=None, usecols=sorted(pos), comment="#",
+            skiprows=skiprows, nrows=_TEXT_COLUMN_SNIFF_ROWS, dtype=str, engine="c",
+        )
+    except (ValueError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        # A layout the file does not have; the stream reports that properly.
+        return set()
+    out: "set[str]" = set()
+    for p, c in pos.items():
+        col = head[p].dropna().str.strip()
+        # pandas reads True/False as booleans, which cast to 1/0 - that is how
+        # a True/False `is_miss` column has always imported, so it is not text.
+        col = col[~col.str.lower().isin(("true", "false", ""))]
+        if len(col) and pd.to_numeric(col, errors="coerce").isna().any():
+            out.add(c)
+    return out
+
+
+# Tokens pandas reads as missing in a NUMERIC column. Spelled out because a
+# read that holds a text column must turn the default list off for it ('NA' and
+# 'None' are perfectly good class names) and so has to restate it for the rest.
+_ASCII_NUMERIC_NA = sorted(pd._libs.parsers.STR_NA_VALUES)
+
+
+def _ascii_na_values(text_keys, numeric_keys) -> dict:
+    """`na_values` for a read holding both kinds of column (pass with
+    keep_default_na=False): only an empty cell is missing in a text column."""
+    return {**{k: _ASCII_NUMERIC_NA for k in numeric_keys}, **{k: [""] for k in text_keys}}
+
+
+def _check_text_column_size(source_path: _Path, ed: dict, vals: set) -> None:
+    """Refuse a text column that is free text rather than a label."""
+    instance = _is_instance_label_slug(ed["slug"])
+    limit = _TEXT_COLUMN_MAX_INSTANCES if instance else _TEXT_COLUMN_MAX_CLASSES
+    # Raw spellings, so padding variants may overcount slightly; only ever
+    # checked against the cap as a cheap early exit, and again exactly below.
+    if len({v.strip() for v in vals} - {""}) <= limit:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Column \"{ed['label']}\" in {source_path.name} holds text with more "
+            f"than {limit} distinct values (e.g. {sorted(vals)[0]!r}). A text column "
+            f"is imported as named classes, so it has to be a label, not free text. "
+            f"Set it to Skip in the import dialog"
+            + ("." if instance else
+               ", or, if it numbers objects such as plants, give it a name ending "
+               f"in \"_instance\", which allows up to {_TEXT_COLUMN_MAX_INSTANCES}.")
+        ),
+    )
+
+
+def _text_column_codes(vals: set) -> "tuple[Dict[str, int], Dict[str, int]]":
+    """(names, raw) for one text column's distinct RAW values: `names` maps each
+    name to its code, 1..N in natural-sorted order; `raw` maps every spelling
+    the file used - a comma file pads its cells, so 'leaf' and ' leaf' are one
+    name - to that code, with a blank cell as 0."""
+    names = {name: i + 1 for i, name in enumerate(
+        sorted({v.strip() for v in vals} - {""}, key=_natural_sort_key))}
+    return names, {v: names.get(v.strip(), 0) for v in vals}
+
+
+def _text_column_palette(slug: str, label: str, vocabulary: "Dict[str, int]") -> dict:
+    """The class palette naming a text column's codes, in the shape
+    `parsePalette` (src/renderer/lib/classPalettes.ts) reads."""
+    import colorsys
+    classes = [{"value": 0, "label": "Unclassified", "color": [0.55, 0.55, 0.55]}]
+    for name, code in sorted(vocabulary.items(), key=lambda kv: kv[1]):
+        # Golden-angle hue steps keep neighboring codes apart at any count.
+        r, g, b = colorsys.hsv_to_rgb((code * 0.61803398875) % 1.0,
+                                      0.60 if code % 2 else 0.80,
+                                      0.90 if code % 3 else 0.70)
+        classes.append({"value": code, "label": name,
+                        "color": [round(r, 4), round(g, 4), round(b, 4)]})
+    return {"id": f"file-{slug}", "name": label, "slug": slug, "updatedAt": 0,
+            "derived": True, "classes": classes}
+
+
 def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 column_plan: "Optional[ColumnPlan]" = None,
                 capture_full_xyz: bool = False,
@@ -28271,6 +28448,26 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
 
     chunk_rows = 500_000
 
+    # Columns of words become named classes - see "Text columns in an ASCII
+    # cloud" above. A timestamp cannot: it is the pulse clock, and there is no
+    # reading of 'leaf' as seconds.
+    text_cols = _ascii_text_columns(
+        source_path, names,
+        [ed["col"] for ed in extra_dims] + ([ts_dim["col"]] if ts_dim else []),
+        skiprows, sep)
+    for ed in ([ts_dim] if ts_dim else []) + extra_dims:
+        slug = ed["slug"].lower()
+        if ed["col"] in text_cols and (
+                ed is ts_dim or slug == _MISS_SLUG
+                or slug in _MULTI_RETURN_SLUGS or slug in _GRID_INDEX_SLUGS):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"The column mapped to {ed['label']} in {source_path.name} holds text, "
+                        f"not numbers. Import a text column as a Label instead."),
+            )
+    text_dims = [ed for ed in extra_dims if ed["col"] in text_cols]
+    text_codes: "Dict[str, Dict[str, int]]" = {}
+
     # ONE pre-pass over just the x/y/z (and intensity) columns, for three
     # things the stream below needs up front:
     #   * the data MIN, the LAS offset, so projected clouds (UTM northings
@@ -28291,15 +28488,28 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         intensity_pos = names.index(intensity_role) if intensity_role is not None else None
         usecols = sorted(set(xyz_pos + ([intensity_pos] if intensity_pos is not None else [])))
         col_of = {pos: k for k, pos in enumerate(usecols)}
+        # Text columns ride this same pass to have their distinct values
+        # collected - a pass of their own measured +50% on a labeled file,
+        # nearly all of it tokenizing the file a third time.
+        text_pos = {names.index(ed["col"]): ed for ed in text_dims}
+        text_seen: "Dict[int, set]" = {pos: set() for pos in text_pos}
+        text_read = ({"dtype": {pos: str for pos in text_pos}, "keep_default_na": False,
+                      "na_values": _ascii_na_values(text_pos, usecols)}
+                     if text_pos else {})
         xyz_idx = [col_of[pos] for pos in xyz_pos]
         xyz_min = np.array([np.inf, np.inf, np.inf])
         gmin, gmax = np.inf, -np.inf
         kept_rows = 0
         for col_chunk in pd.read_csv(
             source_path, sep=sep, header=None,
-            usecols=usecols, comment="#",
-            skiprows=skiprows, chunksize=chunk_rows, engine="c",
+            usecols=sorted(set(usecols) | set(text_pos)), comment="#",
+            skiprows=skiprows, chunksize=chunk_rows, engine="c", **text_read,
         ):
+            for pos, ed in text_pos.items():
+                text_seen[pos].update(col_chunk[pos].dropna().unique())
+                _check_text_column_size(source_path, ed, text_seen[pos])
+            if text_pos:
+                col_chunk = col_chunk[usecols]
             block = col_chunk.to_numpy(dtype=np.float64)
             del col_chunk
             # The stream keeps rows whose x/y/z are present (dropna), so count
@@ -28322,6 +28532,9 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         if intensity_pos is not None and np.isfinite(gmin) and np.isfinite(gmax):
             intensity_lo, intensity_hi = gmin, gmax
         header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
+        for pos, ed in text_pos.items():
+            class_names, text_codes[ed["col"]] = _text_column_codes(text_seen[pos])
+            ed["palette"] = _text_column_palette(ed["slug"], ed["label"], class_names)
 
         xyz_sink = None
         if capture_full_xyz:
@@ -28333,7 +28546,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
             rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
             extra_dims, xyz_sink=xyz_sink,
             origin_cols=origin_cols, origins_out=origin_chunks,
-            ts_dim=ts_dim,
+            ts_dim=ts_dim, text_codes=text_codes,
         )
     except (ValueError, KeyError) as e:
         # A non-numeric value reaching the x/y/z/RGB float cast almost always
@@ -28357,7 +28570,9 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         origins = (np.concatenate(origin_chunks, axis=0)
                    if origin_chunks else np.empty((0, 3), dtype=np.float64))
     return (total_points,
-            [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims],
+            [{"slug": ed["slug"], "label": ed["label"],
+              **({"palette": ed["palette"]} if "palette" in ed else {})}
+             for ed in extra_dims],
             full_xyz, origins)
 
 
@@ -28367,7 +28582,8 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                        xyz_sink: "Optional[_PositionSink]" = None,
                        origin_cols: "Optional[Dict[str, str]]" = None,
                        origins_out: "Optional[list]" = None,
-                       ts_dim: "Optional[dict]" = None) -> int:
+                       ts_dim: "Optional[dict]" = None,
+                       text_codes: "Optional[Dict[str, Dict[str, int]]]" = None) -> int:
     """Inner streaming loop for `_xyz_to_las`, split out so the caller can wrap
     column-mismatch errors (raised here from the float casts) into a clean 400.
     Returns the total points written.
@@ -28394,9 +28610,14 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
     `_split_timestamp_extra_dim`). It is written to the standard float64 gps_time
     field rather than declared as a float32 extra dimension, which at GPS
     magnitudes would quantize it to ~32 s and destroy pulse grouping. It stays in
-    `names`/`usecols` — only its DESTINATION changes."""
+    `names`/`usecols` — only its DESTINATION changes.
+
+    `text_codes` maps a text column (its entry in `names`) to its {name: code}
+    vocabulary; such a column is read as strings and written as its codes, with
+    an empty cell as 0 (see "Text columns in an ASCII cloud")."""
     import laspy
     total_points = 0
+    text_codes = text_codes or {}
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         reader = pd.read_csv(
             source_path,
@@ -28408,6 +28629,15 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
             skiprows=skiprows,
             chunksize=chunk_rows,
             engine="c",
+            # Without this pandas would parse a text column's numeric-looking
+            # names ('007', '1e3') into numbers that no longer match the
+            # vocabulary's keys.
+            dtype={c: str for c in text_codes} or None,
+            # ...and would read a class named 'NA' or 'None' as a missing cell.
+            **({"keep_default_na": False,
+                "na_values": _ascii_na_values(
+                    text_codes, [c for c in names if c not in text_codes and not _is_skip_name(c)])}
+               if text_codes else {}),
         )
         for chunk in reader:
             # Drop rows with non-numeric / missing x/y/z. A .pts file leads
@@ -28482,7 +28712,21 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                 # attribute's own range) — including a rescued secondary
                 # intensity/reflectance column, so its true dB/float values stay
                 # available for color-by and filtering.
-                record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)
+                codes = text_codes.get(ed["col"])
+                if codes is not None:
+                    record[ed["slug"]] = (chunk[ed["col"]].map(codes).fillna(0)
+                                          .to_numpy(dtype=np.float32))
+                    continue
+                try:
+                    record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)
+                except ValueError as e:
+                    # Numbers through the sniffed rows, text after them.
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"Column \"{ed['label']}\" in {source_path.name} mixes numbers "
+                                f"and text ({e}). A column must be one or the other to "
+                                f"import; set it to Skip, or make its values consistent."),
+                    ) from e
             writer.write_points(record)
             total_points += n
     return total_points
@@ -36082,8 +36326,14 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # loses the wizard's custom labels. `_source_to_las` returns the proper
         # [{slug, label}] (honoring the column_plan), so overlay those labels.
         _label_by_slug = {ed["slug"]: ed.get("label", ed["slug"]) for ed in (source_extra_dims or [])}
+        # Likewise the class names of a text column, which the LAS holds only as
+        # codes (see "Text columns in an ASCII cloud").
+        _palette_by_slug = {ed["slug"]: ed["palette"] for ed in (source_extra_dims or [])
+                            if "palette" in ed}
         for ed in extra_dims_meta:
             ed["label"] = _label_by_slug.get(ed["slug"], ed["label"])
+            if ed["slug"] in _palette_by_slug:
+                ed["palette"] = _palette_by_slug[ed["slug"]]
         # Drop the scalars the user unticked in the import wizard. Applied HERE,
         # after every format's arrays are in RAM and before the session exists,
         # because this is the one place all in-file formats converge — and the
@@ -36332,7 +36582,11 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     meta = {"cache_id": cache_key, "cache_dir": str(cache_dir),
             "observed_classes": observed_classes, **meta}
     # Palettes read from the file (see `_las_file_palettes`), by column slug.
-    file_palettes = {ed["slug"]: ed["palette"] for ed in (sess.extra_dims_meta or [])
+    # Keyed - and self-named - in lowercase: the renderer resolves a palette by
+    # the lowercased attribute and drops one whose own `slug` disagrees with its
+    # key, so a column called 'Category' would otherwise lose its class names.
+    file_palettes = {ed["slug"].lower(): {**ed["palette"], "slug": ed["slug"].lower()}
+                     for ed in (sess.extra_dims_meta or [])
                      if isinstance(ed, dict) and "palette" in ed}
     if file_palettes:
         meta["class_palettes"] = file_palettes

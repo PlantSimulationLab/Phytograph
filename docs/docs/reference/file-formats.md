@@ -27,6 +27,21 @@
 - Additional columns become scalar fields. If the file has a header row,
   column names become field names. Otherwise fields are named
   `field_0`, `field_1`, ….
+- A column of **text** (`leaf`, `stem`, a plant id such as `A-12`) is imported
+  as a label: each distinct value becomes a named class, numbered from 1 in
+  natural sort order (`p-2` before `p-10`), and the column colors, filters and
+  splits by those names. An empty cell is class 0, *Unclassified*. One column
+  may hold up to 255 distinct values — or 16,383 when its name ends in
+  `_instance`, for a column that numbers objects — and a column with more is
+  refused by name, since it is free text rather than a label; set it to
+  **Skip** in the import wizard. Numbering is per file, so two files with
+  different sets of names number them differently. A label is one token: in a
+  whitespace-separated file a name cannot contain a space, and in any file it
+  cannot contain `#`, which starts a comment. `True`/`False` columns are read
+  as 1/0, not as labels. A text column cannot be the timestamp, the miss flag,
+  or a scan-index or multi-return column. A column that mixes numbers with
+  even one word is a text column, so its numbers become names and are
+  renumbered from 1.
 - Separator is auto-detected from the file's **contents**, not its extension:
   the first data row is sniffed for comma, then tab, then semicolon, falling
   back to whitespace. So a comma-delimited `.asc` or `.txt` reads correctly,
@@ -37,7 +52,8 @@
   the **first** line is also read as a column header when its tokens resolve
   to a valid `x`/`y`/`z` layout — so a legend like
   `# x y z r255 g255 b255 row column is_miss` names every field on import
-  instead of being discarded. A `#` remark that isn't a column list (e.g.
+  instead of being discarded. An axis name may carry its unit (`x_mm`,
+  `y (m)`); the unit is not applied for you, so pick it in the wizard. A `#` remark that isn't a column list (e.g.
   `# exported by FooScan`) stays an ordinary comment.
 
 When a point cloud is loaded by path (dragged into the viewer, or attached
