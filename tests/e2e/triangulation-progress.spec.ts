@@ -4,12 +4,15 @@ import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
-// A larger cloud (7,429 points) so ball pivoting runs long enough that the
-// backend's 0.25s progress ticks flush markers in separate network chunks over
-// real time — making the per-stage label progression genuinely observable
-// (a 60-point cloud meshes in well under one tick and shows only the final
-// stage). This exercises the real streaming feed, not a contrived one.
-const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'multi_tree.xyz');
+// A cloud big enough (60,745 points) that the run takes real time. The pill can
+// only paint a stage if React commits between that stage arriving and the run
+// ending, so the stage has to LAST. This used multi_tree.xyz (7,429 points),
+// which once did: it now triangulates in 63 ms end to end, five of its eight
+// stages arriving in the same millisecond, and on the Linux runner the whole
+// run fit inside one commit — the pill went from its opening "Triangulating…"
+// straight to gone, with every stage streamed correctly behind it. Here meshing
+// alone holds its label for ~650 ms (measured locally; the runner is slower).
+const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'potted-tomato.xyz');
 
 // The Open3D triangulation methods now show a status pill with real, per-stage
 // backend-driven labels (previously only Helios showed any indicator). This test
@@ -29,7 +32,7 @@ test('ball-pivoting triangulation shows a per-stage progress pill', async () => 
     await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="potted-tomato"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -44,6 +47,16 @@ test('ball-pivoting triangulation shows a per-stage progress pill', async () => 
       // updates into one paint or rAF is throttled under load.
       (window as unknown as { __triStages: string[] }).__triStages = [];
       (window as unknown as { __triLabels: string[] }).__triLabels = [];
+      // When each stage arrived, for the failure message: whether a stage was
+      // on screen long enough to paint is the first thing to know if the pill
+      // never showed one.
+      const stageLog = (window as unknown as { __triStages: string[] }).__triStages;
+      const arrivals: string[] = ((window as unknown as { __triArrivals: string[] }).__triArrivals = []);
+      const push = stageLog.push.bind(stageLog);
+      stageLog.push = (...msgs: string[]) => {
+        for (const m of msgs) arrivals.push(`${Math.round(performance.now())}ms ${m}`);
+        return push(...msgs);
+      };
       const seen = new Set<string>();
       const record = () => {
         const pill = document.querySelector('[data-testid="triangulation-running"]');
@@ -85,9 +98,10 @@ test('ball-pivoting triangulation shows a per-stage progress pill', async () => 
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });
 
-    const { labels, stages } = await page.evaluate(() => ({
+    const { labels, stages, arrivals } = await page.evaluate(() => ({
       labels: (window as unknown as { __triLabels: string[] }).__triLabels,
       stages: (window as unknown as { __triStages: string[] }).__triStages,
+      arrivals: (window as unknown as { __triArrivals: string[] }).__triArrivals,
     }));
     // At least two distinct real backend stages were reported. The exact set
     // depends on timing, but they must come from the backend's stage vocabulary.
@@ -112,7 +126,10 @@ test('ball-pivoting triangulation shows a per-stage progress pill', async () => 
     // The pill did render at least one of those stages to the user — the DOM
     // half of the contract (that the pill exists and shows real text) still
     // matters, it just can't carry the per-stage count.
-    expect(labels.some((l) => vocab.includes(l)), `painted labels: ${JSON.stringify(labels)}`).toBe(true);
+    expect(
+      labels.some((l) => vocab.includes(l)),
+      `painted labels: ${JSON.stringify(labels)} / stages arrived: ${JSON.stringify(arrivals)}`,
+    ).toBe(true);
 
     // And a real mesh was produced.
     const trianglesStr = await meshRow.getAttribute('data-triangle-count');
