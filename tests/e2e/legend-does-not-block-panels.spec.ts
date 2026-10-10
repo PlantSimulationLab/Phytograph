@@ -86,8 +86,15 @@ test('a legend card cannot swallow a tool panel button', async () => {
 
     // And the click must actually reach it: with the legend at the panels' own
     // z-20 this threw "scalar-overlay subtree intercepts pointer events".
+    //
+    // The proof it landed is the DEM, not the Cancel button the run shows while
+    // it works: on this 61-point cloud the run is over before a click on the
+    // Linux runner (~1 s) has returned, so a locator checked afterwards finds
+    // the button already gone and the finished DEM sitting in the scene.
+    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="scalars DEM"]');
+    await expect(demRow).toHaveCount(0);
     await page.getByTestId('dem-run-button').click({ timeout: 10_000 });
-    await expect(page.getByTestId('dem-cancel-button')).toBeVisible({ timeout: 30_000 });
+    await expect(demRow).toBeVisible({ timeout: 30_000 });
   } finally {
     await close();
   }
