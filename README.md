@@ -4,6 +4,8 @@ A desktop application for measuring, comparing, and modeling plant
 architecture from LiDAR scans — built for plant scientists who work with
 point clouds, meshes, and procedural plant models.
 
+![Phytograph demo](docs/docs/assets/demo.gif)
+
 📖 **Full documentation & user guide**: <https://plantsimulationlab.github.io/Phytograph/>
 
 Phytograph runs on **macOS** (Apple Silicon and Intel), **Windows 10/11**,
@@ -29,7 +31,9 @@ Get the latest installer from the
   launch it. The build is signed and notarized by Apple, so it opens with a
   normal double-click.
 - **Windows** — run the installer. If SmartScreen warns you, choose
-  **More info → Run anyway**.
+  **More info → Run anyway**. If the app opens but reports that Windows
+  blocked one of its components, see the
+  [install guide](https://plantsimulationlab.github.io/Phytograph/guide/install/#install-on-windows).
 - **Linux** — run it **from a terminal**: `chmod +x Phytograph-x86_64.AppImage`
   then `./Phytograph-x86_64.AppImage`. Double-clicking often does nothing —
   GNOME Files and similar managers refuse to launch executables. (Also needs
@@ -91,7 +95,7 @@ and installs in place — no need to return here to re-download.
   position, DBH, stem curve, height, crown base, and crown size, summarize the
   stand (stems/ha, basal area, QMD, Lorey's height, canopy cover, biomass), and
   build a QSM for every tree in one run.
-- **Measure canopy structure** — invert overlapping scans into a voxel grid of
+- **Measure leaf and branch area** — invert overlapping scans into a voxel grid of
   leaf area density (m²/m³) with its vertical profile and LAI, and fit crown
   shapes (ellipsoid, prism, cone, alpha shape) for height and volume.
 - **Model the terrain** — grid classified ground returns into a bare-earth
