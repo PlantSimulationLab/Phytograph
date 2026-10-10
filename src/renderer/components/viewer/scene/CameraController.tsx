@@ -871,8 +871,17 @@ export function CameraController({
     const timer = setTimeout(() => {
       if (!controlsRef.current) return;
       // Frame the CONTENT, not the outlier-inflated raw bounds.
-      // Re-checked here too: the user may have moved in the tick since.
-      if (userMovedCameraRef.current) return;
+      // Re-checked here too: the user may have moved in the tick since. That
+      // move claims the content exactly as it does above, so the latch must
+      // say so. Bailing with it still open left a camera that WAS framed
+      // reporting that it never had been: a new mesh is framed on its own
+      // bounds 50 ms after it appears (frameMeshInViewport), which counts as a
+      // move, and on a slow machine that lands before this tick does.
+      if (userMovedCameraRef.current) {
+        hasFramedContentRef.current = true;
+        framedRobustRef.current = true;
+        return;
+      }
       snapToView('iso', framingBoundsRef.current);
       hasFramedContentRef.current = true;
       framedRobustRef.current = haveRobust;
