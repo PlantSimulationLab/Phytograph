@@ -120,6 +120,18 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
     // Refreshed once per pick in doPick, before anything reads it.
     const viewDir = new THREE.Vector3();
 
+    // Test hook: how far the last press got toward becoming a pick. A click
+    // that drops no label is otherwise indistinguishable from outside — the
+    // press never reached the canvas, it read as a drag, the pick threw, or
+    // nothing was under the cursor all look like "nothing happened". An E2E
+    // failure reads this to say which. Reset on mount, so a stale outcome from
+    // an earlier arming can't be mistaken for this one's.
+    let pickErrors: string[] = [];
+    const note = (outcome: string, detail: Record<string, unknown> = {}) => {
+      (window as any).__lastPointPick = { outcome, at: performance.now(), ...detail };
+    };
+    note('armed');
+
     // One GPU pick at one ray. Occlusion within the probe — across every
     // cloud — is the pick pass's depth test (pickAcrossOctrees keeps it from
     // being cleared between clouds); choosing BETWEEN probes is the caller's,
@@ -148,7 +160,8 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
             onBeforePickRender: makeInflatePickSplat(gl.getPixelRatio()),
           },
         ) as Record<string, unknown> | null;
-      } catch {
+      } catch (err) {
+        pickErrors.push(String(err));
         return null; // a pick against a half-streamed octree can throw; ignore
       }
       const position = hit?.position as THREE.Vector3 | undefined;
@@ -345,7 +358,11 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
 
     const doPick = (clientX: number, clientY: number) => {
       const rect = gl.domElement.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
+      if (rect.width === 0 || rect.height === 0) {
+        note('zero-size-canvas');
+        return;
+      }
+      pickErrors = [];
       const ndc = new THREE.Vector2(
         ((clientX - rect.left) / rect.width) * 2 - 1,
         -((clientY - rect.top) / rect.height) * 2 + 1,
@@ -362,7 +379,17 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       const centerHit = probeOctrees(raycaster.ray);
       const octreeHit = pickOctrees(clientX, clientY, rect, centerHit);
       const flatHit = pickFlatClouds(raycaster);
-      if (!octreeHit && !flatHit) return;
+      if (!octreeHit && !flatHit) {
+        note('no-hit', {
+          clientX,
+          clientY,
+          octrees: octreesRef.current.length,
+          centerHit: !!centerHit,
+          pickErrors: pickErrors.length,
+          firstPickError: pickErrors[0] ?? null,
+        });
+        return;
+      }
 
       let winner: PointPickHit;
       if (octreeHit && flatHit) {
@@ -374,6 +401,7 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       } else {
         winner = (octreeHit ?? flatHit) as PointPickHit;
       }
+      note('picked', { clientX, clientY, cloudId: winner.cloudId, pickErrors: pickErrors.length });
       onPickRef.current(winner);
     };
 
@@ -382,13 +410,17 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       pressRef.active = true;
       pressRef.x = e.clientX;
       pressRef.y = e.clientY;
+      note('pressed', { clientX: e.clientX, clientY: e.clientY });
     };
 
     const handlePointerUp = (e: PointerEvent) => {
       if (e.button !== 0 || !pressRef.active) return;
       pressRef.active = false;
       // Drag guard: a press that traveled was an orbit, not a pick.
-      if (Math.hypot(e.clientX - pressRef.x, e.clientY - pressRef.y) > DRAG_SLOP_PX) return;
+      if (Math.hypot(e.clientX - pressRef.x, e.clientY - pressRef.y) > DRAG_SLOP_PX) {
+        note('dragged', { from: [pressRef.x, pressRef.y], to: [e.clientX, e.clientY] });
+        return;
+      }
       doPick(e.clientX, e.clientY);
     };
 
@@ -399,6 +431,7 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
     return () => {
       canvas.removeEventListener('pointerdown', handlePointerDown);
       window.removeEventListener('pointerup', handlePointerUp);
+      delete (window as any).__lastPointPick;
     };
   }, [gl, camera, scene]);
 

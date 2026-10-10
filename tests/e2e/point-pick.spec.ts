@@ -79,30 +79,96 @@ test.describe('point picker', () => {
       null,
       { timeout: 30_000 },
     );
-    let last = '';
+    //
+    // "Stopped" is judged at 9 significant digits, not bit-for-bit. The controls
+    // re-derive the camera position from spherical coordinates every frame, and
+    // on the Linux runner that round trip does not land on the same double, so
+    // an exact comparison never saw two equal polls: it ran out its 4 s on
+    // every test there and then clicked anyway, having verified nothing. A
+    // camera still moving at this precision is a real failure, and says where.
+    let last: Record<string, unknown> | null = null;
+    let lastRounded = '';
     for (let i = 0; i < 40; i++) {
       const now = await session.page.evaluate(
-        () => JSON.stringify((window as any).__getCameraState?.() ?? null),
+        () => ((window as any).__getCameraState?.() ?? null) as Record<string, unknown> | null,
       );
-      if (now !== 'null' && now === last) return;
+      const rounded = JSON.stringify(now, (_k, v) =>
+        typeof v === 'number' && Number.isFinite(v) ? Number(v.toPrecision(9)) : v,
+      );
+      if (now && rounded === lastRounded) {
+        const drifting = changedKeys(last, now);
+        if (drifting.length > 0 && !reportedDrift) {
+          reportedDrift = true;
+          console.log(`[point-pick] camera settled; sub-precision drift in: ${drifting.join(', ')}`);
+        }
+        return;
+      }
       last = now;
+      lastRounded = rounded;
       await session.page.waitForTimeout(100);
     }
+    const final = await session.page.evaluate(
+      () => ((window as any).__getCameraState?.() ?? null) as Record<string, unknown> | null,
+    );
+    const moving = changedKeys(last, final);
+    throw new Error(
+      `camera never settled in 4 s; still changing: ${moving.join(', ') || '(nothing in the last poll)'}\n` +
+      moving.map((k) => `  ${k}: ${JSON.stringify(last?.[k])} -> ${JSON.stringify(final?.[k])}`).join('\n'),
+    );
+  }
+  let reportedDrift = false;
+
+  function changedKeys(a: Record<string, unknown> | null, b: Record<string, unknown> | null): string[] {
+    if (!a || !b) return [];
+    return Object.keys(b).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
   }
 
   // Click a viewport pixel the way a real pointer arrives at it: move first,
   // yield a frame, then press and release. The picker's drag guard measures
   // press→release travel, so press and release must be at the same pixel.
+  let lastClick: { x: number; y: number; under: string | null } | null = null;
   async function clickViewport(x: number, y: number) {
     await session.page.mouse.move(x, y);
-    await session.page.evaluate(
-      () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+    const under = await session.page.evaluate(
+      (p) => new Promise<string | null>((r) => requestAnimationFrame(() => requestAnimationFrame(() => {
+        const el = document.elementFromPoint(p.x, p.y) as HTMLElement | null;
+        r(el ? `<${el.tagName.toLowerCase()}${el.dataset.testid ? ` data-testid="${el.dataset.testid}"` : ''}>` : null);
+      }))),
+      { x, y },
     );
+    lastClick = { x, y, under };
     await session.page.mouse.down();
     await session.page.mouse.up();
   }
 
   const labels = () => session.page.getByTestId('picked-point-label');
+
+  // A click that drops no label fails here as a bare count mismatch, which
+  // cannot tell a swallowed press from a pick that found nothing. Attach what
+  // the picker itself recorded (PointPicker's __lastPointPick) and what was
+  // under the pointer, so the failure names the stage that lost the click.
+  async function expectLabels(count: number) {
+    try {
+      await expect(labels()).toHaveCount(count, { timeout: 10_000 });
+    } catch (err) {
+      const click = lastClick;
+      const state = await session.page.evaluate((p) => {
+        const el = p ? (document.elementFromPoint(p.x, p.y) as HTMLElement | null) : null;
+        return {
+          picker: (window as any).__lastPointPick ?? 'picker not mounted',
+          underPointerNow: el ? `<${el.tagName.toLowerCase()}>` : null,
+          camera: (window as any).__getCameraState?.() ?? null,
+        };
+      }, click);
+      throw new Error(
+        `${(err as Error).message}\n\n` +
+        `click: ${JSON.stringify(click)}\n` +
+        `picker: ${JSON.stringify(state.picker)}\n` +
+        `under pointer now: ${state.underPointerNow}\n` +
+        `camera: ${JSON.stringify(state.camera)}`,
+      );
+    }
+  }
 
   // Read one label's attribute rows as a slug → displayed-value map.
   async function attributesOf(label: Locator): Promise<Record<string, string>> {
@@ -151,7 +217,7 @@ test.describe('point picker', () => {
     const px = await worldToScreenPx([0.4, 0.0, 0.3]);
     await clickViewport(px.x, px.y);
 
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
     const label = labels().first();
     await expect(label.getByTestId('picked-point-scan')).toHaveText('scalars');
 
@@ -195,7 +261,7 @@ test.describe('point picker', () => {
     const OFFSET_PX = 4;
     await clickViewport(px.x + OFFSET_PX, px.y - OFFSET_PX);
 
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
     // It must resolve to the point actually under the cursor's neighborhood —
     // "a label appeared" would also pass if the pick grabbed some other point,
     // which is the failure mode an over-large splat would introduce.
@@ -224,7 +290,7 @@ test.describe('point picker', () => {
       pxA.y + ((pxB.y - pxA.y) / len) * step,
     );
 
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
     expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
   });
 
@@ -260,7 +326,7 @@ test.describe('point picker', () => {
     // ranking the background wins.
     await clickViewport(px.x + 6, px.y + 6);
 
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
     const coords = await worldCoordsOf(labels().first());
     // Y is the depth axis: 0 is the near plane, 8 the far one. This is the whole
     // assertion — picking ANY near-plane point is correct, picking the far plane
@@ -300,7 +366,7 @@ test.describe('point picker', () => {
     const px = await worldToScreenPx([0.0, 0.0, 0.0]);
     await clickViewport(px.x, px.y);
 
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
     const coords = await worldCoordsOf(labels().first());
     // Y is depth: 0 is the near cloud, 8 the far one — that is the assertion.
     // X/Z only confirm it is the clicked dot (to the octree's 1 mm grid).
@@ -331,7 +397,7 @@ test.describe('point picker', () => {
     await armPicker();
     const px = await worldToScreenPx([0.4, 0.0, 0.3]);
     await clickViewport(px.x, px.y);
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
 
     const attrs = await attributesOf(labels().first());
     // The scalar itself still reads correctly under its own slug…
@@ -349,7 +415,7 @@ test.describe('point picker', () => {
       const px = await worldToScreenPx(world);
       await clickViewport(px.x, px.y);
     }
-    await expect(labels()).toHaveCount(3, { timeout: 10_000 });
+    await expectLabels(3);
     await expect(session.page.getByTestId('point-picker-panel'))
       .toHaveAttribute('data-picked-count', '3');
 
@@ -417,7 +483,7 @@ test.describe('point picker', () => {
     await armPicker();
     const px = await worldToScreenPx(target);
     await clickViewport(px.x, px.y);
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
 
     const label = labels().first();
     // Both columns are present: each coordinate row carries world then (local).
@@ -489,7 +555,7 @@ test.describe('point picker', () => {
     await armPicker();
     const px = await worldToScreenPx([0.4, 0.0, 0.3]);
     await clickViewport(px.x, px.y);
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
 
     const panel = session.page.getByTestId('point-picker-panel');
     await session.page.getByTestId('point-picker-arm').click();
@@ -505,7 +571,7 @@ test.describe('point picker', () => {
     await session.page.getByTestId('point-picker-arm').click();
     await expect(panel).toHaveAttribute('data-armed', 'true');
     await clickViewport(px2.x, px2.y);
-    await expect(labels()).toHaveCount(2, { timeout: 10_000 });
+    await expectLabels(2);
   });
 
   test('closing the panel disarms the tool but keeps the placed labels', async () => {
@@ -514,7 +580,7 @@ test.describe('point picker', () => {
 
     const px = await worldToScreenPx([0.4, 0.0, 0.3]);
     await clickViewport(px.x, px.y);
-    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    await expectLabels(1);
 
     await session.page.getByTestId('point-picker-close').click();
     await expect(session.page.getByTestId('point-picker-panel')).toHaveCount(0);
