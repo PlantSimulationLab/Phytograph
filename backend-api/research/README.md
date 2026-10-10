@@ -118,3 +118,43 @@ a *moderate* predictor (ρ≈0.65), and it runs ~1.5× permissive — fine for l
 is meant to be insensitive within a band) but worth surfacing as "suggested, review."
 This sweep fixes age=35 and 1 scanner; re-run with `--ages`/`--scanners` before final
 sign-off if multi-view or age strongly change the picture.
+
+## `clumping_scale.py`
+
+Answers: *can the scan itself tell us the scale at which vegetation is clumped, so we can
+pick a LAD voxel size (or correct the Beer's-law inversion) instead of guessing?*
+
+Beer's law assumes a voxel is homogeneous. Clumping inside a voxel makes the inversion
+read LOW; a voxel approaching leaf size makes it read HIGH (about `+0.2 (leaf width /
+voxel)^2`, measured on uniform canopies). The two cancel somewhere, so "total leaf area vs
+voxel size" has no plateau to look for.
+
+The harness builds leaf scenes with a known clump scale and exact leaf area (uniform,
+Neyman-Scott clumps, crowns-with-gaps) plus PlantArchitecture trees, scans them with the
+Helios synthetic scanner (single ray or finite-footprint multi-return), and scores
+label-free estimators against that truth. Everything is computed from per-cell hits `H`,
+summed free path `Z` and summed potential path `D` of ONE fine traversal:
+
+- **Scale ladder** (`ladder`): `H` and `Z` are additive, so every coarser voxel's estimate
+  is `sum(H)/sum(Z)` of its children. The ratio of a level's mean to the reference is the
+  predicted Beer's-law bias at that voxel size.
+- **Clump scale** (`covariance_profile`, `fit_covariance`): autocovariance of the fine
+  attenuation field from cross-cell products only, so per-cell noise drops out unmodeled.
+- **Reference** (`decoupled_field`, `pair_up`, `analyze`): a fine-level estimate with no
+  leaf-size term, so **no leaf width is required**. Hits over free path is biased where a
+  cell holds a leaf or two because each hit shortens that cell's own free path; dividing
+  by potential path and taking the shading factor from the neighbors breaks that coupling.
+  A leaf width, if supplied, only trims a few-percent residual.
+
+```bash
+python research/clumping_scale.py            # synthetic scenes (~2 min)
+python research/clumping_scale.py --plants   # + almond and walnut trees
+```
+
+Known limits: clumps only a few leaf widths across (tight shoots) are not recoverable at
+any voxel size; `recommend_voxel` is a sketch whose sampling floor over-rejects fine
+voxels in crown-and-gap scenes. Separate from clumping: a finite beam footprint makes even
+a uniform canopy read low (Helios' own `calculateLeafArea`: 0.93 at 0.35 mrad, 0.78 at
+3 mrad) because weak partial returns fall below the scan's detection threshold; with the
+threshold near zero it reads 1.03. The ladder's relative shape survives this, the absolute
+reference does not.
