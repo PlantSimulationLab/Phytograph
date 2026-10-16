@@ -274,3 +274,100 @@ test('re-running the segmentation retires hand corrections to wood_class', async
   await expect.poll(async () => (await counts())['1'] ?? 0, { timeout: 15_000 })
     .toBeGreaterThan(700);
 });
+
+// tree_wood_leaf_ground.xyz is tree_wood_leaf.xyz (4240 pts) standing on a flat
+// 40×40 ground grid (1600 pts at z≈-0.01): 5840 points.
+const GROUND_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf_ground.xyz');
+const GROUND_REMINDER = "hasn't been through Ground Segmentation";
+
+// Ground is neither wood nor leaf. After Ground Segmentation labels (and keeps)
+// the ground, wood/leaf must leave those points out: splitting the PARENT —
+// which still holds every point — must give wood + leaf == the non-ground count
+// exactly, with no reminder. Before the fix every ground point landed in one
+// of the two halves, so wood + leaf was the whole cloud.
+test('leaves points labeled ground out of the wood/leaf split', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', GROUND_FIXTURE);
+  await completeImportWizard(page);
+  const parentRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground"]');
+  await expect(parentRow).toHaveAttribute('data-point-count', '5840', { timeout: 20_000 });
+
+  await page.getByTestId('tool-ground-segment').click();
+  await expect(page.getByTestId('ground-segment-panel')).toBeVisible();
+  await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
+  await page.getByTestId('ground-class-threshold').fill('0.05');
+  await page.getByTestId('ground-split-clouds').check();
+  await page.getByTestId('ground-segment-run-button').click();
+
+  const groundRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground (ground)"]');
+  const plantRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground (non-ground)"]');
+  await expect(groundRow).toBeVisible({ timeout: 60_000 });
+  await expect(plantRow).toBeVisible({ timeout: 60_000 });
+  const groundN = parseInt((await groundRow.getAttribute('data-point-count')) ?? '0', 10);
+  const plantN = parseInt((await plantRow.getAttribute('data-point-count')) ?? '0', 10);
+  expect(groundN + plantN).toBe(5840);
+  // CSF found the grid (and maybe a few trunk-base points), not the canopy.
+  expect(groundN).toBeGreaterThanOrEqual(1500);
+  expect(groundN).toBeLessThan(1800);
+
+  // Wood/leaf on the PARENT only: it carries ground_class with the ground kept.
+  await page.getByTestId('tool-wood-segment').click();
+  const panel = page.getByTestId('wood-segment-panel');
+  await expect(panel).toBeVisible();
+  const rows = panel.locator('[data-testid="wood-target-row"]');
+  for (let i = 0; i < await rows.count(); i++) {
+    const row = rows.nth(i);
+    const box = row.locator('input');
+    if ((await row.getAttribute('data-label')) === 'tree_wood_leaf_ground') await box.check();
+    else await box.uncheck();
+  }
+  await expect(panel).toHaveAttribute('data-target-count', '1');
+  await page.getByTestId('wood-method').selectOption('geometric');
+  await page.getByTestId('wood-mode').selectOption('split');
+  await page.getByTestId('wood-segment-run-button').click();
+
+  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground (wood)"]');
+  const leafRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground (leaf)"]');
+  await expect(woodRow).toBeVisible({ timeout: 60_000 });
+  await expect(leafRow).toBeVisible({ timeout: 60_000 });
+  const woodN = parseInt((await woodRow.getAttribute('data-point-count')) ?? '0', 10);
+  const leafN = parseInt((await leafRow.getAttribute('data-point-count')) ?? '0', 10);
+  expect(woodN + leafN).toBe(plantN);
+  expect(woodN).toBeGreaterThan(0);
+  expect(leafN).toBeGreaterThan(woodN);
+
+  // Ground segmentation ran, so there is nothing to remind the user of.
+  await expect(page.getByTestId('toast-success').filter({ hasText: 'Wood/Leaf Segmentation Complete' }))
+    .toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('toast-warning').filter({ hasText: GROUND_REMINDER })).toHaveCount(0);
+});
+
+// The same cloud with Ground Segmentation never run: every point is classified
+// (ground included, there is no way to tell it apart), and the user is told.
+test('reminds the user when the cloud never went through Ground Segmentation', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', GROUND_FIXTURE);
+  await completeImportWizard(page);
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground"]');
+  await expect(cloudRow).toHaveAttribute('data-point-count', '5840', { timeout: 20_000 });
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-wood-segment').click();
+  await expect(page.getByTestId('wood-segment-panel')).toBeVisible();
+  await page.getByTestId('wood-method').selectOption('geometric');
+  await page.getByTestId('wood-mode').selectOption('split');
+  await page.getByTestId('wood-segment-run-button').click();
+
+  await expect(page.getByTestId('toast-warning').filter({ hasText: GROUND_REMINDER }))
+    .toBeVisible({ timeout: 60_000 });
+  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground (wood)"]');
+  const leafRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf_ground (leaf)"]');
+  await expect(woodRow).toBeVisible({ timeout: 60_000 });
+  await expect(leafRow).toBeVisible({ timeout: 60_000 });
+  const woodN = parseInt((await woodRow.getAttribute('data-point-count')) ?? '0', 10);
+  const leafN = parseInt((await leafRow.getAttribute('data-point-count')) ?? '0', 10);
+  expect(woodN + leafN).toBe(5840);
+});

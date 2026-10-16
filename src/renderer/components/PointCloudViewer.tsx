@@ -394,6 +394,20 @@ const TREE_GROUND_REMINDER =
   "This cloud hasn't been through Ground Segmentation. If it still contains ground, " +
   'run that first — otherwise ground under each crown is counted as part of that tree.';
 
+// The Wood / Leaf counterpart (`ground_warning` on the wood response). Ground is
+// neither, so every method mislabels it; the skeleton methods (branch-segment,
+// connectivity) also root the tree at the lowest points, i.e. in the ground.
+const WOOD_GROUND_REMINDER =
+  "This cloud hasn't been through Ground Segmentation. If it still contains ground, " +
+  'run that first — otherwise ground points are classified as wood or leaf.';
+
+// One advisory toast body for a wood/leaf run: the backend's non-fatal warnings
+// plus the ground reminder. Null when there is nothing to say.
+function woodAdvisory(warnings?: string[], groundWarning?: boolean): string | null {
+  const parts = [...(warnings ?? []), ...(groundWarning ? [WOOD_GROUND_REMINDER] : [])];
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
 // Child-cloud name suffix for a `ground_class` value, shared by the octree and
 // flat ground-split paths so the two can't drift apart. The fallback keeps an
 // unexpected class distinguishable instead of producing duplicate row names.
@@ -16299,10 +16313,9 @@ export default function PointCloudViewer({
     const WOOD = 1, LEAF = 2;
     // Surface non-fatal backend advisories (e.g. the connectivity method warning
     // that the cloud's base looks like un-removed ground) as a warning toast.
-    const showWoodWarnings = (warnings?: string[]) => {
-      if (warnings && warnings.length > 0) {
-        showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: warnings.join(' ') });
-      }
+    const showWoodWarnings = (warnings?: string[], groundWarning?: boolean) => {
+      const message = woodAdvisory(warnings, groundWarning);
+      if (message) showToast({ type: 'warning', title: 'Wood / Leaf Segmentation', message });
     };
     // Reflectance assist: enabled only when the user toggle is on. The backend
     // self-weights by per-cloud separability (≈0 on low-contrast species), and
@@ -16352,6 +16365,12 @@ export default function PointCloudViewer({
           // (otherwise the concatenated array can't align 1:1) — mirrors the
           // backend's all-or-nothing rule for multi-source requests.
           let allHaveRefl = reflWeight > 0;
+          // Ground labels from a prior Ground Segmentation, concatenated like the
+          // points. A cloud without the column contributes "plant" (2) — nothing
+          // to exclude — and is the one the reminder below is about.
+          const groundParts: number[] = [];
+          let anyHasGround = false;
+          let anyLacksGround = false;
           // `hitCount` is what each cloud CONTRIBUTED (misses excluded), which
           // is what the label slices are indexed by; `fullCount` is the cloud's
           // real length, needed to scatter those labels back. Conflating the two
@@ -16368,7 +16387,21 @@ export default function PointCloudViewer({
             // backend's all-or-nothing rule needs reflectance to align 1:1 with
             // the points actually sent, not with the unfiltered cloud.
             const refl = allHaveRefl ? inlineReflectance(d) : null;
-            const hits = collectHitPoints(d, { reflectance: refl ?? undefined });
+            const groundValues = d.scalarFields?.[GROUND_CLASS_ATTRIBUTE]?.values;
+            const hits = collectHitPoints(d, {
+              reflectance: refl ?? undefined,
+              ground: groundValues,
+            });
+            const g = hits.aligned.ground;
+            if (g && g.length === hits.points.length) {
+              anyHasGround = true;
+              // A loop, not push(...g): spreading a cloud-sized array as
+              // arguments overflows the call stack.
+              for (const v of g) groundParts.push(v);
+            } else {
+              anyLacksGround = true;
+              for (let i = 0; i < hits.points.length; i++) groundParts.push(2);
+            }
             for (const pt of hits.points) {
               inlineParts.push([pt[0] + t.x, pt[1] + t.y, pt[2] + t.z]);
             }
@@ -16387,11 +16420,12 @@ export default function PointCloudViewer({
             ...(allHaveRefl && reflParts.length === inlineParts.length
               ? { reflectance: reflParts }
               : {}),
+            ...(anyHasGround ? { ground_class: groundParts } : {}),
           }, abort.signal);
           if (!response.success) {
             throw new Error(response.error || 'Wood/leaf segmentation failed');
           }
-          showWoodWarnings(response.warnings);
+          showWoodWarnings(response.warnings, anyLacksGround);
           const labels = response.labels;
 
           let cursor = 0;
@@ -16485,15 +16519,16 @@ export default function PointCloudViewer({
         const willSplit = woodMode === 'split' && !!onAddCloud;
         const meta = await sessionSegmentWood(
           sessionId, { ...woodParams, defer_octree: willSplit }, signal);
-        if (meta.warnings && meta.warnings.length > 0) {
-          showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: meta.warnings.join(' ') });
-        }
+        const advisory = woodAdvisory(meta.warnings, meta.ground_warning);
+        if (advisory) showToast({ type: 'warning', title: 'Wood / Leaf Segmentation', message: advisory });
 
         retireLabelColumn(id, WOOD_CLASS_ATTRIBUTE);
         if (woodMode === 'remove') {
-          // Keep only leaf points (delete wood) on the same session.
+          // Delete the wood points on the same session. Keeping class 0 too keeps
+          // the ground a prior Ground Segmentation labeled (it was never
+          // classified, so it is not wood); misses are kept by the backend anyway.
           const r = await sessionFilter(sessionId, {
-            scalarFilters: [{ slug: WOOD_CLASS_ATTRIBUTE, min: LEAF, max: LEAF, values: [LEAF] }],
+            scalarFilters: [{ slug: WOOD_CLASS_ATTRIBUTE, min: 0, max: LEAF, values: [0, LEAF] }],
             rebuild: true,
           });
           onUpdateCloud(id, buildSessionOctreeData(r, octreeInfo, baseName, undefined, { diverged: true }));
@@ -16580,10 +16615,15 @@ export default function PointCloudViewer({
       const reflSrc = (woodParams.reflectance_weight_max ?? 0) > 0
         ? inlineReflectance(displayData)
         : null;
+      // Ground labels from a prior Ground Segmentation that kept the ground:
+      // sent so the backend leaves those points out (they come back 0).
+      const groundValues = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE]?.values;
       const { points, hitIndices, aligned, droppedMisses } = collectHitPoints(displayData, {
         reflectance: reflSrc ?? undefined,
+        ground: groundValues,
       });
       const refl = aligned.reflectance?.length ? aligned.reflectance : null;
+      const groundClass = aligned.ground?.length === points.length ? aligned.ground : undefined;
       if (droppedMisses > 0) {
         console.log(`Wood/leaf segmentation: excluded ${droppedMisses} sky/miss points`);
       }
@@ -16592,6 +16632,7 @@ export default function PointCloudViewer({
         points,
         ...woodParams,
         ...(refl && refl.length === points.length ? { reflectance: refl } : {}),
+        ...(groundClass ? { ground_class: groundClass } : {}),
       }, signal);
       if (!response.success) {
         throw new Error(response.error || 'Wood/leaf segmentation failed');
@@ -16599,17 +16640,21 @@ export default function PointCloudViewer({
       // Full-length labels so every index below (makeChild, scalar fields)
       // refers to cloud position i, not hit-subset position i.
       const woodLabels = scatterToFullLength(response.labels, hitIndices, count);
-      if (response.warnings && response.warnings.length > 0) {
-        showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: response.warnings.join(' ') });
-      }
+      const advisory = woodAdvisory(response.warnings, response.ground_warning);
+      if (advisory) showToast({ type: 'warning', title: 'Wood / Leaf Segmentation', message: advisory });
 
       // Build a child cloud holding only the points of `classValue` (used by
       // both split and remove modes — remove keeps just the leaf class).
       let splitChildren = 0;
-      const makeChild = (classValue: number, suffix: string, color: string, replaceParent: boolean) => {
+      // `keepGround` also keeps the points Ground Segmentation labeled ground
+      // (wood_class 0 — never classified, so not wood). Misses are 0 too and
+      // stay out, as before: the child carries no is_miss column to mark them.
+      const makeChild = (classValue: number, suffix: string, color: string, replaceParent: boolean, keepGround = false) => {
         const idxs: number[] = [];
         for (let i = 0; i < count; i++) {
-          if (Math.round(woodLabels[i]) === classValue) idxs.push(i);
+          const label = Math.round(woodLabels[i]);
+          if (label === classValue
+            || (keepGround && label === 0 && groundValues?.[i] === 1 /* ground */)) idxs.push(i);
         }
         if (idxs.length === 0) return;
         const pos = new Float32Array(idxs.length * 3);
@@ -16652,8 +16697,8 @@ export default function PointCloudViewer({
       };
 
       if (woodMode === 'remove') {
-        // Replace the cloud in place with just the leaf points.
-        makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', true);
+        // Replace the cloud in place with just the leaf (and labeled ground) points.
+        makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', true, true);
       } else {
         // Full-length (misses = 0, outside the 1..2 wood/leaf range) so the
         // scalar field stays aligned to positions.

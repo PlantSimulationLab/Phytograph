@@ -1445,13 +1445,17 @@ export interface WoodSegmentationRequest {
   method?: WoodSegMethod;
   backbone_support?: number;
   model_id?: string;
+  // Per-point ground/plant labels (1=ground) aligned 1:1 with `points`, from a
+  // prior Ground Segmentation that kept the ground. Ground points are left out
+  // of the classifier and come back labeled 0. Omitted ⇒ `ground_warning`.
+  ground_class?: number[];
 }
 
 export type WoodSegMethod = 'ml' | 'sota' | 'connectivity' | 'geometric';
 
 export interface WoodSegmentationResponse {
   success: boolean;
-  labels: number[];   // 1=wood, 2=leaf, aligned to resolved point order
+  labels: number[];   // 1=wood, 2=leaf, 0=ground; aligned to resolved point order
   num_wood: number;
   num_leaf: number;
   num_points: number;
@@ -1459,6 +1463,9 @@ export interface WoodSegmentationResponse {
   // Non-fatal advisories from the connectivity method (e.g. base looks like
   // un-removed ground). Surfaced as a warning toast; the result is still valid.
   warnings?: string[];
+  // True when no ground labels came with the points (Ground Segmentation never
+  // ran). A reminder, not a detection — the file may have arrived ground-free.
+  ground_warning?: boolean;
   error?: string;
 }
 
@@ -4621,8 +4628,8 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // trees were probably fused into one and `num_trees` is too low. Surfaced as
   // a warning toast — it is the only signal that a plausible count is wrong.
   fusion_warning?: string | null;
-  // Segment Trees: true when the cloud has never been through Ground
-  // Segmentation (no ground_class column). A reminder, not a detection.
+  // Segment Trees / Wood-Leaf: true when the cloud has never been through
+  // Ground Segmentation (no ground_class column). A reminder, not a detection.
   ground_warning?: boolean;
   // Segment Trees: how the run was tiled (backend-api/tiled_trees.py), when
   // it was. `trees_truncated` > 0 means some trees may have been cut off by a

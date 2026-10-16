@@ -113,8 +113,9 @@ export function WoodSegmentPanel({
       {selectedCount > 0 && (<>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-        Separates woody structure (trunk, branches) from leaves. Crop the ground
-        first. Higher sensitivity classifies more points as wood.
+        Separates woody structure (trunk, branches) from leaves. Run Ground
+        Segmentation first; the points it labels ground are left out. Higher
+        sensitivity classifies more points as wood.
       </div>
 
       {/* Method: connectivity (skeleton backbone, recovers thin twigs) vs the

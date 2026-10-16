@@ -316,6 +316,47 @@ def test_wood_segment_endpoint_inline():
     assert set(body["labels"]).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
 
 
+def test_wood_segment_endpoint_inline_excludes_labeled_ground():
+    """Points a prior Ground Segmentation labeled ground are left out of the
+    classifier (label 0, never wood or leaf), and a request WITH ground labels
+    gets no reminder while one without them does."""
+    from fastapi.testclient import TestClient
+
+    rng = np.random.RandomState(1)
+    trunk = np.column_stack([
+        np.zeros(200), np.zeros(200), np.linspace(0.05, 1.5, 200)
+    ]) + rng.normal(0, 0.002, (200, 3))
+    leaf = rng.normal([0.3, 0.3, 1.0], 0.1, (400, 3))
+    ground = np.column_stack([
+        rng.uniform(-1.5, 1.5, 300), rng.uniform(-1.5, 1.5, 300), rng.normal(0, 0.01, 300)
+    ])
+    # Ground interleaved, not appended, so a mis-scatter would show.
+    points = np.vstack([ground[:150], trunk, leaf, ground[150:]])
+    gc = np.r_[np.ones(150), np.full(600, 2.0), np.ones(150)]
+    is_ground = gc == main.GROUND_CLASS_GROUND
+
+    client = TestClient(main.app)
+    body = client.post("/api/segment/wood", json={
+        "points": points.tolist(), "ground_class": gc.tolist(), "method": "geometric",
+    }).json()
+    assert body["success"] is True
+    labels = np.asarray(body["labels"])
+    assert len(labels) == len(points)
+    assert np.all(labels[is_ground] == 0)
+    assert set(labels[~is_ground]).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+    assert body["num_wood"] + body["num_leaf"] == int((~is_ground).sum())
+    assert body["ground_warning"] is False
+
+    # Same plant points with the ground labels withheld: classified as before,
+    # but now the caller is reminded that ground segmentation never ran.
+    body = client.post("/api/segment/wood", json={
+        "points": points[~is_ground].tolist(), "method": "geometric",
+    }).json()
+    assert body["success"] is True
+    assert body["ground_warning"] is True
+    assert np.array_equal(np.asarray(body["labels"]), labels[~is_ground])
+
+
 def test_wood_segment_reflectance_inert_when_no_contrast():
     """Reflectance assist must be a no-op when the reflectance carries no
     wood/leaf contrast — proves graceful fallback to pure geometry (the property

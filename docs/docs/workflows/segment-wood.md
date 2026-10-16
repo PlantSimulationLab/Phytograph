@@ -29,8 +29,14 @@ There are four methods (see **Method** below):
 
 ## Segment
 
-1. Crop the ground first (see [Segment ground points](segment-ground.md)) —
-   the tool expects a cloud of plant material, not soil.
+1. Run [Segment ground points](segment-ground.md) first — the tool expects a
+   cloud of plant material, not soil. You don't have to delete or split off the
+   ground: points that Ground Segmentation labeled **Ground** are left out of
+   the classification. They come out as neither wood nor leaf, are not
+   included in either split cloud, and are kept by **Remove wood**. If you
+   segment a cloud that has never been through Ground Segmentation, a warning
+   reminds you once the run finishes. The run still completes, because the file
+   may have been ground-free to begin with.
 2. Select the point cloud (or clouds) you want to segment.
 3. Click **Segment Wood / Leaf** (the icon showing a bare forked branch and a
    leaf either side of a dashed split, in the **Tools** › Segmentation group),

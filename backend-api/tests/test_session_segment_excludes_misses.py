@@ -204,3 +204,72 @@ def test_session_segment_wood_writes_each_label_on_its_own_point(
     expected = np.where(z[live_hit] > z_mid, main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF)
     assert np.array_equal(col[live_hit], expected)
     assert np.allclose(col[~live_hit], 0.0)
+
+
+# --- Ground labeled by a prior Ground Segmentation ---------------------------
+# Ground is not wood or leaf. A cloud whose ground was segmented but kept carries
+# a `ground_class` column; wood/leaf must classify only the non-ground hits and
+# leave ground at 0. A cloud with NO such column has never been through Ground
+# Segmentation, and the response says so (`ground_warning`), as segment_trees does.
+
+
+def _capture_worker(monkeypatch):
+    """Replace the worker with one that records the points it was handed and
+    labels every one of them leaf."""
+    seen = {}
+
+    async def fake(tool, pts, params, **kw):
+        seen["pts"] = np.array(pts)
+        return np.full(len(pts), main.WOOD_CLASS_LEAF, np.int32), {"warnings": []}
+
+    monkeypatch.setattr(main, "_run_killable", fake)
+    return seen
+
+
+def test_session_segment_wood_leaves_labeled_ground_out(client, leafcube_session, monkeypatch):
+    sess = main._cloud_sessions[leafcube_session]
+    hit = sess.extras[main._MISS_SLUG] == 0
+    z = sess.positions[:, 2]
+    # The lowest fifth of the hits is "ground"; misses get the plant default.
+    is_ground = hit & (z < np.quantile(z[hit], 0.2))
+    sess.extras[main.GROUND_CLASS_SLUG] = np.where(
+        is_ground, main.GROUND_CLASS_GROUND, 2).astype(np.float32)
+    seen = _capture_worker(monkeypatch)
+
+    res = client.post(f"/api/cloud/session/{leafcube_session}/segment_wood",
+                      json={"method": "geometric", "defer_octree": True})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ground_warning"] is False
+
+    plant = hit & ~is_ground
+    # The worker saw exactly the non-ground hits, in order.
+    assert np.array_equal(seen["pts"], sess.positions[plant])
+    assert body["point_count"] == int(plant.sum())
+    col = sess.extras[main.WOOD_CLASS_SLUG]
+    assert np.allclose(col[is_ground], 0.0), "ground must not be called wood or leaf"
+    assert np.all(col[plant] == main.WOOD_CLASS_LEAF)
+
+
+def test_session_segment_wood_reminds_when_ground_never_segmented(
+        client, leafcube_session, monkeypatch):
+    sess = main._cloud_sessions[leafcube_session]
+    assert main.GROUND_CLASS_SLUG not in sess.extras
+    seen = _capture_worker(monkeypatch)
+
+    res = client.post(f"/api/cloud/session/{leafcube_session}/segment_wood",
+                      json={"method": "geometric", "defer_octree": True})
+    assert res.status_code == 200, res.text
+    assert res.json()["ground_warning"] is True
+    assert len(seen["pts"]) == EXPECTED_HITS
+
+
+def test_session_segment_wood_all_ground_is_a_readable_400(client, leafcube_session, monkeypatch):
+    sess = main._cloud_sessions[leafcube_session]
+    sess.extras[main.GROUND_CLASS_SLUG] = np.full(
+        EXPECTED_TOTAL, main.GROUND_CLASS_GROUND, np.float32)
+    _capture_worker(monkeypatch)
+    res = client.post(f"/api/cloud/session/{leafcube_session}/segment_wood",
+                      json={"method": "geometric"})
+    assert res.status_code == 400
+    assert "non-ground" in res.json()["detail"]

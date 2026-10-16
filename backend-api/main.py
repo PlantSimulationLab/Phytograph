@@ -8034,12 +8034,18 @@ class WoodSegmentationRequest(BaseModel):
     method: Literal["sota", "connectivity", "geometric", "ml"] = "sota"
     backbone_support: float = 0.0
     model_id: Optional[str] = None
+    # Optional per-point ground/plant labels aligned 1:1 with `points`, from a
+    # prior ground segmentation that was kept rather than deleted. Ground points
+    # (== GROUND_CLASS_GROUND) are left out of the classifier and labeled 0, so
+    # ground is never called wood or leaf. Absent ⇒ `ground_warning`. The session
+    # endpoint ignores this and reads the persisted `ground_class` column.
+    ground_class: Optional[List[float]] = None
 
 
 class WoodSegmentationResponse(BaseModel):
     """Per-point wood/leaf labels aligned to the resolved point order."""
     success: bool
-    labels: List[int] = []          # 1=wood, 2=leaf
+    labels: List[int] = []          # 1=wood, 2=leaf, 0=ground (excluded)
     num_wood: int = 0
     num_leaf: int = 0
     num_points: int = 0
@@ -8051,7 +8057,21 @@ class WoodSegmentationResponse(BaseModel):
     # looks like un-removed ground). The result is still returned; the UI surfaces
     # these as a warning toast.
     warnings: List[str] = []
+    # True when no ground labels came with the points, i.e. Ground Segmentation
+    # has not been run — a reminder, not a claim that ground is present (the
+    # file may have arrived ground-free). Mirrors segment_trees.
+    ground_warning: bool = False
     error: Optional[str] = None
+
+
+def _wood_ground_keep_mask(ground_class, n: int) -> Optional[np.ndarray]:
+    """Mask of the points wood/leaf classifies: everything not labeled ground.
+    None when no usable ground labels came with the request (absent, or not
+    aligned 1:1 with the `n` resolved points) — the caller then classifies all
+    points and raises the ground reminder."""
+    if ground_class is None or len(ground_class) != n:
+        return None
+    return np.asarray(ground_class) != GROUND_CLASS_GROUND
 
 
 def _wood_segment_kwargs(request: "WoodSegmentationRequest") -> dict:
@@ -8133,11 +8153,22 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
         else:
             raise HTTPException(status_code=400, detail="Provide `points`, `source`, or `sources`.")
 
+        # Points labeled ground by a prior Ground Segmentation are not wood or
+        # leaf: leave them out of the classifier (label 0), as segment_trees does.
+        n_full = len(points)
+        keep = _wood_ground_keep_mask(request.ground_class, n_full)
+        if keep is not None:
+            points = points[keep]
+            if reflectance is not None:
+                reflectance = reflectance[keep]
+
         if len(points) < 3:
             return WoodSegmentationResponse(
                 success=False,
-                num_points=len(points),
-                error="Need at least 3 points for wood/leaf segmentation",
+                num_points=n_full,
+                error=("Need at least 3 non-ground points for wood/leaf segmentation"
+                       if keep is not None else
+                       "Need at least 3 points for wood/leaf segmentation"),
             )
 
         # The compute runs in a KILLABLE subprocess (see `_run_killable`); the
@@ -8145,26 +8176,31 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
         # endpoint can still surface advisories (e.g. ground-not-removed).
         _require_wood_ml_model(request)
         try:
-            labels, wood_meta = await _run_killable(
+            sub_labels, wood_meta = await _run_killable(
                 "wood", points, _wood_segment_kwargs(request),
                 http_request=http_request, reflectance=reflectance,
             )
         except ClientDisconnected:
             return WoodSegmentationResponse(
                 success=False,
-                num_points=len(points),
+                num_points=n_full,
                 error="Wood/leaf segmentation was canceled.",
             )
         warns = list(wood_meta.get("warnings", []))
-        num_wood = int(np.count_nonzero(labels == WOOD_CLASS_WOOD))
+        if keep is None:
+            labels = np.asarray(sub_labels)
+        else:
+            labels = np.zeros(n_full, dtype=np.int64)
+            labels[keep] = np.asarray(sub_labels)
         return WoodSegmentationResponse(
             success=True,
             labels=labels.tolist(),
-            num_wood=num_wood,
-            num_leaf=len(labels) - num_wood,
+            num_wood=int(np.count_nonzero(labels == WOOD_CLASS_WOOD)),
+            num_leaf=int(np.count_nonzero(labels == WOOD_CLASS_LEAF)),
             num_points=len(labels),
             source_counts=source_counts,
             warnings=warns,
+            ground_warning=keep is None,
         )
 
     except HTTPException:
@@ -41298,8 +41334,8 @@ def session_generate_dem(session_id: str, request: SessionDemRequest, http_reque
 class SessionWoodSegmentRequest(WoodSegmentationRequest):
     """Run wood/leaf segmentation on the session's in-RAM points and append a
     `wood_class` column (1=wood, 2=leaf). Inherits the segment_wood tuning
-    fields; `points`/`source` are ignored (the session's arrays are the source
-    of truth)."""
+    fields; `points`/`source`/`ground_class` are ignored (the session's arrays,
+    including its `ground_class` column, are the source of truth)."""
     # Skip the octree rebuild and return NO octree metadata. Set by a caller
     # that is about to POST `extract_by_column` with `rebuild_parent`, so the
     # parent's rebuild runs CONCURRENTLY with the children's instead of alone and
@@ -41371,7 +41407,10 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     the session pristine. If the cloud's points are edited while it runs, the
     write is refused (409, `_raise_if_session_edited_locked`) rather than
     scattered onto the wrong points. The snapshot and the write run off the
-    event loop: each is a full-length gather."""
+    event loop: each is a full-length gather.
+
+    Points a prior Ground Segmentation labeled ground keep `wood_class` 0, and
+    `ground_warning` is set when the cloud has no `ground_class` column at all."""
     sess = _get_cloud_session(session_id)
 
     def _snapshot():
@@ -41381,6 +41420,14 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
             # all survivors (misses → 0, dropped at rebuild). See _session_survivor_hit_mask.
             surv = ~sess.deleted
             hit = _session_survivor_hit_mask(sess)
+            # Ground points from a prior Ground Segmentation (labeled, not
+            # deleted) are not wood or leaf: fold them out of the compute mask so
+            # they keep label 0, exactly like the misses. The column survives
+            # deletion and splitting, so its ABSENCE is the fact that Ground
+            # Segmentation never ran — the reminder below, as in segment_trees.
+            ground_col = sess.extras.get(GROUND_CLASS_SLUG)
+            if ground_col is not None:
+                hit = hit & (ground_col[surv] != GROUND_CLASS_GROUND)
             pts = _session_hit_positions_locked(sess, hit)
             # Resolve an optional per-point reflectance scalar from the session,
             # aligned 1:1 with the HIT points (the same set we compute on). `scalar_slug`
@@ -41391,11 +41438,14 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
             if request.reflectance_weight_max and request.reflectance_weight_max > 0:
                 refl_surv = _session_reflectance_scalar(sess, request.scalar_slug, surv)
                 reflectance = refl_surv[hit] if refl_surv is not None else None
-            return pts, hit, reflectance, sess.deleted.copy()
+            return pts, hit, reflectance, sess.deleted.copy(), ground_col is None
 
-    pts, hit, reflectance, deleted0 = await run_in_threadpool(_snapshot)
+    pts, hit, reflectance, deleted0, no_ground_labels = await run_in_threadpool(_snapshot)
     if len(pts) < 3:
-        raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
+        raise HTTPException(
+            status_code=400,
+            detail=("Need at least 3 points for wood/leaf segmentation." if no_ground_labels
+                    else "Need at least 3 non-ground points for wood/leaf segmentation."))
     _require_wood_ml_model(request)
     try:
         hit_labels, wood_meta = await _run_killable(
@@ -41418,7 +41468,8 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
                 _mark_octree_stale_locked(sess)
 
     await run_in_threadpool(_write)
-    common = {"session_id": session_id, "point_count": int(len(pts)), "warnings": warns}
+    common = {"session_id": session_id, "point_count": int(len(pts)), "warnings": warns,
+              "ground_warning": no_ground_labels}
     # Deferred: see `defer_octree` — the caller rebuilds this octree alongside
     # the split's children.
     if request.defer_octree:
