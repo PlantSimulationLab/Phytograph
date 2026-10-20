@@ -65,6 +65,21 @@ describe('qsmAabb + gridOverlapsQsm', () => {
   });
 });
 
+describe('a mesh kept relative to its cloud\'s worldShift', () => {
+  const ws: [number, number, number] = [512_345, 4_271_234, 87];
+  it('overlap compares the grid in WORLD coordinates with the QSM', () => {
+    const q = qsm([{ start: [ws[0], ws[1], ws[2]], end: [ws[0] + 1, ws[1] + 1, ws[2] + 1] }]);
+    const m = { ...mesh('m', 'helios', meshData({ gridCenter: [0, 0, 0] })), vertexOffset: ws };
+    expect(gridOverlapsQsm(m, q)).toBe(true);
+    expect(gridOverlapsQsm(mesh('m', 'helios', meshData({ gridCenter: [0, 0, 0] })), q)).toBe(false);
+  });
+  it('sends the grid in WORLD coordinates, vertices in the mesh frame', () => {
+    const tin = meshToTriangulationInput(meshData({ gridCenter: [1, 2, 3] }), ws)!;
+    expect(tin.grid.center).toEqual([ws[0] + 1, ws[1] + 2, ws[2] + 3]);
+    expect(Array.from(tin.vertices.slice(0, 3))).toEqual([0, 0, 0]);
+  });
+});
+
 describe('eligibleLeafAngleMeshes', () => {
   it('keeps only overlapping Helios grid meshes', () => {
     const q = qsm([{ start: [0, 0, 0], end: [1, 1, 1] }]);

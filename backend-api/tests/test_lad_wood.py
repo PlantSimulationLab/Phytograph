@@ -810,3 +810,153 @@ class TestWoodSplitFromAnotherColumn:
                              main.LADWoodSplit(slug=None))
         assert r["success"], r.get("error")
         assert r["has_wood_classification"] is False
+
+
+class TestWoodClassifierExactMatch:
+    """A vertex that is not bit-identical to a source point has NO class.
+    `searchsorted` returns an insertion point, not a hit, so an unchecked lookup
+    gave such a vertex the class of whichever point sat next in hash order -- a
+    random one -- and a mesh that took a float32 round trip through world
+    coordinates was classified by coin flip."""
+
+    def _setup(self):
+        rng = np.random.default_rng(3)
+        pts = rng.uniform(0, 10, (20_000, 3)).astype(np.float32)
+        classes = np.full(len(pts), main.WOOD_CLASS_WOOD)
+        # The points the mesh is built from are LEAF; everything else is wood.
+        classes[:3_000] = main.WOOD_CLASS_LEAF
+        tri = pts[:3_000].reshape(1_000, 3, 3)
+        return pts, classes, tri
+
+    def test_exact_vertices_take_their_own_class(self):
+        pts, classes, tri = self._setup()
+        clf = main._WoodTriangleClassifier(pts, classes)
+        clf.add_chunk(tri)
+        assert clf._matched == clf._queried == 3_000
+        assert clf._used == 0  # all leaf: nothing reaches the wood accumulator
+
+    def test_unmatched_vertices_are_never_labelled(self):
+        pts, classes, tri = self._setup()
+        clf = main._WoodTriangleClassifier(pts, classes)
+        # The same triangles, one float32 ulp away -- what a world-frame round
+        # trip leaves behind. Most of the cloud is wood, so a random lookup
+        # would call nearly all of these wood.
+        clf.add_chunk(np.nextafter(tri, np.float32(np.inf)))
+        assert clf._matched == 0
+        assert clf._used == 0
+        g, source, _n = clf.resolve(np.radians(np.full(10, 45.0)))
+        assert source == "default"
+
+
+@pytest.mark.skipif(not os.path.exists(_WOODCUBE_XYZ),
+                    reason="woodcube fixture not generated")
+class TestGeoreferencedTriangulationReuse:
+    """The UI's LAD path, on a cloud imported with a world shift.
+
+    The dialog triangulates (Helios), the renderer keeps that mesh, and LAD then
+    REUSES it -- so the mesh rides the PHB1 frame to the renderer and back. In
+    WORLD coordinates that is float32 at UTM magnitude (0.5 m at a northing of
+    4.2e6), which wrecked the Delaunay itself and then made every vertex miss
+    the exact point match the wood classifier needs. The renderer now asks for
+    the cloud's stored frame (`frame_origin`), the vertices come back relative
+    to it, and the reused mesh is the cloud's own float32 points again.
+    """
+
+    SHIFT = np.array([512_345.0, 4_271_234.0, 87.0])
+    ORIGIN = [-5.0, 0.0, 0.5]   # stored frame
+
+    def _session(self, sid):
+        d = np.loadtxt(_WOODCUBE_XYZ)
+        sess = main.CloudSession(
+            session_id=sid, source_path=_WOODCUBE_XYZ, ascii_format=None,
+            column_plan=None, positions=d[:, :3].astype(np.float64),
+            colors=None, intensity=None,
+            extras={main._MISS_SLUG: d[:, 3].astype(np.float32),
+                    main.WOOD_CLASS_SLUG: d[:, 4].astype(np.float32)},
+            extra_dims_meta=[{"slug": main._MISS_SLUG, "label": "is_miss"},
+                             {"slug": main.WOOD_CLASS_SLUG, "label": main.WOOD_CLASS_LABEL}],
+            deleted=np.zeros(len(d), dtype=bool), deleted_history=[],
+            octree_cache_id=None, created_at=0.0, world_shift=self.SHIFT.copy())
+        with main._cloud_session_lock:
+            main._cloud_sessions[sid] = sess
+        return sess
+
+    def _triangulate_as_the_renderer_does(self, sid):
+        """buildHeliosTriangulationRequest: world-frame scan origin and grid,
+        `frame_origin` = the cloud's worldShift. Returns what the renderer's
+        mesh holds: the frame's vertices rebased into the stored frame."""
+        world = lambda p: list(np.asarray(p, dtype=np.float64) + self.SHIFT)  # noqa: E731
+        req = main.HeliosTriangulationRequest(
+            scans=[main.HeliosScanEntry(
+                session_id=sid, origin=world(self.ORIGIN), n_theta=1400, n_phi=2800,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360)],
+            lmax=0.06, max_aspect_ratio=10,
+            grid=main.HeliosGrid(center=world([0, 0, 0.5]), size=[1, 1, 1], nx=1, ny=1, nz=1),
+            frame_origin=list(self.SHIFT))
+        result = main._do_helios_computation(req)
+        assert result["success"] is True, result.get("error")
+        from tests.binframe import decode_bin_frame
+        meta, bufs = decode_bin_frame(main._pack_helios_triangulation(result))
+        # What the renderer's rebaseVec3s(buffer, vertex_origin, frame) does
+        # (double precision; a pass-through when the backend honored the frame).
+        verts = bufs["vertices"].reshape(-1, 3)
+        delta = np.asarray(meta["vertex_origin"], dtype=np.float64) - self.SHIFT
+        if np.any(delta):
+            verts = (verts.astype(np.float64) + delta).astype(np.float32)
+        idx = bufs["triangles"].reshape(-1, 3)
+        return result, verts, idx, bufs["triangle_scan_ids"].astype(np.int32)
+
+    def test_reused_mesh_measures_G_wood_on_a_shifted_cloud(self):
+        pytest.importorskip("pyhelios")
+        sid = "woodcube-utm"
+        sess = self._session(sid)
+        try:
+            result, verts, idx, scan_ids = self._triangulate_as_the_renderer_does(sid)
+            # The mesh's vertices ARE the cloud's float32 points, bit for bit.
+            stored = sess.positions.astype(np.float32)
+            keys = {tuple(p) for p in stored.view(np.uint32).reshape(-1, 3).tolist()}
+            used = verts[np.unique(idx)]
+            hits = sum(tuple(v) in keys for v in used.view(np.uint32).reshape(-1, 3).tolist())
+            assert hits == len(used)
+
+            scan = main.HeliosScanEntry(
+                session_id=sid, origin=self.ORIGIN, n_theta=1400, n_phi=2800,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360, return_type="single")
+            r = main._do_lad_computation(
+                main.LADComputeRequest(
+                    scans=[scan], lmax=0.06, max_aspect_ratio=10, min_voxel_hits=1,
+                    grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1)),
+                reuse_mesh=(verts, idx, scan_ids))
+            assert r["success"] is True, r.get("error")
+            assert r["wood_gtheta_source"] == "mesh", r.get("warnings")
+            assert r["wood_gtheta"] == pytest.approx(
+                TestWoodCubeFixture._true_g_wood(), rel=0.05)
+        finally:
+            main._cloud_sessions.pop(sid, None)
+
+    def test_same_mesh_as_the_unshifted_cloud(self):
+        """Georeferencing must not change the triangulation at all."""
+        pytest.importorskip("pyhelios")
+        res = _run_triangulation_unshifted()
+        sid = "woodcube-utm-2"
+        self._session(sid)
+        try:
+            shifted, verts, _idx, _ids = self._triangulate_as_the_renderer_does(sid)
+        finally:
+            main._cloud_sessions.pop(sid, None)
+        assert shifted["num_triangles"] == res["num_triangles"]
+        np.testing.assert_allclose(
+            np.sort(verts, axis=0),
+            np.sort(np.asarray(res["vertices"], dtype=np.float32), axis=0), atol=0)
+
+
+def _run_triangulation_unshifted():
+    scan = main.HeliosScanEntry(
+        file_path=_WOODCUBE_XYZ, ascii_format="x y z is_miss wood_class",
+        origin=[-5.0, 0.0, 0.5], n_theta=1400, n_phi=2800,
+        theta_min=0, theta_max=180, phi_min=0, phi_max=360)
+    res = main._do_helios_computation(main.HeliosTriangulationRequest(
+        scans=[scan], lmax=0.06, max_aspect_ratio=10,
+        grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1)))
+    assert res["success"] is True, res.get("error")
+    return res

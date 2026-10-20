@@ -289,9 +289,14 @@ export function serializeMeshObj(
     // Provenance comment lines (e.g. the Helios plant type/age), written after
     // the banner.
     comments?: string[];
+    // World offset of the vertex frame (MeshEntry.vertexOffset), added as each
+    // coordinate is formatted -- in double precision, which the float32 vertex
+    // buffer could not hold at georeferenced magnitudes.
+    origin?: readonly number[];
   },
 ): MeshExportFile[] {
   const { vertices, indices, normals, uvCoordinates, vertexCount, triangleCount } = data;
+  const [ox, oy, oz] = opts.origin ?? [0, 0, 0];
   const baseName = sanitizeMeshName(opts.baseName);
 
   // Material names must be unique across BOTH sets (supplied + color-derived),
@@ -333,7 +338,7 @@ export function serializeMeshObj(
   if (resolved.length > 0) lines.push(`mtllib ${baseName}.mtl`);
 
   for (let i = 0; i < vertexCount; i++) {
-    lines.push(`v ${f6(vertices[i * 3])} ${f6(vertices[i * 3 + 1])} ${f6(vertices[i * 3 + 2])}`);
+    lines.push(`v ${f6(vertices[i * 3] + ox)} ${f6(vertices[i * 3 + 1] + oy)} ${f6(vertices[i * 3 + 2] + oz)}`);
   }
   if (hasUVs) {
     for (let i = 0; i < vertexCount; i++) {
@@ -453,9 +458,13 @@ function serializeMtl(materials: ResolvedMaterial[], includeDefault: boolean): s
  */
 export function serializeMeshPly(
   data: MeshData,
-  opts: { comments?: string[] } = {},
+  opts: { comments?: string[]; origin?: readonly number[] } = {},
 ): string {
   const { vertices, indices, normals, vertexColors, vertexCount, triangleCount } = data;
+  // See serializeMeshObj's `origin`. Georeferenced coordinates need a double:
+  // a float property would hand the reader back the 0.5 m lattice.
+  const [ox, oy, oz] = opts.origin ?? [0, 0, 0];
+  const pos = (ox || oy || oz) ? 'double' : 'float';
   const hasNormals = !!normals && normals.length >= vertexCount * 3;
   const hasColors = !!vertexColors && vertexColors.length >= vertexCount * 3;
   const lines: string[] = [
@@ -464,9 +473,9 @@ export function serializeMeshPly(
     'comment Mesh exported from Phytograph',
     ...(opts.comments ?? []).map(c => `comment ${c}`),
     `element vertex ${vertexCount}`,
-    'property float x',
-    'property float y',
-    'property float z',
+    `property ${pos} x`,
+    `property ${pos} y`,
+    `property ${pos} z`,
     ...(hasNormals ? ['property float nx', 'property float ny', 'property float nz'] : []),
     ...(hasColors ? ['property uchar red', 'property uchar green', 'property uchar blue'] : []),
     `element face ${triangleCount}`,
@@ -478,7 +487,7 @@ export function serializeMeshPly(
     return Math.round(s * 255);
   };
   for (let i = 0; i < vertexCount; i++) {
-    let line = `${f6(vertices[i * 3])} ${f6(vertices[i * 3 + 1])} ${f6(vertices[i * 3 + 2])}`;
+    let line = `${f6(vertices[i * 3] + ox)} ${f6(vertices[i * 3 + 1] + oy)} ${f6(vertices[i * 3 + 2] + oz)}`;
     if (hasNormals) {
       line += ` ${f6(normals![i * 3])} ${f6(normals![i * 3 + 1])} ${f6(normals![i * 3 + 2])}`;
     }
@@ -494,8 +503,9 @@ export function serializeMeshPly(
 }
 
 /** Serialize a mesh to ASCII STL, with per-facet normals computed from winding. */
-export function serializeMeshStl(data: MeshData): string {
+export function serializeMeshStl(data: MeshData, opts: { origin?: readonly number[] } = {}): string {
   const { vertices, indices, triangleCount } = data;
+  const [ox, oy, oz] = opts.origin ?? [0, 0, 0];  // see serializeMeshObj's `origin`
   const lines: string[] = ['solid mesh'];
   for (let i = 0; i < triangleCount; i++) {
     const i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
@@ -508,9 +518,9 @@ export function serializeMeshStl(data: MeshData): string {
     const len = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) || 1;
     lines.push(`  facet normal ${f6(n[0] / len)} ${f6(n[1] / len)} ${f6(n[2] / len)}`);
     lines.push('    outer loop');
-    lines.push(`      vertex ${f6(v0[0])} ${f6(v0[1])} ${f6(v0[2])}`);
-    lines.push(`      vertex ${f6(v1[0])} ${f6(v1[1])} ${f6(v1[2])}`);
-    lines.push(`      vertex ${f6(v2[0])} ${f6(v2[1])} ${f6(v2[2])}`);
+    lines.push(`      vertex ${f6(v0[0] + ox)} ${f6(v0[1] + oy)} ${f6(v0[2] + oz)}`);
+    lines.push(`      vertex ${f6(v1[0] + ox)} ${f6(v1[1] + oy)} ${f6(v1[2] + oz)}`);
+    lines.push(`      vertex ${f6(v2[0] + ox)} ${f6(v2[1] + oy)} ${f6(v2[2] + oz)}`);
     lines.push('    endloop');
     lines.push('  endfacet');
   }

@@ -90,7 +90,10 @@ import { ScanWireframeEntry } from './ScanPatternWireframe';
 import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
-import StatusPill from './StatusPill';
+import StatusPill, { ChannelStatusPill } from './StatusPill';
+import { createProgressChannel } from '../lib/progressChannel';
+import { createDisplayIndicesCache } from '../lib/displayIndicesCache';
+import { meshVertexOffset, rebaseVec3s, shiftToStored } from '../lib/meshFrame';
 import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
@@ -2139,7 +2142,10 @@ export default function PointCloudViewer({
 
   const [showBackfillPopup, setShowBackfillPopup] = useState(false);
   const [isBackfillRunning, setIsBackfillRunning] = useState(false);
-  const [backfillProgress, setBackfillProgress] = useState<{ label: string; value: number | null } | null>(null);
+  // Ticks at 10 Hz during the gapfill creep: a channel, not state, so a tick
+  // re-renders the pill alone (see progressChannel.ts).
+  const [backfillProgress] = useState(createProgressChannel);
+  const setBackfillProgress = backfillProgress.set;
   const backfillAbortRef = useRef<AbortController | null>(null);
   // Stops the synthetic-progress ticker for the opaque gapfill stage. Set while a
   // backfill runs so Cancel can clear the interval, not just abort the fetch.
@@ -2299,7 +2305,10 @@ export default function PointCloudViewer({
   // The uninterruptible C++ ray-trace can't self-report, so executeScan drives a
   // synthetic creep across that stage (see scanSynthStopRef) and `value` stays a
   // finite fraction throughout — a null only briefly precedes the first marker.
-  const [scanProgress, setScanProgress] = useState<{ label: string; value: number | null } | null>(null);
+  // Ticks at 25 Hz during a ray trace: a channel, not state, so a tick
+  // re-renders the pill alone (see progressChannel.ts).
+  const [scanProgress] = useState(createProgressChannel);
+  const setScanProgress = scanProgress.set;
   // AbortController for the in-flight scan request, so the user can cancel a
   // hung/long scan. Aborting tears down the HTTP request and frees the UI; the
   // backend ALSO cancels the run (see scanRunIdRef) so the C++ ray trace bails
@@ -12394,6 +12403,19 @@ export default function PointCloudViewer({
     return out;
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
+  // The render loop calls this for every flat cloud on EVERY viewer render;
+  // see displayIndicesCache.ts for why it must not recompute each time.
+  const [displayIndicesCache] = useState(() =>
+    createDisplayIndicesCache<PointCloudData, typeof getDisplayIndices>());
+  const getDisplayIndicesCached = useCallback((cloud: PointCloudEntry, showCropPreview: boolean): Uint32Array | null => {
+    const { erasedIndices: erased, translation: t } = getEditState(cloud.id);
+    return displayIndicesCache(
+      cloud.data,
+      { compute: getDisplayIndices, erased, tx: t.x, ty: t.y, tz: t.z, preview: showCropPreview },
+      () => getDisplayIndices(cloud, showCropPreview),
+    );
+  }, [displayIndicesCache, getDisplayIndices, getEditState]);
+
   // Save exported content to a user-chosen path. Returns the written file name,
   // or null if the user canceled the save dialog.
   //
@@ -13161,12 +13183,16 @@ export default function PointCloudViewer({
         meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 },
         meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 },
       ));
+      // World coordinates, as before a Helios mesh moved into its cloud's stored
+      // frame: the serializers add the offset in double precision.
+      const origin = meshVertexOffset(mesh);
 
       if (format === 'obj') {
         const files = serializeMeshObj(exportData, {
           baseName,
           materials: mesh.plantMaterials,
           comments,
+          origin,
         });
         if (window.electronAPI && savePath) {
           for (const [i, f] of files.entries()) {
@@ -13196,8 +13222,8 @@ export default function PointCloudViewer({
         });
       } else {
         const content = format === 'ply'
-          ? serializeMeshPly(exportData, { comments })
-          : serializeMeshStl(exportData);
+          ? serializeMeshPly(exportData, { comments, origin })
+          : serializeMeshStl(exportData, { origin });
         if (window.electronAPI && savePath) {
           await window.electronAPI.fs.writeText(savePath, content);
         } else {
@@ -17286,9 +17312,13 @@ export default function PointCloudViewer({
       // handleICPSnapToFit, so the two tools agree about where the mesh is.
       const ps = await buildPointSource(cloud);
       const meshTransform = meshDeltaInput(mesh);
+      // The backend measures in WORLD coordinates; a mesh kept relative to an
+      // offset (lib/meshFrame.ts) gets it back here, in double precision.
+      const [mox, moy, moz] = meshVertexOffset(mesh);
       const meshVertices: number[] = Array.from(meshWorldVertices(
         mesh.data.vertices, mesh.data.vertexCount,
-        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)));
+        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)),
+        (v, i) => v + (i % 3 === 0 ? mox : i % 3 === 1 ? moy : moz));
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
       const response = await computeAlignmentDistance(
@@ -17353,10 +17383,19 @@ export default function PointCloudViewer({
       // The mesh (SOURCE - to be moved) as DRAWN: position, rotation and scale.
       // `vertex + position` alone dropped rotation and scale, so the backend
       // fitted a shape other than the one on screen (see meshWorldVertices).
-      const meshTransform = { ...meshDeltaInput(mesh), worldShift: null };
+      // The backend aligns in WORLD coordinates. A mesh kept relative to an offset
+      // (lib/meshFrame.ts) is sent with it added back (double precision), and the
+      // world-space delta is conjugated into the mesh's own frame on the way back:
+      // composeMeshDelta's `worldShift` is that frame's offset FROM world, -offset.
+      const [mox, moy, moz] = meshVertexOffset(mesh);
+      const meshTransform = {
+        ...meshDeltaInput(mesh),
+        worldShift: (mox || moy || moz) ? [-mox, -moy, -moz] as [number, number, number] : null,
+      };
       const meshVertices: number[] = Array.from(meshWorldVertices(
         mesh.data.vertices, mesh.data.vertexCount,
-        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)));
+        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)),
+        (v, i) => v + (i % 3 === 0 ? mox : i % 3 === 1 ? moy : moz));
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
       const response = await icpRegisterMeshToCloud(
@@ -20547,16 +20586,15 @@ export default function PointCloudViewer({
       // what makes a REUSE run follow the terrain exactly like the viewport (and
       // like the first new-triangulation run did). Falls back to the stored grid
       // only when the box was deleted (no live offsets to recover).
-      // `grid` (m.data.grid) was recorded in the mesh's WORLD frame — the
-      // triangulation request grid is shifted to world to match the world-frame
-      // triangulation points. The LAD inversion runs in the cloud's STORED frame, so
-      // translate this fallback back by the source cloud's worldShift. (The live-box
-      // grid, when present, is already STORED scene coords, so ladReuseGrid prefers it
-      // and this only bites when the grid box was deleted.) No-op without a shift.
-      const reuseWs = scans.find(s => s.id === scanIds[0])?.data?.octree?.worldShift ?? [0, 0, 0];
-      const storedFallbackGrid = (reuseWs[0] === 0 && reuseWs[1] === 0 && reuseWs[2] === 0)
+      // `grid` (m.data.grid) is in the mesh's vertex frame (lib/meshFrame.ts):
+      // the cloud's STORED frame for a current Helios mesh, WORLD for an older one.
+      // The LAD inversion runs in the STORED frame, so translate this fallback into
+      // it. (The live-box grid, when present, is already STORED scene coords, so
+      // ladReuseGrid prefers it and this only bites when the grid box was deleted.)
+      const reuseShift = shiftToStored(m, scans.find(s => s.id === scanIds[0])?.data?.octree?.worldShift);
+      const storedFallbackGrid = (reuseShift[0] === 0 && reuseShift[1] === 0 && reuseShift[2] === 0)
         ? grid
-        : { ...grid, center: [grid.center[0] - reuseWs[0], grid.center[1] - reuseWs[1], grid.center[2] - reuseWs[2]] as [number, number, number] };
+        : { ...grid, center: [grid.center[0] - reuseShift[0], grid.center[1] - reuseShift[1], grid.center[2] - reuseShift[2]] as [number, number, number] };
       const ladGrid = ladReuseGrid(storedFallbackGrid, liveGridOption?.grid);
       options.push({
         id: m.id,
@@ -20570,6 +20608,7 @@ export default function PointCloudViewer({
         // Ball-pivot has no unfiltered set; its `data` already carries the grid +
         // per-triangle cell ids the reuse path needs.
         meshData: m.unfilteredMesh?.data ?? m.data,
+        vertexOffset: m.vertexOffset,
         gridMeshId: gridBoxPresent ? gridMeshId : undefined,
       });
     }
@@ -20861,10 +20900,17 @@ export default function PointCloudViewer({
         return null;
       }
 
+      // The mesh lives in the source cloud's STORED frame (vertexOffset = its
+      // worldShift), not world: float32 world coordinates of a georeferenced
+      // cloud are quantized to ~0.5 m (lib/meshFrame.ts). The request names that
+      // frame, so the buffer normally arrives in it already and rebasing is a
+      // pass-through; vertices, scan origins and grid all share it.
+      const frame: [number, number, number] = request.frame_origin ?? [0, 0, 0];
+
       // The big arrays arrive as zero-copy typed-array views over the binary
       // frame — used directly (no .flat()/JSON.parse). Helios sends no per-vertex
       // colors or normals, so colors are absent and normals are computed here.
-      const vertices = response.vertices;
+      const vertices = rebaseVec3s(response.vertices, response.vertexOrigin, frame);
       const indices = response.triangles;
       const vertexColors: Float32Array | undefined = undefined;
 
@@ -20904,7 +20950,8 @@ export default function PointCloudViewer({
       // facet normal toward the scanner that saw it, so closed scanned surfaces
       // read a continuous outward bearing instead of a 180° hemisphere seam.
       const scanOrigins = triangleScanIds
-        ? Float32Array.from(request.scans.flatMap(s => [s.origin[0], s.origin[1], s.origin[2]]))
+        ? Float32Array.from(request.scans.flatMap(s => [
+            s.origin[0] - frame[0], s.origin[1] - frame[1], s.origin[2] - frame[2]]))
         : undefined;
 
       // Per-triangle grid cell + the grid it was binned in, so the leaf-angle
@@ -20916,7 +20963,11 @@ export default function PointCloudViewer({
         : undefined;
       const grid = request.grid
         ? {
-            center: request.grid.center as [number, number, number],
+            center: [
+              request.grid.center[0] - frame[0],
+              request.grid.center[1] - frame[1],
+              request.grid.center[2] - frame[2],
+            ] as [number, number, number],
             size: request.grid.size as [number, number, number],
             nx: request.grid.nx,
             ny: request.grid.ny,
@@ -20997,6 +21048,7 @@ export default function PointCloudViewer({
           cap: { lmax: capLmax, maxAspectRatio: capAspect },
         },
         triangleFilter: { lmax: seedLmax, maxAspectRatio: seedAspect },
+        vertexOffset: frame,
         // Provenance for the mesh list — the filter breakdown updates live as the
         // user adjusts Lmax/aspect (counts derived from the returned set).
         // sourceScanIds + gridMeshId let the LAD tool reuse this triangulation
@@ -21246,9 +21298,10 @@ export default function PointCloudViewer({
           filterAspect,
           mesh.triangulationParams!.sourceScanIds ?? [],
           newTri.scans.map(s => s.id),
-          // WORLD-frame mesh verts → the cloud's STORED frame (matches the session
-          // points LAD runs against). All source scans share one cloud/worldShift.
-          newTri.scans[0]?.data?.octree?.worldShift ?? null,
+          // Mesh verts → the cloud's STORED frame (matches the session points LAD
+          // runs against). All source scans share one cloud/worldShift. A fresh
+          // Helios mesh is already in it, so this is an exact pass-through.
+          shiftToStored(mesh, newTri.scans[0]?.data?.octree?.worldShift),
         );
         gridMeshId = newTri.gridMeshId || undefined;
         setLadProgress({ label: 'Inverting Beer’s law…', value: null });
@@ -23974,7 +24027,7 @@ export default function PointCloudViewer({
           const isOctreeCloud = !!cloud.data.octree;
           const indices = isOctreeCloud
             ? null
-            : getDisplayIndices(cloud, showCropPreview);
+            : getDisplayIndicesCached(cloud, showCropPreview);
           if (indices && indices.length === 0) return null;
 
           return (
@@ -25954,10 +26007,10 @@ export default function PointCloudViewer({
       )}
 
       {isBackfillRunning && (
-        <StatusPill
+        <ChannelStatusPill
           testId="backfill-running"
-          label={backfillProgress?.label ?? 'Backfilling misses…'}
-          progress={backfillProgress?.value ?? null}
+          channel={backfillProgress}
+          fallbackLabel="Backfilling misses…"
           onCancel={cancelBackfill}
         />
       )}
@@ -26062,10 +26115,10 @@ export default function PointCloudViewer({
           long op shows. The ray-trace stage streams a null fraction, which
           StatusPill renders as a label-only pulse (no bar/percent). */}
       {isScanning && (
-        <StatusPill
+        <ChannelStatusPill
           testId="synthetic-scan-status"
-          label={scanProgress?.label ?? 'Scanning…'}
-          progress={scanProgress?.value ?? null}
+          channel={scanProgress}
+          fallbackLabel="Scanning…"
           onCancel={cancelScan}
         />
       )}

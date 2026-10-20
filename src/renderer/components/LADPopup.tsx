@@ -8,6 +8,7 @@ import type { MeshData } from '../lib/pointCloudTypes';
 import { hasData, hasParams, isBackfillEligible, detectedReturnMode } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
+import { shiftToStored } from '../lib/meshFrame';
 import { WOOD_SPLIT_OFF, woodSplitColumns, defaultWoodSplitChoice, buildWoodSplit } from '../lib/ladWoodSplit';
 import { WOOD_CLASS_ATTRIBUTE } from '../lib/classification';
 import { InfoHint } from './InfoHint';
@@ -38,6 +39,8 @@ export interface LADTriangulationOption {
   // lmax/aspect filter can be re-applied here). extractReuseMeshPayload turns it
   // into the vertices/indices/scan-id buffers sent to the backend for injection.
   meshData: MeshData;
+  // The mesh's vertex frame (MeshEntry.vertexOffset; lib/meshFrame.ts).
+  vertexOffset?: [number, number, number];
   // The voxel-box mesh (if still in the scene) whose volume matches this grid.
   // Reusing this triangulation hides that box so its faces don't z-fight the LAD
   // voxel result. Undefined when the box was deleted/resized away.
@@ -520,9 +523,9 @@ export function LADPopup({
         reuseMesh = extractReuseMeshPayload(
           reuseTri.meshData, lmax, maxAspectRatio,
           reuseTri.scanIds, selectedScans.map(s => s.id),
-          // WORLD-frame mesh verts → the cloud's STORED frame (matches the session
-          // points LAD runs against). All source scans share one cloud/worldShift.
-          selectedScans[0]?.data?.octree?.worldShift ?? null);
+          // Mesh verts → the cloud's STORED frame (matches the session points LAD
+          // runs against). All source scans share one cloud/worldShift.
+          shiftToStored(reuseTri, selectedScans[0]?.data?.octree?.worldShift));
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Cannot reuse this triangulation');
         return;

@@ -1259,6 +1259,9 @@ export function buildHeliosTriangulationRequest(
     phi_max: 360,
     ...(triGrid ? { grid: triGrid } : {}),
     ...(isSnapped ? { bin_grid: toWorld(grid!) } : {}),
+    // Triangulate in the cloud's STORED frame, so the returned vertices come back
+    // relative to it (see lib/meshFrame.ts for why not world).
+    frame_origin: [ws[0], ws[1], ws[2]],
   };
 }
 
@@ -1571,10 +1574,11 @@ const CELL_OUTSIDE = 0xffffffff;
 // `meshData` is the mesh to reuse (the UNFILTERED Helios candidate set, or a
 // ball-pivot mesh's `data`); pass requestScanIdOrder = the exact scan-id list, in
 // order, that buildLADRequest will emit (i.e. selectedScans.map(s => s.id)).
-// `worldShift` is the source cloud's shift (world = stored + worldShift). Mesh
-// vertices are WORLD-frame (triangulation reads points in world frame), but LAD
-// runs against the session's STORED points, so the reused geometry is translated
-// into the STORED frame here. Null/zero → passed through unshifted (no allocation).
+// `worldShift` is the translation to SUBTRACT from the mesh vertices to land in
+// the cloud's STORED frame, which LAD runs against: `shiftToStored(mesh, cloud
+// worldShift)` from lib/meshFrame.ts. That is the cloud's whole worldShift for a
+// world-frame mesh, and zero for a Helios mesh already kept in the stored frame.
+// Null/zero → passed through unshifted (no allocation, bit-exact).
 export function extractReuseMeshPayload(
   meshData: MeshData,
   lmax: number,

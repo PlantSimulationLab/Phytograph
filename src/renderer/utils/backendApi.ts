@@ -1656,6 +1656,9 @@ export interface HeliosTriangulationRequest {
   // bins triangles into so it can drop the ground-below / canopy-above triangles the
   // flat crop admits. Omitted for non-snapped grids (binned against `grid`).
   bin_grid?: HeliosGrid;
+  // The source cloud's worldShift: Helios (float32) triangulates relative to it,
+  // and the returned vertices are relative to `vertexOrigin`, which then equals it.
+  frame_origin?: [number, number, number];
 }
 
 // Auto-estimate fields as returned by the backend.
@@ -1682,7 +1685,8 @@ export interface HeliosTriangulationDiagnostics {
 export interface HeliosTriangulationResult {
   success: boolean;
   error?: string;
-  vertices: Float32Array;          // flat xyz (numVertices*3)
+  vertices: Float32Array;          // flat xyz (numVertices*3), relative to vertexOrigin
+  vertexOrigin: [number, number, number]; // world = vertex + vertexOrigin (float64)
   triangles: Uint32Array;          // flat indices (numTriangles*3)
   triangleScanIds?: Uint32Array;   // source scan per triangle
   triangleCellIds?: Uint32Array;   // grid cell per triangle (0xffffffff = outside)
@@ -1715,6 +1719,7 @@ export async function heliosTriangulate(
       success: false,
       error: (meta.error as string) ?? 'Triangulation failed',
       vertices: new Float32Array(0),
+      vertexOrigin: [0, 0, 0],
       triangles: new Uint32Array(0),
       numTriangles: 0,
       numVertices: 0,
@@ -1729,6 +1734,7 @@ export async function heliosTriangulate(
   return {
     success: true,
     vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+    vertexOrigin: (meta.vertex_origin as [number, number, number] | undefined) ?? [0, 0, 0],
     triangles: (buffers.triangles as Uint32Array) ?? new Uint32Array(0),
     triangleScanIds: buffers.triangle_scan_ids as Uint32Array | undefined,
     triangleCellIds: buffers.triangle_cell_ids as Uint32Array | undefined,

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { extractReuseMeshPayload } from './pointCloudHelpers';
 import { applyTriangleFilter } from './triangleFilter';
+import { shiftToStored } from './meshFrame';
 import { encodeBinaryFrame, decodeBinaryFrame } from '../utils/backendApi';
 import type { MeshData } from './pointCloudTypes';
 
@@ -58,6 +59,21 @@ describe('extractReuseMeshPayload', () => {
     // The shared mesh buffer (also rendered) must not be mutated in place.
     expect(Array.from(mesh.vertices)).toEqual(Array.from(original));
     expect(payload.vertices).not.toBe(mesh.vertices);
+  });
+
+  it('a mesh already in the cloud\'s stored frame goes through bit-exact', () => {
+    // A Helios mesh keeps its vertices relative to the cloud's worldShift
+    // (vertexOffset). The reuse shift is then zero, so the payload carries the
+    // very float32 values -- the wood classifier matches them bit for bit.
+    const mesh = makeMesh([{ edgeMax: 0.1, aspect: 2, scan: 0 }]);
+    mesh.vertices[1] = 0.123456789;
+    const ws: [number, number, number] = [512_345, 4_271_234, 87];
+    const payload = extractReuseMeshPayload(
+      mesh, 1, 100, ['A'], ['A'], shiftToStored({ vertexOffset: ws }, ws));
+    expect(payload.vertices[1]).toBe(mesh.vertices[1]);
+    // A legacy WORLD mesh still has the cloud's whole shift taken off.
+    const legacy = extractReuseMeshPayload(mesh, 1, 100, ['A'], ['A'], shiftToStored({}, ws));
+    expect(legacy.vertices[0]).toBe(-512_345);
   });
 
   it('passes vertices through unshifted when worldShift is null or zero', () => {

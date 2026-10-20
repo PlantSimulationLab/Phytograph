@@ -636,6 +636,12 @@ export interface MeshEntry {
     cap: { lmax: number; maxAspectRatio: number };
   };
   triangleFilter?: { lmax: number; maxAspectRatio: number };
+  // World offset of the vertex frame: world = vertex + vertexOffset. Set on Helios
+  // triangulations to the source cloud's worldShift (vertices in its STORED
+  // frame), because float32 world coordinates of a georeferenced cloud are
+  // quantized to ~0.5 m. Absent = vertices are world coordinates. Read it only
+  // through lib/meshFrame.ts. The mesh's grid and scanOrigins share this frame.
+  vertexOffset?: [number, number, number];
   // Opt-in point-spacing cross-check (method === 'helios'). The auto-Lmax
   // estimator can silently overshoot on a sparse surface (bridging across the
   // gaps), which corrupts G(theta); the candidate-edge distribution can't

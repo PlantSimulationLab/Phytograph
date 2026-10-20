@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import type { ProgressChannel } from '../lib/progressChannel';
 
 interface StatusPillProps {
   /** Stage label, e.g. "Triangulating scan 2 of 3". */
@@ -117,4 +118,26 @@ export default function StatusPill({ label, progress, onCancel, testId, standalo
   );
 
   return host ? createPortal(pill, host) : pill;
+}
+
+/**
+ * A StatusPill whose label and progress come from a ProgressChannel, for an
+ * operation that animates its bar from a timer. Only this component re-renders
+ * on a tick; the viewer that owns the channel does not (see progressChannel.ts).
+ */
+export function ChannelStatusPill({ channel, fallbackLabel, onCancel, testId }: {
+  channel: ProgressChannel;
+  fallbackLabel: string;
+  onCancel?: () => void;
+  testId?: string;
+}) {
+  const p = useSyncExternalStore(channel.subscribe, channel.get);
+  return (
+    <StatusPill
+      testId={testId}
+      label={p?.label ?? fallbackLabel}
+      progress={p?.value ?? null}
+      onCancel={onCancel}
+    />
+  );
 }

@@ -152,6 +152,33 @@ describe('sanitizeMeshName', () => {
   });
 });
 
+describe('mesh export at georeferenced coordinates', () => {
+  // A Helios mesh keeps float32 vertices relative to its cloud's worldShift; the
+  // export adds that offset back in double precision. In float32 a northing of
+  // 4271234.5678 can only be 4271234.5 -- a 0.5 m lattice.
+  const origin = [512_345, 4_271_234, 87];
+  const one = (): MeshData => ({
+    vertices: new Float32Array([0.5678, 0.1234, 0.0001, 1, 0, 0, 0, 1, 0]),
+    indices: new Uint32Array([0, 1, 2]), vertexCount: 3, triangleCount: 1,
+  });
+
+  it('OBJ writes world coordinates to the micrometre', () => {
+    const [obj] = serializeMeshObj(one(), { baseName: 'g', origin });
+    expect(linesStartingWith(obj.text!, 'v ')[0]).toBe('v 512345.567800 4271234.123400 87.000100');
+  });
+
+  it('PLY declares double coordinates when they are georeferenced', () => {
+    const ply = serializeMeshPly(one(), { origin });
+    expect(ply).toContain('property double x');
+    expect(ply).toContain('512345.567800 4271234.123400 87.000100');
+    expect(serializeMeshPly(one())).toContain('property float x');
+  });
+
+  it('STL writes world coordinates', () => {
+    expect(serializeMeshStl(one(), { origin })).toContain('vertex 512345.567800 4271234.123400 87.000100');
+  });
+});
+
 describe('serializeMeshObj — geometry', () => {
   it('writes one v line per vertex and one f line per triangle', () => {
     const [obj] = serializeMeshObj(quad(), { baseName: 'tiny' });

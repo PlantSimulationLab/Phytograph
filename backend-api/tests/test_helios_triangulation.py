@@ -788,7 +788,7 @@ class TestInMemoryIngest:
                 "timestamp": np.array([10.0, 10.0, 11.0, 12.0, 13.0])}
         monkeypatch.setattr(main, "_resolve_scan_session", lambda e, what: object())
         monkeypatch.setattr(main, "_session_hit_positions_for_triangulation",
-                            lambda sid: xyz.copy())
+                            lambda sid, frame_origin=None: xyz.copy())
         monkeypatch.setattr(main, "_session_multireturn_columns_for_triangulation",
                             lambda sid: cols)
         req = main.HeliosTriangulationRequest(
@@ -896,3 +896,84 @@ class TestInMemoryIngest:
             a, b, c = t[:, 0:3], t[:, 3:6], t[:, 6:9]
             return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1).sum()
         assert area(ram[2]) == pytest.approx(area(text[2]), rel=1e-5)
+
+
+class TestWorldShiftedTriangulation:
+    """A georeferenced cloud must triangulate exactly like the same cloud near
+    the origin. Helios stores hits and vertices as float32, which at a UTM
+    northing (~4.2e6 m) resolves only 0.5 m, so geometry handed over in world
+    coordinates was snapped onto a lattice coarser than the sphere itself. The
+    triangulation now runs in a local frame and adds the offset back in float64.
+    """
+
+    SHIFT = np.array([512_345.0, 4_271_234.0, 87.0])
+
+    def _rows(self, i):
+        return np.loadtxt(os.path.join(_SPHERE_DIR, f"sphere_scan{i}.xyz"))
+
+    def _inline_request(self, shift):
+        scans = []
+        for i, o in enumerate(_SPHERE_ORIGINS):
+            xyz = self._rows(i)[:, 2:5] + shift
+            scans.append(main.HeliosScanEntry(
+                points=xyz.tolist(), origin=list(np.asarray(o) + shift),
+                n_theta=100, n_phi=200,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360))
+        return main.HeliosTriangulationRequest(scans=scans, lmax=0.5, max_aspect_ratio=5)
+
+    def _file_request(self, shift, tmp_path, grid=None):
+        scans = []
+        for i, o in enumerate(_SPHERE_ORIGINS):
+            rows = self._rows(i)
+            rows[:, 2:5] += shift
+            f = tmp_path / f"shifted{i}.xyz"
+            np.savetxt(f, rows, fmt="%.6f")
+            scans.append(main.HeliosScanEntry(
+                file_path=str(f), ascii_format=_SPHERE_FMT,
+                origin=list(np.asarray(o) + shift),
+                n_theta=100, n_phi=200,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360))
+        return main.HeliosTriangulationRequest(
+            scans=scans, lmax=0.5, max_aspect_ratio=5, grid=grid)
+
+    def _assert_same_mesh(self, near, far):
+        assert near["success"] is True, near.get("error")
+        assert far["success"] is True, far.get("error")
+        assert far["num_triangles"] == near["num_triangles"]
+        assert far["surface_area"] == pytest.approx(near["surface_area"], rel=1e-4)
+        # Same vertices, once the shift is taken back off (float64 throughout).
+        a = np.sort(np.asarray(near["vertices"]), axis=0)
+        b = np.sort(np.asarray(far["vertices"]) - self.SHIFT, axis=0)
+        np.testing.assert_allclose(b, a, atol=1e-4)
+
+    def test_inline_points_at_utm_magnitude(self):
+        pytest.importorskip("pyhelios")
+        self._assert_same_mesh(
+            main._do_helios_computation(self._inline_request(np.zeros(3))),
+            main._do_helios_computation(self._inline_request(self.SHIFT)))
+
+    def test_ascii_file_at_utm_magnitude(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        (tmp_path / "near").mkdir()
+        (tmp_path / "far").mkdir()
+        self._assert_same_mesh(
+            main._do_helios_computation(self._file_request(np.zeros(3), tmp_path / "near")),
+            main._do_helios_computation(self._file_request(self.SHIFT, tmp_path / "far")))
+
+    def test_ascii_file_with_grid_at_utm_magnitude(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        (tmp_path / "near").mkdir()
+        (tmp_path / "far").mkdir()
+        near_grid = main.HeliosGrid(center=[0, 0, 0.5], size=[3, 3, 3], nx=2, ny=2, nz=2)
+        far_grid = main.HeliosGrid(center=list(np.array([0, 0, 0.5]) + self.SHIFT),
+                                   size=[3, 3, 3], nx=2, ny=2, nz=2)
+        near = main._do_helios_computation(self._file_request(np.zeros(3), tmp_path / "near", near_grid))
+        far = main._do_helios_computation(self._file_request(self.SHIFT, tmp_path / "far", far_grid))
+        self._assert_same_mesh(near, far)
+        assert list(far["triangle_cell_ids"]) == list(near["triangle_cell_ids"])
+
+    def test_local_origin_is_zero_for_small_coordinates(self):
+        assert not np.any(main._helios_local_origin([12.5, -40.0, 3.0]))
+        np.testing.assert_array_equal(
+            main._helios_local_origin([512_345.7, 4_271_234.2, 87.9]),
+            [512_345.0, 4_271_234.0, 87.0])

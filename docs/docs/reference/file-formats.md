@@ -304,8 +304,12 @@ neither, the inversion warns that its result is likely to be inaccurate.
 | Format | Import | Export | Notes |
 |---|---|---|---|
 | `.obj` | ✅ | ✅ | Vertices + faces + normals + UVs + materials. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied; on export, that `.mtl` and its texture images are written back alongside the `.obj`. |
-| `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. |
+| `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. A mesh of a georeferenced (world-shifted) cloud is exported with `double` coordinates, since a `float` cannot hold a UTM coordinate to better than about half a meter. |
 | `.stl` | ✅ | ✅ | Triangles only — no topology metadata. ASCII **and** binary on import; exported as ASCII. Binary STL's non-standard per-facet color is read only for facets that set its "color valid" bit. |
+
+A Helios triangulation of a georeferenced cloud is kept in the cloud's shifted
+frame inside the app (so it stays precise) and exported in world coordinates:
+the shift is added back as the file is written.
 
 Polygonal faces with more than three vertices are triangulated on
 import. Textured `.obj` import reads UV coordinates (`vt`) and per-material

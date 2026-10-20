@@ -12,6 +12,7 @@ import {
 import type { Histogram } from '../lib/leafAngleDistribution';
 import { buildRoseGeometry, polarToXY } from '../lib/azimuthRose';
 import { SelectAllHeader } from './SelectAllHeader';
+import { meshVertexOffset } from '../lib/meshFrame';
 
 interface LeafAnglePlotPopupProps {
   isOpen: boolean;
@@ -77,8 +78,11 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
       grid && nx > 0 && ny > 0 && nz > 0
         ? [grid.size[0] / nx, grid.size[1] / ny, grid.size[2] / nz]
         : null;
+    // The grid is in the mesh's vertex frame; the reported centers are WORLD.
+    const o = mesh ? meshVertexOffset(mesh) : [0, 0, 0];
     const gridMin: [number, number, number] | null = grid
-      ? [grid.center[0] - grid.size[0] / 2, grid.center[1] - grid.size[1] / 2, grid.center[2] - grid.size[2] / 2]
+      ? [grid.center[0] + o[0] - grid.size[0] / 2, grid.center[1] + o[1] - grid.size[1] / 2,
+        grid.center[2] + o[2] - grid.size[2] / 2]
       : null;
     return ids.map((id, i) => {
       // Decode row-major index back to (i,j,k) for a readable label when we know

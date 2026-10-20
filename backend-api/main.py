@@ -9346,6 +9346,13 @@ class HeliosTriangulationRequest(BaseModel):
     # making "crop to grid" yield only in-voxel triangles. When absent the bin uses
     # `grid` itself (the flat / non-snapped case), unchanged.
     bin_grid: Optional[HeliosGrid] = None
+    # The WORLD offset of the frame the caller keeps its geometry in (the source
+    # cloud's worldShift). Helios is float32, so it triangulates relative to a
+    # local origin; with this set, that origin IS the cloud's stored frame: a
+    # session's points go in exactly as stored, and the response's vertices
+    # (relative to `vertex_origin`, which then equals this) are bit-identical to
+    # the cloud's own float32 points. None: an origin is picked near the grid.
+    frame_origin: Optional[List[float]] = None
 
 class HeliosFilterEstimate(BaseModel):
     """Auto-estimated triangulation filter, derived from the candidate edge-length
@@ -10233,6 +10240,18 @@ def _load_triangulation_scan(cloud, tmpdir: str, scan_info: dict, grid_center: l
                   rotation=float(grid_rotation_deg))
 
 
+def _helios_local_origin(grid_center) -> "np.ndarray":
+    """The offset subtracted from everything handed to Helios, whose geometry is
+    float32. Whole metres near the grid center (so the local coordinates stay
+    exact decimal shifts of the input), or zero when every coordinate is already
+    small enough that float32 resolves it to better than 0.1 mm."""
+    import numpy as np
+    c = np.asarray(grid_center, dtype=np.float64)
+    if not np.all(np.isfinite(c)) or np.abs(c).max() < 1.0e3:
+        return np.zeros(3)
+    return np.floor(c)
+
+
 def _triangulation_zero_message(diag: dict, lmax: float, max_aspect: float) -> str:
     """Human-readable explanation for a 0-triangle result, derived from the
     filter breakdown so the user can tell a data problem from a filter problem.
@@ -10290,9 +10309,14 @@ _HELIOS_MAX_RETURN_TRIANGLES = 12_000_000
 _HELIOS_MERGED_RATIO = 10.0
 
 
-def _session_hit_positions_for_triangulation(session_id: str) -> "np.ndarray":
-    """Surviving HIT positions (N,3 float64, world coords) of a cloud session,
-    for Helios triangulation. Honors unbaked deletions and ALWAYS excludes sky/
+def _session_hit_positions_for_triangulation(session_id: str,
+                                             frame_origin=None) -> "np.ndarray":
+    """Surviving HIT positions (N,3 float64) of a cloud session, for Helios
+    triangulation: world coords, or relative to `frame_origin` when given. A
+    `frame_origin` equal to the session's world shift returns the STORED
+    positions untouched, so float32 copies of them are the cloud's own float32
+    points bit for bit (adding the shift and taking it off again would not
+    guarantee that). Honors unbaked deletions and ALWAYS excludes sky/
     miss points — a miss is a ray that hit nothing, projected ~1 km out, never a
     surface, so it must never be triangulated (it would mesh a phantom shell and,
     with the post-backfill miss count often exceeding the hits, balloon the run).
@@ -10315,8 +10339,12 @@ def _session_hit_positions_for_triangulation(session_id: str) -> "np.ndarray":
         positions = sess.positions[keep].copy()
         world_shift = sess.world_shift
     positions = positions.astype(np.float64, copy=False)
-    if world_shift is not None:
-        positions = positions + np.asarray(world_shift, dtype=np.float64)
+    offset = (np.zeros(3) if world_shift is None
+              else np.asarray(world_shift, dtype=np.float64))
+    if frame_origin is not None:
+        offset = offset - np.asarray(frame_origin, dtype=np.float64)
+    if np.any(offset):
+        positions = positions + offset
     return np.ascontiguousarray(positions)
 
 
@@ -10540,6 +10568,8 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         tmpdir = tempfile.mkdtemp(prefix="phytograph_helios_")
 
         scans_info = []
+        frame_origin = (np.asarray(request.frame_origin, dtype=np.float64)
+                        if request.frame_origin is not None else None)
 
         # Per-scan angular geometry comes from the scan's own ScanParameters when
         # present; the request-level values are only a fallback for scans that
@@ -10600,14 +10630,17 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 scan_entry, "The triangulation") is not None
 
             if session_id is not None and session_present:
-                # Session source of truth: hits only, misses excluded.
-                xyz = _session_hit_positions_for_triangulation(session_id)
+                # Session source of truth: hits only, misses excluded. With a
+                # `frame_origin` the points arrive already in the local frame
+                # (see `local_origin` below); bounds stay world.
+                xyz = _session_hit_positions_for_triangulation(session_id, frame_origin)
                 if xyz.shape[0] == 0:
                     raise ValueError(
                         "The edited point cloud has no surviving hit points to "
                         "triangulate (all points deleted or only misses remain).")
-                bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
-                bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
+                _to_world = frame_origin if frame_origin is not None else 0.0
+                bb_lo = np.minimum(bb_lo, xyz.min(axis=0) + _to_world)
+                bb_hi = np.maximum(bb_hi, xyz.max(axis=0) + _to_world)
                 # Preserve multi-return columns (target_index/target_count) so the
                 # cloud Helios triangulates is detected as multi-return
                 # (isMultiReturnData()) and gets the first-return + adaptive
@@ -10627,6 +10660,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 else:
                     arrays = {"xyz": xyz, "labels": [], "vals": None}
                     fmt = "x y z"
+                arrays["local"] = frame_origin is not None
                 n_theta, n_phi = _resolution(
                     scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
                 fp = None
@@ -10743,6 +10777,20 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 "been segmented or cropped."
             )
 
+        # Helios stores every hit and triangle vertex as float32 (helios::vec3),
+        # whose resolution at a UTM northing (~4e6 m) is 0.5 m: a world-shifted
+        # cloud handed over in world coordinates is snapped onto a lattice coarser
+        # than its leaves before the Delaunay ever runs. So Helios gets everything
+        # (points, scan origins, grid) relative to a local origin near the data,
+        # and the vertices come back in float64 with the origin added back. The
+        # caller's own frame when it names one (`frame_origin`); otherwise whole
+        # metres near the grid, or zero for small coordinates, where float32 is
+        # already sub-0.1 mm.
+        local_origin = (frame_origin if frame_origin is not None
+                        else _helios_local_origin(grid_center))
+        shift_files = bool(np.any(local_origin))
+        grid_center_local = (np.asarray(grid_center, dtype=np.float64) - local_origin).tolist()
+
         # Crop every scan's points to the voxel volume BEFORE triangulating. A
         # scan's footprint (e.g. a 1 km TLS acquisition) can dwarf a small analysis
         # grid; triangulating the whole footprint just to discard the out-of-grid
@@ -10757,16 +10805,21 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # Helios <grid> would otherwise admit; absent it, crop to `grid` itself. Only
         # runs for a real (explicit) grid — the auto single-cell bounding box already
         # encloses every point, so there is nothing to crop.
-        if request.grid is not None:
+        if request.grid is not None or shift_files:
             from qsm.grid import bin_points_to_cells_terrain
             _crop_bg = request.bin_grid if request.bin_grid is not None else request.grid
             for _si, scan_info in enumerate(scans_info):
                 _ckpt()
                 _arrays = scan_info["arrays"]
+                if _arrays is not None and request.grid is None:
+                    continue  # nothing to crop; recentred at load time
                 if _arrays is not None:
-                    # In-RAM scan: mask the arrays, data columns in lockstep.
+                    # In-RAM scan: mask the arrays, data columns in lockstep. An
+                    # already-local scan is binned against the grid in that frame.
+                    _crop_center = (np.asarray(_crop_bg.center, dtype=np.float64)
+                                    - (local_origin if _arrays.get("local") else 0.0))
                     cell_ids = bin_points_to_cells_terrain(
-                        _arrays["xyz"], _crop_bg.center, _crop_bg.size,
+                        _arrays["xyz"], _crop_center.tolist(), _crop_bg.size,
                         _crop_bg.nx, _crop_bg.ny, _crop_bg.nz,
                         column_offsets=getattr(_crop_bg, "column_offsets", None),
                         rotation_deg=float(getattr(_crop_bg, "rotation", 0.0) or 0.0),
@@ -10788,25 +10841,33 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                     scan_info["filepath"], scan_info["ascii_format"])
                 if rows_in is None or rows_in.shape[0] == 0:
                     continue
-                pts_in = rows_in[:, (xi, yi, zi)]
-                cell_ids = bin_points_to_cells_terrain(
-                    pts_in, _crop_bg.center, _crop_bg.size,
-                    _crop_bg.nx, _crop_bg.ny, _crop_bg.nz,
-                    column_offsets=getattr(_crop_bg, "column_offsets", None),
-                    rotation_deg=float(getattr(_crop_bg, "rotation", 0.0) or 0.0),
-                    kept_columns=getattr(_crop_bg, "kept_columns", None),
-                )
-                in_grid = np.asarray(cell_ids) >= 0
-                if in_grid.all():
+                if request.grid is not None:
+                    pts_in = rows_in[:, (xi, yi, zi)]
+                    cell_ids = bin_points_to_cells_terrain(
+                        pts_in, _crop_bg.center, _crop_bg.size,
+                        _crop_bg.nx, _crop_bg.ny, _crop_bg.nz,
+                        column_offsets=getattr(_crop_bg, "column_offsets", None),
+                        rotation_deg=float(getattr(_crop_bg, "rotation", 0.0) or 0.0),
+                        kept_columns=getattr(_crop_bg, "kept_columns", None),
+                    )
+                    in_grid = np.asarray(cell_ids) >= 0
+                else:
+                    in_grid = np.ones(rows_in.shape[0], dtype=bool)
+                if in_grid.all() and not shift_files:
                     continue  # nothing outside — leave the scan file untouched
                 # Rewrite this scan to a temp file of only its in-voxel points,
                 # keeping ALL columns and the original ASCII_format. For a
                 # file_path scan this deliberately points AWAY from the original on
-                # disk (never overwrite it). %.8g, not %.6g: world coords can sit
-                # near z~100 m, where 6 sig-figs rounds to ~1 mm and quantizes the
-                # angular structure the spherical-projection Delaunay depends on.
+                # disk (never overwrite it). The x/y/z columns are written relative
+                # to `local_origin` (Helios reads this file as float32 too). %.8g,
+                # not %.6g: local coords can sit near z~100 m, where 6 sig-figs
+                # rounds to ~1 mm and quantizes the angular structure the
+                # spherical-projection Delaunay depends on.
+                rows_out = rows_in[in_grid]
+                if shift_files:
+                    rows_out[:, (xi, yi, zi)] -= local_origin
                 pts_path = os.path.join(tmpdir, f"scan_crop_{_si}.txt")
-                np.savetxt(pts_path, rows_in[in_grid], fmt="%.8g", delimiter=" ")
+                np.savetxt(pts_path, rows_out, fmt="%.8g", delimiter=" ")
                 scan_info["filepath"] = pts_path
                 # ascii_format is unchanged — the rewritten file keeps the same
                 # column layout as the source it was read from.
@@ -10840,8 +10901,16 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                     if n_scans > 1 else "Triangulating")
             cloud = LiDARCloud()
             cloud.disableMessages()
+            # Into the local frame (see `local_origin`). File scans were already
+            # rewritten in it by the crop pass above.
+            scan_info["origin"] = (np.asarray(scan_info["origin"], dtype=np.float64)
+                                   - local_origin).tolist()
+            if (scan_info["arrays"] is not None and shift_files
+                    and not scan_info["arrays"].get("local")):
+                scan_info["arrays"]["xyz"] = (
+                    np.asarray(scan_info["arrays"]["xyz"], dtype=np.float64) - local_origin)
             _load_triangulation_scan(
-                cloud, tmpdir, scan_info, grid_center, grid_size,
+                cloud, tmpdir, scan_info, grid_center_local, grid_size,
                 grid_nx, grid_ny, grid_nz,
                 xml_name=f"helios_config_{scan_idx}.xml",
                 grid_rotation_deg=grid_rotation_deg,
@@ -10952,7 +11021,12 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 cap_lmax = float(edges_ok.max()) if edges_ok.size else 0.0
             keep = asp_ok & (tri_edge_max <= cap_lmax)
 
-        tri_v = tri_v[keep]
+        # Everything below stays in the LOCAL frame Helios ran in; the origin is
+        # added only to the world-coordinate `vertices` of the result. Adding it
+        # here and taking it off again in the packer would not be exact: at a UTM
+        # northing float64 resolves ~1e-9 m, below which a small coordinate's
+        # float32 bits are lost.
+        tri_v = tri_v[keep].astype(np.float64)
         kept_scan_ids = scan_ids_all[keep]
         if tri_v.shape[0] == 0:
             return {
@@ -10971,7 +11045,13 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         _report(0.85, "Deduplicating vertices")
         all_verts = tri_v.reshape(-1, 3)
         rounded = np.round(all_verts, 5)
-        unique_arr, inverse = np.unique(rounded, axis=0, return_inverse=True)
+        # The rounded key only DECIDES which vertices are one; each keeps an
+        # actual vertex as its value. Shipping the rounded value instead moved
+        # every vertex off the input point it is, which is what the LAD reuse
+        # path's wood classifier identifies triangles by (bit-exact match).
+        _, first, inverse = np.unique(rounded, axis=0, return_index=True,
+                                      return_inverse=True)
+        unique_arr = all_verts[first]
         # ravel() guards against numpy versions that return inverse as (N,1).
         triangles_arr = inverse.ravel().reshape(-1, 3)
 
@@ -10994,18 +11074,19 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # itself (flat case). -1 (outside) is never returned (dropped); the binary
         # packer still maps any -1 to the uint32 sentinel for safety.
         _report(0.93, "Binning into grid")
-        centroids = (v0 + v1 + v2) / 3.0
+        centroids = (v0 + v1 + v2) / 3.0   # local frame, like the grids below
         bg = request.bin_grid if request.bin_grid is not None else request.grid
         if bg is not None and getattr(bg, "column_offsets", None):
             from qsm.grid import bin_points_to_cells_terrain
             triangle_cell_ids = bin_points_to_cells_terrain(
-                centroids, bg.center, bg.size, bg.nx, bg.ny, bg.nz,
+                centroids, (np.asarray(bg.center, dtype=np.float64) - local_origin).tolist(),
+                bg.size, bg.nx, bg.ny, bg.nz,
                 column_offsets=bg.column_offsets, rotation_deg=bg.rotation,
                 kept_columns=bg.kept_columns,
             )
         else:
             triangle_cell_ids = _bin_points_to_cells(
-                centroids, grid_center, grid_size, grid_nx, grid_ny, grid_nz
+                centroids, grid_center_local, grid_size, grid_nx, grid_ny, grid_nz
             )
         triangle_cell_ids = np.asarray(triangle_cell_ids)
         # Drop out-of-grid triangles (snapped-grid ground/over-canopy, or anything
@@ -11030,7 +11111,11 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         _report(1.0, "Finalizing")
         return {
             "success": True,
-            "vertices": unique_arr,
+            "vertices": unique_arr + local_origin,   # world (float64)
+            # The frame Helios ran in, and the vertices in it. The packer ships
+            # these (float32 world coordinates would re-quantize them).
+            "vertex_origin": np.asarray(local_origin, dtype=np.float64).tolist(),
+            "vertices_local": unique_arr,
             "triangles": triangles_arr,
             "surface_area": total_area,
             "num_triangles": int(triangles_arr.shape[0]),
@@ -11091,6 +11176,7 @@ def _pack_helios_triangulation(result: dict) -> bytes:
             "grid_message": result.get("grid_message"),
         }, [])
 
+    vertex_origin = np.asarray(result.get("vertex_origin") or [0.0, 0.0, 0.0], dtype=np.float64)
     meta = {
         "success": True,
         "method_used": result.get("method_used", "helios"),
@@ -11104,9 +11190,13 @@ def _pack_helios_triangulation(result: dict) -> bytes:
         "diagnostics": result.get("diagnostics"),
         "grid_warning": result.get("grid_warning", False),
         "grid_message": result.get("grid_message"),
+        # World coordinates of the vertex buffer's zero: vertex = buffer + origin,
+        # added in float64 by the renderer (the buffer itself is float32).
+        "vertex_origin": vertex_origin.tolist(),
     }
     buffers = [
-        ("vertices", result["vertices"], "f32"),
+        ("vertices", result["vertices_local"] if "vertices_local" in result
+         else np.asarray(result["vertices"], dtype=np.float64) - vertex_origin, "f32"),
         ("triangles", result["triangles"], "u32"),
         # -1 (outside grid) wraps to the 0xffffffff sentinel the renderer expects.
         ("triangle_scan_ids", result["triangle_scan_ids"], "u32"),
@@ -12557,6 +12647,10 @@ _WOOD_AXIS_TRIANGLE_CAP = 50_000
 # contamination (measured -18.4% in G), so a low-confidence answer must be
 # REFUSED rather than reported. See lad_wood.WoodAxisAccumulator.axis.
 _WOOD_AXIS_MIN_CONFIDENCE = 0.55
+# Fraction of looked-up vertices that must be bit-identical to a source point.
+# A mesh Helios built from these very points matches ~100%; one that took a
+# float32 round trip through world coordinates matches almost nothing.
+_WOOD_AXIS_MIN_MATCH_RATE = 0.9
 # A single-axis cylinder G is mathematically confined to (0, 1/pi] -- 1/pi is the
 # broadside view, 0 is end-on -- and `cylinder_G` produces that by construction,
 # so there is nothing useful to range-check. (An earlier version checked
@@ -12581,7 +12675,8 @@ class _WoodTriangleClassifier:
     chunk, so an unclassified run pays nothing.
     """
 
-    __slots__ = ("_keys_sorted", "_order", "_classes", "_acc", "_rng", "_seen", "_used")
+    __slots__ = ("_keys_sorted", "_order", "_classes", "_acc", "_rng", "_seen", "_used",
+                 "_queried", "_matched")
 
     def __init__(self, points, classes):
         import numpy as np
@@ -12595,6 +12690,8 @@ class _WoodTriangleClassifier:
         self._rng = np.random.default_rng(0)
         self._seen = 0       # triangles offered
         self._used = 0       # triangles sampled and classified
+        self._queried = 0    # vertices looked up
+        self._matched = 0    # ...that are bit-identical to a source point
 
     @staticmethod
     def _hash(xyz):
@@ -12624,9 +12721,16 @@ class _WoodTriangleClassifier:
             v = v[self._rng.choice(len(v), remaining, replace=False)]
 
         flat = np.ascontiguousarray(v.reshape(-1, 3), dtype=np.float32)
-        pos = np.searchsorted(self._keys_sorted, self._hash(flat))
+        keys = self._hash(flat)
+        pos = np.searchsorted(self._keys_sorted, keys)
         np.clip(pos, 0, len(self._keys_sorted) - 1, out=pos)
-        lab = self._classes[self._order[pos]].reshape(-1, 3)
+        # `searchsorted` returns an insertion point, not a hit: a vertex that is
+        # not bit-identical to a source point lands on whichever point sits next
+        # in HASH order, i.e. a random one. Such a vertex has no class.
+        matched = self._keys_sorted[pos] == keys
+        self._queried += int(matched.size)
+        self._matched += int(matched.sum())
+        lab = np.where(matched, self._classes[self._order[pos]], -1).reshape(-1, 3)
         # Majority of the three vertices. A triangle whose vertices DISAGREE
         # straddles a leaf/wood junction: its normal belongs to neither medium,
         # so it is excluded rather than guessed into one.
@@ -12638,6 +12742,11 @@ class _WoodTriangleClassifier:
         """(g_wood, source, n_triangles). `source` is 'mesh' when the axis was
         measured and passed both guards, else 'default'."""
         import lad_wood
+        # A mesh whose vertices are mostly NOT the source points (a reused
+        # mesh that took a float32 round trip through world coordinates) can't
+        # be labelled; its few chance matches are no basis for an axis.
+        if self._queried and self._matched < _WOOD_AXIS_MIN_MATCH_RATE * self._queried:
+            return lad_wood.WOOD_G_DEFAULT, "default", 0
         axis, confidence = self._acc.axis()
         if axis is None or confidence < _WOOD_AXIS_MIN_CONFIDENCE:
             return lad_wood.WOOD_G_DEFAULT, "default", self._acc.count
@@ -20511,6 +20620,7 @@ class PlantGenerationResponse(BaseModel):
 
 import uuid
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20531,6 +20641,41 @@ class PlantSession:
     position: tuple  # (x, y, z)
     created_at: float  # timestamp
     last_accessed: float = 0.0  # bumped on every read/advance; drives idle eviction
+    # Held for every native call on this session AND for its teardown. Taking a
+    # session out of `_plant_sessions` under `_session_lock` does not stop a
+    # DELETE or the sweep freeing it a moment later, mid-`advanceTime` (a client
+    # that times out and retries, or File -> New, does exactly that), and the
+    # native code segfaults the whole backend. It also serializes two advances
+    # of one plant, which the native code was never safe for.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    closed: bool = False  # set under `lock` by teardown; a holder must check it
+
+
+@contextmanager
+def _plant_session_in_use(session_id: str):
+    """The live session, held under its own lock for the duration of the block,
+    or a 404 when it is gone or was torn down while this request waited."""
+    with _session_lock:
+        session = _plant_sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        session.last_accessed = time.time()
+    with session.lock:
+        if session.closed:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        yield session
+
+
+def _close_plant_session_locked(session: "PlantSession") -> None:
+    """Free a session's pyhelios objects. Caller holds `session.lock`, so no
+    native call on it is in flight, and has already removed it from
+    `_plant_sessions`."""
+    session.closed = True
+    try:
+        session.plantarch.__exit__(None, None, None)
+        session.context.__exit__(None, None, None)
+    except Exception:
+        pass
 
 
 class PlantSessionCreateRequest(BaseModel):
@@ -21731,28 +21876,23 @@ def advance_plant_session(session_id: str, request: PlantSessionAdvanceRequest):
     Advance time for a plant session and return updated geometry.
     """
     try:
-        with _session_lock:
-            if session_id not in _plant_sessions:
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-            session = _plant_sessions[session_id]
-            session.last_accessed = time.time()
-
         if request.dt < 0:
             raise HTTPException(status_code=400, detail="dt must be >= 0")
 
-        previous_age = session.current_age
+        with _plant_session_in_use(session_id) as session:
+            previous_age = session.current_age
 
-        # Advance time
-        if request.dt > 0:
-            session.plantarch.advanceTime(request.dt)
+            # Advance time
+            if request.dt > 0:
+                session.plantarch.advanceTime(request.dt)
 
-        # Get updated state
-        current_age = session.plantarch.getPlantAge(session.plant_id)
-        height = session.plantarch.getPlantHeight(session.plant_id)
-        session.current_age = current_age
+            # Get updated state
+            current_age = session.plantarch.getPlantAge(session.plant_id)
+            height = session.plantarch.getPlantHeight(session.plant_id)
+            session.current_age = current_age
 
-        # Extract geometry (+ real Helios UVs / materials / textures)
-        vertices, faces, colors, vertex_count, triangle_count, tex = _extract_session_geometry(session)
+            # Extract geometry (+ real Helios UVs / materials / textures)
+            vertices, faces, colors, vertex_count, triangle_count, tex = _extract_session_geometry(session)
 
         print(f"[Plant Session] Advanced {session_id}: {previous_age:.1f} -> {current_age:.1f} days, {vertex_count} vertices")
 
@@ -21797,19 +21937,15 @@ def advance_plant_session(session_id: str, request: PlantSessionAdvanceRequest):
 def get_plant_session_status(session_id: str):
     """Get the current status of a plant session."""
     try:
-        with _session_lock:
-            if session_id not in _plant_sessions:
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-            session = _plant_sessions[session_id]
-            session.last_accessed = time.time()
-
-        height = session.plantarch.getPlantHeight(session.plant_id)
+        with _plant_session_in_use(session_id) as session:
+            height = session.plantarch.getPlantHeight(session.plant_id)
+            current_age = session.current_age
 
         return PlantSessionStatusResponse(
             success=True,
             session_id=session_id,
             plant_type=session.plant_type,
-            current_age=session.current_age,
+            current_age=current_age,
             height=height
         )
 
@@ -21836,12 +21972,10 @@ def delete_plant_session(session_id: str):
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             session = _plant_sessions.pop(session_id)
 
-        # Clean up pyhelios resources
-        try:
-            session.plantarch.__exit__(None, None, None)
-            session.context.__exit__(None, None, None)
-        except:
-            pass
+        # Clean up pyhelios resources, after any advance/status already running
+        # on this session finishes (see PlantSession.lock).
+        with session.lock:
+            _close_plant_session_locked(session)
 
         print(f"[Plant Session] Deleted session {session_id}")
 
@@ -34199,18 +34333,25 @@ def _sweep_cloud_sessions() -> None:
 def _sweep_plant_sessions() -> None:
     """Lazily drop idle / over-cap plant sessions, tearing down pyhelios."""
     now = time.time()
+    victims = []
     with _session_lock:
         for sid in _evict_session_ids(_plant_sessions, _MAX_PLANT_SESSIONS, now):
-            sess = _plant_sessions.pop(sid, None)
-            if sess is None:
+            sess = _plant_sessions.get(sid)
+            # A session mid-advance is in use, not idle: skip it rather than
+            # free it under the native call (or wait for it while holding
+            # `_session_lock`, which every plant request needs).
+            if sess is None or not sess.lock.acquire(blocking=False):
                 continue
-            # Same teardown as the DELETE endpoint so native resources are freed.
-            try:
-                sess.plantarch.__exit__(None, None, None)
-                sess.context.__exit__(None, None, None)
-            except Exception:
-                pass
-            print(f"[Plant Session] Evicted idle/over-cap session {sid}")
+            _plant_sessions.pop(sid)
+            victims.append((sid, sess))
+    # Same teardown as the DELETE endpoint, outside `_session_lock`; each
+    # victim's own lock is already held from the acquire above.
+    for sid, sess in victims:
+        try:
+            _close_plant_session_locked(sess)
+        finally:
+            sess.lock.release()
+        print(f"[Plant Session] Evicted idle/over-cap session {sid}")
 
 
 # Manual-labeling undo budget. Capped by BYTES rather than by entry count
@@ -40307,7 +40448,9 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     leaves the session pristine. The snapshot and the write run off the event
     loop: each is a full-length gather, and taking `_cloud_session_lock` on the
     loop thread parks every other request behind whichever worker holds it."""
-    sess = _get_cloud_session(session_id)
+    # Off the loop: a lookup can restore a spilled session (a multi-hundred-MB
+    # read, plus a sweep that may spill another), all under _cloud_session_lock.
+    sess = await run_in_threadpool(_get_cloud_session, session_id)
 
     def _snapshot():
         with _cloud_session_lock:
@@ -40316,9 +40459,9 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
             # back over all survivors (misses default 0, dropped from the octree at
             # rebuild). See _session_survivor_hit_mask.
             hit = _session_survivor_hit_mask(sess)
-            return hit, _session_hit_positions_locked(sess, hit)
+            return hit, _session_hit_positions_locked(sess, hit), sess.deleted.copy()
 
-    hit, pts = await run_in_threadpool(_snapshot)
+    hit, pts, deleted0 = await run_in_threadpool(_snapshot)
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
     # Cost gate, BEFORE the worker is spawned: a cloth too fine for the extent
@@ -40359,13 +40502,14 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         if "CSF" in str(e) or "cloth" in str(e).lower():
             raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
         raise
-    # Scatter hit-labels back over ALL survivors (misses → 0). `len(hit)` is the
-    # survivor count captured under the first lock, so this stays aligned with the
-    # snapshot the compute ran on.
+    # Scatter hit-labels back over ALL survivors (misses → 0). `hit` is aligned
+    # with the snapshot the compute ran on, which the guard confirms is still the
+    # cloud's survivor set.
     def _write():
         labels = np.zeros(len(hit), dtype=np.int64)
         labels[hit] = np.asarray(hit_labels)
         with _cloud_session_lock:
+            _raise_if_session_edited_locked(sess, deleted0, "ground segmentation")
             _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
             if request.defer_octree:
                 # The cached octree predates the column. Say so, or the background
@@ -40487,7 +40631,7 @@ async def session_compute_normals(session_id: str,
     The column write + octree rebuild run in the parent AFTER the compute
     returns, so a cancel during the long compute leaves the session pristine.
     The snapshot and the write run off the event loop (see the ground handler)."""
-    sess = _get_cloud_session(session_id)
+    sess = await run_in_threadpool(_get_cloud_session, session_id)  # see segment_ground
 
     def _snapshot():
         with _cloud_session_lock:
@@ -40498,9 +40642,9 @@ async def session_compute_normals(session_id: str,
             pts = _session_hit_positions_locked(sess, hit)
             origin, origin_source = _session_normal_origins_locked(
                 sess, hit, request.viewpoint)
-            return hit, pts, origin, origin_source
+            return hit, pts, origin, origin_source, sess.deleted.copy()
 
-    hit, pts, origin, origin_source = await run_in_threadpool(_snapshot)
+    hit, pts, origin, origin_source, deleted0 = await run_in_threadpool(_snapshot)
     if len(pts) < normals_mod.MIN_POINTS:
         raise HTTPException(
             status_code=400,
@@ -40558,13 +40702,14 @@ async def session_compute_normals(session_id: str,
             detail=f"Normal estimation returned {values.shape}, expected "
                    f"{(len(pts), normals_mod.N_COLUMNS)}.")
 
-    # Scatter the hit-aligned result back over ALL survivors (misses → 0).
-    # `len(hit)` is the survivor count captured under the first lock, so this
-    # stays aligned with the snapshot the compute ran on.
+    # Scatter the hit-aligned result back over ALL survivors (misses → 0). `hit`
+    # is aligned with the snapshot the compute ran on, which the guard confirms
+    # is still the cloud's survivor set.
     def _write():
         full = np.zeros((len(hit), normals_mod.N_COLUMNS), dtype=np.float32)
         full[hit] = values
         with _cloud_session_lock:
+            _raise_if_session_edited_locked(sess, deleted0, "normal estimation")
             for col, (slug, label) in enumerate(normals_mod.COLUMNS):
                 _session_add_extra_column(sess, slug, label, full[:, col])
             # These normals describe the geometry as it stands right now.
@@ -40631,7 +40776,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
     call that cannot poll a cancel flag. The column write + octree rebuild happen
     in the parent AFTER the compute returns, so canceling mid-compute leaves the
     session pristine."""
-    sess = _get_cloud_session(session_id)
+    sess = await run_in_threadpool(_get_cloud_session, session_id)  # see segment_ground
     if request.method not in denoise.METHODS:
         raise HTTPException(
             status_code=400,
@@ -40647,9 +40792,10 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
             # _session_survivor_hit_mask.
             hit = _session_survivor_hit_mask(sess)
             pts = _session_hit_positions_locked(sess, hit)
-            return hit, pts, denoise.NOISE_CLASS_SLUG in sess.extras
+            return (hit, pts, denoise.NOISE_CLASS_SLUG in sess.extras,
+                    sess.deleted.copy())
 
-    hit, pts, already_denoised = await run_in_threadpool(_snapshot)
+    hit, pts, already_denoised, deleted0 = await run_in_threadpool(_snapshot)
     if int(hit.sum()) < denoise.MIN_POINTS:
         raise HTTPException(
             status_code=400,
@@ -40678,6 +40824,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
         labels = np.full(len(hit), denoise.NOISE_CLEAN, dtype=np.int64)
         labels[hit] = np.asarray(hit_labels)
         with _cloud_session_lock:
+            _raise_if_session_edited_locked(sess, deleted0, "noise detection")
             _session_add_extra_column(sess, denoise.NOISE_CLASS_SLUG,
                                       denoise.NOISE_CLASS_LABEL, labels)
 
@@ -40820,6 +40967,14 @@ class _DemXYBox:
             self.miny = min(self.miny, float(xy[:, 1].min()))
             self.maxx = max(self.maxx, float(xy[:, 0].max()))
             self.maxy = max(self.maxy, float(xy[:, 1].max()))
+
+
+# Why a DEM refuses to write its height-above-ground column; the same race
+# `_raise_if_session_edited_locked` guards in the HTTP handlers, reported through
+# the DEM's own error result rather than a 409.
+_SESSION_EDITED_DURING_DEM = (
+    "The cloud was edited while the DEM ran, so its height-above-ground column "
+    "no longer lines up with the points; run it again.")
 
 
 def _session_dem_blocks(snap: dict):
@@ -41122,6 +41277,8 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
                     hag[offset:offset + n_s][hit[surv]] = hag_hits
                 offset += n_s
             with _cloud_session_lock:
+                if not np.array_equal(sess.deleted, snap["deleted"]):
+                    raise ValueError(_SESSION_EDITED_DURING_DEM)
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG,
                                           HEIGHT_ABOVE_GROUND_LABEL, hag)
             cache_key, cache_dir, meta = _session_rebuild(sess)
@@ -41302,6 +41459,9 @@ def _do_session_dem_inner(sess: "CloudSession", request: "SessionDemRequest", pr
             hag = np.zeros(int(hit_in_surv.shape[0]), dtype=np.float64)
             hag[hit_in_surv] = hag_hits
             with _cloud_session_lock:
+                # `surv` is the snapshot's survivor mask (a fresh array, not a view).
+                if not np.array_equal(sess.deleted, ~surv):
+                    raise ValueError(_SESSION_EDITED_DURING_DEM)
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG, HEIGHT_ABOVE_GROUND_LABEL, hag)
             cache_key, cache_dir, meta = _session_rebuild(sess)
             result["cache_id"] = cache_key
@@ -41411,7 +41571,7 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
 
     Points a prior Ground Segmentation labeled ground keep `wood_class` 0, and
     `ground_warning` is set when the cloud has no `ground_class` column at all."""
-    sess = _get_cloud_session(session_id)
+    sess = await run_in_threadpool(_get_cloud_session, session_id)  # see segment_ground
 
     def _snapshot():
         with _cloud_session_lock:
@@ -41580,7 +41740,7 @@ async def session_segment_organs(session_id: str, request: SessionOrganSegmentRe
     columns are written only after it returns, so a cancel leaves the session
     as it was. The snapshot and the write run off the event loop (each is a
     full-length gather)."""
-    sess = _get_cloud_session(session_id)
+    sess = await run_in_threadpool(_get_cloud_session, session_id)  # see segment_ground
     pts, hit, deleted0 = await run_in_threadpool(_organ_snapshot, sess)
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for organ segmentation.")
@@ -41613,7 +41773,7 @@ def _chm_param_dict(request: TreeSegmentationRequest) -> dict:
 
 async def _session_segment_trees_chm(session_id: str, sess, request, http_request,
                                      *, n_survivors, plant_pts, plant_mask,
-                                     ground_pts, seeds, no_ground_labels):
+                                     ground_pts, seeds, no_ground_labels, deleted0):
     """The method='chm' branch of `session_segment_trees`: the same inputs
     (ground and misses excluded, labels scattered back onto every survivor),
     minus what only TreeIso needs. No cost prompt or tiling — the CHM is one
@@ -41630,7 +41790,7 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
     labels = await run_in_threadpool(
-        _session_write_tree_labels, sess, n_survivors, plant_mask, plant_labels)
+        _session_write_tree_labels, sess, n_survivors, plant_mask, plant_labels, deleted0)
     cache_key, cache_dir, rebuild_meta = await run_in_threadpool(_session_rebuild, sess)
     num_trees = int(labels.max()) if labels.size else 0
     return {"session_id": session_id, "point_count": int(n_survivors), "cache_id": cache_key,
@@ -41640,14 +41800,17 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
 
 
 def _session_write_tree_labels(sess: "CloudSession", n_survivors: int,
-                               plant_mask: np.ndarray, plant_labels) -> np.ndarray:
+                               plant_mask: np.ndarray, plant_labels,
+                               deleted0: np.ndarray) -> np.ndarray:
     """Scatter the plant tree ids back onto every survivor (ground and misses
     stay 0) and write the `tree_instance` column. Returns the survivor-aligned
-    labels. Blocking - a full-length scatter plus a write under
-    `_cloud_session_lock` - so the async handlers call it in the threadpool."""
+    labels. Refuses (409) if the cloud's points were edited since `deleted0`.
+    Blocking - a full-length scatter plus a write under `_cloud_session_lock` -
+    so the async handlers call it in the threadpool."""
     labels = np.zeros(n_survivors, dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)
     with _cloud_session_lock:
+        _raise_if_session_edited_locked(sess, deleted0, "tree segmentation")
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
     return labels
 
@@ -41671,7 +41834,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     Every full-length gather here runs off the event loop (see the ground
     handler): the snapshot under the lock, the plant/ground subsets, and the
     label write."""
-    sess = _get_cloud_session(session_id)
+    sess = await run_in_threadpool(_get_cloud_session, session_id)  # see segment_ground
 
     def _snapshot():
         with _cloud_session_lock:
@@ -41698,9 +41861,10 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         plant_pts = pts[plant_mask] if n_plant >= 10 else None
         ground_pts = (pts[is_ground & is_hit]
                       if n_plant >= 10 and request.method == "chm" else None)
-        return pts, ground_col is None, plant_mask, n_plant, plant_pts, ground_pts
+        return (pts, ground_col is None, plant_mask, n_plant, plant_pts, ground_pts,
+                sess.deleted.copy())
 
-    pts, no_ground_labels, plant_mask, n_plant, plant_pts, ground_pts = (
+    pts, no_ground_labels, plant_mask, n_plant, plant_pts, ground_pts, deleted0 = (
         await run_in_threadpool(_snapshot))
     # The ground reminder: set when Ground Segmentation has never run on this
     # cloud. Deliberately a FACT, not a guess from the geometry — the old
@@ -41724,7 +41888,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         return await _session_segment_trees_chm(
             session_id, sess, request, http_request, n_survivors=len(pts),
             plant_pts=plant_pts, plant_mask=plant_mask, ground_pts=ground_pts,
-            seeds=seeds, no_ground_labels=no_ground_labels,
+            seeds=seeds, no_ground_labels=no_ground_labels, deleted0=deleted0,
         )
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
@@ -41772,7 +41936,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     )
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = await run_in_threadpool(
-        _session_write_tree_labels, sess, len(pts), plant_mask, plant_labels)
+        _session_write_tree_labels, sess, len(pts), plant_mask, plant_labels, deleted0)
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     # Number of distinct trees (max tree id; ground/misses are 0). The renderer
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"

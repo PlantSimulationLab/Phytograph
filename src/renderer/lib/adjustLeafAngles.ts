@@ -4,6 +4,7 @@
 
 import type { MeshData, MeshEntry, QSMEntry } from './pointCloudTypes';
 import type { LeafAngleTriangulationBuffers, QSMGrid } from '../utils/backendApi';
+import { meshVertexOffset } from './meshFrame';
 
 // A mesh is eligible as a leaf-angle target when it is a Helios triangulation
 // carrying per-triangle cell ids AND the grid they index into. Those are exactly
@@ -39,9 +40,11 @@ export function gridOverlapsQsm(mesh: MeshEntry, qsm: QSMEntry): boolean {
   const grid = mesh.data.grid;
   const box = qsmAabb(qsm);
   if (!grid || !box) return true;
+  // The grid is in the mesh's vertex frame; QSM cylinders are WORLD.
+  const offset = meshVertexOffset(mesh);
   for (let k = 0; k < 3; k++) {
-    const gmin = grid.center[k] - grid.size[k] / 2;
-    const gmax = grid.center[k] + grid.size[k] / 2;
+    const gmin = grid.center[k] + offset[k] - grid.size[k] / 2;
+    const gmax = grid.center[k] + offset[k] + grid.size[k] / 2;
     if (gmax < box.min[k] || gmin > box.max[k]) return false; // disjoint on this axis
   }
   return true;
@@ -86,12 +89,23 @@ export function meanLeafInclination(data: MeshData): number {
 //
 // The 0xffffffff "outside the grid" sentinel is preserved as-is; the backend
 // maps it back to -1 after decoding.
+//
+// `origin` is the mesh's vertexOffset (lib/meshFrame.ts). Only the GRID meets
+// the QSM's WORLD coordinates, so only the grid is moved into world; the
+// vertices and scan origins are used only relative to each other (facet
+// orientation, outward reference), so they stay in the mesh's own frame, where
+// float32 holds them exactly.
 export function meshToTriangulationInput(
   data: MeshData,
+  origin: readonly number[] = [0, 0, 0],
 ): LeafAngleTriangulationBuffers | null {
   if (!data.triangleCellIds || !data.grid) return null;
   const grid: QSMGrid = {
-    center: data.grid.center,
+    center: [
+      data.grid.center[0] + origin[0],
+      data.grid.center[1] + origin[1],
+      data.grid.center[2] + origin[2],
+    ],
     size: data.grid.size,
     nx: data.grid.nx,
     ny: data.grid.ny,

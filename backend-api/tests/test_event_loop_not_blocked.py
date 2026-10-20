@@ -148,6 +148,55 @@ def test_no_async_function_takes_the_session_lock_on_the_event_loop():
     )
 
 
+def _session_lock_takers(tree):
+    """Names of the module-level sync functions that take `_cloud_session_lock`,
+    directly or through any chain of calls to one that does."""
+    sync = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    takers = {
+        name for name, fn in sync.items()
+        if any(isinstance(node, ast.With) and any(
+            "_cloud_session_lock" in ast.unparse(item.context_expr)
+            for item in node.items) for node in ast.walk(fn))
+    }
+    calls = {
+        name: {node.func.id for node in ast.walk(fn)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        for name, fn in sync.items()
+    }
+    grew = True
+    while grew:
+        grew = False
+        for name, callees in calls.items():
+            if name not in takers and callees & takers:
+                takers.add(name)
+                grew = True
+    return takers
+
+
+def test_no_async_function_calls_a_session_lock_taker_on_the_event_loop():
+    """The `with` check above only sees the lock written in the async body. A
+    CALL to a function that takes it stalls the loop just the same - and
+    `_get_cloud_session` does worse than take it: a spilled session is read back
+    from disk (hundreds of MB) and the restore sweeps, which can spill another.
+    Six session handlers did exactly that in their first statement. Pass the
+    function to `await run_in_threadpool(fn, ...)` instead of calling it."""
+    tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
+    takers = _session_lock_takers(tree)
+    assert "_get_cloud_session" in takers  # the analysis itself still works
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.AsyncFunctionDef):
+            continue
+        for node in _loop_thread_statements(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in takers):
+                offenders.append(f"{fn.name} calls {node.func.id}() (line {node.lineno})")
+    assert offenders == [], (
+        "these call a function that takes _cloud_session_lock on the event "
+        "loop thread:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_the_heavy_handlers_are_threadpooled():
     """Spot-check the routes that actually carry the load."""
     by_path = {p: (n, a) for p, n, a, _ in _route_handlers()}

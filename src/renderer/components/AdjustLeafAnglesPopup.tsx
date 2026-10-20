@@ -4,6 +4,7 @@ import { QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers } from '
 import type { QSMEntry, MeshEntry } from '../lib/pointCloudTypes';
 import { meshCellIds } from '../lib/leafAngleDistribution';
 import { eligibleLeafAngleMeshes, meshToTriangulationInput } from '../lib/adjustLeafAngles';
+import { meshVertexOffset } from '../lib/meshFrame';
 
 interface AdjustLeafAnglesPopupProps {
   isOpen: boolean;
@@ -52,7 +53,7 @@ export function AdjustLeafAnglesPopup({
       setError('Select a triangulation to match');
       return;
     }
-    const triangulation = meshToTriangulationInput(selectedMesh.data);
+    const triangulation = meshToTriangulationInput(selectedMesh.data, meshVertexOffset(selectedMesh));
     if (!triangulation) {
       setError('The selected mesh has no grid / cell ids');
       return;
