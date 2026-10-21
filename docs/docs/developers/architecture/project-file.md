@@ -100,7 +100,19 @@ reproduce it:
   (`octree_pose`, a transform the renderer applies on top) is a different
   picture than a rebuild would give, and the saved renderer state is written
   against that picture. On open each is installed into the cache under the
-  same content address, unless it is already there.
+  same content address, unless it is already there. An id that one session
+  could regenerate but another draws as-is is embedded too: a split child
+  drawn from its parent's octree (`extract_by_column` with
+  `build_children: false`) holds the parent's current id as its `rendered`
+  one, and a regenerated octree would come back under a new id the child
+  does not know.
+
+A cloud saved while its background refresh was still pending (its edit state
+has a crop in `pendingDeletes`, or `committedFilters`) reopens drawing the
+embedded old octree under the same mask, and `applyOpenedProject` queues that
+refresh once the clouds are in the scene; nothing else would, short of another
+edit. An erase (`squares_union`) is left alone: it never queues a refresh, and
+one would end its undo history.
 
 An octree missing at save time, for example evicted from the cache, is
 simply left out. The cloud's session is the source of truth, and the octree

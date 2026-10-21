@@ -6,6 +6,8 @@ import { BakeQueue } from '../lib/pendingBakes';
 import { isTypingTarget } from '../lib/keyboardFocus';
 import { shouldDeferOctreeRebuild } from '../lib/deferOctreeRebuild';
 import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
+import { classViewFilters } from '../lib/octreeFilterSpec';
+import { octreeMaskStatsKey } from './viewer/renderers/octreeCropMask';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
@@ -3096,6 +3098,20 @@ export default function PointCloudViewer({
   }, []);
   const handleOctreeDrawn = useCallback((cloudId: string, cacheId: string) => {
     drawnCacheIdRef.current.set(cloudId, cacheId);
+    // A split child drawn from its parent's octree has just been drawn from
+    // something else — its own octree, built by an edit's refresh or by
+    // missing-octree recovery — so its class mask has nothing left to hide.
+    // Cleared on DRAW, not on install, for the reason `handoverMasks` exists.
+    if (editStatesRef.current.get(cloudId)?.drawnFrom?.cacheId
+        && editStatesRef.current.get(cloudId)?.drawnFrom?.cacheId !== cacheId) {
+      setEditStates((prev) => {
+        const cur = prev.get(cloudId);
+        if (!cur?.drawnFrom || cur.drawnFrom.cacheId === cacheId) return prev;
+        const next = new Map(prev);
+        next.set(cloudId, { ...cur, drawnFrom: undefined });
+        return next;
+      });
+    }
     setHandoverMasks((prev) => {
       const hold = prev.get(cloudId);
       if (!hold || hold.releaseOnCacheId !== cacheId) return prev;
@@ -3110,7 +3126,20 @@ export default function PointCloudViewer({
       next.delete(cloudId);
       return next;
     });
-  }, []);
+  }, [setEditStates]);
+  // Give a split child that came back `drawn_from_parent` its class mask over
+  // the parent's octree (see `CloudEditState.drawnFrom`).
+  const markDrawnFromParent = useCallback((
+    cloudId: string, parentCacheId: string, slug: string, value: number,
+  ) => {
+    setEditStates((prev) => {
+      const next = new Map(prev);
+      const cur = next.get(cloudId)
+        ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+      next.set(cloudId, { ...cur, drawnFrom: { cacheId: parentCacheId, filters: classViewFilters(slug, value) } });
+      return next;
+    });
+  }, [setEditStates]);
   const labelCommitSeqRef = useRef(0);
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
@@ -8318,7 +8347,8 @@ export default function PointCloudViewer({
       let drawn = 0;
       let full = 0;
       for (const cloud of filterTargetClouds) {
-        const id = cloud.data.octree?.cacheId;
+        const id = octreeMaskStatsKey(
+          cloud.data.octree?.cacheId, cloud.id, !!editStates.get(cloud.id)?.drawnFrom);
         const s = id ? byCloud[id] : undefined;
         if (!s) continue;
         drawn += s.drawn;
@@ -8329,7 +8359,7 @@ export default function PointCloudViewer({
     sample();
     const t = setInterval(sample, 250);
     return () => clearInterval(t);
-  }, [showFilterPanel, filterTargetClouds]);
+  }, [showFilterPanel, filterTargetClouds, editStates]);
 
   // A cloud's filters with every field present at its full extent and disabled.
   // Used to seed the panel and to give a sibling scan (never opened in the
@@ -15684,15 +15714,15 @@ export default function PointCloudViewer({
         }
         const baseName = cloud.data.fileName ?? id;
         const sessionId = octreeInfo.sessionId;
-        // When we're about to split, DEFER the parent's octree rebuild: it is the
-        // single biggest cost of the whole run (measured 11.5 s on 1.2 M points,
-        // against 4.4 s for the entire 2-way split) and it used to run alone, to
-        // completion, before the children even started. The split below builds
-        // only the children, and the parent (hidden once the split lands) is
-        // rebuilt afterwards by the background refresh queue: measured at 10 M
-        // points, 7.7 s for the children alone against 11.3 s with the parent
-        // in the same pool, whose builds compete for the same cores.
         const willSplit = groundSplitClouds && !!onAddCloud;
+        // When splitting, the parent's octree is DEFERRED to the split, which
+        // builds it once, WITH the ground_class column, concurrently with
+        // slicing the children, and draws the children from it through a class
+        // mask instead of converting each (see `drawnFrom`). Measured on the
+        // 45.7 M-point scan: ~N points converted where children-then-parent
+        // converted ~2N. The split's own wait is about what building the
+        // children took (~24-26 s either way); what goes is the parent's ~24 s
+        // background rebuild, which used to compete with whatever came next.
         const meta = await sessionSegmentGround(
           sessionId, { ...csfParams, defer_octree: willSplit, acknowledge_cost: acknowledgeCost },
           abort.signal);
@@ -15721,9 +15751,10 @@ export default function PointCloudViewer({
         if (willSplit) {
           setGroundSplitProgress({ label: splitLabel(), value: null });
           groundSplitRunIdRef.current = null;
-          const { children } = await sessionExtractByColumn(sessionId, GROUND_CLASS_ATTRIBUTE, {
+          const { children, parent } = await sessionExtractByColumn(sessionId, GROUND_CLASS_ATTRIBUTE, {
             includeMisses: true,
-            rebuildParent: false,
+            rebuildParent: true,
+            buildChildren: false,
             signal: abort.signal,
             onProgress: (value, message) => setGroundSplitProgress({
               label: splitLabel(message),
@@ -15753,11 +15784,10 @@ export default function PointCloudViewer({
             // default happens to be, which on a height/scalar scene is two
             // indistinguishable gradients rather than the classes they are.
             setCloudColorMode(childId, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
+            if (c.drawn_from_parent) markDrawnFromParent(childId, c.cache_id, GROUND_CLASS_ATTRIBUTE, c.value);
           }
-          // The parent's octree still predates the ground_class column (the
-          // segmentation deferred it, and the backend marked it stale). Queue
-          // the rebuild; the refresh runner installs it when it lands.
-          octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+          // The parent's octree, built by the split with the column in it.
+          if (parent) onUpdateCloud(id, buildSessionOctreeData(parent, octreeInfo, baseName));
           // The parent still holds every point, so leaving it visible draws the
           // whole cloud on top of the children that were just split out of it —
           // z-fighting mush instead of a visible separation.
@@ -16582,9 +16612,12 @@ export default function PointCloudViewer({
         if (willSplit) {
           setWoodProgress({ label: 'Splitting into wood + leaf clouds…', value: null });
           woodSplitRunIdRef.current = null;
-          const { children } = await sessionExtractByColumn(sessionId, WOOD_CLASS_ATTRIBUTE, {
+          // The split builds the parent's octree with wood_class and draws the
+          // children from it — see the ground split.
+          const { children, parent } = await sessionExtractByColumn(sessionId, WOOD_CLASS_ATTRIBUTE, {
             includeMisses: true,
-            rebuildParent: false,
+            rebuildParent: true,
+            buildChildren: false,
             signal,
             onProgress: (value, message) => setWoodProgress({
               label: message || 'Splitting into wood + leaf clouds…',
@@ -16611,9 +16644,9 @@ export default function PointCloudViewer({
             // legend is built only from VISIBLE clouds, so hiding the parent
             // below would otherwise take the Wood / Leaf legend with it.
             setCloudColorMode(childId, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
+            if (c.drawn_from_parent) markDrawnFromParent(childId, c.cache_id, WOOD_CLASS_ATTRIBUTE, c.value);
           }
-          // Queue the parent's rebuild in the background, as the ground split does.
-          octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+          if (parent) onUpdateCloud(id, buildSessionOctreeData(parent, octreeInfo, baseName));
           // The parent still holds every point, so leaving it visible draws the
           // whole cloud on top of the two halves just split out of it.
           if (children.length > 0) onHideScan(id);
@@ -22322,6 +22355,22 @@ export default function PointCloudViewer({
       setLabelCommitHolds(new Map([...v.labelCommitHolds].map(([id, h]: [string, any]) =>
         [id, { ...h, failed: true, releaseOnCacheId: undefined }])));
     }
+    // A cloud saved while its display refresh was still pending (a crop or a
+    // Remove-points mask over the old octree) reopens drawing that octree
+    // under the same mask. Nothing else would ever queue the rebuild — only a
+    // new edit does — so queue it here, once the clouds are in. An ERASE is
+    // left alone: it never queues a refresh (the user bakes it, and until then
+    // it stays undoable), and a refresh would end its undo history.
+    const editStatesOpened = (sc as { editStates?: Map<string, CloudEditState> }).editStates;
+    const scansOpened = (sc as { scans?: { id: string; data?: PointCloudData }[] }).scans ?? [];
+    openedRefreshRef.current = scansOpened.flatMap((s) => {
+      const sid = s.data?.octree?.sessionId;
+      const e = editStatesOpened?.get(s.id);
+      const refreshPending = !!e?.committedFilters
+        || (e?.pendingDeletes ?? []).some((r) => r.kind !== 'squares_union');
+      return sid && refreshPending
+        ? [{ cloudId: s.id, sessionId: sid }] : [];
+    });
     if (v.treeInventoryEdits) setTreeInventoryEdits(v.treeInventoryEdits);
     if (v.treeQsm) setTreeQsm(v.treeQsm);
     if (v.standSettings) setStandSettings(v.standSettings);
@@ -22345,6 +22394,19 @@ export default function PointCloudViewer({
         : `Opened ${p.path.split(/[\\/]/).pop()}.`,
     });
   }
+
+  // Clouds an opened project left with a pending display refresh (see
+  // applyOpenedProject), queued once they are actually in the scene: the
+  // refresh runner skips a cloud it cannot find.
+  const openedRefreshRef = useRef<{ cloudId: string; sessionId: string }[]>([]);
+  useEffect(() => {
+    const pending = openedRefreshRef.current;
+    if (pending.length === 0) return;
+    const present = new Set(scans.map((c) => c.id));
+    if (!pending.every((p) => present.has(p.cloudId))) return;
+    openedRefreshRef.current = [];
+    for (const p of pending) octreeRefreshQueueRef.current?.enqueue(p.cloudId, p.sessionId);
+  }, [scans]);
 
   // The saved camera, once the reopened content is in the scene (so the
   // display offset is final and the new-content auto-frame has nothing to do).
@@ -24170,6 +24232,9 @@ export default function PointCloudViewer({
                   // ...and past it, until the rebuilt octree is actually drawn
                   // (see `handoverMasks`).
                   handoverFilters={handoverMasks.get(cloud.id)?.filters ?? null}
+                  // A split child still drawn from its parent's octree, masked
+                  // to its own class (see `CloudEditState.drawnFrom`).
+                  viewFilters={getEditState(cloud.id).drawnFrom?.filters ?? null}
                   // Live labeling preview — only for the cloud being labeled.
                   // Live labeling preview. Per CLOUD, not "the cloud the panel
                   // is open on": a committed-but-unbaked hold keeps painting

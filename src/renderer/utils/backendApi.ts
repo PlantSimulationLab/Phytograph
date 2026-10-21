@@ -3853,7 +3853,12 @@ export async function fetchJsonWithProgress<T>(
     if (!response.ok) {
       clearTimeout(timeoutId);
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+      // `status` lets a caller tell a refusal it can route around (a 409) from
+      // a real failure without matching on the message text.
+      throw Object.assign(
+        new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`),
+        { status: response.status },
+      );
     }
     if (!response.body) {
       // No streaming body available — strip any leading markers/whitespace from
@@ -5416,6 +5421,9 @@ export type SessionExtractChild = OctreeMetadata & {
   session_id: string;
   point_count: number;
   cache_id: string;
+  // True when the child has no octree of its own and `cache_id` is the PARENT's:
+  // the caller must mask it to `value` (see `buildChildren`).
+  drawn_from_parent?: boolean;
 };
 
 /** Split a categorical column into ONE child session per distinct value (parent
@@ -5439,6 +5447,12 @@ export async function sessionExtractByColumn(
     // rebuild — the biggest single cost of classify-then-split — overlaps the
     // children's instead of running alone to completion first.
     rebuildParent?: boolean;
+    // false: build no child octrees; each child comes back `drawn_from_parent`,
+    // pointing at the parent's octree, and the caller masks it to its class
+    // until an edit builds it its own. Needs the parent's octree current and
+    // carrying `slug` — when it isn't, the backend refuses (409) and this falls
+    // back to building the children, so the caller never has to care.
+    buildChildren?: boolean;
     signal?: AbortSignal;
     // Per-child build progress ("Building 7 of 42 clouds…"). The split is a
     // minute-scale op on a large plot, so the caller needs a status pill.
@@ -5446,21 +5460,29 @@ export async function sessionExtractByColumn(
     onRunId?: (runId: string) => void;
   },
 ): Promise<{ session_id: string; children: SessionExtractChild[]; parent?: OctreeMetadata & { session_id: string; point_count: number; cache_id: string } }> {
+  type Result = { session_id: string; children: SessionExtractChild[];
+    parent?: OctreeMetadata & { session_id: string; point_count: number; cache_id: string };
+    error?: string };
+  const call = (buildChildren: boolean) => fetchJsonWithProgress<Result>(
+    `/api/cloud/session/${sessionId}/extract_by_column`,
+    { slug, exclude_values: options?.excludeValues ?? null,
+      include_misses: options?.includeMisses ?? false,
+      rebuild_parent: options?.rebuildParent ?? false,
+      build_children: buildChildren },
+    options?.signal,
+    600000,
+    options?.onProgress,
+    options?.onRunId,
+  );
   try {
-    const result = await fetchJsonWithProgress<
-      { session_id: string; children: SessionExtractChild[];
-        parent?: OctreeMetadata & { session_id: string; point_count: number; cache_id: string };
-        error?: string }
-    >(
-      `/api/cloud/session/${sessionId}/extract_by_column`,
-      { slug, exclude_values: options?.excludeValues ?? null,
-        include_misses: options?.includeMisses ?? false,
-        rebuild_parent: options?.rebuildParent ?? false },
-      options?.signal,
-      600000,
-      options?.onProgress,
-      options?.onRunId,
-    );
+    const wantBuild = options?.buildChildren ?? true;
+    let result: Result;
+    try {
+      result = await call(wantBuild);
+    } catch (err) {
+      if (wantBuild || (err as { status?: number }).status !== 409) throw err;
+      result = await call(true);
+    }
     // A build that failed mid-stream reports in the JSON tail (the response is
     // already a 200 by then), so surface it as a real error rather than
     // silently returning zero children.

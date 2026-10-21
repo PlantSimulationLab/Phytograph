@@ -39470,6 +39470,16 @@ class SessionExtractByColumnRequest(BaseModel):
     # and it used to run ALONE and to completion before the children even
     # started. Moving it here overlaps all three builds.
     rebuild_parent: bool = False
+    # False: build NO child octrees. Each child is drawn from the PARENT's octree
+    # through a per-tile class mask (the renderer's `committedFilters`), so the
+    # split converts nothing. A child gets an octree of its own only when an edit
+    # gives it one: it is born stale, and the refresh queue's bake builds it from
+    # the child's own rows. Measured on the 45.7 M-point scan, building the
+    # children was ~N converted points the user waited on, plus another ~N for
+    # the deferred parent in the background. Requires the parent's octree to be
+    # current and to already carry `slug` (409 otherwise; the caller builds),
+    # unless `rebuild_parent` builds it here, concurrently with the slicing.
+    build_children: bool = True
 
 
 # Concurrency cap for the batch octree builds. PotreeConverter is itself
@@ -39546,6 +39556,8 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
 
     sess = _get_cloud_session(session_id)
     exclude = set(int(v) for v in (request.exclude_values if request.exclude_values is not None else [0]))
+    if not request.build_children:
+        return _extract_by_column_as_views(sess, session_id, request, exclude, progress)
     if progress is not None:
         progress(None, "Slicing clouds…")
     children = _slice_children_by_column(sess, request.slug, exclude, request.include_misses)
@@ -39636,6 +39648,131 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
     return out
 
 
+def _parent_view_octree_locked(sess: "CloudSession", slug: str) -> "Optional[str]":
+    """The parent's octree id if children may be drawn from it, else None.
+
+    It must be CURRENT (a stale octree still shows deleted rows, and the child
+    mask would not know to hide them) and must carry the split column (a
+    segmentation that deferred its octree leaves one built before the column
+    existed, and a class mask over it would hide every point). Caller holds
+    `_cloud_session_lock`."""
+    cid = sess.octree_cache_id
+    if not cid or sess.octree_pose is not None:
+        return None
+    meta_path = _octree_cache_root() / cid / "metadata.json"
+    try:
+        attrs = json.loads(meta_path.read_text()).get("attributes") or []
+    except (OSError, ValueError):
+        return None
+    if not any(a.get("name") == slug for a in attrs if isinstance(a, dict)):
+        return None
+    return cid
+
+
+def _extract_by_column_as_views(sess: "CloudSession", session_id: str,
+                                request: SessionExtractByColumnRequest, exclude: set,
+                                progress=None) -> dict:
+    """`extract_by_column` with `build_children=False`: slice the child sessions
+    and point each one at the parent's octree instead of building its own.
+
+    A child is born STALE with `rendered_octree_cache_id` = the parent's octree,
+    which is exactly the state an edited cloud waiting for its refresh is in, so
+    everything downstream already handles it: `_live_session_octree_ids` pins
+    the parent's octree for as long as any child draws from it (even after the
+    parent cloud is deleted), a project save embeds it, and the first edit's
+    bake builds the child its own octree from its own rows.
+
+    With `rebuild_parent` (a segmentation that deferred its octree), the
+    parent's build runs CONCURRENTLY with the slicing and the children's display
+    stats (on the 45.7 M-point scan, 21.5 s for the build against 8.9 s for
+    slicing + stats when run one after the other), so the split waits for
+    roughly the parent's build alone. Measured side by side on that scan, that
+    is about what building the children took (~24-26 s either way, one
+    converter over N against two over N/2 in parallel); the win is the ~24 s
+    background rebuild of the parent that no longer follows. Should an edit
+    race that build, the parent's octree is not one the children can be drawn
+    from, and they are built after all."""
+    from concurrent.futures import ThreadPoolExecutor
+    cancel_event = getattr(progress, "cancel_event", None)
+    if not request.rebuild_parent:
+        with _cloud_session_lock:
+            if _parent_view_octree_locked(sess, request.slug) is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The parent's display is not current or lacks this column; build the children.")
+    if progress is not None:
+        progress(None, "Splitting clouds…")
+    children: "list[tuple[int, CloudSession]]" = []
+    parent_meta: "Optional[dict]" = None
+    out: List[dict] = []
+    try:
+        with ThreadPoolExecutor(max_workers=_EXTRACT_BUILD_POOL) as pool:
+            parent_future = None
+            if request.rebuild_parent:
+                # NOT private: the parent is live and reachable (see `_build_parent`).
+                parent_future = pool.submit(_session_rebuild, sess, cancel_event=cancel_event)
+            children = _slice_children_by_column(sess, request.slug, exclude, request.include_misses)
+            _cancel_checkpoint(progress)
+            # numpy releases the GIL in the per-column passes, so the children's
+            # stats overlap each other and the parent's build.
+            stats = list(pool.map(_session_display_stats, [c for _v, c in children]))
+            if parent_future is not None:
+                ck, ccd, cmeta = parent_future.result()
+                with _cloud_session_lock:
+                    remaining = int((~sess.deleted).sum())
+                parent_meta = {"session_id": session_id, "point_count": remaining,
+                               "cache_id": ck, "cache_dir": str(ccd), **cmeta}
+        _cancel_checkpoint(progress)
+        with _cloud_session_lock:
+            parent_cid = _parent_view_octree_locked(sess, request.slug)
+        if parent_cid is None:
+            # The rebuild lost a race with an edit: build the children instead.
+            for value, child in children:
+                ck, ccd, cmeta = _session_rebuild(child, cancel_event=cancel_event, private=True)
+                out.append({"value": value, "session_id": child.session_id,
+                            "point_count": int(len(child.positions)), "cache_id": ck,
+                            "cache_dir": str(ccd), **cmeta})
+        else:
+            meta = _read_octree_metadata_and_mark_used(_octree_cache_root() / parent_cid)
+            for (value, child), child_stats in zip(children, stats):
+                # Unregistered children are reachable only through this request,
+                # but the registry is shared, so the bookkeeping takes the lock.
+                with _cloud_session_lock:
+                    n_rows = int(len(child.positions))
+                    child.octree_cache_id = parent_cid
+                    _mark_octree_stale_locked(child)
+                    # Every row is drawn (through the mask), so nothing is pending.
+                    child.octree_point_count = n_rows
+                    miss = child.extras.get(_MISS_SLUG)
+                    hit_rows = (np.flatnonzero(np.asarray(miss) == 0) if miss is not None
+                                else slice(None))
+                    hits = np.asarray(child.positions[hit_rows])
+                # The parent's octree holds every class, so its point count and
+                # bounds describe the parent. The renderer shows the child's own.
+                row = {**meta, **child_stats,
+                       "value": value, "session_id": child.session_id,
+                       "point_count": int(hits.shape[0]), "cache_id": parent_cid,
+                       "cache_dir": str(_octree_cache_root() / parent_cid),
+                       "octree_stale": True, "drawn_from_parent": True}
+                if hits.shape[0]:
+                    row["tight_bounds"] = {"min": [float(v) for v in hits.min(axis=0)],
+                                           "max": [float(v) for v in hits.max(axis=0)]}
+                out.append(row)
+    except BaseException:
+        with _cloud_session_lock:
+            for _value, child in children:
+                _cloud_sessions.pop(child.session_id, None)
+        for _value, child in children:
+            _drop_session_spill(child.session_id)
+        raise
+    if progress is not None:
+        progress(1.0, f"Split into {len(out)} clouds")
+    result: dict = {"session_id": session_id, "children": out}
+    if request.rebuild_parent:
+        result["parent"] = parent_meta
+    return result
+
+
 @app.post("/api/cloud/session/{session_id}/extract_by_column")
 def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
                                     http_request: Request):
@@ -39657,6 +39794,13 @@ def session_extract_by_column(session_id: str, request: SessionExtractByColumnRe
     sess = _get_cloud_session(session_id)
     if request.slug not in sess.extras:
         raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {request.slug!r}.")
+    if not request.build_children and not request.rebuild_parent:
+        with _cloud_session_lock:
+            drawable = _parent_view_octree_locked(sess, request.slug) is not None
+        if not drawable:
+            raise HTTPException(
+                status_code=409,
+                detail="The parent's display is not current or lacks this column; build the children.")
 
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -40166,14 +40310,25 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                 entries = []
                 wanted_octrees = list(dict.fromkeys(request.octree_ids))
                 regenerate: set = set()
+                # Ids some session draws AS-IS. One octree can be both: a split
+                # child drawn from its parent's octree (`build_children=False`)
+                # holds the parent's CURRENT id as its stale `rendered` id. The
+                # parent alone would call it regenerable, but open rebuilds it
+                # from the parent under a NEW id and the child, which has no
+                # rebuild of its own to fall back on, would lose its display.
+                embed_as_is: set = set()
                 for i, ((sid, _sess), fields) in enumerate(zip(sessions, snapshots)):
                     _report(0.05 + 0.75 * i / max(1, len(sessions)), f"Saving cloud {i + 1}/{len(sessions)}")
                     entry = pf.write_session(zf, sid, fields, check=lambda: _cancel_checkpoint(progress))
                     entries.append(entry)
+                    own = _project_regenerable_octrees(fields)
                     for k in ("octree_cache_id", "rendered_octree_cache_id", "miss_octree_cache_id"):
                         if fields.get(k):
                             wanted_octrees.append(fields[k])
-                    regenerate.update(_project_regenerable_octrees(fields))
+                            if fields[k] not in own:
+                                embed_as_is.add(fields[k])
+                    regenerate.update(own)
+                regenerate -= embed_as_is
                 for j, cid in enumerate(dict.fromkeys(wanted_octrees)):
                     if cid in regenerate:
                         continue
@@ -40516,13 +40671,14 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     # Cost gate, BEFORE the worker is spawned: a cloth too fine for the extent
     # is refused outright (it is a hang, not a slowdown), and a run past the
     # time / memory guideline answers 409 so the user can decide. The rebuild
-    # term counts the parent (and, when a split follows, its two children too,
-    # which together hold the parent's points again).
+    # term counts the parent only: a split that follows (`defer_octree`) builds
+    # it in `extract_by_column` and draws the children from it, converting
+    # nothing more.
     extent_m = float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
     _refuse_oversized_cloth(extent_m, float(request.cloth_resolution))
     if not request.acknowledge_cost:
         survivors = int(len(hit))
-        rebuild_points = survivors * (2 if request.defer_octree else 1)
+        rebuild_points = survivors
         seconds, bytes_needed, breakdown = _ground_cost_estimate(
             len(pts), extent_m, float(request.cloth_resolution),
             int(request.iterations), rebuild_points)

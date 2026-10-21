@@ -17,6 +17,7 @@ Acceptance shape:
     survives onto the derived octree's attributes) — the option-loss regression.
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -1021,6 +1022,138 @@ def test_extract_by_column_rebuild_parent_builds_the_parent_in_the_same_pool(
         json={"slug": "ground_class"}).content)
     assert "parent" not in body2
     assert main._cloud_sessions[sid2].octree_cache_id == untouched
+
+
+def _ground_classed_session(client, grid_xyz, *, rebuild: bool = True) -> str:
+    """A session with a 400/600 `ground_class` column, its octree rebuilt to
+    carry the column (as a non-deferred segmentation leaves it) unless not."""
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    labels = np.zeros(1000, dtype=np.float32)
+    labels[0:400] = 1
+    labels[400:1000] = 2
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "ground_class",
+                                       "Ground Class", labels)
+    if rebuild:
+        res = client.post(f"/api/cloud/session/{sid}/rebuild_octree", json={})
+        assert res.status_code == 200, res.text
+    return sid
+
+
+def test_extract_by_column_without_child_builds_draws_children_from_the_parent(
+        client, cache_root, grid_xyz, monkeypatch):
+    """`build_children=False` slices real child sessions but converts NOTHING:
+    each child is born stale and drawn from the parent's octree, which it pins.
+
+    This is the whole saving of the split. On the 45.7 M-point scan building
+    the children was ~N converted points the user waited on, plus ~N more for
+    the deferred parent."""
+    sid = _ground_classed_session(client, grid_xyz)
+    parent_cid = main._cloud_sessions[sid].octree_cache_id
+
+    conversions = []
+    orig = main._run_potree_converter
+    monkeypatch.setattr(main, "_run_potree_converter",
+                        lambda *a, **k: (conversions.append(1), orig(*a, **k))[1])
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "ground_class", "build_children": False})
+    assert res.status_code == 200, res.text
+    children = decode_streamed_json(res.content)["children"]
+    assert conversions == []
+
+    assert [c["value"] for c in children] == [1, 2]
+    # The child's OWN count, not the parent octree's 1000.
+    assert [c["point_count"] for c in children] == [400, 600]
+    for c in children:
+        assert c["drawn_from_parent"] is True
+        assert c["cache_id"] == parent_cid
+        child = main._cloud_sessions[c["session_id"]]
+        # Stale, drawing the parent's octree: the state an edited cloud waiting
+        # for its refresh is in, so eviction and project save already pin it.
+        assert child.octree_cache_id is None
+        assert child.rendered_octree_cache_id == parent_cid
+        assert main._pending_deleted_count_locked(child) == 0
+        # Bounds are the child's, not the parent's.
+        pos = child.positions
+        assert c["tight_bounds"]["min"] == pytest.approx(pos.min(axis=0).tolist())
+        assert c["tight_bounds"]["max"] == pytest.approx(pos.max(axis=0).tolist())
+    # The parent is untouched.
+    assert main._cloud_sessions[sid].octree_cache_id == parent_cid
+
+    # Deleting the parent cloud must not let eviction take the octree its
+    # children are still drawn from.
+    assert client.delete(f"/api/cloud/session/{sid}").status_code == 200
+    main._evict_octree_cache(max_bytes=1)
+    assert (cache_root / parent_cid / "metadata.json").is_file()
+
+    # The first refresh (what any edit to the child queues) builds the child an
+    # octree of its own, from its own rows only.
+    child_sid = children[0]["session_id"]
+    out = decode_streamed_json(
+        client.post(f"/api/cloud/session/{child_sid}/bake?compact=false").content)
+    assert out["cache_id"] != parent_cid
+    assert out["point_count"] == 400
+    assert main._cloud_sessions[child_sid].octree_cache_id == out["cache_id"]
+    assert main._cloud_sessions[child_sid].rendered_octree_cache_id is None
+
+
+def test_extract_by_column_without_child_builds_rebuilds_a_deferred_parent_once(
+        client, cache_root, grid_xyz, monkeypatch):
+    """The split as the renderer runs it after a DEFERRED segmentation: the
+    parent's octree predates the class column, so `rebuild_parent` builds it
+    (concurrently with the slicing) and the children are drawn from THAT. One
+    conversion in total, where building the children and the parent was three."""
+    sid = _ground_classed_session(client, grid_xyz, rebuild=False)
+    stale_cid = main._cloud_sessions[sid].octree_cache_id
+
+    conversions = []
+    orig = main._run_potree_converter
+    monkeypatch.setattr(main, "_run_potree_converter",
+                        lambda *a, **k: (conversions.append(1), orig(*a, **k))[1])
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "ground_class", "build_children": False,
+                            "rebuild_parent": True})
+    assert res.status_code == 200, res.text
+    body = decode_streamed_json(res.content)
+    assert len(conversions) == 1
+
+    parent = body["parent"]
+    assert parent["cache_id"] != stale_cid
+    assert parent["point_count"] == 1000
+    assert main._cloud_sessions[sid].octree_cache_id == parent["cache_id"]
+    attrs = json.loads((cache_root / parent["cache_id"] / "metadata.json").read_text())["attributes"]
+    assert any(a["name"] == "ground_class" for a in attrs)
+
+    assert [c["point_count"] for c in body["children"]] == [400, 600]
+    for c in body["children"]:
+        assert c["drawn_from_parent"] is True
+        assert c["cache_id"] == parent["cache_id"]
+        assert main._cloud_sessions[c["session_id"]].rendered_octree_cache_id == parent["cache_id"]
+
+
+def test_extract_by_column_without_child_builds_refuses_a_parent_octree_it_cannot_mask(
+        client, cache_root, grid_xyz):
+    """The children are masked by the split column, so the parent's octree must
+    be current AND carry that column. An octree from before the column existed
+    (a deferred segmentation) would hide every point; a stale one would show
+    deleted rows. Both are a 409 the renderer answers by building the children,
+    and neither leaks a child session."""
+    sid = _ground_classed_session(client, grid_xyz, rebuild=False)
+    before = set(main._cloud_sessions)
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "ground_class", "build_children": False})
+    assert res.status_code == 409, res.text
+
+    sid2 = _ground_classed_session(client, grid_xyz)
+    res = client.post(f"/api/cloud/session/{sid2}/delete_region", json={"region": BOX})
+    assert res.status_code == 200, res.text
+    res = client.post(f"/api/cloud/session/{sid2}/extract_by_column",
+                      json={"slug": "ground_class", "build_children": False})
+    assert res.status_code == 409, res.text
+    assert set(main._cloud_sessions) - before == {sid2}
 
 
 def test_extract_by_column_on_empty_selection_returns_no_children(client, cache_root, grid_xyz):

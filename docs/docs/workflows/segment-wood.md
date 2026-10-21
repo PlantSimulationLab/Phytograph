@@ -117,6 +117,10 @@ each other. Tick its eye icon in the scan list to bring it back. Run skeleton
 extraction or QSM building on the `… (wood)` cloud alone; if you chose **Remove
 wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
 
+As with the ground split, the `… (wood)` and `… (leaf)` clouds appear without
+building a display of their own: each is drawn from the original's, showing
+only its class, until the first edit to it builds its own in the background.
+
 !!! note "How accurate is it?"
     Measured on 59 hand-labeled real trees that no method was tuned or
     trained on (tropical, temperate and boreal), **Machine learning** labels

@@ -187,3 +187,16 @@ function filterSpecKey(clauses: readonly FilterClause[]): string {
     })
     .join('&');
 }
+
+/**
+ * Filters that keep only class `value` of the categorical column `slug`: the
+ * mask a split child is drawn through while it shares its parent's octree
+ * (`CloudEditState.drawnFrom`).
+ */
+export function classViewFilters(slug: string, value: number): CloudFilters {
+  const off = { min: 0, max: 0, enabled: false };
+  return {
+    x: off, y: off, z: off,
+    scalarFields: { [slug]: { min: value, max: value, enabled: true, selectedClasses: [value] } },
+  };
+}

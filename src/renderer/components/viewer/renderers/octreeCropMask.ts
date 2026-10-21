@@ -327,6 +327,18 @@ export function clearCropMaskFromVisibleNodes(octree: any, cacheId?: string): vo
  * shows neither. Mirrors the existing `__octreeCropHidden` hook's convention of
  * publishing a narrow fact rather than handing out the scene graph.
  */
+/**
+ * The `__octreeMaskByCloud` key for one drawn octree: its cache id, unless the
+ * cloud shares that octree with others (a split child drawn from its parent,
+ * `sharesOctree`), when the cloud id is appended so each mask gets its own slot.
+ */
+export function octreeMaskStatsKey(
+  cacheId: string | undefined, cloudId: string | undefined, sharesOctree: boolean,
+): string | undefined {
+  if (!cacheId) return undefined;
+  return sharesOctree && cloudId ? `${cacheId}#${cloudId}` : cacheId;
+}
+
 export function publishCropMaskStats(octree: any, cacheId?: string): void {
   if (!octree) return;
   // E2E seam: hide only the point tiles, leaving the crop overlay and all other

@@ -662,15 +662,47 @@ mask in the same state update that installs the rebuilt octree. A second
 filter on a cloud whose rebuild is still queued waits for it to settle
 first, because the rebuilt octree is what the next mask must be drawn over.
 
-The ground and wood/leaf splits follow the same rule for their parent. The
-segmentation defers the parent's octree (`defer_octree`) and now marks it
-stale, and the split builds only the children (`rebuild_parent: false`). The
-renderer then queues the parent's rebuild on the refresh queue; the parent is
-hidden once the split lands, so nothing waits on it. Measured at 10 M points,
-the children alone take 7.7 s against 11.3 s with the parent in the same
-build pool, where the three converter runs compete for the same cores. The
-stale mark is load-bearing: without it the queued bake would see no deletions,
-take its fast path and hand back the pre-column octree as current.
+### Split children are drawn from the parent's octree
+
+The ground and wood/leaf splits build no child octrees. The segmentation
+defers the parent's octree (`defer_octree`), and `extract_by_column` runs with
+`rebuild_parent: true, build_children: false`: it builds the parent's octree
+once, with the class column in it, CONCURRENTLY with slicing the real child
+sessions (compute and export need them) and measuring their display stats,
+then points each child at the parent's octree. If an edit races that build,
+the parent's octree is not one the children can be drawn from, and they are
+built after all.
+
+Measured on the 45.7 M-point test scan (`test_large_cloud_bench.py`, stages
+`split_by_ground_class` vs `split_by_ground_class_built`, plus an alternating
+A/B run): the split converts ~N points instead of ~2N. Its own wait is about
+what building the children took (~24-26 s either way, since one converter run
+over N is no faster than two over N/2 in parallel); what disappears is the
+~24 s background rebuild of the hidden parent that used to follow it. A child is born in
+exactly the state of an edited cloud whose refresh is pending —
+`octree_cache_id` None, `rendered_octree_cache_id` = the parent's octree — so
+the existing machinery covers it: `_live_session_octree_ids` pins the parent's
+octree for as long as any child draws it (even after the parent cloud is
+deleted), a project save embeds it, and the first edit's background refresh
+bakes the child its own octree from its own rows. Never-edited children are
+never converted.
+
+The renderer draws each child through `CloudEditState.drawnFrom` — the
+parent's cache id plus a class filter on the same per-tile mask as
+`committedFilters` (`classViewFilters`). It is cleared in `handleOctreeDrawn`,
+the first time an octree other than the parent's is *drawn* for that cloud,
+so the other class never flashes back during a handover. Because several
+clouds now share one octree id, a shared octree's mask stats publish under
+`<cacheId>#<cloudId>` (`octreeMaskStatsKey`), not the bare cache id. A project
+save embeds any octree some session draws as-is even when another session
+could regenerate it, since regenerating gives it a new id the children don't
+know.
+
+The trade: until a child has its own octree, it spends the parent's LOD
+budget on tiles where the other class is masked out, so it draws sparser at a
+distance. The per-tree split keeps building its children — dozens of clouds,
+each drawing a full copy of the parent's tiles, would cost more than the
+conversion saves.
 
 
 ## PyHelios streaming and bulk APIs (helios-core v1.3.86)

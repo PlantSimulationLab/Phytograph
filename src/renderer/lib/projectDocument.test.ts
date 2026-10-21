@@ -4,6 +4,7 @@ import {
   encodeProjectScene, decodeProjectScene, toDocValue, fromDocValue, rewireOpenedScene, sceneBackendRefs,
   remapInventoryStateKey, CHUNK_ITEMS, PROJECT_SCENE_MAGIC,
 } from './projectDocument';
+import { classViewFilters } from './octreeFilterSpec';
 
 describe('scene document round trip', () => {
   it('keeps typed arrays, Maps, Sets, NaN and nesting exactly', () => {
@@ -68,6 +69,17 @@ describe('scene document round trip', () => {
     const buffers: Float32Array[] = [];
     const v = toDocValue({ label: '$buf', note: { $bufx: 1 } }, buffers);
     expect(fromDocValue(v, buffers)).toEqual({ label: '$buf', note: { $bufx: 1 } });
+  });
+});
+
+describe('split child drawn from its parent', () => {
+  it('keeps its class mask and the parent octree it is drawn from', () => {
+    const drawnFrom = { cacheId: 'parent-oct', filters: classViewFilters('ground_class', 1) };
+    const doc = { editStates: new Map([['child', {
+      erasedIndices: new Set<number>(), translation: { x: 0, y: 0, z: 0 }, drawnFrom,
+    }]]) };
+    const back = decodeProjectScene(encodeProjectScene(doc)) as typeof doc;
+    expect(back.editStates.get('child')!.drawnFrom).toEqual(drawnFrom);
   });
 });
 

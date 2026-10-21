@@ -17,6 +17,7 @@ import {
   visibilityMaskKey,
   type CropMaskRule,
   publishCropMaskStats,
+  octreeMaskStatsKey,
 } from './octreeCropMask';
 import {
   applyLabelOverlayToVisibleNodes,
@@ -144,6 +145,11 @@ export interface OctreePointCloudProps {
    * on screen. ANDed in like `committedFilters` until the handover attaches.
    */
   handoverFilters?: CloudFilters | null;
+  /**
+   * A split child drawn from its PARENT's octree (`CloudEditState.drawnFrom`):
+   * the class mask that keeps only its own points. ANDed in like the others.
+   */
+  viewFilters?: CloudFilters | null;
   /**
    * Live manual-labeling preview, read through a REF.
    *
@@ -420,6 +426,7 @@ export function OctreePointCloud({
   filters = null,
   committedFilters = null,
   handoverFilters = null,
+  viewFilters = null,
   translation,
   rotation,
   pivot,
@@ -1255,7 +1262,11 @@ export function OctreePointCloud({
   // restores full density. The cleanup runs on unmount and on every key change,
   // which is what un-hides points rather than leaving an earlier mask behind.
   const cropMaskRules = cropMask ?? EMPTY_CROP_MASK;
-  const cacheId = data.octree?.cacheId;
+  // The key this instance's mask stats publish under. Normally the octree id;
+  // a split child drawn from its parent's octree shares that id with its
+  // siblings, and one slot for several masks would hand each the other's
+  // counts (and its empty-filter LOD skip).
+  const cacheId = octreeMaskStatsKey(data.octree?.cacheId, labelStatsId, !!viewFilters);
 
   // The filter preview, DEBOUNCED. The panel commits a new range on every
   // keystroke (so a flat cloud previews as you type), which for an octree would
@@ -1267,23 +1278,32 @@ export function OctreePointCloud({
     () => mergeOctreeFilterSpecs(
       resolveOctreeFilterSpec(filters, octree),
       mergeOctreeFilterSpecs(
-        resolveOctreeFilterSpec(committedFilters, octree),
-        resolveOctreeFilterSpec(handoverFilters, octree),
+        mergeOctreeFilterSpecs(
+          resolveOctreeFilterSpec(committedFilters, octree),
+          resolveOctreeFilterSpec(handoverFilters, octree),
+        ),
+        resolveOctreeFilterSpec(viewFilters, octree),
       ),
     ),
-    [filters, committedFilters, handoverFilters, octree],
+    [filters, committedFilters, handoverFilters, viewFilters, octree],
   );
-  const [filterSpec, setFilterSpec] = useState(EMPTY_FILTER_SPEC);
+  // Born with the masks that are not a typing preview: a split child drawn
+  // from its parent's octree must never show the parent's other classes, not
+  // even for one debounce interval.
+  const [filterSpec, setFilterSpec] = useState(() => liveFilterSpec);
+  const hasLivePreview = !!filters && resolveOctreeFilterSpec(filters, null).clauses.length > 0;
   useEffect(() => {
     // Clearing is applied immediately: restoring hidden points is what the user
-    // is waiting to see, and it costs a setIndex(null) per tile.
-    if (liveFilterSpec.clauses.length === 0) {
-      setFilterSpec(EMPTY_FILTER_SPEC);
+    // is waiting to see, and it costs a setIndex(null) per tile. So is a mask
+    // with no live preview in it (committed, handover, view): those change on
+    // an edit or a swap, never per keystroke, and are already the truth.
+    if (liveFilterSpec.clauses.length === 0 || !hasLivePreview) {
+      setFilterSpec(liveFilterSpec.clauses.length === 0 ? EMPTY_FILTER_SPEC : liveFilterSpec);
       return;
     }
     const t = setTimeout(() => setFilterSpec(liveFilterSpec), FILTER_PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [liveFilterSpec]);
+  }, [liveFilterSpec, hasLivePreview]);
 
   // ONE mask, two clause sources — see the header of octreeCropMask.ts. The key
   // covers both, so a change to either re-masks and an empty stack restores full

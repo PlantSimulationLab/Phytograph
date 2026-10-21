@@ -223,6 +223,56 @@ def test_stale_octree_is_still_embedded(client, cache_root, tmp_path):
     assert created["cache_id"] not in manifest["regenerate"]
 
 
+def test_an_octree_split_children_are_drawn_from_is_embedded_once(client, cache_root, tmp_path):
+    """Children split with `build_children=False` draw the PARENT's current
+    octree. The parent alone would call that octree regenerable and leave it
+    out, but open rebuilds a regenerated octree under a NEW id, and the
+    children (whose stale `rendered` id names the old one) would reopen with
+    nothing to draw. So it travels in the file, once, and every reopened
+    session still names it."""
+    f, _pts = _cloud_file(tmp_path)
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)
+    sid = created["session_id"]
+    labels = np.where(_pts[:, 2] < 5, 1, 2).astype(np.float32)
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "ground_class", "Ground Class", labels)
+    _post_stream(client, f"/api/cloud/session/{sid}/rebuild_octree", {})
+    parent_cid = main._cloud_sessions[sid].octree_cache_id
+    children = _post_stream(client, f"/api/cloud/session/{sid}/extract_by_column",
+                            {"slug": "ground_class", "build_children": False})["children"]
+    assert len(children) == 2 and all(c["cache_id"] == parent_cid for c in children)
+
+    up = client.post("/api/project/scene", content=b"scene",
+                     headers={"Content-Type": "application/octet-stream"})
+    target = tmp_path / "split.phyto"
+    saved = _post_stream(client, "/api/project/save", {
+        "path": str(target), "scene_token": up.json()["token"],
+        "session_ids": [sid] + [c["session_id"] for c in children],
+        "octree_ids": [parent_cid]})
+    assert saved["success"], saved
+    with zipfile.ZipFile(target) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["octrees"] == [parent_cid]
+    assert parent_cid not in manifest["regenerate"]
+
+    # Another machine: the cache is gone, and the embedded copy is what opens.
+    for s in [sid] + [c["session_id"] for c in children]:
+        client.delete(f"/api/cloud/session/{s}")
+    import shutil
+    shutil.rmtree(cache_root)
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"], opened
+    assert parent_cid not in opened["octree_map"]
+    assert (cache_root / parent_cid / "metadata.json").is_file()
+    assert main._cloud_sessions[opened["session_map"][sid]].octree_cache_id == parent_cid
+    for c in children:
+        reopened = main._cloud_sessions[opened["session_map"][c["session_id"]]]
+        assert reopened.rendered_octree_cache_id == parent_cid
+        assert reopened.octree_cache_id is None
+
+
 # ---- regressions: hangs, concurrent saves, dtype-narrowing undo ------------
 
 def _session_from_xyz(client, tmp_path):

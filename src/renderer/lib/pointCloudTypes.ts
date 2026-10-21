@@ -338,6 +338,16 @@ export interface CloudEditState {
   // in the same commit that swaps the octree in.
   committedFilters?: CloudFilters;
   /**
+   * A split child that has no octree of its own yet and is drawn from its
+   * PARENT's octree (`cacheId`), masked to its own class by `filters`. A split
+   * of a 45 M-point cloud used to convert every child before showing it; now a
+   * child is built only when an edit gives it a reason (the edit's background
+   * refresh builds it from the child's own session). Cleared the first time an
+   * octree other than `cacheId` is DRAWN for this cloud, not when one is
+   * installed, so the other classes never flash back during the handover.
+   */
+  drawnFrom?: { cacheId: string; filters: CloudFilters };
+  /**
    * A COMMITTED transform whose octree has not caught up yet.
    *
    * Distinct from `translation`/`rotation` above, which are a live DRAFT the user

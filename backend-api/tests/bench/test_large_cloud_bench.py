@@ -255,7 +255,7 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
         # the cache-locality and parallelism figures — see normals.py, which
         # explains why multiplying them overstates the result ~5x.
         # `defer_octree` keeps the octree rebuild out of this measurement — it
-        # is measured on its own by `delete_region_and_rebuild` below.
+        # is measured on its own by `background_refresh` below.
         res = client.post(f"/api/cloud/session/{sid}/compute_normals",
                           json={"k": 30, "orientation": "origin",
                                 "defer_octree": True, "acknowledge_cost": True})
@@ -278,19 +278,42 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
         dem_meta, _ = decode_bin_frame(res.content)
         assert dem_meta.get("success", True), dem_meta
 
+    # Split as the UI runs it: segmentation deferred the parent's octree (the
+    # `segment_ground` stage above), and the split builds it once WITH the
+    # ground_class column, concurrently with slicing the children, then draws
+    # the children from it, converting nothing more.
     with stage("split_by_ground_class"):
         res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
                           json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,
-                                "rebuild_parent": True})
+                                "rebuild_parent": True, "build_children": False})
         split = _decode(res)
     assert len(split.get("children", [])) == 2
+    assert all(c.get("drawn_from_parent") for c in split["children"])
+    for c in split["children"]:
+        client.delete(f"/api/cloud/session/{c['session_id']}")
 
-    with stage("delete_region_and_rebuild"):
+    # The split as it used to run, for comparison: both children built plus
+    # the parent (which the UI then rebuilt in the background), ~2N converted.
+    with stage("split_by_ground_class_built"):
+        res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                          json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,
+                                "rebuild_parent": True})
+        built = _decode(res)
+    assert len(built.get("children", [])) == 2
+    for c in built["children"]:
+        client.delete(f"/api/cloud/session/{c['session_id']}")
+
+    # Delete Region as the UI runs it: the mask is all the user waits for (the
+    # renderer hides the points per tile), and the display catches up in the
+    # background through the refresh queue's non-compacting bake.
+    with stage("delete_region"):
         res = client.post(f"/api/cloud/session/{sid}/delete_region",
                           json={"region": {"kind": "box", "min": [0, 0, -10], "max": [10, 10, 10],
                                            "invert": False}})
         assert res.status_code == 200, res.text[:500]
-        res = client.post(f"/api/cloud/session/{sid}/rebuild_octree")
+
+    with stage("background_refresh"):
+        res = client.post(f"/api/cloud/session/{sid}/bake?compact=false")
         assert res.status_code == 200, res.text[:500]
 
     with stage("export_laz"):

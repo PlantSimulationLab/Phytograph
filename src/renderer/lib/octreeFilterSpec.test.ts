@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC, withHiddenLabelClasses } from './octreeFilterSpec';
+import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC, withHiddenLabelClasses, classViewFilters } from './octreeFilterSpec';
+import { octreeMaskStatsKey } from '../components/viewer/renderers/octreeCropMask';
 import { filterValueKeeps } from './pointCloudHelpers';
 import { ORIG_INTENSITY_ATTRIBUTE } from './pointPick';
 import type { CloudFilters } from './pointCloudTypes';
@@ -257,5 +258,36 @@ describe('withHiddenLabelClasses', () => {
     // A new stroke changes the key, so tiles are re-masked.
     expect(withHiddenLabelClasses(EMPTY_FILTER_SPEC, '__label', [2, 0], 'p|s1,s2').key)
       .not.toBe(spec.key);
+  });
+});
+
+describe('classViewFilters', () => {
+  it('keeps exactly one class of the split column and nothing on any axis', () => {
+    const spec = resolveOctreeFilterSpec(classViewFilters('ground_class', 1), null);
+    expect(spec.clauses).toHaveLength(1);
+    const [clause] = spec.clauses;
+    expect(clause.source).toEqual({ kind: 'attribute', slug: 'ground_class' });
+    // Class ids arrive as floats in the tile buffer; rounding is what keeps them.
+    expect([0, 1, 2, 0.9999, 1.0001].map(v => filterValueKeeps(clause.range, v)))
+      .toEqual([false, true, false, true, true]);
+  });
+
+  it('two siblings mask differently, so they never share a mask key', () => {
+    expect(resolveOctreeFilterSpec(classViewFilters('wood_class', 0), null).key)
+      .not.toBe(resolveOctreeFilterSpec(classViewFilters('wood_class', 1), null).key);
+  });
+});
+
+describe('octreeMaskStatsKey', () => {
+  it('is the cache id for a cloud with an octree of its own', () => {
+    expect(octreeMaskStatsKey('abc', 'cloud-1', false)).toBe('abc');
+    expect(octreeMaskStatsKey(undefined, 'cloud-1', true)).toBeUndefined();
+  });
+
+  it('gives each cloud sharing one octree its own slot', () => {
+    const a = octreeMaskStatsKey('parent', 'ground', true);
+    const b = octreeMaskStatsKey('parent', 'plant', true);
+    expect(a).not.toBe(b);
+    expect(a).not.toBe('parent');
   });
 });
