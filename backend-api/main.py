@@ -16905,10 +16905,17 @@ def _apply_return_mode(lidar, scan_id: int, s: "LidarScanScanner",
       - "single": RETURN_MODE_SINGLE, maxReturns=1, selection per request.
       - "multi" : RETURN_MODE_MULTI, maxReturns = request max_returns.
 
+    Every scan also records what a real instrument records: no miss point for the
+    escaped part of a partly intercepted pulse (Helios writes one by default). With
+    that point, multi-return LAD on a synthetic scan reads close to truth while the
+    same inversion on real data reads high (+15-57% in
+    research/multireturn_weighting.py), so a synthetic check would hide the bias.
+
     For an idealized exact scan the caller sends rays_per_pulse=1, which the engine
     reduces to one exact return per pulse regardless of the stored mode — so there
     is no separate "clean" mode to handle here.
     """
+    lidar.setScanRecordPartialMisses(scan_id, False)
     if s.return_mode == "multi":
         lidar.setScanReturnMode(scan_id, ReturnMode.MULTI)
         lidar.setScanMaxReturns(scan_id, max(1, int(s.max_returns)))

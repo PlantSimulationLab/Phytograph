@@ -930,6 +930,38 @@ class TestPulseReturnMode:
         assert not np.array_equal(
             self._points(by_id["single"]), self._points(by_id["multi"]))
 
+    def test_multi_records_no_partial_miss(self, client, monkeypatch):
+        # A real instrument records nothing for the part of a pulse that escaped, so
+        # a pulse that kept a return must not also carry a miss point (Helios writes
+        # one by default, which hides the beam-footprint LAD bias). Edge pulses of the
+        # wide cone half-hit the near cap and spill past the far floor's edge too, so
+        # partly intercepted pulses exist; fully transmitted pulses keep their miss.
+        pytest.importorskip("pyhelios")
+        seen = []
+        orig = main._create_lidar_scan_session
+
+        def _spy(r, retained_standard_fields=None):
+            seen.append((np.asarray(r["is_miss"]).astype(bool),
+                         np.asarray(r["timestamps_f64"]["timestamp"], dtype=np.float64)))
+            return orig(r, retained_standard_fields)
+
+        monkeypatch.setattr(main, "_create_lidar_scan_session", _spy)
+        verts, tris = _stacked_slabs()
+        scanner = {**_cone_scanner("multi", "multi"), "theta_min_deg": 120.0}
+        req = main.LidarScanRequest(
+            meshes=[main.LidarScanMesh(vertices=verts, triangles=tris)],
+            scanners=[main.LidarScanScanner(**scanner)],
+            rays_per_pulse=200, pulse_distance_threshold=0.1, record_misses=True,
+        )
+        result = main._do_lidar_scan(req)
+        assert result["success"] is True, result.get("error")
+        assert len(seen) == 1
+        miss, ts = seen[0]
+        assert miss.any() and (~miss).any()
+        hit_pulses = np.unique(ts[~miss])
+        miss_pulses = np.unique(ts[miss])
+        assert len(np.intersect1d(hit_pulses, miss_pulses)) == 0, "a pulse kept both a return and a partial miss"
+
     def test_legacy_return_type_field_still_accepted(self, client):
         # An old client that sends return_type (not return_mode) must still scan;
         # 'multi' maps to the new multi mode.

@@ -154,7 +154,39 @@ python research/clumping_scale.py --plants   # + almond and walnut trees
 Known limits: clumps only a few leaf widths across (tight shoots) are not recoverable at
 any voxel size; `recommend_voxel` is a sketch whose sampling floor over-rejects fine
 voxels in crown-and-gap scenes. Separate from clumping: a finite beam footprint makes even
-a uniform canopy read low (Helios' own `calculateLeafArea`: 0.93 at 0.35 mrad, 0.78 at
-3 mrad) because weak partial returns fall below the scan's detection threshold; with the
-threshold near zero it reads 1.03. The ladder's relative shape survives this, the absolute
+a uniform canopy read low on Helios synthetic scans (0.93 at 0.35 mrad, 0.78 at 3 mrad);
+`multireturn_weighting.py` below shows that is a synthetic-recording artifact and that real
+scans read HIGH instead. The ladder's relative shape survives either way, the absolute
 reference does not.
+
+## `multireturn_weighting.py`
+
+How a finite-footprint pulse's returns should be weighted in the inversion. Uniform leaf
+canopy, 40 rays/pulse, pooled attenuation / truth (a single ray reads 0.987):
+
+| footprint, leaf 5 cm | equal, Helios rows | equal, real rows | energy, true fraction |
+|---|---|---|---|
+| 0.35 mrad, threshold 0 / 0.05 | 0.99 / 0.93 | 1.27 / 1.14 | 0.99 / 0.94 |
+| 3 mrad, threshold 0 / 0.05 | 1.04 / 0.80 | 1.57 / 1.48 | 0.99 / 0.78 |
+
+- Helios' MULTI mode writes a "partial miss" row for the energy that escaped a pulse; real
+  instruments never do. Without that row, equal weighting (accumulateBeamCell) counts every
+  partial edge hit as a full interception, and LAD reads 15-57% high (10 cm leaves: 15-50%).
+- Helios' own `calculateLeafArea` (0.5 m voxels, G = 0.5) on the same canopy at the new
+  0.001 default threshold: 0.99 / 1.04 with partial-miss rows, 1.39 / 1.95 without them
+  (0.35 / 3 mrad). Per-voxel inversion amplifies the pooled bias. Phytograph's synthetic
+  scan now records without them (`setScanRecordPartialMisses(False)`).
+- The real RIEGL floor (`--real`, reflectance - amplitude) is 30-40 dB below a full
+  footprint return, 0.0002-0.002 of pulse energy, in olive, peach and grape scans at 3-80 m.
+  Helios' default `detectionThreshold` is 0.05, ~100x higher. Real TLS is the threshold-0
+  column.
+- Energy weighting is exact with the true fraction but, driven by reflectance, a 1 dB error
+  in the full-return calibration moves it 10-35%. Taking a pulse as fully intercepted when
+  its last return is strong (tau = 0.3) halves that for narrow beams only. In real scans the
+  upper quantiles of 2-return pulse sums match single returns to ~0.5-1 dB, which is the
+  self-calibration signal, not yet good enough.
+
+```bash
+python research/multireturn_weighting.py                      # synthetic tables (~2 min)
+python research/multireturn_weighting.py --real scan.laz ...  # RIEGL floor vs full return
+```

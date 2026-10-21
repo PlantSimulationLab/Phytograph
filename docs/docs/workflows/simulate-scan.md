@@ -405,6 +405,14 @@ remembered and pre-filled next time:
         multi-echo instruments (RIEGL VZ-400i, miniVUX), and produces
         realistic returns from leaves.
 
+        As on a real instrument, a pulse that a leaf only partly blocks
+        records just its detected returns, with no miss point for the part
+        of the beam that escaped. The detection floor is 0.001 of the pulse
+        energy, near what terrestrial RIEGL scans detect. Leaf area density
+        computed from a multi-return synthetic scan therefore carries the
+        same beam-footprint bias as one from real data: it reads high when
+        the footprint is not small next to the leaves.
+
     One setting applies to every scan position in the run, so a scene mixing
     instruments is simulated with the same optics.
 
