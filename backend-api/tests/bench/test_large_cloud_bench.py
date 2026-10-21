@@ -247,6 +247,33 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
                                 "rigidness": 3, "defer_octree": True})
         assert res.status_code == 200, res.text[:500]
 
+    # Split as the UI runs it, straight after the segmentation (one action in
+    # the UI): ground_class is shown on the imported octree by row lookup, so
+    # the split slices the children and draws them from that octree,
+    # converting nothing. (Before row ids it built the parent once here, and
+    # before that the children and then the parent.) It must come BEFORE
+    # Estimate Normals, which still marks the octree stale.
+    with stage("split_by_ground_class"):
+        res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                          json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,
+                                "rebuild_parent": True, "build_children": False})
+        split = _decode(res)
+    assert len(split.get("children", [])) == 2
+    assert all(c.get("drawn_from_parent") for c in split["children"])
+    for c in split["children"]:
+        client.delete(f"/api/cloud/session/{c['session_id']}")
+
+    # The split as it used to run, for comparison: both children built plus
+    # the parent (which the UI then rebuilt in the background), ~2N converted.
+    with stage("split_by_ground_class_built"):
+        res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                          json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,
+                                "rebuild_parent": True})
+        built = _decode(res)
+    assert len(built.get("children", [])) == 2
+    for c in built["children"]:
+        client.delete(f"/api/cloud/session/{c['session_id']}")
+
     with stage("estimate_normals"):
         # The whole scalability story of Compute Normals in one number. Expect
         # ~0.45 M pts/s in-process (10 M points in 20.8 s on 12 cores), or ~38 s
@@ -277,31 +304,6 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
         from tests.binframe import decode_bin_frame
         dem_meta, _ = decode_bin_frame(res.content)
         assert dem_meta.get("success", True), dem_meta
-
-    # Split as the UI runs it: segmentation deferred the parent's octree (the
-    # `segment_ground` stage above), and the split builds it once WITH the
-    # ground_class column, concurrently with slicing the children, then draws
-    # the children from it, converting nothing more.
-    with stage("split_by_ground_class"):
-        res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
-                          json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,
-                                "rebuild_parent": True, "build_children": False})
-        split = _decode(res)
-    assert len(split.get("children", [])) == 2
-    assert all(c.get("drawn_from_parent") for c in split["children"])
-    for c in split["children"]:
-        client.delete(f"/api/cloud/session/{c['session_id']}")
-
-    # The split as it used to run, for comparison: both children built plus
-    # the parent (which the UI then rebuilt in the background), ~2N converted.
-    with stage("split_by_ground_class_built"):
-        res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
-                          json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,
-                                "rebuild_parent": True})
-        built = _decode(res)
-    assert len(built.get("children", [])) == 2
-    for c in built["children"]:
-        client.delete(f"/api/cloud/session/{c['session_id']}")
 
     # Delete Region as the UI runs it: the mask is all the user waits for (the
     # renderer hides the points per tile), and the display catches up in the

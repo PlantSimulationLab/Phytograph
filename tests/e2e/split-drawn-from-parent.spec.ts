@@ -58,6 +58,7 @@ async function segmentAndSplit(page: Page, app: LaunchedApp['app']) {
   const parent = row(page, 'ground_plants');
   await expect(parent).toBeVisible({ timeout: 20_000 });
   await expect(parent).toHaveAttribute('data-selected', 'true');
+  const importedCacheId = (await parent.getAttribute('data-octree-cache-id'))!;
 
   await page.getByTestId('tool-ground-segment').click();
   await expect(page.getByTestId('ground-segment-panel')).toBeVisible();
@@ -71,6 +72,10 @@ async function segmentAndSplit(page: Page, app: LaunchedApp['app']) {
   const plant = row(page, 'ground_plants (non-ground)');
   await expect(ground).toBeVisible({ timeout: 60_000 });
   await expect(plant).toBeVisible({ timeout: 60_000 });
+  // Neither the segmentation nor the split rebuilt anything: ground_class is
+  // shown on the IMPORTED octree by row lookup (octreeOverlayColumns.ts), and
+  // the children are drawn from that same octree.
+  await expect(parent).toHaveAttribute('data-octree-cache-id', importedCacheId);
   return { parent, ground, plant };
 }
 
@@ -163,6 +168,10 @@ test('the class mask and the shared octree survive save and reopen', async () =>
     const octreeDirs = () => readdirSync(session.octreeCacheRoot).filter((n) => /^[0-9a-f]{40}$/.test(n));
     for (const d of octreeDirs()) rmSync(join(session.octreeCacheRoot, d), { recursive: true, force: true });
 
+    // File → New first: it frees the saved sessions, as a backend restart
+    // would, so the reopened children can only find their parent's column
+    // under the parent's NEW session id.
+    await resetToFreshScene(app, page);
     await stubMessageBox(app, 0);
     await stubOpenDialog(app, projectPath);
     await app.evaluate(({ BrowserWindow }) => {
@@ -174,6 +183,11 @@ test('the class mask and the shared octree survive save and reopen', async () =>
     await expect(row(page, 'ground_plants (ground)')).toHaveCount(1, { timeout: 30_000 });
     await expectDrawnFromParent(page, parentCacheId,
       row(page, 'ground_plants (ground)'), row(page, 'ground_plants (non-ground)'));
+    // ...and still are a moment later: a lookup that failed would have rebuilt
+    // each child its own octree by now.
+    await page.waitForTimeout(3_000);
+    await expect(row(page, 'ground_plants (ground)')).toHaveAttribute('data-octree-cache-id', parentCacheId);
+    await expect(row(page, 'ground_plants (non-ground)')).toHaveAttribute('data-octree-cache-id', parentCacheId);
   } finally {
     rmSync(projectPath, { force: true });
   }

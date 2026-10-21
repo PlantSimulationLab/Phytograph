@@ -127,7 +127,9 @@ works through them one after another:
 ### Large clouds
 
 Before it starts, Phytograph estimates how long the run will take on this
-cloud — the cloth filter plus the octree rebuild that follows it — and how much
+cloud — the cloth filter, plus an octree rebuild for a cloud opened from a
+project saved by an older version (otherwise the classification is shown
+without rebuilding the display) — and how much
 memory it needs. When the estimate is past about a minute and a half, or the
 memory needed is more than this machine's budget, the panel shows an amber
 advisory with the estimate instead of starting, and the button becomes
@@ -160,8 +162,9 @@ the ground cloud, or run skeleton extraction / triangulation on the non-ground
 cloud alone.
 
 The two clouds appear as soon as the classification finishes: each one is
-drawn from the original's display, showing only its own class, so no extra
-display has to be built. Each is still a full cloud of its own — tools,
+drawn from the original's display, showing only its own class, so no display
+has to be built — neither for them nor, since the classification itself is
+shown without rebuilding, for the original. Each is still a full cloud of its own — tools,
 export and edits act on its points alone. The first time you edit one (crop,
 erase, remove points, label), it gets a display of its own in the background,
 the same way any edit refreshes the display. Until then a split cloud can look

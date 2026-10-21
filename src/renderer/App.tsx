@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { clearOverlayColumnCache } from './components/viewer/renderers/octreeOverlayColumns';
 import { Box, FileUp, Bug, Lightbulb } from "lucide-react";
 import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
@@ -2026,6 +2027,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       if (mesh.plantSessionId) deletions.push(deletePlantSession(mesh.plantSessionId));
     }
     await Promise.allSettled(deletions);
+    // Overlay columns fetched for those sessions (tens of MB each on a large
+    // cloud) would otherwise outlive the scene that showed them.
+    clearOverlayColumnCache();
     onResetScene();
   }, [scene, onResetScene]);
 

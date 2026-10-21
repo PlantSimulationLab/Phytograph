@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { ROW_HI_ATTRIBUTE, ROW_LO_ATTRIBUTE } from '../renderers/octreeOverlayColumns';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
@@ -187,6 +188,9 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
         values.intensity = values[ORIG_INTENSITY_ATTRIBUTE];
         delete values[ORIG_INTENSITY_ATTRIBUTE];
       }
+      // The point's session row: an index for overlay lookups, not a field.
+      delete values[ROW_LO_ATTRIBUTE];
+      delete values[ROW_HI_ATTRIBUTE];
       return { cloudId: owner.cloudId, position: position.clone(), values };
     };
 

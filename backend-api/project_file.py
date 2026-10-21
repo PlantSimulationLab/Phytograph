@@ -54,7 +54,7 @@ SESSION_SCALARS = (
     "rendered_octree_cache_id", "miss_octree_cache_id", "miss_octree_origin",
     "octree_pose", "octree_point_count", "octree_stale_gen", "normals_stale",
     "derived_fields", "backfilled_misses_stale", "backfilled_misses_moved",
-    "unrestorable_hit_count",
+    "unrestorable_hit_count", "column_tokens", "overlay_columns",
 )
 LABEL_DELTA_ARRAYS = ("idx", "prev", "starts", "lengths", "prev_float")
 

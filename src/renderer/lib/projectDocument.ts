@@ -198,7 +198,10 @@ export function decodeProjectScene(bytes: ArrayBuffer | Uint8Array): unknown {
 
 // ---------------------------------------------------------------- scene -----
 
-interface OctreeLike { sessionId?: string; divergedFromSource?: boolean; cacheId?: string; missOctreeCacheId?: string | null }
+interface OctreeLike {
+  sessionId?: string; divergedFromSource?: boolean; cacheId?: string; missOctreeCacheId?: string | null;
+  overlayColumns?: { sessionId: string }[];
+}
 interface ScanLike { id: string; data?: { octree?: OctreeLike | null; bounds?: unknown } | null }
 
 type Vec = { x: number; y: number; z: number };
@@ -245,6 +248,13 @@ export function rewireOpenedScene<S extends { scans: ScanLike[]; meshes: MeshLik
     if (oct.cacheId && octreeMap[oct.cacheId]) remapped.cacheId = octreeMap[oct.cacheId];
     if (oct.missOctreeCacheId && octreeMap[oct.missOctreeCacheId]) {
       remapped.missOctreeCacheId = octreeMap[oct.missOctreeCacheId];
+    }
+    // Overlay columns are looked up in a session — for a split child, its
+    // PARENT's — and every session reopens under a new id. Left alone, each
+    // lookup 404s and the cloud rebuilds a display it did not need.
+    if (oct.overlayColumns?.length) {
+      remapped.overlayColumns = oct.overlayColumns.map((c) =>
+        (sessionMap[c.sessionId] ? { ...c, sessionId: sessionMap[c.sessionId] } : c));
     }
     return { ...s, data: { ...s.data, octree: remapped } };
   });

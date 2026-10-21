@@ -117,6 +117,22 @@ describe('rewireOpenedScene', () => {
   });
 });
 
+describe('overlay columns on reopen', () => {
+  it("follow the session they are looked up in — a split child's parent's — to its new id", () => {
+    const scene = { meshes: [], scans: [
+      { id: 'parent', data: { octree: { sessionId: 'p-old', cacheId: 'oct',
+        overlayColumns: [{ slug: 'ground_class', sessionId: 'p-old', token: 't' }] } } },
+      { id: 'child', data: { octree: { sessionId: 'c-old', cacheId: 'oct',
+        overlayColumns: [{ slug: 'ground_class', sessionId: 'p-old', token: 't' }] } } },
+    ] };
+    const { scene: out } = rewireOpenedScene(scene, { 'p-old': 'p-new', 'c-old': 'c-new' });
+    for (const s of out.scans) {
+      expect(s.data!.octree!.overlayColumns).toEqual([{ slug: 'ground_class', sessionId: 'p-new', token: 't' }]);
+    }
+    expect(out.scans[1].data!.octree!.sessionId).toBe('c-new');
+  });
+});
+
 describe('sceneBackendRefs', () => {
   it('lists each session and octree once', () => {
     const refs = sceneBackendRefs([

@@ -72,7 +72,7 @@ written with its full state:
 | point-aligned arrays | `positions`, `colors`, `intensity`, `deleted`, `deleted_base`, `timestamps`, `beam_origins`, and every `extras` column (in order, with its `extra_dims_meta` label) |
 | undo history | `deleted_history` (one index array per step) and `label_history` (each `_LabelDelta`'s arrays, stroke id, encoding and count) |
 | miss buffer | `backfilled_misses` (`positions`, `directions`, `timestamp`, `origins` when present) |
-| scalars | `world_shift`, `ascii_format`, `column_plan`, `source_path` (provenance only), `crs_epsg`, `source_units`, `source_unit_scale`, `gps_time_encoding`, `octree_cache_id`, `rendered_octree_cache_id`, `miss_octree_cache_id`, `miss_octree_origin`, `octree_pose`, `octree_point_count`, `octree_stale_gen`, `normals_stale`, `derived_fields`, `backfilled_misses_stale`, `backfilled_misses_moved`, `unrestorable_hit_count` |
+| scalars | `world_shift`, `ascii_format`, `column_plan`, `source_path` (provenance only), `crs_epsg`, `source_units`, `source_unit_scale`, `gps_time_encoding`, `octree_cache_id`, `rendered_octree_cache_id`, `miss_octree_cache_id`, `miss_octree_origin`, `octree_pose`, `octree_point_count`, `octree_stale_gen`, `normals_stale`, `derived_fields`, `backfilled_misses_stale`, `backfilled_misses_moved`, `unrestorable_hit_count`, `column_tokens`, `overlay_columns` |
 
 Pending (unbaked) deletions therefore reopen still pending, and undo still
 works across a save. The backend's `deleted` mask and the renderer's

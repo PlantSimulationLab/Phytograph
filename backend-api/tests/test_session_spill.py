@@ -163,6 +163,8 @@ def test_every_cloudsession_field_survives_the_round_trip(spill_root):
     sess.deleted_base = np.zeros(n, dtype=bool)
     sess.octree_pose = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
     sess.rendered_octree_cache_id = "rendered-full"
+    sess.column_tokens = {"ground_class": "tok-1"}
+    sess.overlay_columns = {"ground_class": "tok-1"}
     sess.deleted_history = [np.zeros(n, dtype=bool), np.ones(n, dtype=bool)]
     sess.backfilled_misses = {
         "positions": np.ones((4, 3)) * 1000.0,

@@ -5415,6 +5415,35 @@ export async function sessionExtract(
   }
 }
 
+/** One column's values in session ROW order — what the octree overlay looks
+ * tile rows up in (see octreeOverlayColumns.ts). `token` must still be the
+ * column's current one: a stale token rejects with `status` 409, and a session
+ * that is gone with 404, either of which the caller answers by rebuilding. */
+export async function fetchSessionColumn(
+  sessionId: string, slug: string, token: string,
+): Promise<ArrayLike<number>> {
+  const url = `${getBackendUrl()}/api/cloud/session/${sessionId}/column/${encodeURIComponent(slug)}`
+    + `?token=${encodeURIComponent(token)}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw Object.assign(
+      new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`),
+      { status: response.status },
+    );
+  }
+  const buf = await response.arrayBuffer();
+  switch (response.headers.get('X-Column-Dtype')) {
+    case 'uint8': return new Uint8Array(buf);
+    case 'int8': return new Int8Array(buf);
+    case 'uint16': return new Uint16Array(buf);
+    case 'int16': return new Int16Array(buf);
+    case 'uint32': return new Uint32Array(buf);
+    case 'int32': return new Int32Array(buf);
+    default: return new Float32Array(buf);
+  }
+}
+
 /** Metadata for one child session produced by {@link sessionExtractByColumn}. */
 export type SessionExtractChild = OctreeMetadata & {
   value: number;         // the distinct column value this child was sliced for (e.g. tree id)

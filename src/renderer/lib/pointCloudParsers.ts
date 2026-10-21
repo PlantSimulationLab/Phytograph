@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { PointCloudData, ScalarField } from './pointCloudTypes';
+import type { OverlayColumn, PointCloudData, ScalarField } from './pointCloudTypes';
 import { parsePalette, type ClassPalette } from './classPalettes';
 import { isLengthUnit } from './units';
 import {
@@ -1111,7 +1111,7 @@ export function buildPointCloudFromOctree(
     }
   }
 
-  return {
+  const data: PointCloudData = {
     // No flat arrays — the OctreePointCloud renderer reads from the
     // octree directly. An empty Float32Array satisfies the type without
     // consuming heap on a multi-gigabyte source.
@@ -1225,8 +1225,42 @@ export function buildPointCloudFromOctree(
       scanParams: 'scan_params' in meta
         ? ((meta as { scan_params?: ScanParamsFromFile }).scan_params ?? null)
         : undefined,
+      // Columns shown by row lookup rather than built in. Undefined when the
+      // response does not say (a caller then carries the previous list).
+      overlayColumns: parseOverlayColumns(meta),
     },
   };
+  if (data.octree) applyOverlayColumnRanges(data.octree);
+  return data;
+}
+
+function parseOverlayColumns(meta: OctreeMetadata): OverlayColumn[] | undefined {
+  const raw = (meta as OctreeMetadata & { overlay_columns?: unknown }).overlay_columns;
+  if (!Array.isArray(raw)) return undefined;
+  const out: OverlayColumn[] = [];
+  for (const r of raw as Record<string, unknown>[]) {
+    if (typeof r?.slug !== 'string' || typeof r.session_id !== 'string') continue;
+    out.push({
+      slug: r.slug, token: String(r.token ?? ''), sessionId: r.session_id,
+      label: typeof r.label === 'string' ? r.label : r.slug,
+      min: Number(r.min), max: Number(r.max),
+    });
+  }
+  return out;
+}
+
+/**
+ * Give each overlay column the range and label an attribute built into the
+ * octree would have had, so the Color-by picker, the colorbar and the scalar
+ * swap's gate (`attributeRanges[field]`) treat it as one. Overrides a BUILT
+ * attribute of the same name, whose values the overlay replaces.
+ */
+export function applyOverlayColumnRanges(octree: NonNullable<PointCloudData['octree']>): void {
+  for (const c of octree.overlayColumns ?? []) {
+    if (!isFinite(c.min) || !isFinite(c.max)) continue;
+    octree.attributeRanges = { ...octree.attributeRanges, [c.slug]: { min: [c.min], max: [c.max] } };
+    octree.attributeLabels = { ...octree.attributeLabels, [c.slug]: c.label };
+  }
 }
 
 export function buildPointCloudFromBackend(

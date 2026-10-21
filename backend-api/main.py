@@ -297,6 +297,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Read by the renderer's overlay column fetch (`/column/{slug}`); a
+    # cross-origin response hides every other header from script.
+    expose_headers=["X-Column-Dtype", "X-Column-Length", "X-Column-Token"],
 )
 
 
@@ -17639,7 +17642,7 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
     try:
         with tempfile.TemporaryDirectory() as _tmp:
             hits_las = _PathLocal(_tmp) / "octree_hits.las"
-            _session_to_las(sess, hits_las, exclude_misses=True)
+            _session_to_las(sess, hits_las, exclude_misses=True, row_ids="absolute")
             cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
         sess.octree_cache_id = cache_key
         out["cache_id"] = cache_key
@@ -20668,6 +20671,7 @@ class PlantGenerationResponse(BaseModel):
 # Stateful session management for incremental plant growth simulation
 
 import uuid
+import functools
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -31248,6 +31252,7 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
     seen_attrs: set[str] = set()
     deduped = []
     tight_bounds = None
+    row_ids = False
     for a in raw.get("attributes", []):
         name = a.get("name")
         if not name or name in seen_attrs:
@@ -31257,6 +31262,11 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
         # _OCTREE_HIDDEN_ATTRIBUTE_PREFIX. Offering it would list a field the
         # cloud no longer has.
         if name.startswith(_OCTREE_HIDDEN_ATTRIBUTE_PREFIX):
+            continue
+        # The row ids are an index, not a field: tiles decode them (see
+        # `_OCTREE_ROW_ATTRS`), but no list should offer them.
+        if name in _OCTREE_ROW_ATTRS:
+            row_ids = True
             continue
         # Preserve per-attribute min/max when present. The renderer needs
         # these for the intensity / height shaders' uniform ranges
@@ -31309,6 +31319,8 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
             "max": list(bbox.get("max", [0.0, 0.0, 0.0])),
         },
         "attributes": deduped,
+        # Whether tiles carry `_OCTREE_ROW_ATTRS`, i.e. can take overlay columns.
+        "row_ids": row_ids,
     }
 
 
@@ -34753,6 +34765,15 @@ class CloudSession:
     # claiming the cache is servable as the session's current geometry.
     # Cleared whenever a rebuild installs a fresh `octree_cache_id`.
     rendered_octree_cache_id: Optional[str] = None
+    # A token per column, replaced on every wholesale write of it
+    # (`_session_put_column_locked`). Lets a reader that cached a column's
+    # values — the renderer's overlay — ask whether they are still current.
+    column_tokens: Dict[str, str] = field(default_factory=dict)
+    # Columns the DRAWN octree was built without, slug -> the column token it
+    # was registered at. The renderer shows each by looking tile rows up in the
+    # session column (`_OCTREE_ROW_ATTRS`), so a tool that only adds a column
+    # needs no rebuild. A rebuild drops every entry its LAS carried.
+    overlay_columns: Dict[str, str] = field(default_factory=dict)
     # Bumped by `_mark_octree_stale_locked`, i.e. by every edit that leaves the
     # derived octree behind the session (delete, undo, filter/split commit,
     # transform). `_session_rebuild` snapshots it before it writes and compares
@@ -35649,8 +35670,21 @@ def _trajectory_wire_from_beam_origins(beam_origins, timestamps, max_poses=3000)
 _LAS_WRITE_CHUNK = 2_000_000
 
 
+# Every session octree carries each point's session ROW as two hidden uint16
+# attributes (low and high 16 bits; a single float32 — which is how potree-core
+# hands every extra attribute to the renderer — is exact only below 2^24 rows).
+# They are the point identity the octree otherwise lacks: PotreeConverter keeps
+# each input point exactly once, in both sampling modes and with exact-duplicate
+# positions (verified on 0.2 M and 3 M points), but reorders them by Morton
+# code. With them the renderer can show a column the octree was built WITHOUT,
+# by looking each tile point's value up in the session column
+# (`overlay_columns`), so a tool that only adds a column no longer rebuilds.
+_OCTREE_ROW_ATTRS = ("__row_lo", "__row_hi")
+
+
 def _session_to_las(sess: "CloudSession", out_las: _Path,
-                    exclude_misses: bool = False, block_lock=None) -> int:
+                    exclude_misses: bool = False, block_lock=None,
+                    row_ids: "Optional[str]" = None) -> int:
     """Write the session's SURVIVING points (positions[~deleted] + all
     attributes) to a LAS, entirely from the in-RAM arrays — no source file read.
     Mirrors `_xyz_to_las`'s header/record layout so PotreeConverter ingests it
@@ -35673,6 +35707,11 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     between blocks (a delete, a label stroke) can differ between blocks, which
     the next rebuild reconciles and the renderer masks meanwhile. Without it
     the caller must hold the lock for the whole write, as before.
+
+    `row_ids` adds `_OCTREE_ROW_ATTRS`, for an OCTREE build only (never a file
+    a user or a round trip reads back): "absolute" writes each point's row in
+    the session as it stands, "compact" its row after a compacting bake drops
+    the deleted rows (its rank among the non-deleted ones).
     """
     import laspy
     import contextlib
@@ -35688,6 +35727,9 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             keep = keep & (extras_ref[_MISS_SLUG] == 0)
         n = int(keep.sum())
         idx = np.flatnonzero(keep)
+        # A compacting bake keeps the non-deleted rows (misses included) in
+        # order, so a row's new index is its rank among them.
+        compact_rows = np.flatnonzero(~sess.deleted) if row_ids == "compact" else None
         # bbox over the selection, block-wise so a memmapped session pays no
         # full copy (cheap - just the f64 xyz), computed before the chunked
         # write so the header mins/maxs cover every chunk.
@@ -35720,6 +35762,9 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
         _extra_dims_out, _ts_extra = list(sess.extra_dims_meta), None
     for ed in _extra_dims_out:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+    if row_ids is not None:
+        for name in _OCTREE_ROW_ATTRS:
+            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.uint16))
     # Preserve the clock identity across a bake/rebuild. Without this the session's
     # 'adjusted_standard' reading is lost on the round trip and comes back as
     # 'gps_week', which the create endpoint reports as a trajectory-join warning.
@@ -35776,6 +35821,11 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
                 record.gps_time = bts
             for ed in _extra_dims_out:
                 record[ed["slug"]] = bext[ed["slug"]]
+            if row_ids is not None:
+                rows = (np.searchsorted(compact_rows, block) if compact_rows is not None
+                        else block)
+                record[_OCTREE_ROW_ATTRS[0]] = (rows & 0xFFFF).astype(np.uint16)
+                record[_OCTREE_ROW_ATTRS[1]] = (rows >> 16).astype(np.uint16)
             writer.write_points(record)
             del record, bpos, bcol, bint, bts, bext
         if n > 0:
@@ -36777,7 +36827,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         _report(0.58, "Writing octree source…")
         _cancel_checkpoint(progress)
         hits_las = tmp_dir / "octree_hits.las"
-        _session_to_las(sess, hits_las, exclude_misses=True)
+        _session_to_las(sess, hits_las, exclude_misses=True, row_ids="absolute")
         cache_key, cache_dir, meta = _build_octree_from_las(
             hits_las, extra_dims_meta, progress=progress,
             cancel_event=cancel_event, span=(0.62, 0.90),
@@ -38388,13 +38438,15 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
             # blocks written in between are missing those points.
             built_mask = None if compact else np.array(sess.deleted, dtype=bool, copy=True)
             built_gen = sess.octree_stale_gen
+            built_tokens = dict(sess.column_tokens)
             built_point_count = int((~np.asarray(sess.deleted)).sum())
         # Octree is hits-only (misses stay in the session for LAD/overlay). The
         # lock is taken per BLOCK rather than across the whole encode, as
         # `_session_rebuild` does: held for the write (~1 s per 10 M points) it
         # stalled every other session request behind a BACKGROUND refresh.
         _session_to_las(sess, las_path, exclude_misses=True,
-                        block_lock=_cloud_session_lock)
+                        block_lock=_cloud_session_lock,
+                        row_ids="compact" if compact else "absolute")
         cache_key, cache_dir, meta = _build_octree_from_las(
             las_path, extra_dims_meta, progress=progress, cancel_event=cancel_event,
         )
@@ -38426,9 +38478,12 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
                 # history alone: its entries still describe real edits.
                 sess.rendered_octree_cache_id = cache_key
             sess.octree_point_count = built_point_count
+            _prune_overlay_locked(sess, built_tokens)
         remaining = built_point_count
     else:
         remaining = _compact_baked_session(sess, cache_key)
+        with _cloud_session_lock:
+            _prune_overlay_locked(sess, built_tokens)
 
     return _finish_bake(sess, session_id, remaining, cache_key, cache_dir, meta)
 
@@ -38811,10 +38866,87 @@ def _session_display_stats(sess: "CloudSession") -> dict:
         positions = sess.positions
         intensity = sess.intensity
         extras = dict(sess.extras)
+        overlay = dict(sess.overlay_columns)
+        labels = {ed["slug"]: ed.get("label") for ed in sess.extra_dims_meta}
     return {
         "observed_classes": _observed_classes(editable, extras),
         **_robust_color_stats(editable, positions, intensity, extras),
+        "overlay_columns": _overlay_column_info(sess.session_id, overlay, labels, editable, extras),
     }
+
+
+def _overlay_column_info(session_id: str, overlay: "Dict[str, str]", labels: dict,
+                         editable: np.ndarray, extras: dict) -> List[dict]:
+    """What the renderer needs to show each overlay column: where to fetch it
+    (session + token, see `/column/{slug}`), and the label and value range the
+    octree's own attribute list would have carried had it been built with it."""
+    out: List[dict] = []
+    for slug, token in overlay.items():
+        col = extras.get(slug)
+        if col is None:
+            continue
+        vals = np.asarray(col)[editable] if editable.any() else np.zeros(1, dtype=np.float32)
+        out.append({"slug": slug, "token": token, "session_id": session_id,
+                    "label": labels.get(slug) or slug,
+                    "min": float(vals.min()), "max": float(vals.max())})
+    return out
+
+
+@functools.lru_cache(maxsize=256)
+def _octree_has_row_ids(root: str, cache_id: str) -> bool:
+    """Whether an octree's tiles carry `_OCTREE_ROW_ATTRS`. Cached: an entry is
+    content-addressed, so its attribute list never changes under its id."""
+    try:
+        attrs = json.loads((_Path(root) / cache_id / "metadata.json").read_text()).get("attributes") or []
+    except (OSError, ValueError):
+        return False
+    names = {a.get("name") for a in attrs if isinstance(a, dict)}
+    return all(n in names for n in _OCTREE_ROW_ATTRS)
+
+
+def _drawn_octree_id_locked(sess: "CloudSession") -> "Optional[str]":
+    """The octree the renderer is drawing this session from: the current one,
+    or the stale one an edit is masking over. Caller holds the lock."""
+    return sess.octree_cache_id or sess.rendered_octree_cache_id
+
+
+def _overlay_column_locked(sess: "CloudSession", slug: str) -> bool:
+    """Show the just-written `slug` on the drawn octree through the overlay,
+    instead of rebuilding the octree to carry it. False when the drawn octree
+    has no row ids (built before they existed), and the caller rebuilds.
+
+    Valid on a stale octree too: deleted rows keep their indices, and the
+    renderer already hides them. Caller holds the lock."""
+    cid = _drawn_octree_id_locked(sess)
+    if not cid:
+        return False
+    if not _octree_has_row_ids(str(_octree_cache_root()), cid):
+        return False
+    sess.overlay_columns[slug] = sess.column_tokens.get(slug, "")
+    return True
+
+
+def _prune_overlay_locked(sess: "CloudSession", built_tokens: "Dict[str, str]") -> None:
+    """Drop the overlay columns an octree just built from the session carries:
+    every column whose token is unchanged since the build snapshotted them
+    (`built_tokens`) went into its LAS. One written during the build stays.
+    Caller holds the lock."""
+    for slug in list(sess.overlay_columns):
+        if slug in built_tokens and sess.column_tokens.get(slug) == built_tokens[slug]:
+            del sess.overlay_columns[slug]
+
+
+def _overlay_octree_result(sess: "CloudSession") -> "tuple[str, _Path, dict]":
+    """(cache_key, dir, meta) for the octree the session is drawn from, after a
+    column was registered as an overlay instead of rebuilt: the shape a
+    `_session_rebuild` returns, so a caller swaps one for the other. Caller
+    must NOT hold the lock."""
+    with _cloud_session_lock:
+        cid = _drawn_octree_id_locked(sess)
+        stale = sess.octree_cache_id is None
+    cache_dir = _octree_cache_root() / cid
+    meta = _read_octree_metadata_and_mark_used(cache_dir)
+    return cid, cache_dir, {**meta, **_session_display_stats(sess), "octree_stale": stale}
 
 
 # ── Compact scalar columns ─────────────────────────────────────────────────
@@ -38909,6 +39041,7 @@ def _session_put_column_locked(sess: "CloudSession", slug: str, arr: np.ndarray)
     replaced when there is one (a new file renamed over the old, so a reader
     still holding the old map keeps a valid one), otherwise a fresh `x<k>`
     column is added. Caller holds the lock."""
+    sess.column_tokens[slug] = uuid.uuid4().hex[:12]
     store = getattr(sess, "store", None)
     if store is None:
         sess.extras[slug] = arr
@@ -39102,6 +39235,7 @@ def _session_rebuild(
         # Taken before the write: a non-private write drops the lock between
         # blocks, so an edit can land anywhere from here to the converter's end.
         built_gen = sess.octree_stale_gen
+        built_tokens = dict(sess.column_tokens)
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
         # Octree is hits-only (misses stay in the session for LAD/overlay). A
@@ -39112,7 +39246,8 @@ def _session_rebuild(
         # stalled). See `_session_to_las` for what a mid-write edit can do.
         with (_las_write_lock if private else contextlib.nullcontext()):
             _session_to_las(sess, las_path, exclude_misses=True,
-                            block_lock=None if private else _cloud_session_lock)
+                            block_lock=None if private else _cloud_session_lock,
+                            row_ids="absolute")
         with _cloud_session_lock:
             extra_dims_meta = list(sess.extra_dims_meta)
         cache_key, cache_dir, meta = _build_octree_from_las(
@@ -39142,6 +39277,9 @@ def _session_rebuild(
             # delete races its build; the renderer's refresh queue rebuilds.
             sess.rendered_octree_cache_id = cache_key
         sess.octree_point_count = built_point_count
+        # Either way the renderer now draws THIS octree, which carries every
+        # column as of the snapshot, so those leave the overlay.
+        _prune_overlay_locked(sess, built_tokens)
         # Exact class lists, attached HERE for the same reason the pose is
         # cleared here: every edit that changes which points exist (filter,
         # split, segment, extract, bake, commit_labels) funnels through this one
@@ -39659,6 +39797,10 @@ def _parent_view_octree_locked(sess: "CloudSession", slug: str) -> "Optional[str
     cid = sess.octree_cache_id
     if not cid or sess.octree_pose is not None:
         return None
+    # The column shown by row lookup (`overlay_columns`) masks just as well:
+    # the children look it up in the PARENT's session (see the view rows).
+    if slug in sess.overlay_columns and _octree_has_row_ids(str(_octree_cache_root()), cid):
+        return cid
     meta_path = _octree_cache_root() / cid / "metadata.json"
     try:
         attrs = json.loads(meta_path.read_text()).get("attributes") or []
@@ -39706,9 +39848,12 @@ def _extract_by_column_as_views(sess: "CloudSession", session_id: str,
     parent_meta: "Optional[dict]" = None
     out: List[dict] = []
     try:
+        with _cloud_session_lock:
+            # Already drawable (the column went to the overlay): nothing to build.
+            parent_ready = _parent_view_octree_locked(sess, request.slug) is not None
         with ThreadPoolExecutor(max_workers=_EXTRACT_BUILD_POOL) as pool:
             parent_future = None
-            if request.rebuild_parent:
+            if request.rebuild_parent and not parent_ready:
                 # NOT private: the parent is live and reachable (see `_build_parent`).
                 parent_future = pool.submit(_session_rebuild, sess, cancel_event=cancel_event)
             children = _slice_children_by_column(sess, request.slug, exclude, request.include_misses)
@@ -39718,6 +39863,15 @@ def _extract_by_column_as_views(sess: "CloudSession", session_id: str,
             stats = list(pool.map(_session_display_stats, [c for _v, c in children]))
             if parent_future is not None:
                 ck, ccd, cmeta = parent_future.result()
+                with _cloud_session_lock:
+                    remaining = int((~sess.deleted).sum())
+                parent_meta = {"session_id": session_id, "point_count": remaining,
+                               "cache_id": ck, "cache_dir": str(ccd), **cmeta}
+            elif request.rebuild_parent:
+                # The caller deferred the parent's octree expecting this split
+                # to build it; the drawn one already shows the column, so hand
+                # that back in the same shape.
+                ck, ccd, cmeta = _overlay_octree_result(sess)
                 with _cloud_session_lock:
                     remaining = int((~sess.deleted).sum())
                 parent_meta = {"session_id": session_id, "point_count": remaining,
@@ -39734,6 +39888,15 @@ def _extract_by_column_as_views(sess: "CloudSession", session_id: str,
                             "cache_dir": str(ccd), **cmeta})
         else:
             meta = _read_octree_metadata_and_mark_used(_octree_cache_root() / parent_cid)
+            # Columns the parent's octree shows by row lookup are looked up in
+            # the PARENT's session — the tiles' rows are the parent's rows.
+            with _cloud_session_lock:
+                p_overlay = dict(sess.overlay_columns)
+                p_labels = {ed["slug"]: ed.get("label") for ed in sess.extra_dims_meta}
+                p_editable = _session_editable_mask_locked(sess)
+                p_extras = dict(sess.extras)
+            parent_overlay = _overlay_column_info(session_id, p_overlay, p_labels,
+                                                  p_editable, p_extras)
             for (value, child), child_stats in zip(children, stats):
                 # Unregistered children are reachable only through this request,
                 # but the registry is shared, so the bookkeeping takes the lock.
@@ -39749,7 +39912,7 @@ def _extract_by_column_as_views(sess: "CloudSession", session_id: str,
                     hits = np.asarray(child.positions[hit_rows])
                 # The parent's octree holds every class, so its point count and
                 # bounds describe the parent. The renderer shows the child's own.
-                row = {**meta, **child_stats,
+                row = {**meta, **child_stats, "overlay_columns": parent_overlay,
                        "value": value, "session_id": child.session_id,
                        "point_count": int(hits.shape[0]), "cache_id": parent_cid,
                        "cache_dir": str(_octree_cache_root() / parent_cid),
@@ -39771,6 +39934,37 @@ def _extract_by_column_as_views(sess: "CloudSession", session_id: str,
     if request.rebuild_parent:
         result["parent"] = parent_meta
     return result
+
+
+_OVERLAY_DTYPES = {"uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"}
+
+
+@app.get("/api/cloud/session/{session_id}/column/{slug}")
+def session_column(session_id: str, slug: str, token: Optional[str] = None):
+    """One column's values in session ROW order, as raw little-endian bytes —
+    what the renderer's overlay looks tile rows up in (`_OCTREE_ROW_ATTRS`).
+
+    Sent in the column's own storage type (`X-Column-Dtype`), so a class column
+    on a 45.7 M-point cloud is 46 MB rather than 183 MB of float32. `token`, when
+    given, must be the column's current one (`column_tokens`): a caller holding
+    an older token cached values that no longer exist and gets a 409, which the
+    renderer answers by rebuilding that cloud's octree instead."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        col = sess.extras.get(slug)
+        current = sess.column_tokens.get(slug, "")
+    if col is None:
+        raise HTTPException(status_code=404, detail=f"No column {slug!r} in this cloud.")
+    if token is not None and token != current:
+        raise HTTPException(status_code=409, detail=f"Column {slug!r} changed since it was shown.")
+    arr = np.asarray(col)
+    if arr.dtype.name not in _OVERLAY_DTYPES:
+        arr = arr.astype(np.int32 if arr.dtype.kind in "iu" and arr.size and
+                         np.abs(arr).max() < 2**31 else np.float32)
+    data = np.ascontiguousarray(arr, dtype=arr.dtype.newbyteorder("<")).tobytes()
+    return Response(content=data, media_type="application/octet-stream",
+                    headers={"X-Column-Dtype": arr.dtype.name, "X-Column-Length": str(arr.size),
+                             "X-Column-Token": current})
 
 
 @app.post("/api/cloud/session/{session_id}/extract_by_column")
@@ -40427,6 +40621,8 @@ def _project_restore_session(zf, key: str, compact: bool = False) -> "CloudSessi
               "octree_pose", "octree_point_count", "octree_stale_gen"):
         if f.get(k) is not None:
             setattr(sess, k, f[k])
+    for k in ("column_tokens", "overlay_columns"):
+        setattr(sess, k, dict(f.get(k) or {}))
     for k in ("normals_stale", "backfilled_misses_stale", "backfilled_misses_moved"):
         setattr(sess, k, bool(f.get(k)))
     sess.unrestorable_hit_count = int(f.get("unrestorable_hit_count") or 0)
@@ -40678,7 +40874,14 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     _refuse_oversized_cloth(extent_m, float(request.cloth_resolution))
     if not request.acknowledge_cost:
         survivors = int(len(hit))
-        rebuild_points = survivors
+
+        def _shows_by_row() -> bool:
+            # Off the loop: the session lock, and a metadata read.
+            with _cloud_session_lock:
+                drawn = _drawn_octree_id_locked(sess)
+            return bool(drawn) and _octree_has_row_ids(str(_octree_cache_root()), drawn)
+        # Nothing to rebuild when the drawn octree can show the column by row.
+        rebuild_points = 0 if await run_in_threadpool(_shows_by_row) else survivors
         seconds, bytes_needed, breakdown = _ground_cost_estimate(
             len(pts), extent_m, float(request.cloth_resolution),
             int(request.iterations), rebuild_points)
@@ -40716,17 +40919,23 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         with _cloud_session_lock:
             _raise_if_session_edited_locked(sess, deleted0, "ground segmentation")
             _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
-            if request.defer_octree:
+            # Shown on the drawn octree by row lookup: no rebuild at all.
+            overlaid = _overlay_column_locked(sess, GROUND_CLASS_SLUG)
+            if request.defer_octree and not overlaid:
                 # The cached octree predates the column. Say so, or the background
                 # bake that follows a split takes its no-deletions fast path and
                 # hands back that pre-column octree as current.
                 _mark_octree_stale_locked(sess)
+        return overlaid
 
-    await run_in_threadpool(_write)
+    overlaid = await run_in_threadpool(_write)
     common = {"session_id": session_id, "point_count": int(len(pts)),
               "class_threshold_used": gmeta.get("class_threshold"),
               "class_threshold_method": gmeta.get("method"),
               "tiled": gmeta.get("tiled")}
+    if overlaid:
+        cache_key, cache_dir, meta = await run_in_threadpool(_overlay_octree_result, sess)
+        return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
     # Deferred: the caller is about to rebuild this octree alongside the split's
     # children. Return NO octree fields — see `defer_octree`.
     if request.defer_octree:
@@ -41827,14 +42036,20 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
         with _cloud_session_lock:
             _raise_if_session_edited_locked(sess, deleted0, "wood/leaf segmentation")
             _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
-            if request.defer_octree:
+            # As the ground handler: shown by row lookup, no rebuild.
+            overlaid = _overlay_column_locked(sess, WOOD_CLASS_SLUG)
+            if request.defer_octree and not overlaid:
                 # See the ground handler: without this the background bake after a
                 # split reuses the pre-column octree.
                 _mark_octree_stale_locked(sess)
+        return overlaid
 
-    await run_in_threadpool(_write)
+    overlaid = await run_in_threadpool(_write)
     common = {"session_id": session_id, "point_count": int(len(pts)), "warnings": warns,
               "ground_warning": no_ground_labels}
+    if overlaid:
+        cache_key, cache_dir, meta = await run_in_threadpool(_overlay_octree_result, sess)
+        return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
     # Deferred: see `defer_octree` — the caller rebuilds this octree alongside
     # the split's children.
     if request.defer_octree:

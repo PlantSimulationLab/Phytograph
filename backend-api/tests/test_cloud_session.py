@@ -620,9 +620,9 @@ def test_session_segment_ground_appends_class_no_file_read(client, cache_root, t
     )
     assert res.status_code == 200, res.text
     body = res.json()
-    # The derived octree now carries a ground_class attribute.
-    attr_names = {a["name"] for a in body.get("attributes", [])}
-    assert "ground_class" in attr_names, attr_names
+    # The drawn octree shows ground_class by row lookup (no rebuild): see
+    # tests/test_octree_overlay_columns.py.
+    assert [o["slug"] for o in body["overlay_columns"]] == ["ground_class"]
     # And the in-RAM session grew a ground_class column aligned to its points.
     sess = main._cloud_sessions[sid]
     assert "ground_class" in sess.extras
@@ -634,7 +634,7 @@ def test_session_segment_ground_appends_class_no_file_read(client, cache_root, t
 
 
 def test_segment_ground_defer_octree_skips_the_rebuild_and_returns_no_octree(
-        client, cache_root, tmp_path):
+        client, cache_root, tmp_path, monkeypatch):
     """`defer_octree` skips the parent rebuild and returns NO octree fields.
 
     The caller that sets it is about to split, and the renderer then queues this
@@ -644,7 +644,11 @@ def test_segment_ground_defer_octree_skips_the_rebuild_and_returns_no_octree(
     Returning the PRE-column octree with its `cache_id`/`bounds` would be the
     stale-octree bug `bake` already guards against — the renderer would treat it
     as current. So the fields are omitted entirely and `octree_deferred` says so.
-    The session's column IS written either way; only the rebuild is deferred."""
+    The session's column IS written either way; only the rebuild is deferred.
+
+    Only for an octree WITHOUT row ids (built by an older version): one with
+    them shows the column by lookup and needs no rebuild to defer."""
+    monkeypatch.setattr(main, "_octree_has_row_ids", lambda root, cid: False)
     rows = []
     for i in range(30):
         for j in range(30):

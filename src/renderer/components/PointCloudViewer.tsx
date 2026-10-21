@@ -107,7 +107,7 @@ import { prettifyQSMError } from '../lib/qsmErrors';
 import { stopClickAfterTextSelection } from '../lib/textSelection';
 import { computeGridFloor } from '../lib/gridFloor';
 import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, createScanColorAllocator, isBackfillEligible, detectedReturnMode, missingMultiReturnColumns, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
-import { parsePointCloudFromPath, buildPointCloudFromOctree, POINT_CLOUD_FORMATS } from '../lib/pointCloudParsers';
+import { parsePointCloudFromPath, buildPointCloudFromOctree, applyOverlayColumnRanges, POINT_CLOUD_FORMATS } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
@@ -4258,6 +4258,13 @@ export default function PointCloudViewer({
       // already-edited cloud must not clear the flag).
       data.octree.divergedFromSource =
         octreeInfo.divergedFromSource || !!opts?.diverged;
+      // A response that does not list overlay columns (one assembled without
+      // the session's display stats) changed nothing about them: an in-place
+      // translation keeps the row ids, so the same lookups still apply.
+      if (!('overlay_columns' in result) && octreeInfo.overlayColumns?.length) {
+        data.octree.overlayColumns = octreeInfo.overlayColumns;
+        applyOverlayColumnRanges(data.octree);
+      }
     }
     return data;
   }, []);
@@ -4285,6 +4292,36 @@ export default function PointCloudViewer({
   // deleted points and undoes baked transforms — the user's work vanishes on
   // what looks like a success path. `divergedFromSource` marks those clouds and
   // we refuse rather than revert.
+  // An overlay column (see octreeOverlayColumns.ts) could not be fetched: the
+  // session it is looked up in is gone (a split child whose parent cloud was
+  // deleted), or the column was rewritten since this octree was handed over.
+  // Either way the cure is an octree that carries what it shows itself, which
+  // `rebuild_octree` builds from this cloud's own session. A plain refresh
+  // would not do: a current octree takes bake's no-rebuild path and comes back
+  // listing the same overlay. Once per (cloud, octree), so a failing rebuild
+  // cannot loop.
+  const overlayRebuildsRef = useRef(new Set<string>());
+  const handleOverlayUnavailable = useCallback(async (cloudId: string) => {
+    const cloud = cloudsRef.current.find(c => c.id === cloudId);
+    const octreeInfo = cloud?.data.octree;
+    if (!cloud || !octreeInfo?.sessionId) return;
+    const key = `${cloudId}|${octreeInfo.cacheId}`;
+    if (overlayRebuildsRef.current.has(key)) return;
+    overlayRebuildsRef.current.add(key);
+    try {
+      const rebuilt = await rebuildSessionOctree(octreeInfo.sessionId);
+      const current = cloudsRef.current.find(c => c.id === cloudId)?.data.octree ?? octreeInfo;
+      onUpdateCloud(cloudId, buildSessionOctreeData(rebuilt, current, cloud.data.fileName ?? cloudId));
+    } catch (err) {
+      console.error('Rebuilding a cloud whose overlay column is unavailable failed', err);
+      showToast({
+        type: 'error',
+        title: `Could not display ${cloud.data.fileName ?? 'a cloud'}`,
+        message: describeBackendError(err, 'Rebuild display').message,
+      });
+    }
+  }, [onUpdateCloud, buildSessionOctreeData, showToast]);
+
   const handleOctreeMissing = useCallback(async (cloudId: string) => {
     const cloud = clouds.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
@@ -24299,6 +24336,7 @@ export default function PointCloudViewer({
                   // version-bumped). Rebuild from the source descriptor or, if
                   // that's impossible, surface a clear message.
                   onOctreeMissing={() => handleOctreeMissing(cloud.id)}
+                  onOverlayUnavailable={() => { void handleOverlayUnavailable(cloud.id); }}
                 />
               ) : (() => {
                 // Flat cloud draft rotation (Transformation tool): the parent group

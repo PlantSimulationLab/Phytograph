@@ -5,7 +5,11 @@ import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForCloud, buildCategoricalGradientStops, UNKNOWN_CLASS_COLOR } from '../../../lib/classification';
 import { categoricalTexels } from '../../../lib/categoricalTexture';
-import type { CloudFilters, PointCloudData } from '../../../lib/pointCloudTypes';
+import type { CloudFilters, OverlayColumn, PointCloudData } from '../../../lib/pointCloudTypes';
+import { fetchSessionColumn } from '../../../utils/backendApi';
+import {
+  applyOverlayColumnsToVisibleNodes, loadOverlayColumn, overlayReadyKey, type OverlayColumnValues,
+} from './octreeOverlayColumns';
 import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC, withHiddenLabelClasses } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { isWideOctreeAttribute } from '../../../lib/octreeWideAttributes';
@@ -245,6 +249,10 @@ export interface OctreePointCloudProps {
   // actionable message. Invoked at most once per cacheId (guarded here) so a
   // genuinely unrecoverable cloud can't spin a rebuild loop.
   onOctreeMissing?: () => void;
+  // An overlay column (`data.octree.overlayColumns`) could not be fetched: its
+  // session is gone, or the column changed since this octree was handed over.
+  // The parent rebuilds the cloud an octree of its own, which needs neither.
+  onOverlayUnavailable?: () => void;
 }
 
 // Point a tile geometry's `intensity` attribute at the named scalar
@@ -328,6 +336,9 @@ const FILTER_PREVIEW_DEBOUNCE_MS = 80;
 // stable: a fresh `[]` per render would re-run the mask effect (and its
 // clear-then-reapply cleanup) on every parent render with no crop active.
 const EMPTY_CROP_MASK: readonly CropMaskRule[] = Object.freeze([]);
+// Same reasoning, for the overlay column lists.
+const EMPTY_OVERLAY: readonly OverlayColumn[] = Object.freeze([]);
+const EMPTY_OVERLAY_VALUES: readonly OverlayColumnValues[] = Object.freeze([]);
 
 // True when the crop clip box provably yields an EMPTY result for this cloud —
 // so the per-frame LOD update can be skipped and the cloud simply hidden.
@@ -436,6 +447,7 @@ export function OctreePointCloud({
   onOctreeReady,
   onOctreeDrawn,
   onOctreeMissing,
+  onOverlayUnavailable,
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
   const firstTilesFiredRef = useRef(false);
@@ -481,6 +493,34 @@ export function OctreePointCloud({
   // effect doesn't re-run when the parent passes a new callback identity.
   const onOctreeMissingRef = useRef(onOctreeMissing);
   onOctreeMissingRef.current = onOctreeMissing;
+  const onOverlayUnavailableRef = useRef(onOverlayUnavailable);
+  onOverlayUnavailableRef.current = onOverlayUnavailable;
+
+  // Overlay columns (see octreeOverlayColumns.ts): fetched once per token and
+  // written into each tile as it loads. `overlayReady` holds the ones fetched
+  // so far; keyed by the list's identity-free description so a re-render with
+  // an equal list neither refetches nor re-masks.
+  const overlayList = data.octree?.overlayColumns ?? EMPTY_OVERLAY;
+  const overlayListKey = overlayList.map((c) => `${c.sessionId}|${c.slug}|${c.token}`).join(',');
+  const [overlayReady, setOverlayReady] = useState<{ key: string; columns: OverlayColumnValues[] }>(
+    { key: '', columns: [] });
+  useEffect(() => {
+    if (!overlayListKey) { setOverlayReady({ key: '', columns: [] }); return; }
+    let live = true;
+    Promise.all(overlayList.map((c) =>
+      loadOverlayColumn(c, fetchSessionColumn).then((values) => ({ slug: c.slug, token: c.token, values })),
+    )).then((columns) => {
+      if (live) setOverlayReady({ key: overlayListKey, columns });
+    }, (err) => {
+      if (!live) return;
+      console.warn(`Overlay column unavailable for ${data.octree?.cacheId}:`, err);
+      onOverlayUnavailableRef.current?.();
+    });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayListKey]);
+  const overlayColumns = overlayReady.key === overlayListKey ? overlayReady.columns : EMPTY_OVERLAY_VALUES;
+  const overlayPending = !!overlayListKey && overlayReady.key !== overlayListKey;
 
   // The cacheId we've already reported as missing, so a load failure fires the
   // recovery callback at most once per octree — even if React re-runs the effect.
@@ -1309,15 +1349,24 @@ export function OctreePointCloud({
   // covers both, so a change to either re-masks and an empty stack restores full
   // density. The cleanup runs on unmount and on every key change, which is what
   // un-hides points rather than leaving an earlier mask behind.
-  const cropMaskKey = visibilityMaskKey(cropMaskRules, filterSpec);
+  // An overlay column that arrives re-masks the tiles masked without it: a
+  // clause on an attribute a tile lacks does not apply, so they kept everything.
+  const readyKey = overlayReadyKey(overlayColumns);
+  const maskSpec = useMemo(
+    () => (readyKey && filterSpec.clauses.length > 0
+      ? { ...filterSpec, key: `${filterSpec.key}|ov:${readyKey}` } : filterSpec),
+    [filterSpec, readyKey],
+  );
+  const cropMaskKey = visibilityMaskKey(cropMaskRules, maskSpec);
   const labelMaskUsedRef = useRef(false);
   useEffect(() => {
     if (!octree) return;
-    if (cropMaskRules.length === 0 && filterSpec.clauses.length === 0) {
+    applyOverlayColumnsToVisibleNodes(octree, overlayColumns);
+    if (cropMaskRules.length === 0 && maskSpec.clauses.length === 0) {
       clearCropMaskFromVisibleNodes(octree, cacheId);
       return;
     }
-    applyCropMaskToVisibleNodes(octree, displayOffset, cropMaskRules, cropMaskKey, filterSpec, cacheId);
+    applyCropMaskToVisibleNodes(octree, displayOffset, cropMaskRules, cropMaskKey, maskSpec, cacheId);
     return () => clearCropMaskFromVisibleNodes(octree, cacheId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [octree, cropMaskKey, cacheId, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
@@ -1371,14 +1420,20 @@ export function OctreePointCloud({
   const frameStateRef = useRef({
     clipBox, translation, rotation, poseMatrix, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
-    labelStatsId, labelHiddenIndices, filterSpec, cacheId,
+    labelStatsId, labelHiddenIndices, filterSpec: maskSpec, cacheId,
+    overlayColumns, hideUntilOverlay: false,
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
     // emptiness for a rotated cloud (see cropClipsEverything).
     clipBox, translation, rotation, poseMatrix, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
-    labelStatsId, labelHiddenIndices, filterSpec, cacheId,
+    labelStatsId, labelHiddenIndices, filterSpec: maskSpec, cacheId,
+    overlayColumns,
+    // A split child is drawn from its parent's octree through a class mask on
+    // an overlay column; until that column has arrived the mask cannot hide
+    // anything, and the child would draw the whole parent. Draw nothing.
+    hideUntilOverlay: overlayPending && !!viewFilters,
   };
 
   useEffect(() => {
@@ -1404,7 +1459,7 @@ export function OctreePointCloud({
           const cacheId = d.octree?.cacheId;
           if (cacheId) ((window as any).__octreeCropHidden ??= {})[cacheId] = cropEmpty;
         }
-        if (cropEmpty) {
+        if (cropEmpty || frameStateRef.current.hideUntilOverlay) {
           if (octree.visible) octree.visible = false;
           return true;
         }
@@ -1452,6 +1507,9 @@ export function OctreePointCloud({
           firstTilesFiredRef.current = true;
           onReady?.();
         }
+        // Overlay columns into tiles that streamed in since the last frame,
+        // BEFORE anything below reads `geometry.attributes`.
+        applyOverlayColumnsToVisibleNodes(octree, frameStateRef.current.overlayColumns);
         const scalarActive =
           cm === 'scalar' && !!field && !!d.octree?.attributeRanges?.[field];
         // Manual-labeling overlay. Runs BEFORE the scalar swap decision below

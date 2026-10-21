@@ -705,6 +705,66 @@ each drawing a full copy of the parent's tiles, would cost more than the
 conversion saves.
 
 
+### Columns shown by row lookup (no rebuild to add a column)
+
+Every session octree carries each point's session ROW as two hidden uint16
+attributes, `__row_lo` and `__row_hi` (`_OCTREE_ROW_ATTRS`; one float32, the
+type potree-core hands every extra attribute to the renderer as, is exact only
+below 2^24 rows). PotreeConverter keeps every input point exactly once, in
+both sampling modes and with exact-duplicate positions, but reorders them by
+Morton code — so before this the octree had no point identity at all, and
+every tool that only ADDED a column rebuilt the whole octree just so the
+renderer could see it. `_session_to_las(row_ids=...)` writes them for octree
+builds only: `"absolute"` for a rebuild, `"compact"` for a compacting bake,
+whose rows renumber (a row's new index is its rank among the non-deleted).
+They are filtered out of every attribute list (`_read_octree_metadata` reports
+`row_ids: true` instead) and out of the point picker.
+
+A tool that adds a column calls `_overlay_column_locked`: if the drawn octree
+(current, or the stale one a pending edit is masked over) carries row ids, the
+column is registered in `sess.overlay_columns` and no rebuild runs; the
+response is `_overlay_octree_result` — the same octree, plus `overlay_columns`
+(slug, token, session id, label, range) from `_session_display_stats`. The
+renderer (`octreeOverlayColumns.ts`) fetches the column once from
+`GET /api/cloud/session/{id}/column/{slug}?token=…` in its storage type (a
+class column on the 45.7 M-point scan is 46 MB) and writes each tile's values
+into `geometry.attributes[slug]` as the tile loads. Coloring, the filter and
+crop mask, a split child's class mask and the picker all read that attribute,
+so they cannot tell an overlay column from a built one. Ground and wood/leaf
+segmentation use it today; an octree built before row ids existed rebuilds as
+before.
+
+- **Tokens.** `_session_put_column_locked` gives a column a new token on every
+  wholesale write. The endpoint refuses a stale token (409), and a missing
+  session is a 404; the renderer answers either by rebuilding that cloud's
+  octree from its own session (`handleOverlayUnavailable`), once per octree.
+- **Rebuilds bake it in.** `_session_rebuild` and both bake paths snapshot the
+  tokens before their LAS write and drop from the overlay every column whose
+  token is unchanged afterwards (`_prune_overlay_locked`); a column written
+  during the build stays an overlay.
+- **Split children.** A split can now draw its children from an overlay column
+  of the parent: the tiles' rows are the PARENT's, so each child's
+  `overlay_columns` names the parent's session. Until the column arrives a
+  child draws nothing (its class mask cannot hide anything without it).
+- **Persistence.** `column_tokens` and `overlay_columns` travel in the project
+  file (`SESSION_SCALARS`) and through spill (the session is pickled whole).
+  The renderer's saved overlay lists name sessions, so `rewireOpenedScene`
+  maps them to the reopened ids like the cloud's own.
+
+Measured on the 45.7 M-point test scan (`test_large_cloud_bench.py`): ground
+segmentation converts nothing (a non-splitting run used to rebuild all ~45.7 M
+points), and segment-then-split converts nothing either — the
+`split_by_ground_class` stage takes ~13 s, which is slicing the two child
+sessions and measuring their display stats, against ~39 s and 91.4 M
+converted points for `split_by_ground_class_built` in the same run. The cost:
+4 bytes per point in every octree, and one fetch of the column (46 MB for a
+class column at that size) the first time a cloud shows it.
+
+Not yet routed through it: normals (five float32 columns, 915 MB on the
+45.7 M-point scan, too much to ship whole; they would need per-tile fetches),
+height above ground, tree segmentation, scalar-field expressions and label
+commits.
+
 ## PyHelios streaming and bulk APIs (helios-core v1.3.86)
 
 PyHelios v0.1.32 exposes the lidar plugin's large-cloud APIs. The backend

@@ -33,6 +33,17 @@ export interface ScalarField {
 // renderer-side synthetic data (skeleton/mesh-derived overlays). The viewer
 // renders via potree-core streaming when this is set, falling back to the
 // flat-typed-array path otherwise.
+/** One overlay column: where to fetch its values, and the label and range the
+ *  octree's attribute list would have carried had it been built with it. */
+export interface OverlayColumn {
+  slug: string;
+  token: string;
+  sessionId: string;
+  label: string;
+  min: number;
+  max: number;
+}
+
 export interface OctreeRef {
   cacheId: string;            // sha1 hex; also the cache dir name
   sourceXyzPath: string;       // original on-disk source — needed for re-crop
@@ -157,6 +168,11 @@ export interface OctreeRef {
   // it changes on backfill, so keying the MissOctree loader on it remounts the
   // shell when the miss set changes (replacing the old missRefresh mechanism).
   missOctreeCacheId?: string | null;
+  // Columns this octree was built WITHOUT, shown by looking each tile point's
+  // session row up in the column (see octreeOverlayColumns.ts). Set from the
+  // backend's `overlay_columns`; a split child drawn from its parent lists the
+  // PARENT's, since the tiles' rows are the parent's.
+  overlayColumns?: OverlayColumn[];
   // Full scan-pattern parameters recovered from the source file (E57 pose +
   // angular sweep + grid resolution; PCD VIEWPOINT origin), when present. The
   // import path turns this into the Scan's ScanParameters so a lone-file import
