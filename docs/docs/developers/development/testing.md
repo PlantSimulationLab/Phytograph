@@ -73,8 +73,11 @@ what the stub cannot prove.
 ## A native dependency can be nondeterministic — pin its threads, don't loosen the test
 
 The `cloth-simulation-filter` wheel (`import CSF`) is **OpenMP-parallel on
-Linux and single-threaded on macOS**, and upstream CSF has a data race inside
-that parallel region: `Cloth::timeStep` runs `satisfyConstraintSelf` under a
+Linux and single-threaded on macOS**. The app no longer runs it (it uses the
+serial port in `csf_cloth.py`), but the tests still compare against it,
+so it is a test dependency (`backend-api/requirements-dev.txt`, and CI's
+test-deps install), not a runtime one.
+Upstream CSF has a data race inside that parallel region: `Cloth::timeStep` runs `satisfyConstraintSelf` under a
 `#pragma omp parallel for`, and that function writes its *neighbor* particle
 (`p2->offsetPos(...)`) — a particle another iteration owns. The settled cloth,
 and the `maxDiff < 0.005` early stop that reads it, therefore both depend on
@@ -88,12 +91,14 @@ any macOS machine, because the macOS wheel has no OpenMP at all.
 
 Two rules follow:
 
-- **Pin `OMP_NUM_THREADS=1` in the test harness, not in the backend.** The race
-  is upstream and threading is worth real time on production-sized clouds, so
-  the backend keeps it. `backend-api/tests/tile_pool_probe.py` sets the pin at
-  module import — before `numpy` or any native extension loads, and inherited
-  by its spawn-pool children — which makes CSF reproducible for the test
-  without changing what ships.
+- **Pin the reference to one thread in the test harness.** The wheel is a
+  test oracle now, so its threads only need pinning where a test runs it.
+  `tests/test_csf_reduced.py`'s `one_omp_thread()` uses `threadpoolctl`,
+  which sets the limit on every loaded OpenMP runtime, including one libhelios
+  already initialized. An environment variable set mid-process would be read
+  too late. (`backend-api/tests/tile_pool_probe.py` also sets
+  `OMP_NUM_THREADS=1` at module import, before any native extension loads, so
+  its spawn-pool children inherit it.)
 - **Don't answer nondeterminism by weakening the assertion.** Once CSF is
   pinned, `test_tiled_parallel.py` can keep demanding the pool's labels match
   the sequential ones *exactly*, which is the property it exists for: that

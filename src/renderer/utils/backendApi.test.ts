@@ -277,8 +277,8 @@ describe('segmentGround', () => {
   });
 
   it('surfaces detail on error', async () => {
-    mockFetchError(500, { detail: 'CSF not installed' });
-    await expect(segmentGround(req)).rejects.toThrow('CSF not installed');
+    mockFetchError(500, { detail: "The cloth filter's dependency (numba) is not installed." });
+    await expect(segmentGround(req)).rejects.toThrow('numba) is not installed');
   });
 
   // Cancellation: the optional external AbortSignal is the panel's Cancel button.

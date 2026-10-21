@@ -53,10 +53,11 @@ pye57>=0.4.0
 # scripts/build-backend.mjs (C-extension). The module degrades to os.sysconf /
 # resource when it is missing, so a bare venv still starts.
 psutil>=5.9
-# Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension
-# (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
-# macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.
-cloth-simulation-filter>=1.1.7
+# Cloth Simulation Filter — ground/non-ground segmentation runs our numba port
+# of it (backend-api/csf_cloth.py). numba was already here through prosail; it
+# is listed because csf_cloth needs it directly. The original CSF wheel is now
+# only the tests' reference, so it lives in requirements-dev.txt.
+numba>=0.60
 # TreeIso individual-tree segmentation deps. The TreeIso algorithm itself is
 # vendored (MIT) under backend-api/vendor/treeiso/; these are its runtime deps.
 # cut_pursuit_py is a pybind11 C-extension (imports as `import cut_pursuit_py`)

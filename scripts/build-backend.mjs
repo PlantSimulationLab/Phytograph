@@ -159,9 +159,9 @@ const hiddenImports = [
 // pip wheel. collect-all gathers the package's Python code, textures, and xml
 // asset trees — but NOT the native libhelios, which lives outside the package
 // tree in the source layout; that's added separately via pyheliosExtraArgs.
-// CSF (cloth-simulation-filter) is a SWIG C-extension; the import name is the
-// capitalized "CSF" (PyPI distribution is "cloth-simulation-filter"). collect-all
-// pulls its _CSF native module + SWIG wrapper.
+// Ground segmentation's cloth filter is backend-api/csf_cloth.py, a numba port
+// of CSF. The CSF wheel (cloth-simulation-filter) is only the tests' reference
+// and is NOT bundled; numba/llvmlite come through PyInstaller's contrib hooks.
 // TreeIso tree segmentation: cut_pursuit_py is a pybind11 C-extension (its
 // .so/.pyd must travel with the bundle); skimage/numpy_indexed pull in
 // submodules PyInstaller doesn't always trace. The TreeIso algorithm itself is
@@ -182,7 +182,7 @@ const hiddenImports = [
 // wood/leaf segmentation raised ModuleNotFoundError in the packaged app while dev
 // (running against the venv) passed. collect-all, not a hidden-import, so the
 // whole package travels regardless of which subpackages get traced.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'sklearn', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile', 'psutil'];
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'cut_pursuit_py', 'skimage', 'sklearn', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile', 'psutil'];
 
 // Vendored TreeIso (MIT) lives under backend-api/vendor/ and is imported lazily
 // via a runtime sys.path tweak in main.py. Add vendor/ to the analysis path so

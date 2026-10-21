@@ -3,3 +3,6 @@ pytest>=8.0
 pytest-cov>=5.0
 pytest-asyncio>=0.23
 httpx>=0.27
+# The original CSF (`import CSF`): the reference tests/test_csf_cloth.py and
+# test_csf_reduced.py pin backend-api/csf_cloth.py against. Not shipped.
+cloth-simulation-filter>=1.1.7

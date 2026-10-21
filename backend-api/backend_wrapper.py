@@ -68,7 +68,7 @@ if os.environ.get("PHYTOGRAPH_IMPORT_SELFTEST"):
     _REQUIRED = [
         "sklearn.mixture",   # _wood_geometric_labels (wood/leaf segmentation)
         "skimage", "cut_pursuit_py", "numpy_indexed", "maxflow",  # TreeIso
-        "CSF",               # ground segmentation
+        "csf_cloth",         # ground segmentation (numba; settled below too)
         "pye57", "plyfile", "laspy", "pyproj", "tifffile",  # IO
         "open3d", "scipy", "pytexit",
         # pyhelios is deliberately NOT here: loading it pulls in the native
@@ -82,10 +82,27 @@ if os.environ.get("PHYTOGRAPH_IMPORT_SELFTEST"):
             importlib.import_module(_m)
         except Exception as _e:
             _failed.append(f"{_m}: {type(_e).__name__}: {_e}")
+    # Importing proves the module is there, not that numba can compile in a
+    # frozen app (llvmlite's native lib, the cache locator): settle a tiny
+    # cloth for real. Reported apart from the import count.
+    _settle = "skipped (csf_cloth did not import)"
+    if not any(_f.startswith("csf_cloth:") for _f in _failed):
+        try:
+            import numpy as _np
+            import csf_cloth as _cc
+            _cloth, _info = _cc.settle(
+                _np.random.default_rng(0).random((200, 3)) * 5.0, cloth_resolution=0.5,
+                rigidness=3, time_step=0.65, iterations=50, slope_smooth=True)
+            if not (_np.isfinite(_cloth).all() and _info["iterations"] > 0):
+                raise RuntimeError(f"degenerate cloth after {_info['iterations']} iterations")
+            _settle = "OK"
+        except Exception as _e:
+            _settle = f"FAILED ({type(_e).__name__}: {_e})"
     for _f in _failed:
         print(f"[selftest] FAIL {_f}")
-    print(f"[selftest] {len(_REQUIRED) - len(_failed)}/{len(_REQUIRED)} imports OK")
-    sys.exit(1 if _failed else 0)
+    print(f"[selftest] {len(_REQUIRED) - len(_failed)}/{len(_REQUIRED)} imports OK; "
+          f"cloth settle {_settle}")
+    sys.exit(1 if _failed or _settle != "OK" else 0)
 
 
 # ==================== Command line ====================

@@ -20,6 +20,15 @@ import csf_reduced as cr
 CSF = pytest.importorskip("CSF")
 
 
+def one_omp_thread():
+    """The Linux/Windows CSF wheels run the cloth's constraint pass under
+    OpenMP with a data race (docs: developers/development/testing.md), so the
+    reference is only reproducible single-threaded. threadpoolctl sets that on
+    every loaded OpenMP runtime, even one already initialized by libhelios."""
+    from threadpoolctl import threadpool_limits
+    return threadpool_limits(limits=1, user_api="openmp")
+
+
 def _plain(points, *, cloth_resolution, rigidness, class_threshold, iterations,
            slope_smooth, time_step):
     csf = CSF.CSF()
@@ -32,7 +41,7 @@ def _plain(points, *, cloth_resolution, rigidness, class_threshold, iterations,
     csf.setPointCloud(np.ascontiguousarray(points[:, :3], dtype=np.float64))
     g, ng = CSF.VecInt(), CSF.VecInt()
     prev = os.getcwd()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, one_omp_thread():
         try:
             os.chdir(tmp)
             csf.do_filtering(g, ng)
@@ -67,11 +76,15 @@ PARAMS = [
 ]
 
 
+@pytest.mark.parametrize("fill_mode", [0, 1], ids=["csf_fill", "default_fill"])
 @pytest.mark.parametrize("params", PARAMS, ids=lambda p: f"res{p['cloth_resolution']}")
-def test_labels_match_plain_csf_on_the_whole_cloud(params):
+def test_labels_match_plain_csf_on_the_whole_cloud(params, fill_mode):
+    """With CSF's own fill the reduction must be exact by construction; the
+    default fill also agrees exactly on this cloud (it can differ only near
+    large empty regions - see tests/test_csf_cloth.py)."""
     pts = _plot()
     ref = _plain(pts, **params)
-    got, grid, cloth, n_reps = cr.segment(pts, **params)
+    got, grid, cloth, n_reps = cr.segment(pts, fill_mode=fill_mode, **params)
     assert n_reps < len(pts) / 5, "the cloth must see far fewer points than the cloud"
     assert 0 < ref.sum() < len(pts)
     assert np.array_equal(got, ref), f"{int((got != ref).sum())} labels differ"

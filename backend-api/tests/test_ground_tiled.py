@@ -28,7 +28,7 @@ def _cloud(n, extent=40.0, seed=3):
 
 
 def test_dispatch_by_point_count(monkeypatch):
-    pytest.importorskip("CSF")
+    pytest.importorskip("numba")
     xyz, truth = _cloud(60_000)
     monkeypatch.setenv("PHYTOGRAPH_GROUND_TILE_MIN_POINTS", "50000")
     monkeypatch.setenv("PHYTOGRAPH_GROUND_TILE_TARGET_POINTS", "10000")
@@ -45,7 +45,7 @@ def test_dispatch_by_point_count(monkeypatch):
 
 
 def test_sampled_auto_threshold_is_shared_by_every_tile(monkeypatch):
-    pytest.importorskip("CSF")
+    pytest.importorskip("numba")
     xyz, truth = _cloud(60_000)
     monkeypatch.setenv("PHYTOGRAPH_GROUND_TILE_MIN_POINTS", "0")
     monkeypatch.setenv("PHYTOGRAPH_GROUND_TILE_TARGET_POINTS", "10000")
@@ -83,7 +83,7 @@ XYZ_FORMAT = "x y z"
 def test_session_endpoint_reports_the_tiling(client, tmp_path, monkeypatch):
     from tests.binframe import decode_streamed_json
 
-    pytest.importorskip("CSF")
+    pytest.importorskip("numba")
     monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
     monkeypatch.setenv("PHYTOGRAPH_GROUND_TILE_MIN_POINTS", "1000")
     monkeypatch.setenv("PHYTOGRAPH_GROUND_TILE_TARGET_POINTS", "2000")

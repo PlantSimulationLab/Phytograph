@@ -100,8 +100,11 @@ architectures.
 |---|---|---|---|
 | POST | `/api/segment/ground` | `main.py` | Classify points into ground (1) / plant (2) via the Cloth Simulation Filter. Takes inline `points` or a `source` descriptor (read at full resolution — no downsampling, so labels align 1:1). Returns per-point `labels` + counts. Used for flat (in-memory) clouds; session clouds use `/api/cloud/session/{id}/segment_ground` instead. A cloth too fine for the extent is refused with **400** (see the session variant) |
 
-The classifier is the `cloth-simulation-filter` package (`import CSF`), a
-SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
+The classifier is CSF (Zhang et al. 2016). The cloth is settled by
+`backend-api/csf_cloth.py`, a numba port of the `cloth-simulation-filter`
+source with a faster fill for particles with no point. The wheel
+(`import CSF`) is not bundled; it is only the reference the tests compare the
+port against (see `developers/architecture/large-clouds.md`).
 
 ## Noise filtering
 

@@ -16,11 +16,13 @@ cloth depends on the input points through exactly two things:
 Every other point matters only to the final labeling (`c2cdist`), which
 interpolates the settled cloth bilinearly at each point. So the cloth that
 all N points produce is the cloth that at most one point per particle (plus
-the six bounding-box extremes) produces. At a 0.5 m cloth a 45.7 M-point
-terrestrial scan has ~10^5 particles, so CSF runs on ~10^5 points instead of
+the six bounding-box extremes) produces. The cloth itself is settled by
+`csf_cloth`, a port of CSF's simulation (the wheel's own with `fill_mode=0`;
+the default fills empty particles faster, see there). At a 0.5 m cloth a
+45.7 M-point terrestrial scan has ~10^5 particles, so CSF runs on ~10^5 points instead of
 all of them, and its working set (~60 B per point, twice over) stops scaling
 with the scan. The labeling is then done here, in chunks, with `c2cdist`'s
-own arithmetic against the full-precision cloth (`do_cloth_export`).
+own arithmetic against the full-precision cloth.
 
 Exactness. Which point a particle keeps is decided with CSF's arithmetic
 (`int(delta / step + 0.5)`, `SQUARE_DIST`) reproduced in float64. A compiled
@@ -30,12 +32,12 @@ the minimum; they keep their input order, so CSF's own first-wins tie-break
 picks among them exactly as it would have among all N. The labeling
 reproduces `c2cdist` operation for operation; a point can only disagree if
 its height above the cloth is within rounding (~1e-15 m) of the threshold.
-`tests/test_csf_reduced.py` checks label equality against plain CSF.
+`tests/test_csf_reduced.py` checks label equality against plain CSF on the
+whole cloud with both fills; `tests/test_csf_cloth.py` pins the cloth itself
+to the wheel (`fill_mode=0`) and bounds what the default fill changes.
 """
 from __future__ import annotations
 
-import os
-import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
@@ -139,41 +141,31 @@ def representative_indices(points: np.ndarray, grid: ClothGrid,
 
 def settle_cloth(points: np.ndarray, *, cloth_resolution: float, rigidness: int,
                  time_step: float, iterations: int, slope_smooth: bool,
-                 class_threshold: float) -> "tuple[ClothGrid, np.ndarray, np.ndarray]":
+                 class_threshold: float, fill_mode: int = 1
+                 ) -> "tuple[ClothGrid, np.ndarray, np.ndarray]":
     """Run CSF on the representative points. Returns (grid, cloth, reps):
     `cloth` is the settled cloth as CSF holds it internally, a (height, width)
     array of particle y (CSF's inverted up axis, i.e. minus the elevation),
-    and `reps` the rows CSF was given."""
-    import CSF
+    and `reps` the rows CSF was given.
+
+    The cloth comes from `csf_cloth`, our port of CSF's simulation, which
+    fills particles with no point in a fraction of CSF's time (see there).
+    `class_threshold` never reaches the cloth; it is accepted so callers can
+    pass CSF's whole parameter set."""
+    import csf_cloth
 
     lo, hi, extremes = bbox_and_extremes(points)
     grid = ClothGrid.from_bbox(lo, hi, cloth_resolution)
     reps = representative_indices(points, grid, extremes)
     sub = np.ascontiguousarray(np.asarray(points[reps, :3], dtype=np.float64))
-
-    csf = CSF.CSF()
-    csf.params.bSloopSmooth = bool(slope_smooth)
-    csf.params.cloth_resolution = float(cloth_resolution)
-    csf.params.rigidness = int(rigidness)
-    csf.params.class_threshold = float(class_threshold)
-    csf.params.time_step = float(time_step)
-    csf.params.interations = int(iterations)       # sic: the CSF API spelling
-    csf.setPointCloud(sub)
-    # do_cloth_export never writes cloth_nodes.txt, but run from a temp dir
-    # anyway in case a future CSF does, as segment_ground does for do_filtering.
-    prev = os.getcwd()
-    with tempfile.TemporaryDirectory() as tmp:
-        try:
-            os.chdir(tmp)
-            flat = np.asarray(csf.do_cloth_export(), dtype=np.float64)
-        finally:
-            os.chdir(prev)
-    nodes = flat.reshape(-1, 3)                    # (x, y, elevation) per particle
-    if len(nodes) != grid.width * grid.height:
+    cloth, info = csf_cloth.settle(
+        sub, cloth_resolution=float(cloth_resolution), rigidness=int(rigidness),
+        time_step=float(time_step), iterations=int(iterations),
+        slope_smooth=bool(slope_smooth), fill_mode=int(fill_mode))
+    if cloth.shape != (grid.height, grid.width):
         raise RuntimeError(
-            f"CSF built {len(nodes)} particles, expected {grid.width} x {grid.height}")
-    # toVector writes -pos.y; negating back is exact.
-    cloth = (-nodes[:, 2]).reshape(grid.height, grid.width)
+            f"CSF built {info['width']} x {info['height']} particles, "
+            f"expected {grid.width} x {grid.height}")
     return grid, cloth, reps
 
 
@@ -220,11 +212,12 @@ def ground_mask(points: np.ndarray, grid: ClothGrid, cloth: np.ndarray,
 
 def segment(points: np.ndarray, *, cloth_resolution: float, rigidness: int,
             class_threshold: float, iterations: int, slope_smooth: bool,
-            time_step: float) -> "tuple[np.ndarray, ClothGrid, np.ndarray, int]":
+            time_step: float, fill_mode: int = 1
+            ) -> "tuple[np.ndarray, ClothGrid, np.ndarray, int]":
     """CSF's ground mask for every point, from a cloth settled on the
     representative points. Returns (ground mask, grid, cloth, n_representative)."""
     grid, cloth, reps = settle_cloth(
         points, cloth_resolution=cloth_resolution, rigidness=rigidness,
         time_step=time_step, iterations=iterations, slope_smooth=slope_smooth,
-        class_threshold=class_threshold)
+        class_threshold=class_threshold, fill_mode=fill_mode)
     return ground_mask(points, grid, cloth, class_threshold), grid, cloth, int(len(reps))

@@ -10,6 +10,7 @@ Layers:
   - `segment_ground()` helper run directly → accuracy / per-class recall / IoU.
   - `/api/segment/ground` endpoint → label alignment + counts.
 """
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,13 @@ requires_csf = pytest.mark.skipif(
     reason="CSF (cloth-simulation-filter) not installed",
 )
 
+# The app's own cloth (csf_cloth) needs numba, not the CSF wheel; the wheel
+# gates only the tests that call it as a reference.
+requires_cloth = pytest.mark.skipif(
+    importlib.util.find_spec("numba") is None,
+    reason="numba not installed",
+)
+
 
 def _metrics(pred, truth):
     acc = float((pred == truth).mean())
@@ -63,7 +71,7 @@ def _metrics(pred, truth):
     return acc, ground_recall, plant_recall, ground_iou
 
 
-@requires_csf
+@requires_cloth
 def test_segment_ground_quantitative():
     """CSF labels vs ground-truth annotations on the real bean scan."""
     points, truth = _load_fixture()
@@ -91,7 +99,7 @@ def test_segment_ground_quantitative():
     assert plant_recall >= MIN_PLANT_RECALL, f"plant recall {plant_recall:.4f} below {MIN_PLANT_RECALL}"
 
 
-@requires_csf
+@requires_cloth
 def test_auto_class_threshold_reproduces_hand_tuned_value():
     """Auto mode should land on the tolerance a human tuned by hand.
 
@@ -182,7 +190,7 @@ def test_estimate_class_threshold_finds_the_gap():
     assert 0.35 <= threshold < 2.0, meta
 
 
-@requires_csf
+@requires_cloth
 def test_auto_class_threshold_survives_a_differently_settled_cloth():
     """The estimate must come from the histogram's SHAPE, not from one bin.
 
@@ -454,3 +462,41 @@ def test_segment_ground_too_few_points(client):
 def test_segment_ground_requires_input(client):
     res = client.post("/api/segment/ground", json={})
     assert res.status_code == 400
+
+
+@requires_cloth
+def test_a_non_finite_point_is_labeled_plant_and_does_not_poison_the_cloth():
+    """One NaN coordinate used to turn the whole cloth NaN (its bounding box is
+    the cloud's) and label every point plant. It is now dropped from the cloth,
+    labeled plant, and the other points segment exactly as without it."""
+    points, _ = _load_fixture()
+    kw = dict(cloth_resolution=0.05, rigidness=3, class_threshold=0.05)
+    clean = main.segment_ground(points, **kw)
+    bad = points.copy()
+    bad[17, 2] = np.nan
+    bad[40, 0] = np.inf
+    meta: dict = {}
+    got = main.segment_ground(bad, meta=meta, **kw)
+    assert got[17] == main.GROUND_CLASS_PLANT and got[40] == main.GROUND_CLASS_PLANT
+    assert meta["non_finite_points"] == 2
+    keep = np.setdiff1d(np.arange(len(points)), [17, 40])
+    expect = main.segment_ground(points[keep], **kw)
+    assert np.array_equal(got[keep], expect)
+    assert (clean == main.GROUND_CLASS_GROUND).sum() > 0.2 * len(points)
+
+
+def test_only_a_missing_module_reads_as_numba_not_installed():
+    """A ground worker's failure arrives as a RuntimeError holding its
+    traceback, which nearly always mentions the cloth. Only the import error
+    itself may produce the "install numba" message."""
+    oom = RuntimeError(
+        'Traceback (most recent call last):\n'
+        '  File "csf_reduced.py", line 157, in settle_cloth\n'
+        '    cloth, info = csf_cloth.settle(sub, cloth_resolution=float(cloth_resolution))\n'
+        'MemoryError: Unable to allocate 6.4 GiB')
+    assert not main._cloth_dependency_missing(oom)
+    missing = RuntimeError(
+        'Traceback (most recent call last):\n'
+        '  File "csf_cloth.py", line 39, in <module>\n'
+        "ModuleNotFoundError: No module named 'numba'")
+    assert main._cloth_dependency_missing(missing)

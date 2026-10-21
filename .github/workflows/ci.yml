@@ -200,7 +200,9 @@ jobs:
           # pytest-asyncio: pytest.ini sets asyncio_mode = auto, so the async
           #   test_e57_import coroutines need it or they error as "async def not
           #   natively supported".
-          pip install pytest pytest-cov pytest-asyncio httpx
+          # cloth-simulation-filter: the original CSF, which the cloth tests
+          #   compare backend-api/csf_cloth.py against.
+          pip install pytest pytest-cov pytest-asyncio httpx cloth-simulation-filter
 
       - name: Build PyHelios from source
         run: node scripts/build-pyhelios.mjs

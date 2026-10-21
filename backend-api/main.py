@@ -6026,7 +6026,7 @@ def _resolve_segmentation_points(
 # the other way round. They feed an ETA the user sees BEFORE committing to a
 # run, so their job is to be the right order of magnitude, not exact.
 _RATE_CSF_PTS_PER_S = 10e6            # measured ~35 M pts/s on a uniform cloud
-_RATE_CLOTH_NODE_ITERS_PER_S = 50e6   # measured 60-105 M node-iterations/s
+_RATE_CLOTH_NODE_ITERS_PER_S = 7.5e6  # measured 15-100 M (x the 500-iteration cap; csf_cloth)
 _RATE_WORKER_STAGE_PTS_PER_S = 30e6   # np.save + np.load of the (N,3) float64
 _WORKER_STARTUP_S = 4.5               # seg_worker re-imports main + libhelios
 _RATE_LAS_WRITE_PTS_PER_S = 10e6      # _session_to_las incl. extras
@@ -6229,13 +6229,11 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
                 error="Ground segmentation was canceled.",
             )
         except RuntimeError as e:
-            # The CSF C-extension raises ImportError inside the worker when it's
-            # missing; the worker surfaces it as a traceback string.
-            if "CSF" in str(e) or "cloth" in str(e).lower():
+            if _cloth_dependency_missing(e):
                 return GroundSegmentationResponse(
                     success=False,
                     num_points=len(points),
-                    error="CSF (cloth-simulation-filter) not installed. Run: pip install cloth-simulation-filter",
+                    error="The cloth filter's dependency (numba) is not installed. Run: pip install numba",
                 )
             raise
 
@@ -6906,7 +6904,7 @@ def _dem_ground_mask(points: np.ndarray, request: "DemRequest") -> "tuple[Option
             if int(mask.sum()) >= 3:
                 return mask, "csf_auto", None
         except ImportError:
-            return None, "all_points", "CSF not installed; used all points (lowest returns)."
+            return None, "all_points", "The cloth filter (numba) is not installed; used all points (lowest returns)."
     return None, "all_points", "No ground classification; used all points (lowest returns)."
 
 
@@ -18175,6 +18173,34 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     return threshold, meta
 
 
+def _finite_xyz_rows(points: np.ndarray) -> "Optional[np.ndarray]":
+    """Indices of the rows whose x, y and z are all finite, or None when every
+    row is (the common case, so no index array is built). Chunked, so a
+    memory-mapped cloud is not copied to answer it."""
+    step = 2_000_000
+    bad = []
+    for a in range(0, len(points), step):
+        ok = np.isfinite(np.asarray(points[a:a + step, :3])).all(axis=1)
+        if not ok.all():
+            bad.append(a + np.flatnonzero(~ok))
+    if not bad:
+        return None
+    mask = np.ones(len(points), dtype=bool)
+    mask[np.concatenate(bad)] = False
+    return np.flatnonzero(mask)
+
+
+def _cloth_dependency_missing(e: BaseException) -> bool:
+    """True when a ground worker's failure is numba (or the cloth module
+    itself) missing. The worker surfaces a failure as a RuntimeError holding
+    its traceback, and nearly every traceback on this path mentions the
+    cloth (`csf_cloth.py`, `settle_cloth`, `cloth_resolution=`), so only the
+    import error's own text counts: matching "cloth" anywhere told the user
+    to install numba for an out-of-memory error."""
+    text = str(e)
+    return any(f"No module named '{m}'" in text for m in ("numba", "csf_cloth", "llvmlite"))
+
+
 def segment_ground(
     points: np.ndarray,
     cloth_resolution: float = 0.05,
@@ -18221,12 +18247,28 @@ def segment_ground(
     Pass a dict as `meta` to receive the threshold actually applied plus the
     estimator's diagnostics.
 
-    Raises ImportError if the `CSF` extension is unavailable — the caller turns
+    Raises ImportError if numba (`csf_cloth`) is unavailable — the caller turns
     that into a clean error response rather than a 500.
     """
-    import CSF  # noqa: F401  SWIG C-extension; imported here so a missing dep is catchable
+    import csf_cloth  # noqa: F401  numba-compiled; imported here so a missing dep is catchable
 
     n = len(points)
+    keep = _finite_xyz_rows(points)
+    if keep is not None:
+        # One NaN coordinate would turn the whole cloth NaN (its bounding box
+        # is the cloud's) and quietly label every point plant. CSF's own box
+        # happened to skip NaN; here a non-finite point is dropped from the
+        # cloth and labeled plant, and the rest segment as if it were absent.
+        labels = np.full(n, GROUND_CLASS_PLANT, dtype=np.int32)
+        if keep.size:
+            labels[keep] = segment_ground(
+                np.ascontiguousarray(points[keep]), cloth_resolution=cloth_resolution,
+                rigidness=rigidness, class_threshold=class_threshold, iterations=iterations,
+                slope_smooth=slope_smooth, time_step=time_step,
+                auto_class_threshold=auto_class_threshold, meta=meta, tile=tile)
+        if meta is not None:
+            meta["non_finite_points"] = int(n - keep.size)
+        return labels
     if tile is None:
         tile = n >= _ground_tile_min_points()
     if tile and n:
@@ -40506,8 +40548,8 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Ground segmentation was canceled.")
     except RuntimeError as e:
-        if "CSF" in str(e) or "cloth" in str(e).lower():
-            raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
+        if _cloth_dependency_missing(e):
+            raise HTTPException(status_code=500, detail="The cloth filter's dependency (numba) is not installed.")
         raise
     # Scatter hit-labels back over ALL survivors (misses → 0). `hit` is aligned
     # with the snapshot the compute ran on, which the guard confirms is still the
@@ -41399,7 +41441,7 @@ def _do_session_dem_inner(sess: "CloudSession", request: "SessionDemRequest", pr
                     warning = "CSF found too few ground points; used all points."
             except ImportError:
                 ground_source = "all_points"; ground_pts = pts
-                warning = "CSF not installed; used all points (lowest returns)."
+                warning = "The cloth filter (numba) is not installed; used all points (lowest returns)."
         else:
             ground_source = "all_points"; ground_pts = pts
             warning = "No ground classification; used all points (lowest returns)."

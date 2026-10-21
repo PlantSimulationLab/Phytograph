@@ -95,7 +95,7 @@ def test_tiled_cloth_filter_agrees_with_untiled_including_at_the_seams():
     within 0.5 m of a tile boundary separately. A collar that is too small
     would still pass the whole-cloud average (seam points are a few percent)
     but not this band."""
-    CSF = pytest.importorskip("CSF")
+    pytest.importorskip("numba")
     import main
 
     xyz, truth = _cloud(150_000, extent=40.0)

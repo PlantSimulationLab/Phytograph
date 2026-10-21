@@ -429,10 +429,118 @@ row it is past the array (undefined in CSF), so the index is clamped there.
 `tests/test_csf_reduced.py` pins label equality with plain CSF on 1/r²
 plots, including slope smoothing, duplicate points and that edge.
 
-This does not make ground faster. Its time is the cloth simulation, which
+This did not make ground faster, because the time is in the cloth, which
 scales with particles, not points (683 s at a 0.2 m cloth over the whole
 45.7 M scan, either way). The ground worker also memory-maps its input now,
 as normals does.
+
+**The cloth's time was the fill, not the simulation** (`backend-api/csf_cloth.py`).
+The wheel exposes only `do_cloth_export`, with no way to time its phases, so
+CSF's `do_cloth` was ported to numba operation for operation. With
+`fill_mode=0` the port reproduces the wheel's cloth bit for bit
+(`tests/test_csf_cloth.py`), serial like the macOS wheel. There is one caveat.
+A particle's position is `origin + i * step`. The macOS arm64 wheel's
+compiler fuses that into a single FMA; the Intel-Mac, Windows and Linux
+wheels round twice, and so does the port. Where two points are exactly tied
+in distance from a particle, the two conventions can keep different points.
+That happens on mm-quantized TLS data, for example stem points stacked in one
+column 2.5 m apart in height. On the 45.7 M scan's dense tile at 0.3 m, 20
+particles differed and 195 k labels moved. Stock CSF therefore already
+labeled this scan differently on different platforms. The port picks the
+x86 convention everywhere. On tree_1 and tree_4 (0.05, 0.09 and 0.2 m cloths)
+the two conventions agree on accuracy to within 0.00006, in both directions.
+
+Timed by phase, the cost was not the simulation:
+
+| 45.7 M scan, untiled | particles | fill | simulation | iterations |
+|---|---|---|---|---|
+| 0.5 m | 581 × 395 | 4.7 s | 5.1 s | 267 |
+| 0.3 m | 965 × 656 | 47 s | 15 s | 285 |
+| 0.2 m | 1,446 × 982 | 262 s | 37 s | 342 |
+| 0.2 m, the 2 M-point stride sample auto-threshold settles first | 1,444 × 981 | 601 s | 42 s | 354 |
+
+The fill is `RasterTerrian`'s height for a particle with no point. It takes
+the first height along its row, then its column. If both are empty, it floods
+a BFS of its own until it reaches a particle with a point. A terrestrial
+scan's bounding box is mostly empty corners: at 0.5 m only 6,947 of the
+sample's 229,100 particles hold a point, and 37,349 need the flood. Each
+flood costs O(empty area), so the fill grows with the square of the particle
+count.
+
+The port's default (`fill_mode=1`) runs the same hop-nearest search as one
+multi-source BFS (1.2 s at 0.2 m). Untiled, that makes the whole scan 9.8 → 5.2 s
+at 0.5 m, 62 → 15 s at 0.3 m and 299 → 39 s at 0.2 m. The auto-threshold
+sample at 0.3 m goes 98 → 15 s. Like CSF's flood, it picks a particle at the
+fewest hops, but among ties it can pick a different one (or one CSF's
+never-cleared visited flags hid). Measured against stock CSF's labels:
+
+- 45.7 M scan: 3 labels changed at 0.5 m, 14 at 0.3 m and 0 at 0.2 m. All of
+  them are 129–171 m out at the edge of the bounding box, where a few sparse
+  points border the filled corners. The cloth there moved by up to 0.29 m,
+  pulled by fill heights 4–10 particles away. No ground truth covers them.
+- tree_1, tree_4 and the bean fixture: no label changed, and accuracy is
+  identical.
+- The 15 ISPRS samples: no label changed.
+- `tests/test_csf_cloth.py`'s two-patch fixture, whose cloth is mostly filled
+  and whose patches sit 2.4 m apart in elevation: 13 of 8,000 changed, on one
+  patch's edge facing the gap. The test bounds this instead of asserting
+  equality.
+
+End to end through `segment_ground`, the same 45.7 M scan, before and after
+(tiles run in-process here; in the app they run in the seg worker's pool, but
+the dense tile is the long pole either way):
+
+| cloth | manual threshold, tiled | auto threshold (the app default) |
+|---|---|---|
+| 0.5 m | 13.6 → 10.7 s | 36.7 → 16.3 s |
+| 0.3 m | 31.4 → 11.8 s | 195 → 27.5 s |
+| 0.2 m | 85.5 → 16.3 s | 1,448 → 60.6 s |
+
+The auto rows are dominated by the untiled whole-extent cloth that
+auto-threshold settles on a 2 M-point stride sample before the tiles run.
+That sample cloth was 1,271 s of the 1,448 s at 0.2 m, and 45.5 s after.
+Tiled, the default fill changed 0, 2 and 4 labels against the port's stock
+fill at 0.5, 0.3 and 0.2 m. The 0.3 m before/after ground fraction moved
+more (0.1654 → 0.1620): that is the FMA convention above, not the fill.
+
+Two other ways to speed the cloth were measured and rejected, on the same
+data:
+
+- **A coarse-to-fine warm start** settles a 2× or 4× coarser cloth and starts
+  the fine one from it. It was slower, not faster. Pinning is over by about
+  iteration 50; the remaining iterations are cloth sagging between pinned
+  particles, which a warm start does not shorten. It also changes which
+  particles get pinned: 5–12 % of the scan's labels flipped, and ISPRS
+  accuracy fell about 4 points.
+- **A looser stop rule** than CSF's 5 mm saves 5–35 % of the simulation. At
+  2 cm it flips 5,560 tree_1 labels.
+
+CSF's `maxDiff != 0` guard looks like it would run a fully pinned cloth to
+the iteration cap. On these clouds it never comes up: 85–90 % of the
+particles stay movable, hanging over the empty corners.
+
+Two side effects of the port:
+
+- Linux and Windows ground labels are deterministic now. Those wheels ran the
+  constraint pass in parallel with a data race.
+- They also lose that parallelism. The single-threaded port's simulation is
+  ~1.5× faster than the single-threaded wheel's, but on a many-core Linux or
+  Windows machine the parallel wheel's simulation may have been faster.
+
+numba compiles the port in ~1.8 s on first use and caches it. In dev the
+cache sits next to the source. A packaged build has no `.py` source, so
+numba's `UserWideCacheLocator` keys the cache to the executable and writes it
+under the OS user cache dir. If no location is writable, numba refuses
+`cache=True` when the module is imported. `csf_cloth` then falls back to
+compiling once per process, so ground segmentation keeps working. The build's
+import self-test settles a small cloth inside the frozen bundle to prove the
+compile works there.
+
+A point with a non-finite coordinate never reaches the cloth. The cloth's
+bounding box is the cloud's, so one NaN made the whole cloth NaN and labeled
+every point plant. CSF's own bounding box happened to skip it. Such points
+are labeled plant (`meta["non_finite_points"]` counts them), and the rest
+segment exactly as they would without them.
 
 **Point-local tools stream instead.** `_iter_session_hit_positions` yields a
 session's surviving hits in 2 M-row blocks (deletions, misses, world shift
@@ -740,8 +848,9 @@ spawning anything, from measured throughputs (`_RATE_*` constants next to
 the estimate errs long):
 
 - cloth filter: worker start (~4.5 s) + staging + CSF at ~10 M pts/s + the
-  cloth simulation at ~50 M node-iterations/s (nodes = (extent / cloth)²,
-  500 iterations);
+  cloth at ~7.5 M node-iterations/s (nodes = (extent / cloth)², counted at
+  the 500-iteration cap; `csf_cloth` measured 15–100 M on that count over the
+  ISPRS samples and the 45.7 M scan, slowest on the scan);
 - octree rebuild: LAS write at ~10 M pts/s + PotreeConverter at the rate of
   the sampling method it will be given (below); a run that will split into
   ground/plant children counts the parent's points twice.
