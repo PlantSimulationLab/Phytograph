@@ -281,6 +281,24 @@ test('ground -> DEM -> trees -> inventory -> stand -> QSMs on known stems', asyn
     await page.getByTestId('tree-inventory-tab-trees').click();
     expect(cellNumber(await rowOf(matched[0].id).locator('[data-col="qsm_volume_m3"]').textContent()))
       .toBeGreaterThan(0);
+
+    // 5) Re-segmenting the trees changes what the inventory measured, so it
+    // must say it is out of date. A tree segmentation no longer rebuilds the
+    // octree (tree_instance is shown by row lookup), so the cache id it used to
+    // notice by stays the same; the column's new token is what changes.
+    // Fresh first: the QSM step above wrote a column of its own, which already
+    // counts as a change (as its octree rebuild used to).
+    const staleNote = page.getByTestId('tree-inventory-result-note').filter({ hasText: 'has changed' });
+    await page.getByTestId('tree-inventory-run').click();
+    await expect(staleNote).toHaveCount(0, { timeout: 120_000 });
+    await page.getByTestId('tool-tree-segment').click();
+    await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+    await page.getByTestId('tree-segment-run-button').click();
+    await expect(page.getByTestId('tree-segment-cancel-button')).toHaveCount(0, { timeout: 180_000 });
+    if (!(await page.getByTestId('tree-inventory-panel').isVisible())) {
+      await page.getByTestId('tool-tree-inventory').click();
+    }
+    await expect(staleNote).toHaveCount(1, { timeout: 60_000 });
   } finally {
     for (const p of [treesCsv, curveCsv]) if (existsSync(p)) rmSync(p);
   }

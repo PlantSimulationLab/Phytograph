@@ -345,8 +345,8 @@ def test_session_duplicate_copies_all_points_independent_of_parent(
 
 
 def test_session_segment_trees_appends_instance_column(client, cache_root, tmp_path):
-    """TreeIso on the in-RAM points appends a tree_instance column and rebuilds
-    from the arrays. Smoke test on a tiny two-cluster cloud."""
+    """TreeIso on the in-RAM points appends a tree_instance column. Smoke test
+    on a tiny two-cluster cloud."""
     # Two well-separated vertical clusters so TreeIso yields ≥1 instance.
     f = tmp_path / "trees.xyz"
     rows = []
@@ -364,8 +364,8 @@ def test_session_segment_trees_appends_instance_column(client, cache_root, tmp_p
     assert res.status_code == 200, res.text
     # Never ground-segmented: the reminder is set.
     assert res.json()["ground_warning"] is True
-    attr_names = {a["name"] for a in res.json().get("attributes", [])}
-    assert "tree_instance" in attr_names, attr_names
+    # Shown on the drawn octree by row lookup (tests/test_octree_overlay_columns.py).
+    assert "tree_instance" in {o["slug"] for o in res.json()["overlay_columns"]}
     sess = main._cloud_sessions[sid]
     assert "tree_instance" in sess.extras
     assert len(sess.extras["tree_instance"]) == len(sess.positions)

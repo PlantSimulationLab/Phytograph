@@ -81,9 +81,18 @@ test('per-tree split loads each octree exactly once (no remount flicker)', async
   const loaded = Object.entries(counts ?? {});
   expect(loaded.length).toBeGreaterThanOrEqual(childCount + 1);
 
-  // The assertion: nothing was loaded twice. Before the fix every one of these
-  // was 2 (mount, then the first-paint remount).
-  const remounted = loaded.filter(([, n]) => n > 1);
+  // The assertion: no CHILD was loaded twice. Before the fix every one of
+  // these was 2 (mount, then the first-paint remount).
+  //
+  // The parent is the exception, and deliberately: it is recolored by
+  // tree_instance, and a color-mode change remounts its OctreePointCloud for a
+  // fresh material (see the `key` in PointCloudViewer). That used to load a
+  // NEW cache id, because segmentation rebuilt the octree; now tree_instance
+  // is shown on the imported octree by row lookup, so the same id loads twice
+  // — once at import, once for the recolor — and never more.
+  const parentId = (await cloudRow.getAttribute('data-octree-cache-id'))!;
+  expect(counts?.[parentId], 'the parent loaded more than import + recolor').toBeLessThanOrEqual(2);
+  const remounted = loaded.filter(([id, n]) => id !== parentId && n > 1);
   expect(
     remounted,
     `these octrees were loaded more than once (remount flicker): ${remounted.map(([id, n]) => `${id.slice(0, 8)}=${n}`).join(', ')}`,

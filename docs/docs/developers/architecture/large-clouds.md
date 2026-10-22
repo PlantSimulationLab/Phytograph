@@ -730,9 +730,21 @@ renderer (`octreeOverlayColumns.ts`) fetches the column once from
 class column on the 45.7 M-point scan is 46 MB) and writes each tile's values
 into `geometry.attributes[slug]` as the tile loads. Coloring, the filter and
 crop mask, a split child's class mask and the picker all read that attribute,
-so they cannot tell an overlay column from a built one. Ground and wood/leaf
-segmentation use it today; an octree built before row ids existed rebuilds as
-before.
+so they cannot tell an overlay column from a built one. Every tool that only
+adds columns goes through one decision, `_show_new_columns` (overlay, or a
+rebuild for an octree built before row ids existed): ground and wood/leaf
+segmentation, height above ground (DEM), tree segmentation (both methods),
+organ segmentation, a computed scalar field, and a label commit. Scalar-field
+manage moves an overlay field's entry and token on rename, drops it on delete
+(nothing in the octree to hide unless it also carries a built copy, which the
+relabel path still hides), and registers a duplicate as one.
+
+A label commit is the one write a token cannot see on its own: strokes edit
+the column in place. `_do_commit_labels` therefore issues the column a new
+token before showing it, and the renderer's label hold waits for that token's
+column to be fetched (`releaseOnOverlay`) rather than for an octree swap that
+will not come. The tree inventory folds overlay tokens into its staleness key,
+since re-segmenting no longer changes the cache id it used to notice by.
 
 - **Tokens.** `_session_put_column_locked` gives a column a new token on every
   wholesale write. The endpoint refuses a stale token (409), and a missing
@@ -761,9 +773,9 @@ converted points for `split_by_ground_class_built` in the same run. The cost:
 class column at that size) the first time a cloud shows it.
 
 Not yet routed through it: normals (five float32 columns, 915 MB on the
-45.7 M-point scan, too much to ship whole; they would need per-tile fetches),
-height above ground, tree segmentation, scalar-field expressions and label
-commits.
+45.7 M-point scan, too much to ship whole; they would need per-tile fetches).
+A float column is 183 MB at that size against a class column's 46 MB; the
+renderer's column cache is bounded at 512 MB, always keeping the newest.
 
 ## PyHelios streaming and bulk APIs (helios-core v1.3.86)
 

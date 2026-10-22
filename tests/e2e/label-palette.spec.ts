@@ -564,13 +564,15 @@ test('committed labels keep their color when the class numbers have gaps', async
   await expect.poll(async () => (await pointHues(page)).magenta, { timeout: 15_000 })
     .toBeGreaterThan(40);
 
-  // Closing the panel bakes the column into a rebuilt octree (a new cache id).
+  // Closing the panel commits the column: a new token for it, shown on the
+  // same octree by row lookup (see octreeOverlayColumns.ts).
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
-  const before = await row.getAttribute('data-octree-cache-id');
+  const before = await row.getAttribute('data-overlay-columns');
   await panel.getByRole('button', { name: 'Close' }).click();
   await expect(panel).toHaveCount(0);
-  await expect(row).not.toHaveAttribute('data-octree-cache-id', before ?? '', { timeout: 90_000 });
-  // Reopened, the overlay's baseline is the BAKED column, read from the octree:
+  await expect(row).toHaveAttribute('data-overlay-columns', /manual_class:/, { timeout: 90_000 });
+  await expect(row).not.toHaveAttribute('data-overlay-columns', before ?? '', { timeout: 90_000 });
+  // Reopened, the overlay's baseline is the COMMITTED column, read from the tiles:
   // still magenta, no cyan.
   await page.getByTestId('tool-label').click();
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');

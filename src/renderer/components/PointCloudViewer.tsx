@@ -3049,9 +3049,29 @@ export default function PointCloudViewer({
        * cache-id change blanked the labels for the length of the handover.
        */
       releaseOnCacheId?: string;
+      /**
+       * The commit landed as an OVERLAY column (`slug:token`, see
+       * octreeOverlayColumns.ts) on the octree already drawn, so no new cache
+       * id will ever be attached: the hold keeps painting until the cloud
+       * reports that column fetched and written into its tiles.
+       */
+      releaseOnOverlay?: string;
     }>>(() => new Map());
   // The cache id each cloud is DRAWING, as reported by onOctreeDrawn.
   const drawnCacheIdRef = useRef(new Map<string, string>());
+  // The overlay columns (`slug:token`) each cloud has fetched and is writing
+  // into its tiles, as reported by onOverlayColumnsReady.
+  const readyOverlayRef = useRef(new Map<string, Set<string>>());
+  const handleOverlayColumnsReady = useCallback((cloudId: string, ready: string[]) => {
+    readyOverlayRef.current.set(cloudId, new Set(ready));
+    setLabelCommitHolds((prev) => {
+      const hold = prev.get(cloudId);
+      if (!hold?.releaseOnOverlay || !ready.includes(hold.releaseOnOverlay)) return prev;
+      const next = new Map(prev);
+      next.delete(cloudId);
+      return next;
+    });
+  }, []);
   /**
    * Display-only masks for deletions a rebuilt octree has absorbed but which is
    * not ON SCREEN yet — the same gap `releaseOnCacheId` covers for labels.
@@ -4641,9 +4661,14 @@ export default function PointCloudViewer({
       const retired = keep > 0 ? stack.slice(0, Math.max(0, stack.length - keep)) : stack;
       beginMaskHandover(cloudId, baked.cache_id, retired, cur?.committedFilters);
     }
-    onUpdateCloud(cloudId, buildSessionOctreeData(
+    const refreshed = buildSessionOctreeData(
       baked, current, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
-    ));
+    );
+    onUpdateCloud(cloudId, refreshed);
+    const committedOverlay = reason.labelSlug
+      ? refreshed.octree?.overlayColumns?.find((c) => c.slug === reason.labelSlug)
+      : undefined;
+    const overlayKey = committedOverlay ? `${committedOverlay.slug}:${committedOverlay.token}` : null;
     if (reason.labelSlug) {
       // The octree now carries the column, so color by it — the step that used
       // to happen inline at the end of a blocking commit.
@@ -4655,6 +4680,14 @@ export default function PointCloudViewer({
         // here would blank them until its own rebuild landed.
         if (!hold || hold.seq !== reason.labelSeq) return prev;
         const next = new Map(prev);
+        // Committed as an overlay column: retire it once that column is in
+        // the tiles — the octree on screen does not change, so no draw event
+        // would ever come (see `releaseOnOverlay`).
+        if (overlayKey) {
+          if (readyOverlayRef.current.get(cloudId)?.has(overlayKey)) next.delete(cloudId);
+          else next.set(cloudId, { ...hold, releaseOnCacheId: undefined, releaseOnOverlay: overlayKey });
+          return next;
+        }
         // Retire it once the rebuilt octree is on screen, not now — see
         // `releaseOnCacheId`. (Now only if it already is: an unchanged cache id
         // swaps nothing, so no draw event would ever come.)
@@ -16143,7 +16176,8 @@ export default function PointCloudViewer({
           if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
           if (wantHAG) retireLabelColumn(id, HEIGHT_ABOVE_GROUND_ATTRIBUTE);
           finishMesh(result, surface);
-          // The HAG column was baked into the rebuilt octree; refresh + recolor.
+          // The HAG column is shown on the octree (by row lookup, or baked in by
+          // a rebuild for an octree without row ids); adopt it + recolor.
           if (wantHAG && result.cacheId && result.rawMeta) {
             onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
             registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
@@ -21783,8 +21817,17 @@ export default function PointCloudViewer({
     const t = e?.translation ?? { x: 0, y: 0, z: 0 };
     const r = e?.rotation ?? { x: 0, y: 0, z: 0 };
     const sc = e?.scale ?? { x: 1, y: 1, z: 1 };
+    // Columns shown by row lookup change without a new cache id: a re-run tree
+    // segmentation or a new height above ground only issues a new column token
+    // (see octreeOverlayColumns.ts), and the inventory, measured on those
+    // columns, has to read stale then too. Last, so the cache id stays the
+    // first field `remapInventoryStateKey` follows on reopen, and only when
+    // there are any, so an inventory saved before overlays existed still
+    // matches its unchanged cloud.
+    const overlay = (cloud.data.octree?.overlayColumns ?? [])
+      .map((c) => `${c.slug}:${c.token}`).sort().join(',');
     return [cloud.data.octree?.cacheId ?? '', e?.pendingDeletes?.length ?? 0,
-      t.x, t.y, t.z, r.x, r.y, r.z, sc.x, sc.y, sc.z].join('|');
+      t.x, t.y, t.z, r.x, r.y, r.z, sc.x, sc.y, sc.z, ...(overlay ? [overlay] : [])].join('|');
   }, [editStates]);
 
   // The one selected cloud the inventory would run on, and why it can't.
@@ -24337,6 +24380,7 @@ export default function PointCloudViewer({
                   // that's impossible, surface a clear message.
                   onOctreeMissing={() => handleOctreeMissing(cloud.id)}
                   onOverlayUnavailable={() => { void handleOverlayUnavailable(cloud.id); }}
+                  onOverlayColumnsReady={(ready) => handleOverlayColumnsReady(cloud.id, ready)}
                 />
               ) : (() => {
                 // Flat cloud draft rotation (Transformation tool): the parent group
@@ -26684,6 +26728,10 @@ export default function PointCloudViewer({
                     data-registration-reference={isReference ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-octree-cache-id={scan.data?.octree?.cacheId ?? ''}
+                    // Columns shown by row lookup (`slug:token`): a tool that
+                    // only adds a column changes this, not the cache id.
+                    data-overlay-columns={(scan.data?.octree?.overlayColumns ?? [])
+                      .map((c) => `${c.slug}:${c.token}`).join(',')}
                     // World-frame bounding box as "minx,miny,minz,maxx,maxy,maxz"
                     // for E2E. Registration is judged by WHERE the cloud ends up,
                     // and a wrong-plant match on a regular planting lands one

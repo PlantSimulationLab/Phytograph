@@ -196,3 +196,111 @@ def test_a_split_draws_its_children_from_an_overlay_column_converting_nothing(
         # the parent's rows, not the child's.
         [ov] = c["overlay_columns"]
         assert ov["session_id"] == sid and ov["slug"] == "ground_class"
+
+
+# ---- every tool that only adds a column ----------------------------------- #
+#
+# Each was a full PotreeConverter run just so the renderer could see one new
+# column. Each now goes through `_show_new_columns`: the same octree back, the
+# column in `overlay_columns`, its values servable by row.
+
+def _assert_shown_by_row(client, sid, cid, body, slugs, conversions):
+    assert conversions == [], f"{slugs} rebuilt the octree"
+    assert body["cache_id"] == cid
+    shown = {o["slug"]: o for o in body["overlay_columns"]}
+    sess = main._cloud_sessions[sid]
+    for slug in slugs:
+        assert slug in shown, (slug, list(shown))
+        col = client.get(f"/api/cloud/session/{sid}/column/{slug}",
+                         params={"token": shown[slug]["token"]})
+        assert col.status_code == 200, col.text
+        vals = np.frombuffer(col.content, dtype=np.dtype(col.headers["X-Column-Dtype"]).newbyteorder("<"))
+        assert np.array_equal(vals, np.asarray(sess.extras[slug]))
+
+
+def test_height_above_ground_is_shown_without_a_rebuild(client, cache_root, ground_scene, monkeypatch):
+    from tests.binframe import decode_bin_frame
+    created = _create(client, ground_scene)
+    sid, cid = created["session_id"], created["cache_id"]
+    client.post(f"/api/cloud/session/{sid}/segment_ground", json={"cloth_resolution": 0.1})
+    conversions = _count_conversions(monkeypatch)
+    res = client.post(f"/api/cloud/session/{sid}/dem", json={
+        "surface_type": "dtm", "auto_segment_ground": False, "cell_size": 0.1,
+        "method": "tin", "add_height_column": True})
+    assert res.status_code == 200, res.text
+    meta, _ = decode_bin_frame(res.content)
+    assert meta.get("success", True), meta
+    _assert_shown_by_row(client, sid, cid, meta, ["height_above_ground"], conversions)
+    hag = np.asarray(main._cloud_sessions[sid].extras["height_above_ground"])
+    assert np.abs(hag[:900]).max() < 0.05 and hag[900:].max() > 0.25   # ground flat, blob raised
+
+
+def test_tree_segmentation_is_shown_without_a_rebuild(client, cache_root, ground_scene, monkeypatch):
+    created = _create(client, ground_scene)
+    sid, cid = created["session_id"], created["cache_id"]
+    conversions = _count_conversions(monkeypatch)
+    res = client.post(f"/api/cloud/session/{sid}/segment_trees",
+                      json={"method": "chm", "chm_crown_scale": 0.2})
+    assert res.status_code == 200, res.text
+    _assert_shown_by_row(client, sid, cid, res.json(), ["tree_instance"], conversions)
+
+
+def test_a_computed_field_is_shown_without_a_rebuild(client, cache_root, ground_scene, monkeypatch):
+    created = _create(client, ground_scene)
+    sid, cid = created["session_id"], created["cache_id"]
+    conversions = _count_conversions(monkeypatch)
+    res = client.post(f"/api/cloud/session/{sid}/scalar_fields/compute", json={
+        "expression": "z * 2", "slug": "z2", "acknowledge_cost": True})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert "octree_deferred" not in body
+    _assert_shown_by_row(client, sid, cid, body, ["z2"], conversions)
+    sess = main._cloud_sessions[sid]
+    assert np.allclose(np.asarray(sess.extras["z2"]), 2 * np.asarray(sess.positions)[:, 2], atol=1e-5)
+
+
+def test_managing_an_overlay_field_needs_no_rebuild(client, cache_root, ground_scene, monkeypatch):
+    created = _create(client, ground_scene)
+    sid, cid = created["session_id"], created["cache_id"]
+    client.post(f"/api/cloud/session/{sid}/scalar_fields/compute", json={
+        "expression": "z * 2", "slug": "z2", "acknowledge_cost": True})
+    sess = main._cloud_sessions[sid]
+    token = sess.column_tokens["z2"]
+    conversions = _count_conversions(monkeypatch)
+
+    def manage(**body):
+        res = client.post(f"/api/cloud/session/{sid}/scalar_fields/manage", json=body)
+        assert res.status_code == 200, res.text
+        return res.json()
+
+    # Duplicate: a new column, shown by row.
+    dup = manage(action="duplicate", slug="z2", new_slug="z2b")
+    _assert_shown_by_row(client, sid, cid, dup, ["z2", "z2b"], conversions)
+    # Rename: same values under a new name, so the token travels with it.
+    ren = manage(action="rename", slug="z2", new_slug="twice_z")
+    assert {o["slug"] for o in ren["overlay_columns"]} == {"twice_z", "z2b"}
+    assert sess.column_tokens["twice_z"] == token and "z2" not in sess.column_tokens
+    # Delete: dropped from the overlay; nothing in the octree to hide.
+    gone = manage(action="delete", slug="twice_z")
+    assert {o["slug"] for o in gone["overlay_columns"]} == {"z2b"}
+    assert conversions == [] and gone["cache_id"] == cid
+
+
+def test_committing_labels_needs_no_rebuild(client, cache_root, ground_scene, monkeypatch):
+    created = _create(client, ground_scene)
+    sid, cid = created["session_id"], created["cache_id"]
+    slug = main.MANUAL_CLASS_SLUG
+    res = client.post(f"/api/cloud/session/{sid}/label_region", json={"strokes": [{
+        "region": {"kind": "box", "min": [-1, -1, 0.2], "max": [2, 2, 2], "invert": False},
+        "to_class": 3, "stroke_id": "s1"}]})
+    assert res.status_code == 200, res.text
+    sess = main._cloud_sessions[sid]
+    before = sess.column_tokens.get(slug)
+    conversions = _count_conversions(monkeypatch)
+    body = decode_streamed_json(client.post(f"/api/cloud/session/{sid}/commit_labels",
+                                            json={"slug": slug}).content)
+    _assert_shown_by_row(client, sid, cid, body, [slug], conversions)
+    # Strokes write in place; the commit is what tells a reader to refetch.
+    assert sess.column_tokens[slug] != before
+    labels = np.asarray(sess.extras[slug])
+    assert set(labels[900:].tolist()) == {3}

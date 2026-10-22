@@ -84,13 +84,29 @@ export function overlayReadyKey(columns: readonly OverlayColumnValues[]): string
 
 // Fetched columns, shared by every cloud drawn from the same session (a split's
 // children look their class up in the PARENT's column). Keyed by token, so a
-// rewritten column is fetched afresh; a handful of entries bounds the memory —
-// a class column on a 45.7 M-point cloud is 46 MB.
-const MAX_CACHED_COLUMNS = 8;
-const cache = new Map<string, Promise<ArrayLike<number>>>();
+// rewritten column is fetched afresh. Bounded by BYTES, not entries: a class
+// column on the 45.7 M-point scan is 46 MB, but a float one (height above
+// ground, an expression) is 183 MB, and a count bound let a handful of those
+// pin over a gigabyte. The newest column is always kept, whatever its size.
+const MAX_CACHED_BYTES = 512 * 1024 * 1024;
+const cache = new Map<string, { promise: Promise<ArrayLike<number>>; bytes: number }>();
 
 function cacheKey(c: OverlayColumn): string {
   return `${c.sessionId}|${c.slug}|${c.token}`;
+}
+
+function byteLength(values: ArrayLike<number>): number {
+  return (values as { byteLength?: number }).byteLength ?? values.length * 8;
+}
+
+function evictOverBudget(): void {
+  let total = 0;
+  for (const e of cache.values()) total += e.bytes;
+  for (const [key, e] of cache) {
+    if (total <= MAX_CACHED_BYTES || cache.size <= 1) break;
+    cache.delete(key);
+    total -= e.bytes;
+  }
 }
 
 /** The column's values, fetched once per (session, slug, token). A failed
@@ -105,16 +121,16 @@ export function loadOverlayColumn(
     // Most recently used last, so the oldest is the one evicted.
     cache.delete(key);
     cache.set(key, hit);
-    return hit;
+    return hit.promise;
   }
-  const p = fetchColumn(c.sessionId, c.slug, c.token);
-  cache.set(key, p);
-  p.catch(() => { if (cache.get(key) === p) cache.delete(key); });
-  while (cache.size > MAX_CACHED_COLUMNS) {
-    const oldest = cache.keys().next().value as string;
-    cache.delete(oldest);
-  }
-  return p;
+  const promise = fetchColumn(c.sessionId, c.slug, c.token);
+  const entry = { promise, bytes: 0 };
+  cache.set(key, entry);
+  promise.then((values) => {
+    entry.bytes = byteLength(values);
+    evictOverBudget();
+  }, () => { if (cache.get(key) === entry) cache.delete(key); });
+  return promise;
 }
 
 /** Forget every cached column: File → New, and tests. */

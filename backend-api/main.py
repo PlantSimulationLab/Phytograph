@@ -38301,10 +38301,17 @@ def _do_commit_labels(sess: "CloudSession", session_id: str, slug: str,
     anything is claimed: `_session_rebuild` only touches the session after the
     converter returns, so the session keeps its current octree."""
     cancel_event = getattr(progress, "cancel_event", None)
-    # _session_rebuild takes the lock itself (and must not be called holding it —
-    # PotreeConverter is slow).
-    cache_key, cache_dir, meta = _session_rebuild(
-        sess, progress=progress, cancel_event=cancel_event)
+    with _cloud_session_lock:
+        # Strokes write the column IN PLACE, which no token records, so the
+        # commit is where its values change as far as a reader is concerned: a
+        # renderer holding the overlay values from before refetches them.
+        if slug in sess.extras:
+            sess.column_tokens[slug] = uuid.uuid4().hex[:12]
+    # Shown by row lookup when the drawn octree allows (no PotreeConverter run
+    # at all), else rebuilt with the column baked in. Either takes the lock
+    # itself and must not be called holding it.
+    cache_key, cache_dir, meta = _show_new_columns(
+        sess, [slug], progress=progress, cancel_event=cancel_event)
     with _cloud_session_lock:
         editable = _session_editable_mask_locked(sess)
         class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
@@ -38893,14 +38900,21 @@ def _overlay_column_info(session_id: str, overlay: "Dict[str, str]", labels: dic
 
 
 @functools.lru_cache(maxsize=256)
-def _octree_has_row_ids(root: str, cache_id: str) -> bool:
-    """Whether an octree's tiles carry `_OCTREE_ROW_ATTRS`. Cached: an entry is
+def _octree_attribute_names(root: str, cache_id: str) -> "frozenset[str]":
+    """Every attribute name an octree's tiles carry. Cached: an entry is
     content-addressed, so its attribute list never changes under its id."""
     try:
-        attrs = json.loads((_Path(root) / cache_id / "metadata.json").read_text()).get("attributes") or []
+        text = (_Path(root) / cache_id / "metadata.json").read_text()
+        text = re.sub(r'(?<![\w\.])-?(inf|nan)(?![\w\.])', 'null', text)
+        attrs = json.loads(text).get("attributes") or []
     except (OSError, ValueError):
-        return False
-    names = {a.get("name") for a in attrs if isinstance(a, dict)}
+        return frozenset()
+    return frozenset(a.get("name") for a in attrs if isinstance(a, dict) and a.get("name"))
+
+
+def _octree_has_row_ids(root: str, cache_id: str) -> bool:
+    """Whether an octree's tiles carry `_OCTREE_ROW_ATTRS`."""
+    names = _octree_attribute_names(root, cache_id)
     return all(n in names for n in _OCTREE_ROW_ATTRS)
 
 
@@ -38934,6 +38948,31 @@ def _prune_overlay_locked(sess: "CloudSession", built_tokens: "Dict[str, str]") 
     for slug in list(sess.overlay_columns):
         if slug in built_tokens and sess.column_tokens.get(slug) == built_tokens[slug]:
             del sess.overlay_columns[slug]
+
+
+def _show_new_columns(sess: "CloudSession", slugs: "Sequence[str]", progress=None,
+                      cancel_event: "Optional[threading.Event]" = None,
+                      span: "Tuple[float, float]" = (0.0, 1.0)) -> "tuple[str, _Path, dict]":
+    """(cache_key, dir, meta) for showing the just-written `slugs`: the drawn
+    octree with them as overlay columns when it carries row ids, else a
+    rebuild that bakes them in. The one place a column-adding tool decides,
+    so every such tool gets the overlay and the fallback alike. Caller must
+    NOT hold the lock (the fallback runs PotreeConverter)."""
+    with _cloud_session_lock:
+        drawn = _drawn_octree_id_locked(sess)
+        overlay = bool(drawn) and _octree_has_row_ids(str(_octree_cache_root()), drawn)
+        if overlay:
+            for slug in slugs:
+                sess.overlay_columns[slug] = sess.column_tokens.get(slug, "")
+    if overlay:
+        return _overlay_octree_result(sess)
+    # Only the streaming options a caller actually has, so a plain call stays
+    # the plain `_session_rebuild(sess)` every other tool makes.
+    extra = {k: v for k, v in (("progress", progress), ("cancel_event", cancel_event))
+             if v is not None}
+    if span != (0.0, 1.0):
+        extra["span"] = span
+    return _session_rebuild(sess, **extra)
 
 
 def _overlay_octree_result(sess: "CloudSession") -> "tuple[str, _Path, dict]":
@@ -41695,7 +41734,7 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
                     raise ValueError(_SESSION_EDITED_DURING_DEM)
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG,
                                           HEIGHT_ABOVE_GROUND_LABEL, hag)
-            cache_key, cache_dir, meta = _session_rebuild(sess)
+            cache_key, cache_dir, meta = _show_new_columns(sess, [HEIGHT_ABOVE_GROUND_SLUG])
             result["cache_id"] = cache_key
             result["cache_dir"] = str(cache_dir)
             result["point_count"] = int(boxes["all"].n)
@@ -41877,7 +41916,7 @@ def _do_session_dem_inner(sess: "CloudSession", request: "SessionDemRequest", pr
                 if not np.array_equal(sess.deleted, ~surv):
                     raise ValueError(_SESSION_EDITED_DURING_DEM)
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG, HEIGHT_ABOVE_GROUND_LABEL, hag)
-            cache_key, cache_dir, meta = _session_rebuild(sess)
+            cache_key, cache_dir, meta = _show_new_columns(sess, [HEIGHT_ABOVE_GROUND_SLUG])
             result["cache_id"] = cache_key
             result["cache_dir"] = str(cache_dir)
             result["point_count"] = int(len(pts))
@@ -42172,7 +42211,8 @@ async def session_segment_organs(session_id: str, request: SessionOrganSegmentRe
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Organ segmentation was canceled.")
     await run_in_threadpool(_organ_write_columns, sess, deleted0, hit, out)
-    cache_key, cache_dir, octree_meta = await run_in_threadpool(_session_rebuild, sess)
+    cache_key, cache_dir, octree_meta = await run_in_threadpool(
+        _show_new_columns, sess, [PLANT_ORGAN_SLUG, LEAFLET_ID_SLUG])
     return {"session_id": session_id, "point_count": int(len(pts)),
             **_organ_counts(out[:, 0], out[:, 1], meta),
             "cache_id": cache_key, "cache_dir": str(cache_dir), **octree_meta}
@@ -42211,7 +42251,8 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
         raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
     labels = await run_in_threadpool(
         _session_write_tree_labels, sess, n_survivors, plant_mask, plant_labels, deleted0)
-    cache_key, cache_dir, rebuild_meta = await run_in_threadpool(_session_rebuild, sess)
+    cache_key, cache_dir, rebuild_meta = await run_in_threadpool(
+        _show_new_columns, sess, [TREE_INSTANCE_SLUG])
     num_trees = int(labels.max()) if labels.size else 0
     return {"session_id": session_id, "point_count": int(n_survivors), "cache_id": cache_key,
             "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": None,
@@ -42357,7 +42398,8 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = await run_in_threadpool(
         _session_write_tree_labels, sess, len(pts), plant_mask, plant_labels, deleted0)
-    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(
+        _show_new_columns, sess, [TREE_INSTANCE_SLUG])
     # Number of distinct trees (max tree id; ground/misses are 0). The renderer
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
     # is enabled, extracting each into its own child session.
@@ -42909,7 +42951,11 @@ def session_scalar_field_compute(session_id: str,
         # column snapshot degrades to 0 when the expression references
         # none, which would silently suppress the advisory on a large cloud.
         n = len(sess.positions)
-        rebuild_points = 0 if request.defer_octree else n
+        with _cloud_session_lock:
+            drawn = _drawn_octree_id_locked(sess)
+        # No rebuild either when the drawn octree shows the field by row.
+        shows_by_row = bool(drawn) and _octree_has_row_ids(str(_octree_cache_root()), drawn)
+        rebuild_points = 0 if (request.defer_octree or shows_by_row) else n
         seconds, bytes_needed, breakdown = _scalar_compute_cost_estimate(
             n, len(parsed.columns_needed), rebuild_points)
         warning = _cost_advisory(
@@ -42941,13 +42987,18 @@ def session_scalar_field_compute(session_id: str,
         _session_set_full_column_locked(sess, slug, label, values)
         sess.derived_fields[slug] = parsed.source
         stats_values = values[mask].astype(np.float64, copy=True)
-        if request.defer_octree:
+        # Shown by row lookup when the drawn octree allows: nothing to defer.
+        overlaid = _overlay_column_locked(sess, slug)
+        if request.defer_octree and not overlaid:
             _mark_octree_stale_locked(sess)
 
     stats = scalar_fields.describe(stats_values, bins=request.bins)
     common = {"session_id": session_id, "slug": slug, "label": label,
               "expression": parsed.source, "stats": stats,
               "nan_count": meta["nan_count"], "inf_count": meta["inf_count"]}
+    if overlaid:
+        cache_key, cache_dir, oct_meta = _overlay_octree_result(sess)
+        return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **oct_meta}
     if request.defer_octree:
         return {**common, "octree_deferred": True}
     cache_key, cache_dir, oct_meta = _session_rebuild(sess)
@@ -43024,11 +43075,14 @@ def session_scalar_field_manage(session_id: str,
                 detail=(f"{slug!r} is a built-in field that other tools read by "
                         "name, so it cannot be renamed or removed."))
 
+        was_overlay = slug in sess.overlay_columns
         if request.action == "delete":
             sess.extras.pop(slug, None)
             sess.extra_dims_meta[:] = [ed for ed in sess.extra_dims_meta
                                        if ed.get("slug") != slug]
             sess.derived_fields.pop(slug, None)
+            sess.overlay_columns.pop(slug, None)
+            sess.column_tokens.pop(slug, None)
             result = {"slug": slug, "deleted": True}
         else:
             new_slug = (request.new_slug or "").strip()
@@ -43062,6 +43116,12 @@ def session_scalar_field_manage(session_id: str,
                         break
                 if slug in sess.derived_fields:
                     sess.derived_fields[new_slug] = sess.derived_fields.pop(slug)
+                # Same values under a new name: the token and any overlay entry
+                # follow it, so a renderer holding the values keeps them valid.
+                if slug in sess.column_tokens:
+                    sess.column_tokens[new_slug] = sess.column_tokens.pop(slug)
+                if slug in sess.overlay_columns:
+                    sess.overlay_columns[new_slug] = sess.overlay_columns.pop(slug)
                 result = {"slug": new_slug, "previous_slug": slug, "label": label}
             else:  # duplicate
                 # A real copy, not a view: the two fields must be independently
@@ -43082,12 +43142,24 @@ def session_scalar_field_manage(session_id: str,
         relabel_from = (sess.octree_cache_id
                         if request.action in ("rename", "delete")
                         and sess.octree_pose is None else None)
-        if relabel_from is None and request.defer_octree:
+        # A field the drawn octree shows by row lookup and does not CARRY needs
+        # no relabel and no rebuild: renaming or dropping it changes only the
+        # overlay list. A duplicate becomes one when the octree allows.
+        drawn = _drawn_octree_id_locked(sess)
+        built_in = bool(drawn) and slug in _octree_attribute_names(str(_octree_cache_root()), drawn)
+        if request.action == "duplicate":
+            overlay_only = _overlay_column_locked(sess, result["slug"])
+        else:
+            overlay_only = was_overlay and not built_in
+        if relabel_from is None and request.defer_octree and not overlay_only:
             _mark_octree_stale_locked(sess)
         fields = _scalar_fields_listing_locked(sess)
 
     common = {"session_id": session_id, "action": request.action,
               "fields": fields, **result}
+    if overlay_only:
+        cache_key, cache_dir, oct_meta = _overlay_octree_result(sess)
+        return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **oct_meta}
     if relabel_from is not None:
         relabeled = _relabel_octree_attribute(
             relabel_from, slug,

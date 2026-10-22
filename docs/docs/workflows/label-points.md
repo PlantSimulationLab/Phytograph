@@ -31,14 +31,16 @@ label anything you like.
 
 The labels are on the point cloud from the moment you paint them: export and
 every other tool read them straight away. What catches up in the background is
-the cloud's display index, which is rebuilt when you close the panel, and also
-after two minutes without a stroke. There is nothing to press and nothing to
-wait for; the labels stay on screen throughout.
+the cloud's display, which is updated when you close the panel, and also after
+two minutes without a stroke. There is nothing to press and nothing to wait
+for; the labels stay on screen throughout. On a cloud imported or rebuilt by
+this version the update only fetches the label column, so it is quick at any
+size; a cloud from an older project rebuilds its display the first time.
 
 **Undo** in the panel is the app's own Undo, so the two always agree. It is
 available when the most recent edit is a stroke on the column in front of you;
 if you cropped or moved something since, `Cmd+Z` undoes that first. Undo stops
-where the display was last rebuilt: it steps back through the strokes painted
+where the display was last updated: it steps back through the strokes painted
 since, but not into the ones before it.
 
 Each class row shows how many points currently carry it, so you can see the

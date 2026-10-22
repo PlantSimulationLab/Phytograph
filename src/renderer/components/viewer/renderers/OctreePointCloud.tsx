@@ -253,6 +253,9 @@ export interface OctreePointCloudProps {
   // session is gone, or the column changed since this octree was handed over.
   // The parent rebuilds the cloud an octree of its own, which needs neither.
   onOverlayUnavailable?: () => void;
+  // The overlay columns (`slug:token`) fetched and now written into every tile
+  // this cloud loads. A label commit's hold waits for its column here.
+  onOverlayColumnsReady?: (ready: string[]) => void;
 }
 
 // Point a tile geometry's `intensity` attribute at the named scalar
@@ -448,6 +451,7 @@ export function OctreePointCloud({
   onOctreeDrawn,
   onOctreeMissing,
   onOverlayUnavailable,
+  onOverlayColumnsReady,
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
   const firstTilesFiredRef = useRef(false);
@@ -520,6 +524,14 @@ export function OctreePointCloud({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overlayListKey]);
   const overlayColumns = overlayReady.key === overlayListKey ? overlayReady.columns : EMPTY_OVERLAY_VALUES;
+  const onOverlayColumnsReadyRef = useRef(onOverlayColumnsReady);
+  onOverlayColumnsReadyRef.current = onOverlayColumnsReady;
+  useEffect(() => {
+    if (overlayColumns.length === 0) return;
+    // After this commit's effects have written the columns into the loaded
+    // tiles (the mask effect does so, and every later frame for new ones).
+    onOverlayColumnsReadyRef.current?.(overlayColumns.map((c) => `${c.slug}:${c.token}`));
+  }, [overlayColumns]);
   const overlayPending = !!overlayListKey && overlayReady.key !== overlayListKey;
 
   // The cacheId we've already reported as missing, so a load failure fires the

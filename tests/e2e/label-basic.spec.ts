@@ -105,22 +105,30 @@ async function counts(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
 async function closeAndAwaitBake(page: LaunchedApp['page'], color: string) {
   const panel = page.getByTestId('label-panel');
   const pts = fixturePoints(TINY);
-  // The rebuilt octree has a new cache id. Read per cloud, from its row: ids
-  // are content-addressed, so a global "any new id" check is fooled by an
-  // earlier test that built the same content.
+  // The commit lands as a new token for the label column, shown on the SAME
+  // octree by row lookup (see octreeOverlayColumns.ts), so it is read from the
+  // row's overlay list, not its cache id. Per cloud, from its row: a global
+  // check would be fooled by an earlier test's cloud.
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
-  const before = await row.getAttribute('data-octree-cache-id');
+  const committed = async () => (await row.getAttribute('data-overlay-columns') ?? '')
+    .split(',').find((c) => c.startsWith('manual_class:')) ?? null;
+  const before = await committed();
   await panel.getByRole('button', { name: 'Close' }).click();
   await expect(panel).toHaveCount(0);
   const samples: Array<{ matched: number; landed: boolean; pill: boolean }> = [];
   const deadline = Date.now() + 90_000;
+  // Keep sampling for a while AFTER it lands: the column is fetched and
+  // written into the tiles after the commit returns, and the strokes must keep
+  // painting until it is (`releaseOnOverlay`), or the labels flicker out.
+  let after = 0;
   for (;;) {
-    const landed = (await row.getAttribute('data-octree-cache-id')) !== before;
+    const now = await committed();
+    const landed = now !== null && now !== before;
     const drawn = await pointsDrawnIn(page, pts, color, 40, '[data-testid="scalar-overlay"]');
     const pill = await page.getByTestId('octree-refresh-running').count() > 0;
     samples.push({ matched: drawn.matched, landed, pill });
     expect(drawn.matched, `labels vanished at sample ${samples.length}`).toBeGreaterThan(30);
-    if (landed) break;
+    if (landed && ++after >= 15) break;
     if (Date.now() > deadline) throw new Error('the background bake never landed');
     await page.waitForTimeout(100);
   }

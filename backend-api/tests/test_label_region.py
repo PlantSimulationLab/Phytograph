@@ -405,7 +405,16 @@ def test_bake_compacts_labels_and_clears_history(client, cache_root, grid_xyz):
     assert int(painted.sum()) > 0
 
 
-def test_commit_labels_rebuilds_and_exposes_the_column(client, cache_root, grid_xyz):
+def _without_row_ids(monkeypatch):
+    """Commit against an octree built before row ids existed, which takes the
+    REBUILD path. One that has them shows the label column by row lookup and
+    converts nothing (tests/test_octree_overlay_columns.py); the rebuild path
+    these tests pin is still what an older octree gets."""
+    monkeypatch.setattr(main, "_octree_has_row_ids", lambda root, cid: False)
+
+
+def test_commit_labels_rebuilds_and_exposes_the_column(client, cache_root, grid_xyz, monkeypatch):
+    _without_row_ids(monkeypatch)
     sid = _create(client, grid_xyz)
     sess = main._cloud_sessions[sid]
     before = sess.octree_cache_id
@@ -870,6 +879,7 @@ def test_an_edit_during_a_commit_build_leaves_the_octree_stale(
     """
     import threading
 
+    _without_row_ids(monkeypatch)
     sid = _create(client, grid_xyz)
     sess = main._cloud_sessions[sid]
     _paint(client, sid, [_stroke(BOX_BIG, 64, "s1")])
@@ -1014,6 +1024,7 @@ def test_commit_labels_is_cancelable_and_leaves_the_octree_alone(
     import queue
     import threading
 
+    _without_row_ids(monkeypatch)
     sid = _create(client, grid_xyz)
     sess = main._cloud_sessions[sid]
     _paint(client, sid, [_stroke(BOX_BIG, 64, "s1")])

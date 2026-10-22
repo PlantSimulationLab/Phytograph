@@ -77,12 +77,15 @@ describe('loadOverlayColumn', () => {
     await expect(loadOverlayColumn(col('g'), fetch)).resolves.toEqual(new Uint8Array([1]));
   });
 
-  it('keeps only a handful of columns', async () => {
-    const fetch = vi.fn(async () => new Uint8Array([0]));
-    for (let i = 0; i < 9; i++) await loadOverlayColumn(col(`c${i}`), fetch);
-    await loadOverlayColumn(col('c0'), fetch);   // the oldest, evicted
-    expect(fetch).toHaveBeenCalledTimes(10);
-    await loadOverlayColumn(col('c8'), fetch);   // still cached
-    expect(fetch).toHaveBeenCalledTimes(10);
+  it('bounds the cache by bytes, keeping the newest column whatever its size', async () => {
+    const big = () => new Float32Array(48 * 1024 * 1024);   // 192 MB, a float column at ~48 M points
+    const fetch = vi.fn(async () => big());
+    for (const slug of ['a', 'b', 'c']) await loadOverlayColumn(col(slug), fetch);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await loadOverlayColumn(col('c'), fetch);   // newest: cached
+    await loadOverlayColumn(col('b'), fetch);   // still within 512 MB
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await loadOverlayColumn(col('a'), fetch);   // the oldest, evicted when c landed
+    expect(fetch).toHaveBeenCalledTimes(4);
   });
 });
