@@ -38973,7 +38973,7 @@ def _session_display_stats(sess: "CloudSession") -> dict:
         positions = sess.positions
         intensity = sess.intensity
         extras = dict(sess.extras)
-        overlay = dict(sess.overlay_columns)
+        overlay = {slug: sess.column_tokens.get(slug, tok) for slug, tok in sess.overlay_columns.items()}
         labels = {ed["slug"]: ed.get("label") for ed in sess.extra_dims_meta}
     return {
         "observed_classes": _observed_classes(editable, extras),
@@ -38982,20 +38982,35 @@ def _session_display_stats(sess: "CloudSession") -> dict:
     }
 
 
+def _overlay_whole_max_bytes() -> int:
+    """Largest column the renderer fetches WHOLE (`/column/{slug}`). A bigger one
+    is fetched per tile, as each tile loads (`/column_rows`): five float32 normal
+    columns on the 45.7 M-point scan are 915 MB, which a renderer cannot hold,
+    while the loaded tiles only ever need a few million of their rows."""
+    return int(float(_os.environ.get("PHYTOGRAPH_OVERLAY_WHOLE_MAX_MB", "64")) * (1 << 20))
+
+
 def _overlay_column_info(session_id: str, overlay: "Dict[str, str]", labels: dict,
                          editable: np.ndarray, extras: dict) -> List[dict]:
     """What the renderer needs to show each overlay column: where to fetch it
-    (session + token, see `/column/{slug}`), and the label and value range the
-    octree's own attribute list would have carried had it been built with it."""
+    (session + CURRENT token, and whether whole or per tile), and the label and
+    value range the octree's own attribute list would have carried had it been
+    built with it. The token is the column's current one rather than the one it
+    was registered at, so a later rewrite (a rotation rewriting the normals)
+    reads as new values to fetch, not as a column that is gone."""
     out: List[dict] = []
+    whole_max = _overlay_whole_max_bytes()
     for slug, token in overlay.items():
         col = extras.get(slug)
         if col is None:
             continue
         vals = np.asarray(col)[editable] if editable.any() else np.zeros(1, dtype=np.float32)
+        nbytes = int(getattr(col, "nbytes", np.asarray(col).nbytes))
         out.append({"slug": slug, "token": token, "session_id": session_id,
                     "label": labels.get(slug) or slug,
-                    "min": float(vals.min()), "max": float(vals.max())})
+                    "min": float(np.nanmin(vals)) if vals.size else 0.0,
+                    "max": float(np.nanmax(vals)) if vals.size else 0.0,
+                    "fetch": "tile" if nbytes > whole_max else "whole"})
     return out
 
 
@@ -40104,6 +40119,45 @@ def session_column(session_id: str, slug: str, token: Optional[str] = None):
     return Response(content=data, media_type="application/octet-stream",
                     headers={"X-Column-Dtype": arr.dtype.name, "X-Column-Length": str(arr.size),
                              "X-Column-Token": current})
+
+
+@app.post("/api/cloud/session/{session_id}/column_rows")
+async def session_column_rows(session_id: str, request: Request, slugs: str, tokens: str):
+    """The values of some columns at some ROWS: the per-tile form of
+    `/column/{slug}`, for a column too big to fetch whole (`fetch: "tile"`).
+
+    The body is the rows as little-endian uint32 (a tile's `_OCTREE_ROW_ATTRS`);
+    `slugs` and `tokens` are comma-separated and paired, each token the
+    column's current one or the request is a 409. The response is float32,
+    one block of len(rows) per slug, in `slugs` order. `async` only to read the
+    body; the lookup runs in the threadpool."""
+    body = await request.body()
+
+    def _gather() -> bytes:
+        names = [s for s in slugs.split(",") if s]
+        toks = tokens.split(",")
+        if len(toks) != len(names):
+            raise HTTPException(status_code=400, detail="slugs and tokens must pair up.")
+        rows = np.frombuffer(body, dtype="<u4")
+        sess = _get_cloud_session(session_id)
+        with _cloud_session_lock:
+            cols = []
+            for slug, tok in zip(names, toks):
+                col = sess.extras.get(slug)
+                if col is None:
+                    raise HTTPException(status_code=404, detail=f"No column {slug!r} in this cloud.")
+                if sess.column_tokens.get(slug, "") != tok:
+                    raise HTTPException(status_code=409, detail=f"Column {slug!r} changed since it was shown.")
+                cols.append(col)
+            n = int(len(sess.positions))
+        if rows.size and int(rows.max()) >= n:
+            raise HTTPException(status_code=400, detail="A row is past the end of the cloud.")
+        out = np.empty((len(cols), rows.size), dtype="<f4")
+        for i, col in enumerate(cols):
+            out[i] = np.asarray(col[rows], dtype=np.float32)
+        return out.tobytes()
+
+    return Response(content=await run_in_threadpool(_gather), media_type="application/octet-stream")
 
 
 @app.post("/api/cloud/session/{session_id}/extract_by_column")
@@ -41224,7 +41278,14 @@ async def session_compute_normals(session_id: str,
 
     if not request.acknowledge_cost:
         survivors = int(len(hit))
-        rebuild_points = 0 if request.defer_octree else survivors
+
+        def _shows_by_row() -> bool:
+            # Off the loop: the session lock, and a metadata read.
+            with _cloud_session_lock:
+                drawn = _drawn_octree_id_locked(sess)
+            return bool(drawn) and _octree_has_row_ids(str(_octree_cache_root()), drawn)
+        rebuild_points = (0 if request.defer_octree or await run_in_threadpool(_shows_by_row)
+                          else survivors)
         seconds, bytes_needed, breakdown = _normals_cost_estimate(
             len(pts), rebuild_points)
         warning = _cost_advisory(
@@ -41267,10 +41328,15 @@ async def session_compute_normals(session_id: str,
                 _session_add_extra_column(sess, slug, label, full[:, col])
             # These normals describe the geometry as it stands right now.
             sess.normals_stale = False
-            if request.defer_octree:
+            # Shown by row lookup, fetched per tile (five float32 columns are
+            # far too big to ship whole): no rebuild to defer.
+            overlaid = all([_overlay_column_locked(sess, slug)
+                            for slug, _label in normals_mod.COLUMNS])
+            if request.defer_octree and not overlaid:
                 _mark_octree_stale_locked(sess)
+        return overlaid
 
-    await run_in_threadpool(_write)
+    overlaid = await run_in_threadpool(_write)
     # `analyzed_points`, not `point_count`: the octree metadata merged in below
     # carries its OWN `point_count` (the octree's), which would shadow this one.
     # Same naming as the denoise endpoint, for the same reason.
@@ -41280,6 +41346,9 @@ async def session_compute_normals(session_id: str,
               "orientation_source": origin_source,
               "k_used": nmeta.get("k"), "tiled": nmeta.get("tiled"),
               "workers": nmeta.get("workers")}
+    if overlaid:
+        cache_key, cache_dir, meta = await run_in_threadpool(_overlay_octree_result, sess)
+        return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
     if request.defer_octree:
         return {**common, "octree_deferred": True}
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)

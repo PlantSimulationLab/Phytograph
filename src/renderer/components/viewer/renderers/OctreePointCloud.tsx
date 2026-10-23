@@ -6,9 +6,10 @@ import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForCloud, buildCategoricalGradientStops, UNKNOWN_CLASS_COLOR } from '../../../lib/classification';
 import { categoricalTexels } from '../../../lib/categoricalTexture';
 import type { CloudFilters, OverlayColumn, PointCloudData } from '../../../lib/pointCloudTypes';
-import { fetchSessionColumn } from '../../../utils/backendApi';
+import { fetchSessionColumn, fetchSessionColumnRows } from '../../../utils/backendApi';
 import {
-  applyOverlayColumnsToVisibleNodes, loadOverlayColumn, overlayReadyKey, type OverlayColumnValues,
+  applyOverlayColumnsToVisibleNodes, loadOverlayColumn, overlayReadyKey, requestTileColumnsForVisibleNodes,
+  tileColumnGroups, tileColumnsComplete, type OverlayColumnValues,
 } from './octreeOverlayColumns';
 import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC, withHiddenLabelClasses } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
@@ -504,7 +505,21 @@ export function OctreePointCloud({
   // written into each tile as it loads. `overlayReady` holds the ones fetched
   // so far; keyed by the list's identity-free description so a re-render with
   // an equal list neither refetches nor re-masks.
-  const overlayList = data.octree?.overlayColumns ?? EMPTY_OVERLAY;
+  // Whole columns are fetched once; per-tile ones ('tile', too big for that)
+  // as each tile loads — see octreeOverlayColumns.ts.
+  const allOverlay = data.octree?.overlayColumns ?? EMPTY_OVERLAY;
+  const allOverlayKey = allOverlay.map((c) => `${c.sessionId}|${c.slug}|${c.token}|${c.fetch}`).join(',');
+  const overlayList = useMemo(
+    () => allOverlay.filter((c) => c.fetch !== 'tile'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allOverlayKey]);
+  const tileGroups = useMemo(
+    () => tileColumnGroups(allOverlay),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allOverlayKey]);
+  const tileReadyKeys = useMemo(
+    () => tileGroups.flatMap((g) => g.columns.map((c) => `${c.slug}:${c.token}`)),
+    [tileGroups]);
   const overlayListKey = overlayList.map((c) => `${c.sessionId}|${c.slug}|${c.token}`).join(',');
   const [overlayReady, setOverlayReady] = useState<{ key: string; columns: OverlayColumnValues[] }>(
     { key: '', columns: [] });
@@ -526,12 +541,30 @@ export function OctreePointCloud({
   const overlayColumns = overlayReady.key === overlayListKey ? overlayReady.columns : EMPTY_OVERLAY_VALUES;
   const onOverlayColumnsReadyRef = useRef(onOverlayColumnsReady);
   onOverlayColumnsReadyRef.current = onOverlayColumnsReady;
+  // Ready = whole columns fetched, plus per-tile ones once every loaded tile
+  // has its values (reported from the frame loop, below).
+  const wholeReadyRef = useRef<string[]>([]);
+  const tileReadyRef = useRef<string[]>([]);
+  const reportOverlayReady = () => {
+    const ready = [...wholeReadyRef.current, ...tileReadyRef.current];
+    if (ready.length) onOverlayColumnsReadyRef.current?.(ready);
+  };
   useEffect(() => {
-    if (overlayColumns.length === 0) return;
     // After this commit's effects have written the columns into the loaded
     // tiles (the mask effect does so, and every later frame for new ones).
-    onOverlayColumnsReadyRef.current?.(overlayColumns.map((c) => `${c.slug}:${c.token}`));
+    wholeReadyRef.current = overlayColumns.map((c) => `${c.slug}:${c.token}`);
+    reportOverlayReady();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overlayColumns]);
+  const tileReportedRef = useRef('');
+  // A per-tile fetch that 404s/409s means the same as a whole one that does.
+  const tileUnavailableRef = useRef('');
+  const onTileUnavailable = () => {
+    const key = tileReadyKeys.join(',');
+    if (tileUnavailableRef.current === key) return;
+    tileUnavailableRef.current = key;
+    onOverlayUnavailableRef.current?.();
+  };
   const overlayPending = !!overlayListKey && overlayReady.key !== overlayListKey;
 
   // The cacheId we've already reported as missing, so a load failure fires the
@@ -1374,6 +1407,7 @@ export function OctreePointCloud({
   useEffect(() => {
     if (!octree) return;
     applyOverlayColumnsToVisibleNodes(octree, overlayColumns);
+    requestTileColumnsForVisibleNodes(octree, tileGroups, fetchSessionColumnRows, () => frameStateRef.current.onTileUnavailable());
     if (cropMaskRules.length === 0 && maskSpec.clauses.length === 0) {
       clearCropMaskFromVisibleNodes(octree, cacheId);
       return;
@@ -1434,6 +1468,7 @@ export function OctreePointCloud({
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
     labelStatsId, labelHiddenIndices, filterSpec: maskSpec, cacheId,
     overlayColumns, hideUntilOverlay: false,
+    tileGroups, tileReadyKeys, onTileUnavailable, reportTileReady: () => {},
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
@@ -1446,6 +1481,14 @@ export function OctreePointCloud({
     // an overlay column; until that column has arrived the mask cannot hide
     // anything, and the child would draw the whole parent. Draw nothing.
     hideUntilOverlay: overlayPending && !!viewFilters,
+    tileGroups, tileReadyKeys, onTileUnavailable,
+    reportTileReady: () => {
+      const key = tileReadyKeys.join(',');
+      if (tileReportedRef.current === key) return;
+      tileReportedRef.current = key;
+      tileReadyRef.current = tileReadyKeys;
+      reportOverlayReady();
+    },
   };
 
   useEffect(() => {
@@ -1520,8 +1563,15 @@ export function OctreePointCloud({
           onReady?.();
         }
         // Overlay columns into tiles that streamed in since the last frame,
-        // BEFORE anything below reads `geometry.attributes`.
-        applyOverlayColumnsToVisibleNodes(octree, frameStateRef.current.overlayColumns);
+        // BEFORE anything below reads `geometry.attributes`. Per-tile ones
+        // start NaN-filled and land a few frames later.
+        const fsr = frameStateRef.current;
+        applyOverlayColumnsToVisibleNodes(octree, fsr.overlayColumns);
+        if (fsr.tileGroups.length > 0) {
+          requestTileColumnsForVisibleNodes(octree, fsr.tileGroups, fetchSessionColumnRows,
+            () => frameStateRef.current.onTileUnavailable());
+          if (tileColumnsComplete(octree, fsr.tileGroups)) fsr.reportTileReady();
+        }
         const scalarActive =
           cm === 'scalar' && !!field && !!d.octree?.attributeRanges?.[field];
         // Manual-labeling overlay. Runs BEFORE the scalar swap decision below

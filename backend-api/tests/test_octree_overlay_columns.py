@@ -304,3 +304,59 @@ def test_committing_labels_needs_no_rebuild(client, cache_root, ground_scene, mo
     assert sess.column_tokens[slug] != before
     labels = np.asarray(sess.extras[slug])
     assert set(labels[900:].tolist()) == {3}
+
+
+# ---- normals: too big to fetch whole, fetched per tile -------------------- #
+
+def test_normals_are_shown_without_a_rebuild_and_fetched_per_tile(
+        client, cache_root, ground_scene, monkeypatch):
+    """Five float32 columns: 915 MB on the 45.7 M-point scan, which no renderer
+    can hold, so a column past `_overlay_whole_max_bytes` is marked `tile` and
+    served by row (`/column_rows`) for each tile as it loads. Pinned with the
+    threshold lowered so this fixture's columns count as big."""
+    monkeypatch.setenv("PHYTOGRAPH_OVERLAY_WHOLE_MAX_MB", "0.001")
+    created = _create(client, ground_scene)
+    sid, cid = created["session_id"], created["cache_id"]
+    conversions = _count_conversions(monkeypatch)
+    res = client.post(f"/api/cloud/session/{sid}/compute_normals",
+                      json={"k": 8, "orientation": "origin", "acknowledge_cost": True})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert conversions == [] and body["cache_id"] == cid
+    slugs = ["nx", "ny", "nz", "curvature", "verticality"]
+    shown = {o["slug"]: o for o in body["overlay_columns"]}
+    assert set(shown) == set(slugs)
+    assert all(o["fetch"] == "tile" for o in shown.values())
+
+    # One tile's rows, as its __row_lo/__row_hi decode: every column at once.
+    rows, _pos = _octree_rows(cache_root, cid)
+    tile = rows[:137].astype("<u4")
+    sess = main._cloud_sessions[sid]
+    out = client.post(f"/api/cloud/session/{sid}/column_rows",
+                      params={"slugs": ",".join(slugs),
+                              "tokens": ",".join(shown[s]["token"] for s in slugs)},
+                      content=tile.tobytes(),
+                      headers={"Content-Type": "application/octet-stream"})
+    assert out.status_code == 200, out.text
+    vals = np.frombuffer(out.content, dtype="<f4").reshape(len(slugs), tile.size)
+    for i, slug in enumerate(slugs):
+        assert np.array_equal(vals[i], np.asarray(sess.extras[slug], dtype=np.float32)[tile])
+    # Unit normals, as a sanity check on what was served.
+    assert np.allclose(np.linalg.norm(vals[:3], axis=0), 1.0, atol=1e-4)
+
+    # A stale token, an unknown column and a row past the end are refused.
+    def rows_req(slug_list, toks, body_rows):
+        return client.post(f"/api/cloud/session/{sid}/column_rows",
+                           params={"slugs": ",".join(slug_list), "tokens": ",".join(toks)},
+                           content=np.asarray(body_rows, dtype="<u4").tobytes())
+    assert rows_req(["nx"], ["stale"], [0]).status_code == 409
+    assert rows_req(["nope"], ["x"], [0]).status_code == 404
+    assert rows_req(["nx"], [shown["nx"]["token"]], [len(sess.positions)]).status_code == 400
+
+
+def test_a_small_column_is_still_fetched_whole(client, cache_root, ground_scene):
+    sid = _create(client, ground_scene)["session_id"]
+    body = client.post(f"/api/cloud/session/{sid}/segment_ground",
+                       json={"cloth_resolution": 0.1}).json()
+    [ov] = body["overlay_columns"]
+    assert ov["fetch"] == "whole"

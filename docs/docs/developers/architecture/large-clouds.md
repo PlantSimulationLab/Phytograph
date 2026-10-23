@@ -734,7 +734,8 @@ so they cannot tell an overlay column from a built one. Every tool that only
 adds columns goes through one decision, `_show_new_columns` (overlay, or a
 rebuild for an octree built before row ids existed): ground and wood/leaf
 segmentation, height above ground (DEM), tree segmentation (both methods),
-organ segmentation, a computed scalar field, and a label commit. Scalar-field
+organ segmentation, a computed scalar field, Compute Normals, and a label
+commit. Scalar-field
 manage moves an overlay field's entry and token on rename, drops it on delete
 (nothing in the octree to hide unless it also carries a built copy, which the
 relabel path still hides), and registers a duplicate as one.
@@ -772,10 +773,23 @@ converted points for `split_by_ground_class_built` in the same run. The cost:
 4 bytes per point in every octree, and one fetch of the column (46 MB for a
 class column at that size) the first time a cloud shows it.
 
-Not yet routed through it: normals (five float32 columns, 915 MB on the
-45.7 M-point scan, too much to ship whole; they would need per-tile fetches).
-A float column is 183 MB at that size against a class column's 46 MB; the
-renderer's column cache is bounded at 512 MB, always keeping the newest.
+**Whole or per tile.** `_overlay_column_info` marks a column `fetch: "tile"`
+when it is bigger than `PHYTOGRAPH_OVERLAY_WHOLE_MAX_MB` (64 MB): a float
+column is 183 MB on the 45.7 M-point scan, and the five normal columns 915 MB,
+which no renderer should hold, while a class column (46 MB) stays whole. A
+per-tile column is fetched for each tile as it loads: the tile's rows go to
+`POST /api/cloud/session/{id}/column_rows` (uint32 body; `slugs`/`tokens`
+paired), which answers every such column of that session in one float32
+response, so only the loaded tiles' rows ever travel. The renderer caps the
+requests in flight at 6 across all clouds and fills a tile's attribute with
+NaN until its values land — NaN fails every range and class test, so a
+committed filter or a split child's class mask hides those points rather
+than drawing them unfiltered — then drops that tile's mask key so it is
+masked again (`invalidateTileMask`). A label hold counts a per-tile column
+ready once every loaded tile has it (`tileColumnsComplete`). Compute Normals
+uses this; any tool's column takes it automatically past the limit. The
+renderer's whole-column cache is bounded at 512 MB, always keeping the
+newest.
 
 ## PyHelios streaming and bulk APIs (helios-core v1.3.86)
 

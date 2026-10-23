@@ -86,11 +86,13 @@ without needing the whole cloud in memory at once. Each tile overlaps its
 neighbors by enough that a point near a tile edge still sees its full
 neighborhood — the result is identical to processing the cloud whole.
 
-Expect roughly 40 seconds for 10 million points on a modern laptop. Above
-5 million points the recoloring is handed to a background job so the
-columns are usable immediately, and you can keep working while the viewer
-catches up. **Cancel** stops a run at any point and leaves the cloud
-untouched.
+Expect roughly 40 seconds for 10 million points on a modern laptop. The
+cloud is recolored as soon as the estimate finishes, without rebuilding its
+display: on a large cloud the normals are fetched for each part of the view
+as it loads, so a region can take a moment to color in. (A cloud from a
+project saved by an older version rebuilds its display once instead, in the
+background above 5 million points.) **Cancel** stops a run at any point and
+leaves the cloud untouched.
 
 ## Normals and later edits
 

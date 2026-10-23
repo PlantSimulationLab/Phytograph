@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as THREE from 'three';
 import {
   applyOverlayColumnsToGeometry, clearOverlayColumnCache, loadOverlayColumn, overlayReadyKey,
+  requestTileColumns, requestTileColumnsForVisibleNodes, tileColumnGroups, tileColumnsComplete,
   ROW_HI_ATTRIBUTE, ROW_LO_ATTRIBUTE,
 } from './octreeOverlayColumns';
 import type { OverlayColumn } from '../../../lib/pointCloudTypes';
@@ -87,5 +88,77 @@ describe('loadOverlayColumn', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     await loadOverlayColumn(col('a'), fetch);   // the oldest, evicted when c landed
     expect(fetch).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('per-tile columns', () => {
+  const group = { sessionId: 's1', columns: [{ slug: 'nx', token: 'a' }, { slug: 'nz', token: 'b' }] };
+  const octreeOf = (...tiles: THREE.BufferGeometry[]) =>
+    ({ visibleNodes: tiles.map((g) => ({ sceneNode: { geometry: g } })) });
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it('hides a tile behind NaN until its rows arrive, then writes them and re-masks', async () => {
+    const g = tile([70_000, 2]);
+    (g as any).__phytographCropMaskKey = 'masked-before';
+    let resolve!: (v: Float32Array) => void;
+    const fetchRows = vi.fn((_s: string, slugs: string[], tokens: string[], rows: Uint32Array) => {
+      expect(slugs).toEqual(['nx', 'nz']);
+      expect(tokens).toEqual(['a', 'b']);
+      expect(Array.from(rows)).toEqual([70_000, 2]);
+      return new Promise<Float32Array>((r) => { resolve = r; });
+    });
+    requestTileColumns(g, group, fetchRows, () => { throw new Error('unexpected'); });
+    // A placeholder that fails every filter test: the points stay hidden.
+    expect(Array.from(g.attributes.nx.array).every(Number.isNaN)).toBe(true);
+    expect(tileColumnsComplete(octreeOf(g), [group])).toBe(false);
+    // Asked again (every frame): one request, not one per frame.
+    requestTileColumns(g, group, fetchRows, () => {});
+    expect(fetchRows).toHaveBeenCalledTimes(1);
+
+    resolve(new Float32Array([0.1, 0.2, 0.9, 0.8]));   // nx block, then nz block
+    await flush();
+    expect(Array.from(g.attributes.nx.array)).toEqual([Math.fround(0.1), Math.fround(0.2)]);
+    expect(Array.from(g.attributes.nz.array)).toEqual([Math.fround(0.9), Math.fround(0.8)]);
+    expect((g as any).__phytographCropMaskKey).toBeUndefined();
+    expect(tileColumnsComplete(octreeOf(g), [group])).toBe(true);
+  });
+
+  it('reports a column that is gone, and asks again afterwards', async () => {
+    const g = tile([0]);
+    const fetchRows = vi.fn().mockRejectedValueOnce(Object.assign(new Error('changed'), { status: 409 }))
+      .mockResolvedValueOnce(new Float32Array([1, 2]));
+    const gone = vi.fn();
+    requestTileColumns(g, group, fetchRows, gone);
+    await flush();
+    expect(gone).toHaveBeenCalledTimes(1);
+    requestTileColumns(g, group, fetchRows, gone);
+    await flush();
+    expect(fetchRows).toHaveBeenCalledTimes(2);
+    expect(Array.from(g.attributes.nx.array)).toEqual([1]);
+  });
+
+  it('keeps at most a handful of tile requests in flight', async () => {
+    const pending: (() => void)[] = [];
+    const fetchRows = vi.fn(() => new Promise<Float32Array>((r) => {
+      pending.push(() => r(new Float32Array(2)));
+    }));
+    const tiles = Array.from({ length: 10 }, (_, i) => tile([i]));
+    requestTileColumnsForVisibleNodes(octreeOf(...tiles), [group], fetchRows, () => {});
+    expect(fetchRows).toHaveBeenCalledTimes(6);
+    pending.shift()!();
+    await flush();
+    expect(fetchRows).toHaveBeenCalledTimes(7);
+    while (pending.length) { pending.shift()!(); await flush(); }
+    expect(fetchRows).toHaveBeenCalledTimes(10);
+  });
+
+  it('groups only per-tile columns, one request per session', () => {
+    const c = (slug: string, sessionId: string, fetch: 'whole' | 'tile'): OverlayColumn =>
+      ({ slug, token: 't', sessionId, label: slug, min: 0, max: 1, fetch });
+    expect(tileColumnGroups([c('nx', 's1', 'tile'), c('ny', 's1', 'tile'), c('g', 's1', 'whole'),
+      c('h', 's2', 'tile')])).toEqual([
+      { sessionId: 's1', columns: [{ slug: 'nx', token: 't' }, { slug: 'ny', token: 't' }] },
+      { sessionId: 's2', columns: [{ slug: 'h', token: 't' }] },
+    ]);
   });
 });

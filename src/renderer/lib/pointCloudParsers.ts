@@ -1244,6 +1244,7 @@ function parseOverlayColumns(meta: OctreeMetadata): OverlayColumn[] | undefined 
       slug: r.slug, token: String(r.token ?? ''), sessionId: r.session_id,
       label: typeof r.label === 'string' ? r.label : r.slug,
       min: Number(r.min), max: Number(r.max),
+      fetch: r.fetch === 'tile' ? 'tile' : 'whole',
     });
   }
   return out;

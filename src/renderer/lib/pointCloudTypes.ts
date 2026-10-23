@@ -42,6 +42,9 @@ export interface OverlayColumn {
   label: string;
   min: number;
   max: number;
+  /** 'whole': fetched once, in row order. 'tile': too big for that (the five
+   *  normal columns of a large cloud), so fetched for each tile as it loads. */
+  fetch?: 'whole' | 'tile';
 }
 
 export interface OctreeRef {

@@ -17,6 +17,7 @@
 
 import * as THREE from 'three';
 import type { OverlayColumn } from '../../../lib/pointCloudTypes';
+import { invalidateTileMask } from './octreeCropMask';
 
 export const ROW_LO_ATTRIBUTE = '__row_lo';
 export const ROW_HI_ATTRIBUTE = '__row_hi';
@@ -136,4 +137,139 @@ export function loadOverlayColumn(
 /** Forget every cached column: File → New, and tests. */
 export function clearOverlayColumnCache(): void {
   cache.clear();
+}
+
+// ── Per-tile columns ────────────────────────────────────────────────────────
+//
+// A column too big to fetch whole (`fetch: "tile"` — five float32 normal
+// columns on the 45.7 M-point scan are 915 MB) is fetched for each tile as it
+// loads: the tile's rows go to `/column_rows`, and its values come back for
+// every such column of that session in one request. Only the loaded tiles'
+// rows ever travel, bounded by the point budget rather than the cloud.
+//
+// Until a tile's values arrive its attribute is NaN-filled, not absent. An
+// absent attribute makes a filter clause not apply, so a committed filter or a
+// split child's class mask would draw the tile UNFILTERED for a moment; NaN
+// fails every range and class test, so the tile's points stay hidden instead.
+// On arrival the tile's mask key is dropped so the next pass re-masks it.
+
+/** One session's per-tile columns, as a single request group. */
+export interface TileColumnGroup {
+  sessionId: string;
+  columns: { slug: string; token: string }[];
+}
+
+export type FetchColumnRows = (
+  sessionId: string, slugs: string[], tokens: string[], rows: Uint32Array,
+) => Promise<Float32Array>;
+
+const TILE_TAG = '__phytographTileOverlay_';
+const DONE = '_done';
+// Requests in flight at once across every cloud. Each tile is one request, a
+// view can show hundreds of tiles, and the backend serves them from one
+// threadpool shared with every other request.
+const MAX_TILE_REQUESTS = 6;
+let inFlight = 0;
+const queue: (() => void)[] = [];
+
+function schedule<T>(job: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const run = () => {
+      inFlight++;
+      job().then(resolve, reject).finally(() => {
+        inFlight--;
+        queue.shift()?.();
+      });
+    };
+    if (inFlight < MAX_TILE_REQUESTS) run();
+    else queue.push(run);
+  });
+}
+
+function groupKey(g: TileColumnGroup): string {
+  return `${g.sessionId}|${g.columns.map((c) => `${c.slug}:${c.token}`).join(',')}`;
+}
+
+/**
+ * Make sure `geometry` has (or is fetching) the group's columns. Returns
+ * immediately; `onUnavailable` fires if the session is gone or a column
+ * changed (404/409), which the caller answers by rebuilding.
+ */
+export function requestTileColumns(
+  geometry: any, group: TileColumnGroup, fetchRows: FetchColumnRows,
+  onUnavailable: (err: unknown) => void,
+): void {
+  const key = groupKey(group);
+  const tag = TILE_TAG + group.sessionId;
+  if (geometry[tag] === key) return;
+  const lo = geometry?.attributes?.[ROW_LO_ATTRIBUTE];
+  const hi = geometry?.attributes?.[ROW_HI_ATTRIBUTE];
+  if (!lo || !hi) return;
+  geometry[tag] = key;
+  delete geometry[tag + DONE];
+  const n: number = lo.count;
+  for (const c of group.columns) {
+    geometry.setAttribute(c.slug, new THREE.BufferAttribute(new Float32Array(n).fill(NaN), 1));
+  }
+  invalidateTileMask(geometry);
+  const rows = new Uint32Array(n);
+  const L = lo.array as ArrayLike<number>;
+  const H = hi.array as ArrayLike<number>;
+  for (let i = 0; i < n; i++) rows[i] = H[i] * 65536 + L[i];
+  schedule(() => fetchRows(
+    group.sessionId, group.columns.map((c) => c.slug), group.columns.map((c) => c.token), rows,
+  )).then((values) => {
+    // The tile was evicted, or re-requested for newer tokens, meanwhile.
+    if (geometry[tag] !== key || !geometry.attributes) return;
+    group.columns.forEach((c, i) => {
+      geometry.setAttribute(c.slug, new THREE.BufferAttribute(values.slice(i * n, (i + 1) * n), 1));
+    });
+    geometry[tag + DONE] = key;
+    invalidateTileMask(geometry);
+  }, (err) => {
+    if (geometry[tag] === key) delete geometry[tag];
+    onUnavailable(err);
+  });
+}
+
+/** `requestTileColumns` over an octree's loaded tiles. */
+export function requestTileColumnsForVisibleNodes(
+  octree: any, groups: readonly TileColumnGroup[], fetchRows: FetchColumnRows,
+  onUnavailable: (err: unknown) => void,
+): void {
+  if (groups.length === 0) return;
+  const visible = octree?.visibleNodes;
+  if (!Array.isArray(visible)) return;
+  for (const node of visible) {
+    const geom = node?.sceneNode?.geometry;
+    if (!geom) continue;
+    for (const g of groups) requestTileColumns(geom, g, fetchRows, onUnavailable);
+  }
+}
+
+/** The per-tile columns of an overlay list, one request group per session. */
+export function tileColumnGroups(columns: readonly OverlayColumn[]): TileColumnGroup[] {
+  const by = new Map<string, TileColumnGroup>();
+  for (const c of columns) {
+    if (c.fetch !== 'tile') continue;
+    const g = by.get(c.sessionId) ?? { sessionId: c.sessionId, columns: [] };
+    g.columns.push({ slug: c.slug, token: c.token });
+    by.set(c.sessionId, g);
+  }
+  return [...by.values()];
+}
+
+/** Whether every loaded tile has the groups' values (not just placeholders):
+ *  when a label commit's hold may stop painting over them. */
+export function tileColumnsComplete(octree: any, groups: readonly TileColumnGroup[]): boolean {
+  const visible = octree?.visibleNodes;
+  if (!Array.isArray(visible)) return false;
+  for (const node of visible) {
+    const geom = node?.sceneNode?.geometry;
+    if (!geom || !geom.attributes?.[ROW_LO_ATTRIBUTE]) continue;
+    for (const g of groups) {
+      if (geom[TILE_TAG + g.sessionId + DONE] !== groupKey(g)) return false;
+    }
+  }
+  return true;
 }

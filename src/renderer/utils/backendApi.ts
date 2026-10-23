@@ -5444,6 +5444,28 @@ export async function fetchSessionColumn(
   }
 }
 
+/** Several columns' values at a tile's rows (see octreeOverlayColumns.ts):
+ * float32, one block of `rows.length` per slug, in `slugs` order. Rejects
+ * with `status` 409 (a column changed) or 404 (session or column gone). */
+export async function fetchSessionColumnRows(
+  sessionId: string, slugs: string[], tokens: string[], rows: Uint32Array,
+): Promise<Float32Array> {
+  const q = `slugs=${encodeURIComponent(slugs.join(','))}&tokens=${encodeURIComponent(tokens.join(','))}`;
+  const response = await fetch(`${getBackendUrl()}/api/cloud/session/${sessionId}/column_rows?${q}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: rows,
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw Object.assign(
+      new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`),
+      { status: response.status },
+    );
+  }
+  return new Float32Array(await response.arrayBuffer());
+}
+
 /** Metadata for one child session produced by {@link sessionExtractByColumn}. */
 export type SessionExtractChild = OctreeMetadata & {
   value: number;         // the distinct column value this child was sliced for (e.g. tree id)

@@ -15023,7 +15023,9 @@ export default function PointCloudViewer({
           // dropdown.
           setCloudColorMode(id, { mode: 'scalar', field: CURVATURE_ATTRIBUTE });
 
-          if (willDefer) {
+          // Only when the backend really deferred: normals on an octree with
+          // row ids are shown by row lookup, with nothing left to rebuild.
+          if (meta.octree_deferred) {
             octreeRefreshQueueRef.current?.enqueue(id, sessionId);
           }
           done.add(id);

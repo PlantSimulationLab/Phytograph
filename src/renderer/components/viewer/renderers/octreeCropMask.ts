@@ -302,6 +302,15 @@ export function applyCropMaskToVisibleNodes(
 }
 
 /**
+ * Forget the mask key one tile was masked under, so the next pass re-masks
+ * it. For a tile whose attribute values changed under an unchanged key — a
+ * per-tile overlay column arriving (octreeOverlayColumns.ts).
+ */
+export function invalidateTileMask(geometry: any): void {
+  if (geometry) delete geometry[CROP_MASK_FLAG + 'Key'];
+}
+
+/**
  * Remove crop masks from every loaded tile and forget the mask key, so the
  * cloud renders at full density again. Called when the crop region clears,
  * the tool exits, or the component unmounts.
