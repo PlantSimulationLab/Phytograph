@@ -2809,7 +2809,82 @@ def _riegl_reader_invocation(args: List[str], mounts: List[tuple]) -> tuple:
     return cmd, env, container_name
 
 
-def _run_riegl_container(
+# `docker run` exits 125 when the DAEMON refuses to start the container, so
+# the reader never ran and nothing was read or written. One such refusal is a
+# race inside Docker's containerd image store rather than anything wrong with
+# the image: right after the image is built (the stale-image heal in
+# _resolve_riegl_runtime rebuilds it moments before the run) or right after
+# Docker Desktop starts, unpacking it can fail with
+#   apply layer error ... failed to prepare extraction snapshot ...:
+#   NotFound: parent snapshot sha256:... does not exist: not found
+# and the identical `docker run` a few seconds later succeeds. Seen in the
+# packaged app on 2026-10-22: Docker Desktop had just come up, the heal rebuilt
+# the image, and the run in that same second failed with the message above.
+# Matched narrowly -- a different exit-125 failure (bad mount, no image) is
+# not transient, and retrying it would only delay the real error.
+_DOCKER_START_RACE_RE = re.compile(
+    r"(parent snapshot|extraction snapshot)[^\n]*?(does not exist|not found)",
+    re.IGNORECASE,
+)
+_RIEGL_START_RACE_RETRY_DELAYS_S = (2.0, 5.0)
+
+
+class _RieglDockerStartRace(Exception):
+    """`docker run` was refused by a transient daemon race (see above)."""
+
+
+def _is_docker_start_race(returncode, log_tail: str) -> bool:
+    return returncode == 125 and bool(_DOCKER_START_RACE_RE.search(log_tail or ""))
+
+
+def _retry_riegl_start_race(attempt, cancel_event=None):
+    """Run `attempt()`, re-running it while Docker refuses with a start race.
+
+    Safe to repeat because a refused container never started: the reader read
+    nothing, wrote nothing to the bind mounts and called no callback.
+    """
+    for delay in _RIEGL_START_RACE_RETRY_DELAYS_S + (None,):
+        try:
+            return attempt()
+        except _RieglDockerStartRace as exc:
+            if delay is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"{exc} Docker refused to start the reader "
+                        f"{len(_RIEGL_START_RACE_RETRY_DELAYS_S) + 1} times. "
+                        "Restarting Docker Desktop usually clears this."
+                    ),
+                ) from exc
+            logger.warning(
+                "RIEGL reader: docker start race (%s); retrying in %.0fs",
+                str(exc)[:200], delay,
+            )
+            end = time.time() + delay
+            while time.time() < end:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ScanCanceled()
+                time.sleep(0.1)
+
+
+def _run_riegl_container(args: List[str], mounts: List[tuple], **kwargs) -> str:
+    """Run the reader and return its stdout; see _run_riegl_container_once."""
+    return _retry_riegl_start_race(
+        lambda: _run_riegl_container_once(args, mounts, **kwargs),
+        kwargs.get("cancel_event"),
+    )
+
+
+def _stream_riegl_container(args: List[str], mounts: List[tuple], out_dir: Path,
+                            **kwargs) -> tuple:
+    """Stream the reader's positions; see _stream_riegl_container_once."""
+    return _retry_riegl_start_race(
+        lambda: _stream_riegl_container_once(args, mounts, out_dir, **kwargs),
+        kwargs.get("cancel_event"),
+    )
+
+
+def _run_riegl_container_once(
     args: List[str],
     mounts: List[tuple],
     *,
@@ -2932,6 +3007,10 @@ def _run_riegl_container(
                 detail = parsed.get("error")
             except Exception:
                 pass
+            if container_name and _is_docker_start_race(proc.returncode, tail):
+                raise _RieglDockerStartRace(
+                    f"RIEGL reader failed (exit {proc.returncode}). {tail}"
+                )
             raise HTTPException(
                 status_code=500,
                 detail=detail or (
@@ -2949,7 +3028,7 @@ def _run_riegl_container(
                 pass
 
 
-def _stream_riegl_container(
+def _stream_riegl_container_once(
     args: List[str],
     mounts: List[tuple],
     out_dir: Path,
@@ -3015,7 +3094,28 @@ def _stream_riegl_container(
                     cmd, stdout=subprocess.PIPE, stderr=log_handle, env=env,
                     bufsize=1024 * 1024,
                 )
-            header = _read_riegl_header(proc.stdout)
+            try:
+                header = _read_riegl_header(proc.stdout)
+            except HTTPException:
+                # No header usually means the child never ran at all -- docker
+                # refused to start the container -- and "stream ended early"
+                # would hide why. Give it a moment to exit, then report ITS
+                # failure instead.
+                deadline = time.time() + 5.0
+                while proc.poll() is None and time.time() < deadline:
+                    time.sleep(0.05)
+                if proc.poll() in (None, 0):
+                    raise
+                tail = ""
+                try:
+                    with open(log_path) as fh:
+                        tail = fh.read()[-1500:]
+                except Exception:
+                    pass
+                msg = f"RIEGL reader failed (exit {proc.returncode}). {tail}"
+                if container_name and _is_docker_start_race(proc.returncode, tail):
+                    raise _RieglDockerStartRace(msg)
+                raise HTTPException(status_code=500, detail=msg)
             entries = header.get("scans", [])
             by_name = {e.get("name"): (i, e) for i, e in enumerate(entries)}
             handled: set = set()
