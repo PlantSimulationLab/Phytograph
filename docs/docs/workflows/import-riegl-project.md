@@ -623,6 +623,14 @@ Windows or Linux.**
   position whose folder exists but holds no `.rxp` is skipped rather than
   listed as broken.
 
+**Every position is grayed out with "… .rxp is empty (0 bytes)".**
+: The scan files are on disk with no data behind them. Usually the project is
+  in a Dropbox, Box, OneDrive or iCloud folder that has not finished
+  downloading. The reader runs in a container that cannot make the sync client
+  fetch a file, so mark the folder available offline, wait for the sync to
+  finish, and open the project again. If it is not in a synced folder, the copy
+  from the scanner is incomplete; copy it again.
+
 **"The RIEGL reader image is out of date and updating it automatically failed."**
 : Phytograph normally rebuilds a stale reader image by itself at the start of an
   import, so you only see this if that rebuild failed — most often because

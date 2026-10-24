@@ -191,6 +191,28 @@ def test_inspect_reads_metadata_fov_and_gnss(fake_rivlib, project):
     assert scan["sensor_pose"]["pitch_deg"] == pytest.approx(0.12, abs=1e-9)
 
 
+def test_an_empty_rxp_is_reported_as_empty_not_as_bad_preamble(
+    fake_rivlib, project
+):
+    """From the field: a .riproject whose copy died left every .rxp at 0 bytes.
+
+    Real RiVLib answers that with `decoder_rmsmarker::get: bad preamble`, which
+    sends the user hunting for a corrupt file or a version problem. The fake
+    opens an empty file happily and synthesizes points from it, so without the
+    reader's own size check this scan would come back error-free.
+    """
+    rxp = next(project.rglob("*.rxp"))
+    rxp.write_bytes(b"")
+
+    doc = json.loads(_run_reader(fake_rivlib, ["inspect", str(project)]).stdout)
+
+    scan = doc["scans"][0]
+    assert scan["size_bytes"] == 0
+    assert "empty (0 bytes)" in scan.get("error", ""), scan
+    assert rxp.name in scan["error"]
+    assert "point_count_probed" not in scan
+
+
 # ---------------------------------------------------------------------------
 # stream — the path the app actually uses
 # ---------------------------------------------------------------------------

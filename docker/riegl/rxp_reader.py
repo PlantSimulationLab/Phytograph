@@ -1710,7 +1710,31 @@ def scan_params_for(pos: dict) -> dict | None:
 
 
 def _uri(path: str) -> str:
-    """RiVLib takes URIs, not paths — `file:` for local reads."""
+    """RiVLib takes URIs, not paths — `file:` for local reads.
+
+    Also the one place every RiVLib open (points, housekeeping, the miss shim)
+    passes through, so it is where an EMPTY .rxp is refused. RiVLib reports one
+    as `decoder_rmsmarker::get: bad preamble`, which reads like corruption or a
+    version mismatch and names neither real cause.
+
+    From the field, the common cause is a cloud-sync folder, not a bad copy: a
+    Dropbox project that had not finished downloading read as 0 bytes, and
+    under Docker a bind mount cannot make the sync client fetch it, so it stays
+    empty for the reader even after the Mac side would have hydrated it. The
+    file was whole a few minutes later. Name that first, then the bad copy.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = None
+    if size == 0:
+        raise RxpError(
+            f"{os.path.basename(path)} is empty (0 bytes). If the project is in "
+            "a Dropbox, Box, OneDrive or iCloud folder it has probably not "
+            "finished downloading - make it available offline, wait for the "
+            "sync to finish, then reopen it. Otherwise the copy is incomplete; "
+            "copy it again from the scanner."
+        )
     return "file:" + path
 
 
