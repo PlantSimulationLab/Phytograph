@@ -36,6 +36,10 @@ describe('brushAnchorAt', () => {
     const pick = vi.fn<Pick>(() => ({ position: { x: 0, y: 3, z: 0 } }));
     const hit = brushAnchorAt(args(octreeOf([plane(0)], pick)));
     expect(pick.mock.calls[0][3]).toMatchObject({ pickOutsideClipRegion: false });
+    // FIXED splats whatever the display uses (see withFixedPickSize).
+    const material: any = { pointSizeType: 2 };
+    pick.mock.calls[0][3].onBeforePickRender!(material, null);
+    expect(material.pointSizeType).toBe(0);
     expect(hit?.y).toBe(3);
   });
 

@@ -31,6 +31,7 @@
 // nearest surface wins, which is the same rule the depth test applies.
 import * as THREE from 'three';
 import { Potree, type PointCloudOctree, type PickParams, type PickPoint } from 'potree-core';
+import { withFixedPickSize } from './octreePickSplat';
 
 // potree-core's hard limit: node ids 1..255 go in the alpha byte, 0 = empty.
 export const MAX_PICK_NODES_PER_PASS = 255;
@@ -127,7 +128,7 @@ export function pickAcrossOctrees(
         : [];
       let hit: PickPoint | null = null;
       try {
-        hit = Potree.pick(batch.map((e) => e.octree), gl, camera, ray, params);
+        hit = Potree.pick(batch.map((e) => e.octree), gl, camera, ray, withFixedPickSize(params));
       } catch {
         // Undo what an interrupted pick leaves set: potree's render target
         // and its pick-window scissor would otherwise leak into the next frame.

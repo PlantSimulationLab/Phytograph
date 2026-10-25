@@ -11,12 +11,16 @@
 //     on the wrong cloud's surface, where the target has no points.
 
 import * as THREE from 'three';
+import { withFixedPickSize } from './octreePickSplat';
 
 /** The target octree's pick, as potree-core exposes it. */
 export interface PickableOctree extends THREE.Object3D {
   pick(
     gl: THREE.WebGLRenderer, camera: THREE.Camera, ray: THREE.Ray,
-    opts: { pickWindowSize?: number; pickOutsideClipRegion?: boolean; pixelPosition?: THREE.Vector3 },
+    opts: {
+      pickWindowSize?: number; pickOutsideClipRegion?: boolean; pixelPosition?: THREE.Vector3;
+      onBeforePickRender?: (material: any, target: any) => void;
+    },
   ): { position?: { x: number; y: number; z: number } } | null;
 }
 
@@ -40,13 +44,13 @@ export function brushAnchorAt(a: BrushAnchorArgs): THREE.Vector3 | null {
   const { octree } = a;
   if (!octree) return null;
   try {
-    const hit = octree.pick(a.gl, a.camera, a.ray, {
+    const hit = octree.pick(a.gl, a.camera, a.ray, withFixedPickSize({
       pickWindowSize: 17,
       // Visible points only: the clip region is what the user sees (erased and
       // cropped points, and everything outside a cross-section, are clipped).
       pickOutsideClipRegion: false,
       pixelPosition: a.pixelPosition,
-    });
+    }));
     if (hit?.position) return new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
   } catch { /* fall through to the CPU pass */ }
 

@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as THREE from 'three';
 
 const pickMock = vi.fn();
-vi.mock('potree-core', () => ({ Potree: { pick: (...args: unknown[]) => pickMock(...args) } }));
+vi.mock('potree-core', () => ({
+  Potree: { pick: (...args: unknown[]) => pickMock(...args) },
+  PointSizeType: { FIXED: 0, ATTENUATED: 1, ADAPTIVE: 2 },
+}));
 
 import {
   batchPickNodes,
@@ -137,5 +140,34 @@ describe('pickAcrossOctrees', () => {
     expect(gl.setScissorTest).toHaveBeenCalledWith(false);
     expect(gl.setRenderTarget).toHaveBeenCalledWith(null);
     expect(gl.autoClear).toBe(true);
+  });
+});
+
+describe('pick splat sizing', () => {
+  beforeEach(() => pickMock.mockReset());
+
+  it('pins FIXED point size on the pick material, then runs the caller hook', () => {
+    // potree copies the DISPLAY material's sizing onto its pick material; with
+    // an ADAPTIVE display (coverage fill) an unpinned pick drew splats of up to
+    // 50 px and a point far off the cursor won the pick.
+    pickMock.mockReturnValue(null);
+    const order: string[] = [];
+    pickAcrossOctrees([fakeOctree('a', 1)], fakeGl(), camera(), new THREE.Ray(
+      new THREE.Vector3(), new THREE.Vector3(0, 0, -1)), {
+      onBeforePickRender: (m: any) => { order.push(`caller saw ${m.pointSizeType}`); m.size = 9; },
+    });
+    const params = pickMock.mock.calls[0][4];
+    const material: any = { pointSizeType: 2, size: 2 };   // ADAPTIVE, as copied
+    params.onBeforePickRender(material, null);
+    expect(material.pointSizeType).toBe(0);                // FIXED
+    expect(order).toEqual(['caller saw 0']);
+    expect(material.size).toBe(9);
+
+    pickMock.mockClear();
+    pickAcrossOctrees([fakeOctree('a', 1)], fakeGl(), camera(), new THREE.Ray(
+      new THREE.Vector3(), new THREE.Vector3(0, 0, -1)), { pickWindowSize: 13 });
+    const bare: any = { pointSizeType: 2 };
+    pickMock.mock.calls[0][4].onBeforePickRender(bare, null);
+    expect(bare.pointSizeType).toBe(0);
   });
 });

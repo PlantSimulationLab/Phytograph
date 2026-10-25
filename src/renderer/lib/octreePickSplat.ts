@@ -3,7 +3,7 @@
 // Extracted from PointPicker so every octree pick in the app aims the same way.
 // It is not in lib/pointPick.ts because that module is deliberately free of
 // three.js/potree imports; this one needs potree's PointSizeType.
-import { PointSizeType } from 'potree-core';
+import { PointSizeType, type PickParams } from 'potree-core';
 
 // Side of the readback window, in CSS pixels, that `Potree.pick` scans for a
 // written pixel. Aim tolerance, in effect.
@@ -63,4 +63,26 @@ export function makeInflatePickSplat(pixelRatio: number) {
     material.minSize = px;
     material.maxSize = Math.max(material.maxSize, px);
   };
+}
+
+type PickHook = NonNullable<PickParams['onBeforePickRender']>;
+
+// Every octree pick must size its splats in FIXED pixels, whatever the display
+// material uses. `updatePickMaterial` copies `pointSizeType` too, and the pick
+// material never gets the display's shader patches — so once the display moved
+// to ADAPTIVE (octreeCoverageFill.ts) a pick without its own hook ran potree's
+// stock world-space adaptive size, ~8x node spacing and up to 50 px. A
+// foreground point well off the cursor then covered the whole readback window
+// and won (see OCTREE_PICK_POINT_SIZE_PX), so zoom-to-cursor and the erase
+// brush anchored on the wrong surface, differently at each LOD.
+//
+// Pins FIXED at the display's own size, then runs the caller's hook, if any
+// (e.g. `makeInflatePickSplat`), so this is safe to apply to every pick.
+export function withFixedPickSize(params: Partial<PickParams>): Partial<PickParams> {
+  const inner = params.onBeforePickRender;
+  const hook: PickHook = (material, target) => {
+    material.pointSizeType = PointSizeType.FIXED;
+    inner?.(material, target);
+  };
+  return { ...params, onBeforePickRender: hook };
 }
