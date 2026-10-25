@@ -216,3 +216,43 @@ def test_lad_getter_ignores_a_misaligned_timestamps_field():
         return sess.extras[slug][keep] if slug in sess.extras else None
 
     assert _get("timestamp") is None, "a misaligned field must not be used"
+
+
+@pytest.mark.parametrize("encodings, merged", [
+    (("adjusted_standard", "adjusted_standard"), "adjusted_standard"),
+    (("adjusted_standard", None), None),          # mixed clocks: no honest label
+    (("gps_week", "gps_week"), "gps_week"),
+])
+def test_merge_keeps_the_gps_time_clock(tmp_path, encodings, merged):
+    """`_merge_sessions_locked` never passed `gps_time_encoding`, so a merged
+    Adjusted-Standard cloud exported (and saved) as week-seconds time, and its
+    re-import was read as `gps_week` — which the trajectory join refuses."""
+    parts = []
+    for i, enc in enumerate(encodings):
+        s = _session(20)
+        s.session_id = f"merge_ts_{i}"
+        s.gps_time_encoding = enc
+        parts.append(s)
+    with main._cloud_session_lock:
+        out = main._merge_sessions_locked(parts)
+    try:
+        assert out.gps_time_encoding == merged
+        dest = tmp_path / "merged.las"
+        main._export_session_to_las(out, dest, fmt="las", columns=None, translation=None)
+        f = laspy.read(str(dest))
+        assert int(f.header.global_encoding.gps_time_type) == int(merged == "adjusted_standard")
+    finally:
+        main._cloud_sessions.pop(out.session_id, None)
+
+
+def test_merge_with_an_untimed_input_keeps_the_timed_clock():
+    timed, untimed = _session(10), _session(10, with_ts=False)
+    timed.session_id, untimed.session_id = "merge_t", "merge_u"
+    timed.gps_time_encoding = "adjusted_standard"
+    with main._cloud_session_lock:
+        out = main._merge_sessions_locked([timed, untimed])
+    try:
+        assert out.gps_time_encoding == "adjusted_standard"
+        np.testing.assert_array_equal(out.timestamps[10:], 0.0)
+    finally:
+        main._cloud_sessions.pop(out.session_id, None)

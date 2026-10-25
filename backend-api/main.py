@@ -40314,7 +40314,8 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
       - colors / intensity / timestamps / beam_origins: all-or-nothing per input.
         If ANY input carries the attribute, the merged cloud carries it and the
         inputs lacking it contribute a neutral fill (white / 0), so the column
-        never falls out of alignment with positions.
+        never falls out of alignment with positions. `gps_time_encoding` follows
+        the timed inputs when they agree, else None.
 
     Intentionally DROPPED (not carried onto the merged cloud):
       - `backfilled_misses`: the separate recovered-miss buffer. Interleaved
@@ -40382,6 +40383,15 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         ])
     else:
         timestamps = None
+    # The column's CLOCK must travel with it. Dropping it made every merged
+    # Adjusted-Standard cloud export (and save) as week-seconds time, which a
+    # re-import reads as `gps_week` and the trajectory join then refuses. Kept
+    # only when every timed input agrees: week-seconds cannot be converted to an
+    # absolute time without the week, so a mixed column has no single honest
+    # label. An untimed input's rows are 0, LAS's own "no time" (it has no null).
+    encodings = {getattr(s, "gps_time_encoding", None)
+                 for s in sessions if s.timestamps is not None}
+    gps_time_encoding = next(iter(encodings)) if len(encodings) == 1 else None
 
     any_beam = any(s.beam_origins is not None for s in sessions)
     if any_beam:
@@ -40473,6 +40483,7 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         extras=extras,
         extra_dims_meta=merged_meta,
         timestamps=timestamps,
+        gps_time_encoding=gps_time_encoding,
         beam_origins=beam_origins,
         world_shift=(shift_out_arr.copy() if shift_out is not None else None),
         crs_epsg=crs_epsg,
