@@ -33739,10 +33739,15 @@ def _run_pinned(fn):
 def _pin_session(session_id: str) -> None:
     pins = _SESSION_PINS.get()
     if pins is not None:
-        pins.add(session_id)
+        # Under the lock `_pinned_session_ids` iterates these sets with: an add
+        # from another thread mid-iteration raises "set changed size".
+        with _inflight_pins_lock:
+            pins.add(session_id)
 
 
 def _pinned_session_ids() -> "set[str]":
+    """Every in-flight pin. A leaf lock: safe to call holding
+    `_cloud_session_lock`, which is how the sweep reads it."""
     with _inflight_pins_lock:
         out: set = set()
         for pins in _inflight_session_pins:
@@ -34455,8 +34460,14 @@ def _sweep_cloud_sessions() -> None:
     lookup in that window re-admits it instead of failing.
     """
     now = time.time()
-    pinned = _pinned_session_ids()
     with _cloud_session_lock:
+        # Read UNDER the session lock. `_get_cloud_session` pins before it takes
+        # this lock to look up, so either the pin is visible here or the lookup
+        # runs after this pop and claims the session back from
+        # `_spilling_sessions`. Read before the lock, a request could pin and
+        # fetch in between and be handed an object this sweep then spills: its
+        # edit lands on an orphan and the next lookup restores the pre-edit file.
+        pinned = _pinned_session_ids()
         evicted = []
         kept = 0
         for sid in _eviction_victims_locked(now, pinned):
@@ -35229,7 +35240,14 @@ def _get_cloud_session(session_id: str) -> "CloudSession":
     only part-written -- re-admit it), and spilled (read it back). A 404 now
     means the session was never created, was explicitly deleted, or its spill was
     trimmed away -- not merely that eight newer clouds were imported after it.
+
+    Pins BEFORE looking up. `_restore_cloud_session` sweeps before it returns,
+    and an unpinned just-restored session is the newest one but still a memory
+    victim once every older session is pinned by other work: it was spilled
+    straight back out, and the caller's edit landed on the orphaned object. A
+    pin on an id that turns out to be a 404 is harmless; it dies with the scope.
     """
+    _pin_session(session_id)
     with _cloud_session_lock:
         sess = _cloud_sessions.get(session_id)
         if sess is None:
@@ -35249,7 +35267,6 @@ def _get_cloud_session(session_id: str) -> "CloudSession":
         sess = _restore_cloud_session(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Cloud session not found: {session_id}")
-    _pin_session(session_id)
     return sess
 
 

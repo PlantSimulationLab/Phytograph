@@ -311,7 +311,11 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
       over the user's work. Pins ride a `ContextVar` installed by the
       `SessionPinScope` middleware (and by `_run_pinned` for executor threads,
       which do not inherit contextvars and can outlive a canceled request).
-      Resident count can therefore exceed the cap by one request's working
+      The pin must exist *before* the lookup: `_get_cloud_session` pins first
+      (a restore sweeps before returning, and an unpinned just-restored
+      session was spilled straight back out from under its caller), and the
+      sweep reads the pin set under `_cloud_session_lock`, so a request either
+      shows up as pinned or claims its session back mid-spill. Resident count can therefore exceed the cap by one request's working
       set, which is unavoidable and logged.
     - A spilled session still pins its octree ids in `_live_session_octree_ids`
       — out of RAM is not out of the scene.

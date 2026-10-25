@@ -813,3 +813,123 @@ def test_trim_ranks_by_last_use_not_spill_time(spill_root, monkeypatch):
     assert "old_spill_hot" in main._spilled_sessions, (
         "ranked by spill time, so the recently-used cloud was dropped"
     )
+
+
+# ---------------------------------------------------------------------------
+# Pins must cover the lookup itself
+# ---------------------------------------------------------------------------
+
+def _memory_pressure(monkeypatch):
+    """A budget two 64-point sessions overflow, so the sweep picks MEMORY
+    victims (the count cap is out of the way). The store threshold is pinned
+    high because it scales with the budget: at this budget a 64-point session
+    would be restored store-backed, its memmapped columns count as no RAM, and
+    the pressure these tests need would vanish."""
+    monkeypatch.setenv("PHYTOGRAPH_SESSION_STORE_MIN_POINTS", "100000000")
+    monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 32)
+    monkeypatch.setattr(main.memory_budget, "budget_bytes", lambda: 2 * 64 * 100)
+
+
+def test_a_restore_under_memory_pressure_keeps_the_restored_session(
+        spill_root, monkeypatch):
+    """Other work holds A and B; the user edits spilled cloud X.
+
+    `_get_cloud_session` pinned X only after `_restore_cloud_session` returned,
+    and the restore sweeps before returning. With A and B pinned, the newest
+    session -- X itself -- was the only memory victim left: it was spilled
+    straight back out, the handler edited the orphaned object and returned 200,
+    and the next lookup restored the pre-edit pickle.
+    """
+    _memory_pressure(monkeypatch)
+    for sid in ("A", "B", "X"):
+        _admit(_session(sid), age=10)
+    with main._session_pin_scope():
+        main._get_cloud_session("A")
+        main._get_cloud_session("B")
+        main._sweep_cloud_sessions()
+    assert "X" in main._spilled_sessions and "X" not in main._cloud_sessions
+
+    holding, release = threading.Event(), threading.Event()
+
+    def holder():
+        with main._session_pin_scope():
+            main._get_cloud_session("A")
+            main._get_cloud_session("B")
+            holding.set()
+            release.wait(30)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert holding.wait(30)
+        with main._session_pin_scope():
+            sx = main._get_cloud_session("X")
+            assert "X" in main._cloud_sessions, "restored session evicted by its own restore"
+            sx.deleted[:10] = True
+    finally:
+        release.set()
+        t.join(30)
+    assert int(main._get_cloud_session("X").deleted.sum()) == 10, "edit reverted"
+
+
+def test_a_lookup_racing_a_sweep_is_never_handed_an_evicted_object(
+        spill_root, monkeypatch):
+    """The sweep read the pin set BEFORE taking the session lock. A request that
+    pinned and fetched X in that window got the resident object, the sweep then
+    spilled it anyway, and the request's edit was lost to the pickle.
+
+    Forced deterministically: the competing request starts the instant the
+    sweep has read the pins. Fixed, the request blocks on the session lock and
+    either sees the pin or claims X back from `_spilling_sessions`.
+    """
+    _memory_pressure(monkeypatch)
+    for sid in ("A", "B", "X"):
+        _admit(_session(sid), age=10)
+    # Other work holds A and B, so X is the only memory victim -- even after the
+    # racing fetch below makes it the most recently used session.
+    holding, release = threading.Event(), threading.Event()
+
+    def holder():
+        with main._session_pin_scope():
+            main._get_cloud_session("A")
+            main._get_cloud_session("B")
+            holding.set()
+            release.wait(30)
+
+    held = threading.Thread(target=holder)
+    held.start()
+    assert holding.wait(30)
+
+    fetched, sweep_done = threading.Event(), threading.Event()
+    real_pins = main._pinned_session_ids
+    fired = []
+
+    def request():
+        with main._session_pin_scope():
+            sx = main._get_cloud_session("X")
+            fetched.set()
+            sweep_done.wait(30)
+            sx.deleted[:7] = True
+
+    def pins_then_race():
+        out = real_pins()
+        if not fired:
+            fired.append(1)
+            threading.Thread(target=request, daemon=True).start()
+            # Unfixed, the request completes its fetch here; fixed, it is
+            # blocked on the lock the sweep holds, and this times out.
+            fetched.wait(1.0)
+        return out
+
+    monkeypatch.setattr(main, "_pinned_session_ids", pins_then_race)
+    main._sweep_cloud_sessions()
+    monkeypatch.setattr(main, "_pinned_session_ids", real_pins)
+    sweep_done.set()
+    assert fetched.wait(30)
+    deadline = time.time() + 30
+    while time.time() < deadline and int(
+            main._get_cloud_session("X").deleted.sum()) != 7:
+        time.sleep(0.05)
+    release.set()
+    held.join(30)
+    assert int(main._get_cloud_session("X").deleted.sum()) == 7, "edit lost to the spill"
