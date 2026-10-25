@@ -15005,9 +15005,13 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
     column picker — PTX passes the raster indices, which it places every point by.
 
     `world_shift` is the session's import-time global shift, or None for an inline
-    or file-backed entry. It is NOT applied to `positions` (every scan export
-    writes the session's display frame); it is surfaced so a format that declares
-    an absolute pose can put true world coordinates in its header.
+    or file-backed entry. It is NOT applied to `positions`, which stay in the
+    session's stored frame: PTX/E57 write points scanner-local and put the shift
+    into the pose header, while `_write_scan_to_bytes` adds it back to every
+    point row so the flat formats carry true world coordinates.
+
+    `gps_time_encoding` is the session's, so a LAS write can keep the
+    Adjusted-Standard bit (see `_mark_gps_time_absolute`).
     """
     import numpy as np
 
@@ -15020,6 +15024,7 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
     colors = None
     intensity = None
     world_shift = None
+    gps_time_encoding = None
     if sess is not None:
         with _cloud_session_lock:
             keep = ~sess.deleted
@@ -15027,6 +15032,7 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
             extras = {k: np.asarray(v[keep]) for k, v in sess.extras.items()}
             if getattr(sess, 'world_shift', None) is not None:
                 world_shift = np.asarray(sess.world_shift, np.float64).copy()
+            gps_time_encoding = getattr(sess, 'gps_time_encoding', None)
             if getattr(sess, 'colors', None) is not None:
                 # `sess.colors` is uint16 in the LAS 0-65535 scale, but this
                 # function's contract — and every writer below — is 0-1, matching
@@ -15134,7 +15140,8 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
             ordered = [s for s in ordered if s != 'is_miss']
 
     return {"positions": xyz, "colors": colors, "intensity": intensity,
-            "scalars": scalars, "ordered": ordered, "world_shift": world_shift}
+            "scalars": scalars, "ordered": ordered, "world_shift": world_shift,
+            "gps_time_encoding": gps_time_encoding}
 
 
 def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> tuple:
@@ -15160,6 +15167,13 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
     ordered = resolved["ordered"]        # ordered scalar slugs
     n = xyz.shape[0]
     fmt = fmt.lower()
+    # Every format below writes point rows directly, so they must be in WORLD
+    # coordinates: without the shift a georeferenced (e.g. UTM) scan exported
+    # as local 0..N m coordinates with no record of the offset anywhere in the
+    # file. The single-cloud path (`_export_session_to_las`) adds it the same way.
+    ws = resolved.get("world_shift")
+    if ws is not None:
+        xyz = xyz + np.asarray(ws, dtype=np.float64).reshape(3)
 
     # ---- PTX (structured raster) ----
     # Needs the scan's grid + pose, which this signature doesn't carry, so the
@@ -15316,9 +15330,16 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
         las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
         if intensity is not None:
             iv = np.asarray(intensity, dtype=np.float64)
-            rng = iv.max() - iv.min() if n else 0
-            las.intensity = (((iv - iv.min()) / rng * 65535).astype(np.uint16)
-                             if rng > 0 else np.zeros(n, dtype=np.uint16))
+            # A session's intensity is already the raw LAS uint16 value; write it
+            # untouched, as `_export_session_to_las` does. Min-max stretching it
+            # per file made intensity incomparable across scans of one export
+            # and zeroed a constant-intensity cloud. Only a column outside the
+            # uint16 domain (dB reflectance, 0-1 floats) is normalized.
+            if n and np.isfinite(iv).all() and iv.min() >= 0 and iv.max() <= 65535 \
+                    and np.array_equal(iv, np.rint(iv)):
+                las.intensity = iv.astype(np.uint16)
+            else:
+                las.intensity = _intensity_to_las_uint16(iv)
         if colors is not None:
             c = np.clip(colors, 0, 1)
             las.red = (c[:, 0] * 65535).astype(np.uint16)
@@ -15328,6 +15349,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             if s == _ts_col:
                 # float64, into the standard field — see the header note above.
                 las.gps_time = np.asarray(scalars[s], dtype=np.float64)
+                if resolved.get("gps_time_encoding") == 'adjusted_standard':
+                    _mark_gps_time_absolute(las.header)
                 continue
             las[s] = np.asarray(scalars[s], dtype=np.float32)
         ext = ".laz" if fmt == "laz" else ".las"
