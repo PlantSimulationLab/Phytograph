@@ -922,6 +922,74 @@ def test_an_edit_during_a_commit_build_leaves_the_octree_stale(
     assert body["point_count"] == survivors < 1000
 
 
+@pytest.mark.parametrize("edit", ["delete", "undo"])
+def test_an_edit_during_apply_deletions_refuses_the_compaction(
+    client, cache_root, grid_xyz, monkeypatch, edit,
+):
+    """An erase or undo while "Apply deletions" builds must not be compacted
+    against an octree that never saw it.
+
+    The compacting bake skipped the race check the refresh path has: it built
+    the octree from the mask at the start, then compacted by the mask at the
+    end. A delete mid-build was compacted out of the session but still drawn;
+    an undo mid-build left the restored rows in the session but out of the
+    octree — and the octree's row ids, ranks against the OLD mask, put every
+    row-lookup overlay on the wrong points. Only the Apply button is disabled
+    during a bake, so both edits are reachable.
+    """
+    import threading
+
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    res = client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": BOX_BIG})
+    assert res.status_code == 200 and res.json()["deleted_count"] > 0
+    n_before = len(sess.positions)
+    deleted_before = sess.deleted.copy()
+
+    entered, release = threading.Event(), threading.Event()
+    real_build = main._build_octree_from_las
+
+    def held_build(*a, **k):
+        entered.set()
+        assert release.wait(30), "test never released the build"
+        return real_build(*a, **k)
+
+    monkeypatch.setattr(main, "_build_octree_from_las", held_build)
+    result = {}
+    t = threading.Thread(target=lambda: result.update(
+        res=client.post(f"/api/cloud/session/{sid}/bake")))
+    t.start()
+    assert entered.wait(30), "bake never reached the converter"
+
+    if edit == "delete":
+        # Outside BOX_BIG, so it changes the mask rather than re-deleting.
+        res = client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": {
+            "kind": "box", "min": [0.8, 0.8, 0.8], "max": [1.0, 1.0, 1.0]}})
+        assert res.status_code == 200 and res.json()["deleted_count"] > 0
+    else:
+        res = client.post(f"/api/cloud/session/{sid}/reset_edits", json={"edit_count": 0})
+        assert res.status_code == 200, res.text
+    expected_mask = sess.deleted.copy()
+    assert not np.array_equal(expected_mask, deleted_before)
+
+    release.set()
+    t.join(60)
+    with pytest.raises(AssertionError, match="edited while deletions were being applied"):
+        decode_streamed_json(result["res"].content)
+
+    # Nothing was compacted: every row is still there, under the user's CURRENT
+    # mask, and the stale octree is not claimed as current.
+    assert len(sess.positions) == n_before
+    assert np.array_equal(sess.deleted, expected_mask)
+    assert sess.octree_cache_id is None
+
+    # Applying again (no race) compacts to exactly the current survivors.
+    monkeypatch.setattr(main, "_build_octree_from_las", real_build)
+    res = client.post(f"/api/cloud/session/{sid}/bake")
+    body = decode_streamed_json(res.content)
+    assert body["point_count"] == len(sess.positions) == int((~expected_mask).sum())
+
+
 @pytest.mark.parametrize("undo", ["stroke_ids", "edit_count"])
 def test_rerunning_a_segmentation_ends_that_columns_undo(
     client, cache_root, grid_xyz, undo,

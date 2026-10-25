@@ -38561,12 +38561,12 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
         with _cloud_session_lock:
             extra_dims_meta = list(sess.extra_dims_meta)
             # The mask this octree is built from, and the edit generation at
-            # that moment. A non-compacting refresh compares BOTH after the
-            # build to tell whether an edit raced it. The generation is needed
-            # now that the write below drops the lock between blocks: a delete
-            # and its undo landing mid-write leave the mask equal while the
-            # blocks written in between are missing those points.
-            built_mask = None if compact else np.array(sess.deleted, dtype=bool, copy=True)
+            # that moment. Both modes compare BOTH after the build to tell
+            # whether an edit raced it. The generation is needed now that the
+            # write below drops the lock between blocks: a delete and its undo
+            # landing mid-write leave the mask equal while the blocks written
+            # in between are missing those points.
+            built_mask = np.array(sess.deleted, dtype=bool, copy=True)
             built_gen = sess.octree_stale_gen
             built_tokens = dict(sess.column_tokens)
             built_point_count = int((~np.asarray(sess.deleted)).sum())
@@ -38611,19 +38611,34 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
             _prune_overlay_locked(sess, built_tokens)
         remaining = built_point_count
     else:
-        remaining = _compact_baked_session(sess, cache_key)
+        remaining = _compact_baked_session(sess, cache_key, built_mask, built_gen)
         with _cloud_session_lock:
             _prune_overlay_locked(sess, built_tokens)
 
     return _finish_bake(sess, session_id, remaining, cache_key, cache_dir, meta)
 
 
-def _compact_baked_session(sess: "CloudSession", cache_key: str) -> int:
-    """The compacting half of an explicit bake. Returns the new point count."""
+def _compact_baked_session(sess: "CloudSession", cache_key: str,
+                           built_mask: np.ndarray, built_gen: int) -> int:
+    """The compacting half of an explicit bake. Returns the new point count.
+
+    `built_mask`/`built_gen` are the mask and edit generation the octree was
+    built from. An erase, crop or undo during the build (only the Apply button
+    is disabled while it runs) means the octree no longer matches the session:
+    compacting by the current mask would drop or keep rows the octree doesn't,
+    and every overlay shown by row lookup would then sit on the wrong points.
+    Nothing has been mutated yet, so refuse (409) and leave the session exactly
+    as the user left it; applying again builds from the current mask."""
     # Compact the in-RAM arrays to the survivors and clear the mask + history, so
     # the session's source of truth matches the baked octree and further edits
     # start from the reduced set.
     with _cloud_session_lock:
+        if (sess.octree_stale_gen != built_gen
+                or not np.array_equal(np.asarray(sess.deleted), built_mask)):
+            raise HTTPException(
+                status_code=409,
+                detail="The cloud was edited while deletions were being applied; "
+                       "apply them again.")
         keep = np.asarray(~sess.deleted)
         miss_col = sess.extras.get(_MISS_SLUG)
         dropped = ~keep if miss_col is None else (~keep) & (np.asarray(miss_col) == 0)
