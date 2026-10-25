@@ -336,3 +336,68 @@ def test_localization_inverts_when_most_pairs_are_wrong():
     assert not (accused & truly_bad), (
         "localization has become sound in this regime -- update this test to "
         "assert the stronger property instead of the known limitation")
+
+
+def _four_scan_pairs(broken=()):
+    poses = _poses() + [_rigid(60.0, [3.0, 14.0, 0.1])]
+    rel = lambda a, b: np.linalg.inv(poses[a]) @ poses[b]
+    pairs = {(a, b): rel(a, b) for a, b in itertools.combinations(range(4), 2)}
+    for p in broken:
+        bad = pairs[p].copy()
+        bad[0, 3] += 6.0
+        pairs[p] = bad
+    return poses, pairs
+
+
+def test_a_scan_is_placed_through_a_trusted_neighbor_when_its_direct_pair_is_wrong():
+    """The apple-orchard case: 015 was unregisterable against the reference but
+    registered exactly against a neighbor. Its direct pair sits in no closed
+    loop, so it must be reached through pairs that do."""
+    from loop_closure import place_through_trusted_pairs
+
+    poses, pairs = _four_scan_pairs(broken=[(0, 3)])
+    report = check_loops(pairs, 4)
+    assert (0, 3) not in report["trusted_pairs"]
+
+    placed = place_through_trusted_pairs(4, 0, pairs, report)
+    assert placed["unresolved"] == []
+    assert placed["paths"][3] == [0, 1, 3]
+    for i in range(4):
+        assert np.allclose(placed["transforms"][i], poses[i], atol=1e-9), i
+
+
+def test_trusted_direct_pairs_are_used_as_is():
+    from loop_closure import place_through_trusted_pairs
+
+    poses, pairs = _four_scan_pairs()
+    placed = place_through_trusted_pairs(4, 0, pairs, check_loops(pairs, 4))
+    assert placed["paths"] == {0: [0], 1: [0, 1], 2: [0, 2], 3: [0, 3]}
+
+
+def test_no_closed_loop_places_nothing_rather_than_applying_unverified_pairs():
+    """A single broken triangle: no loop closes, so no pair is vouched for.
+    The old placement applied the direct pairs anyway, and the app then
+    reported "every alignment agrees" over a set whose only loop had failed."""
+    from loop_closure import place_through_trusted_pairs
+
+    pairs = _exact_pairs(_poses())
+    broken = pairs[(0, 1)].copy()
+    broken[0, 3] += 5.2
+    pairs[(0, 1)] = broken
+    placed = place_through_trusted_pairs(3, 0, pairs, check_loops(pairs, 3))
+    assert placed["unresolved"] == [1, 2]
+    assert list(placed["transforms"]) == [0]
+
+
+def test_with_no_loops_the_direct_pair_is_used_unverified():
+    """Two scans: there is nothing to check against, so place by the pair and
+    let the caller report the result unvalidated."""
+    from loop_closure import place_through_trusted_pairs
+
+    poses = _poses()[:2]
+    pairs = {(0, 1): np.linalg.inv(poses[0]) @ poses[1]}
+    report = check_loops(pairs, 2)
+    assert not report["checked"]
+    placed = place_through_trusted_pairs(2, 0, pairs, report)
+    assert placed["unresolved"] == []
+    assert np.allclose(placed["transforms"][1], poses[1])

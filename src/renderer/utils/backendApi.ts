@@ -4220,6 +4220,10 @@ export interface MultiScanRegisterResponse {
    *  placed consistently are ABSENT here and listed in `unresolved_scans`. */
   transformation_matrices?: Record<string, number[]>;
   unresolved_scans?: number[];
+  /** Scan index (string key) -> the chain of scans it was placed through,
+   *  reference first. Longer than two when its direct pair with the reference
+   *  failed loop closure and it was reached through a neighbor instead. */
+  placement_paths?: Record<string, number[]>;
   loops?: MultiScanLoop[];
   loops_checked?: boolean;
   loops_consistent?: boolean;

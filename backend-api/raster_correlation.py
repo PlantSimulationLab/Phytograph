@@ -242,7 +242,25 @@ def _top_shifts(target_fft: np.ndarray, target_shape, target_norm: float,
             for i in top]
 
 
-def _has_ground(points: np.ndarray, min_floor_fraction: float = 0.35) -> bool:
+# Share of returns within 1 m of the floor above which a cloud counts as having
+# a ground sheet to strip. Lowered 0.35 -> 0.25 for the apple orchard, whose
+# two scans standing INSIDE the canopy measured 0.283 and 0.300: more of what
+# they see is leaves, but their ground is real, and leaving it in made every
+# pair touching them unregisterable (ScanPos015 landed 89 deg out).
+#
+# The margins are thin and that is worth knowing before moving this again.
+# Measured on the ingest sample the coarse stage sees:
+#   synthetic trellis fixture  0.219-0.221  must NOT strip (4 tests fail if it does)
+#   GrapeX vineyard            0.156-0.185  registers unstripped
+#   apple                      0.283-0.461
+#   peach / olive / UC Davis   0.437-0.764
+# 0.25 changes the decision for exactly two scans of everything measured (apple
+# 002 and 015), with ~0.03 of headroom on either side.
+_MIN_FLOOR_FRACTION = 0.25
+
+
+def _has_ground(points: np.ndarray,
+                min_floor_fraction: float = _MIN_FLOOR_FRACTION) -> bool:
     """Is there actually a ground surface to remove?
 
     Stripping ground from a cloud that has none is not a no-op -- it is

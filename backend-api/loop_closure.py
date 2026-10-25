@@ -145,8 +145,75 @@ def check_loops(pairs: Dict[Tuple[int, int], np.ndarray], n_scans: int,
     # attribute blame, so a caller does not "repair" a pair that was fine.
     localized = bool(in_passing) or len(suspect) <= 1
     return dict(loops=loops, suspect_pairs=suspect, localized=localized,
+                # The pairs some closed loop vouches for -- the only ones
+                # `place_through_trusted_pairs` will build a placement from.
+                trusted_pairs=sorted(in_passing),
                 consistent=bool(loops and not any(not lp["closed"] for lp in loops)),
                 checked=bool(loops))
+
+
+def place_through_trusted_pairs(n_scans: int, reference: int,
+                                pairs: Dict[Tuple[int, int], np.ndarray],
+                                report: dict) -> dict:
+    """Place every scan in the reference frame through pairs a loop vouches for.
+
+    Returns {'transforms': {i: 4x4}, 'paths': {i: [reference, ..., i]},
+    'unresolved': [i, ...]}.
+
+    A scan used to be placed through its DIRECT pair with the reference and
+    nothing else. That fails twice over on a set where one scan is hard to
+    register against the reference but easy against a neighbor -- measured on a
+    real apple orchard, ScanPos015 against the reference was wrong under every
+    coarse setting (landing 89 deg and 33 m out) while 015 against ScanPos014
+    registered to 2 cm under every setting. Routing through the trusted pair
+    places it; the direct pair alone could only ever place it wrongly or not
+    at all.
+
+    And when no loop closed, the direct pairs were applied anyway -- unverified,
+    with nothing in the response saying the set had failed its own check. Now a
+    scan is placed only along a chain of pairs that each sit in a CLOSED loop,
+    and a scan with no such chain is reported unresolved rather than placed.
+
+    Shortest chain wins (fewest compositions, so least accumulated error), and
+    the direct pair is used whenever it is itself trusted. With no loops at all
+    (two scans) there is nothing to verify against, so the direct pair is used
+    as before and the caller reports the result unvalidated.
+    """
+    def edge(a: int, b: int) -> Optional[np.ndarray]:
+        """Transform taking scan b into scan a's frame."""
+        if (a, b) in pairs:
+            return np.asarray(pairs[(a, b)], dtype=np.float64)
+        if (b, a) in pairs:
+            return np.linalg.inv(np.asarray(pairs[(b, a)], dtype=np.float64))
+        return None
+
+    if report.get("checked"):
+        usable = {tuple(sorted(p)) for p in report.get("trusted_pairs", [])}
+    else:
+        usable = {tuple(sorted(p)) for p in pairs}
+    neighbors: Dict[int, List[int]] = {i: [] for i in range(n_scans)}
+    for a, b in usable:
+        neighbors[a].append(b)
+        neighbors[b].append(a)
+
+    # Breadth-first from the reference, neighbors in index order, so the chain
+    # is the shortest one and the choice is deterministic.
+    transforms = {reference: np.eye(4)}
+    paths = {reference: [reference]}
+    frontier = [reference]
+    while frontier:
+        nxt = []
+        for a in frontier:
+            for b in sorted(neighbors[a]):
+                if b in transforms:
+                    continue
+                transforms[b] = transforms[a] @ edge(a, b)
+                paths[b] = paths[a] + [b]
+                nxt.append(b)
+        frontier = nxt
+
+    unresolved = [i for i in range(n_scans) if i not in transforms]
+    return dict(transforms=transforms, paths=paths, unresolved=unresolved)
 
 
 def resolve_with_loops(n_scans: int,

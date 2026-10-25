@@ -251,6 +251,13 @@ def test_a_graph_that_does_not_close_falls_back_to_every_setting():
             _request(views, refine_icp=False), progress=None)
     assert result["success"], result.get("error")
     assert len(calls) == n_edges * len(_COARSE_VARIANTS)
+    # Only the retry looks deeper down the correlation surface: the apple
+    # orchard's 001-015 peak ranked 17th, beyond the default shortlist, and a
+    # set that closes first time must not pay for the deeper search.
+    first, retry = calls[:n_edges], calls[n_edges:]
+    assert all("refine_top_k" not in c for c in first)
+    assert all(c.get("refine_top_k") == main._RETRY_REFINE_TOP_K for c in retry)
+    assert main._RETRY_REFINE_TOP_K > 17
     assert result["variant"]["mode"] == "per-pair"
     assert result["loops_consistent"], result["loops"]
     for k, P in enumerate(poses[1:], start=1):
@@ -290,3 +297,48 @@ def test_the_fine_stage_keeps_the_near_field_and_equalizes_it_instead():
     near_share_before = float(np.mean(
         np.linalg.norm(cloud[:, :2] - np.median(cloud[:, :2], axis=0), axis=1) < 5.0))
     assert float(np.mean(radius < 5.0)) < near_share_before
+
+
+def test_a_scan_unregisterable_against_the_reference_is_placed_through_a_neighbor():
+    """The apple orchard's ScanPos015, as a controlled case.
+
+    There, 015 against the reference landed 89 deg and 33 m out under EVERY
+    coarse setting, while 015 against its neighbor 014 registered to 2 cm. A
+    scan used to be placed through its direct pair with the reference only, so
+    the best it could do was be withheld -- and when no loop closed, it was
+    placed wrongly. Here the (reference, 3) pair is corrupted under every
+    setting; scan 3 must still land correctly, reached through a neighbor whose
+    pairs a closed loop vouches for.
+    """
+    from unittest.mock import patch
+
+    import raster_correlation
+
+    poses, views = _four_views()
+    real = raster_correlation.register_by_correlation
+
+    def which(cloud):
+        first = np.asarray(getattr(cloud, "points", cloud))[0]
+        return next(k for k, v in enumerate(views) if np.allclose(v[0], first))
+
+    def corrupt_ref_to_3(target, source, **kwargs):
+        result = real(target, source, **kwargs)
+        if {which(target), which(source)} == {0, 3}:
+            result = dict(result)
+            result["transformation"] = (_rigid(30.0, [6.0, 0.0, 0.0])
+                                        @ np.asarray(result["transformation"]))
+        return result
+
+    with patch.object(raster_correlation, "register_by_correlation",
+                      corrupt_ref_to_3):
+        result = main._do_multi_scan_register(
+            _request(views, refine_icp=False), progress=None)
+
+    assert result["success"], result.get("error")
+    assert not result["loops_consistent"], "the corrupted pair must break loops"
+    assert result["unresolved_scans"] == []
+    path = result["placement_paths"]["3"]
+    assert path[0] == 0 and path[-1] == 3 and len(path) == 3, path
+    M = np.asarray(result["transformation_matrices"]["3"]).reshape(4, 4)
+    assert np.linalg.norm(M[:2, 3] - poses[3][:2, 3]) < 1.0, (
+        f"scan 3 placed {np.linalg.norm(M[:2, 3] - poses[3][:2, 3]):.2f} m out")

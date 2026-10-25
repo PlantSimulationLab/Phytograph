@@ -45806,6 +45806,19 @@ def _reject_sparse_voxels(points: np.ndarray,
 # the shared, already-decimated clouds.
 _COARSE_WORKERS = 4
 
+# Shortlist depth for the coarse RETRY pass only (the other matching settings,
+# tried when the default's graph does not close). The default pass keeps
+# `raster_correlation._REFINE_TOP_K` = 8, which every set that closes first
+# time is fine with -- and those pay nothing for this.
+#
+# On the apple orchard the true translation for ScanPos001-015 ranked 17th of
+# the correlation surface even with ground stripped, out of reach at 8; at 32
+# every pair in the set has a setting that registers it. That is the set where
+# loops fail, so the retry is where the depth belongs. The old objection to 32
+# (olive 42.8 s -> 114.4 s) was a cost on EVERY run; here it is paid only by a
+# set that would otherwise not register.
+_RETRY_REFINE_TOP_K = 32
+
 # Scans ingested at once. Each holds a full cloud plus the working-copy
 # temporaries (~0.8 GB on a 13.7 M-point scan), so this is the memory bound as
 # much as the parallelism.
@@ -45825,8 +45838,8 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
 
         import fine_registration
         import plane_patches
-        from loop_closure import (check_loops, scan_graph_edges,
-                                  select_per_pair_by_loops,
+        from loop_closure import (check_loops, place_through_trusted_pairs,
+                                  scan_graph_edges, select_per_pair_by_loops,
                                   select_variant_by_loops)
         from raster_correlation import CoarseCloud, register_by_correlation
 
@@ -46034,7 +46047,8 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         # `raster_correlation.CoarseCloud`.
         coarse = [CoarseCloud(X) for X in clouds]
 
-        def run_coarse(jobs, span=(0.10, 0.70), label="Registering scan pairs"):
+        def run_coarse(jobs, span=(0.10, 0.70), label="Registering scan pairs",
+                       top_k=None):
             """{(a, b, cell, mode): 4x4} for every job, computed concurrently.
 
             Every (edge, variant) search is independent, so they run on a small
@@ -46049,9 +46063,10 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             def one(job):
                 _cancel_checkpoint(progress)
                 a, b, cell, mode = job
+                kwargs = {} if top_k is None else dict(refine_top_k=top_k)
                 result = register_by_correlation(coarse[a], coarse[b],
                                                  mode=mode, cell=cell,
-                                                 extent=grid_extent)
+                                                 extent=grid_extent, **kwargs)
                 return np.asarray(result["transformation"], dtype=np.float64)
 
             def warm(cc):
@@ -46134,7 +46149,12 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                 table.update(run_coarse(
                     [(a, b, cell, mode) for a, b in edges
                      for cell, mode in _COARSE_VARIANTS[1:]],
-                    span=(0.40, 0.70), label="Trying other matching settings"))
+                    span=(0.40, 0.70), label="Trying other matching settings",
+                    # A graph that failed to close is exactly the set whose true
+                    # peak may sit below the default shortlist -- apple 001-015
+                    # ranked 17th -- so the retry looks deeper. See
+                    # `_RETRY_REFINE_TOP_K`.
+                    top_k=_RETRY_REFINE_TOP_K))
 
                 def candidates(a, b):
                     return [table[(a, b, cell, mode)]
@@ -46164,26 +46184,14 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         if progress is not None:
             progress(0.75, "Checking loop closure")
 
-        suspect = {tuple(sorted(p)) for p in report.get("suspect_pairs", [])}
-
-        def relative(a, b):
-            """Transform taking scan b into scan a's frame."""
-            if (a, b) in pairs:
-                return pairs[(a, b)]
-            return np.linalg.inv(pairs[(b, a)])
-
-        transforms, unresolved = {}, []
-        for i in range(n):
-            if i == ref:
-                transforms[i] = np.eye(4)
-                continue
-            edge = tuple(sorted((ref, i)))
-            # A pair the loop check blamed is not trustworthy enough to apply.
-            # Saying so beats placing the scan somewhere plausible-looking.
-            if report.get("localized") and edge in suspect:
-                unresolved.append(i)
-                continue
-            transforms[i] = relative(ref, i)
+        # Place each scan along a chain of pairs some CLOSED loop vouches for,
+        # not through its direct pair with the reference. The direct pair can be
+        # unregisterable while a neighbor's is easy (apple orchard: 015 against
+        # the reference was 89 deg wrong under every setting, 015 against 014
+        # right to 2 cm), and when no loop closed the direct pairs used to be
+        # applied unverified. A scan with no trusted chain is withheld.
+        placed = place_through_trusted_pairs(n, ref, pairs, report)
+        transforms, unresolved = placed["transforms"], placed["unresolved"]
 
         if request.refine_icp:
             # Report per scan. A single marker at the start left the pill blank
@@ -46313,6 +46321,10 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             transformation_matrices={str(i): transforms[i].flatten().tolist()
                                      for i in sorted(transforms)},
             unresolved_scans=unresolved,
+            # Scan index -> the chain of scans it was placed through, reference
+            # first. Longer than [reference, i] when its direct pair was not
+            # trusted and it was reached through a neighbor instead.
+            placement_paths={str(i): p for i, p in sorted(placed["paths"].items())},
             loops=loops,
             loops_checked=bool(report.get("checked")),
             loops_consistent=bool(report.get("consistent")),

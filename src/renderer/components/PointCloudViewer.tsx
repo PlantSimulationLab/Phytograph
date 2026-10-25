@@ -18234,11 +18234,23 @@ export default function PointCloudViewer({
             + `${withheld} could not be placed consistently and ${withheld === 1 ? 'was' : 'were'} left alone.`
             + how,
         });
-      } else if (response.validated) {
+      } else if (response.validated && response.loops_consistent) {
         showToast({
           type: 'success',
           title: 'Auto-Register',
           message: `Registered ${applied} scans; every alignment agrees with the others.` + how,
+        });
+      } else if (response.validated) {
+        // Checked but NOT consistent: some pairs failed their loops, and every
+        // scan was still reached through pairs a closed loop confirms. Keyed on
+        // `validated` alone this used to claim "every alignment agrees" over a
+        // set where no loop had closed and a scan sat 89 deg wrong.
+        showToast({
+          type: 'success',
+          title: 'Auto-Register',
+          message: `Registered ${applied} scan${applied === 1 ? '' : 's'}. Some pairs `
+            + `disagreed with the rest and were bypassed; each scan was placed `
+            + `through alignments that close their loops.` + how,
         });
       } else {
         showToast({

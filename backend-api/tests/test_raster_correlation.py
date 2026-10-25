@@ -500,3 +500,34 @@ def test_the_yaw_sweep_is_safe_to_run_from_several_threads():
                    for c, m in variants]
         concurrent = [f.result(timeout=120)["yaw_deg"] for f in futures]
     assert concurrent == serial
+
+
+def test_a_scan_standing_inside_the_canopy_still_counts_as_having_ground():
+    """The apple orchard's ScanPos002 and 015 stand among the trees, so more of
+    what they see is leaves: 0.283 and 0.300 of their returns sit within 1 m of
+    the floor, against 0.42-0.76 for every other real scan measured. At the old
+    0.35 cutoff they read as canopy-only, ground was left in every pair that
+    touched them, and 015 registered 89 deg out under every setting.
+
+    The other side of the line is the trellis fixture (~0.22), whose crowns
+    stripping would shave -- four rotation tests fail if it is stripped. Both
+    are pinned here so a future cutoff cannot quietly cross either.
+    """
+    from raster_correlation import _has_ground
+
+    assert not _has_ground(_planting()), "the trellis fixture must stay unstripped"
+
+    # Same planting, ground densified until 0.28 of returns are near the floor:
+    # the low end of real in-canopy scans.
+    rng = np.random.default_rng(5)
+    canopy = _planting()
+    canopy = canopy[canopy[:, 2] > 0.5]
+    n_ground = int(0.28 / 0.72 * len(canopy))
+    ground = np.column_stack([rng.uniform(-3, 24, n_ground),
+                              rng.uniform(-3, 21, n_ground),
+                              rng.normal(0, 0.03, n_ground)])
+    scan = np.vstack([canopy, ground])
+    z = scan[:, 2]
+    floor = np.percentile(z, 2)
+    assert 0.27 < np.mean((z >= floor) & (z < floor + 1.0)) < 0.30
+    assert _has_ground(scan), "an in-canopy scan's ground must be stripped"

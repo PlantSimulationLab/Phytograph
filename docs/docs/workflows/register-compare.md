@@ -319,8 +319,16 @@ Two practical consequences:
   passing loop vouches for. With exactly three, the problem is detected but any
   of the three could be responsible.
 
-If a scan cannot be placed consistently, Auto-Register reports it as unresolved
-rather than putting it somewhere plausible-looking.
+A scan is placed only through alignments that **close a loop**. When its own
+alignment to the reference fails, it is reached through a neighbor instead —
+for example, a scan that matches the reference badly but its next-door scan
+well is placed via that neighbor. If no such route exists, Auto-Register
+reports the scan as unresolved and leaves it where it was, rather than putting
+it somewhere plausible-looking.
+
+The finishing message says which happened: *"every alignment agrees with the
+others"* only when every loop closed, and *"some pairs disagreed … and were
+bypassed"* when a scan had to be routed around a failed alignment.
 
 ### Registering a whole set at once
 
@@ -338,7 +346,10 @@ best on any individual pair.
 Each scan is matched to the reference scan and to its neighbor in a closing
 ring, not to every other scan, so time grows roughly in proportion to the scan
 count. Expect about a minute for four to six full-resolution terrestrial scans
-(10–14 million points each).
+(10–14 million points each). A set whose first pass does not agree with itself
+gets a slower, more thorough second search — a few minutes rather than one —
+which is what registers scans taken from inside the canopy, where the correct
+alignment is less obvious.
 
 ### Reading the result
 
