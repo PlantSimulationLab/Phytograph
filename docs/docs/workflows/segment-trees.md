@@ -87,6 +87,10 @@ tree.
       (*auto*) to use one twelfth of **Crown scale** (kept between 0.1 and
       1 m). It follows the crown size rather than the point density, so sparse
       scans get a fine grid too; a coarse grid merges neighboring trees.
+      The grid covers the cloud's whole footprint, so its cost grows with the
+      **area**, not the number of points: a large airborne tile asks you to
+      confirm first, and if the grid would not fit in memory at all the panel
+      names the smallest cell that would (or crop the cloud).
 
     For **TreeIso**, adjust these if needed. The size-dependent settings (the internal
    decimation and the max-gap below) are seeded from the cloud's extent each time

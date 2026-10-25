@@ -85,6 +85,14 @@ SEED_TAKEOVER_PER_SCALE = 0.5
 COMPACTNESS_PER_M = 0.03
 # Widest CHM hole (m) filled from its neighbors rather than read as a gap.
 HOLE_FILL_M = 1.0
+# Cost per CHM grid cell. Every stage is a dense pass over the bounding box,
+# so time and memory follow AREA / cell², not the point count: the same 2 M
+# points took 20 s on a 0.25 km² plot and 116 s on 1 km². Measured on cone
+# stands with tracemalloc: 1.1-5 us and 77-135 B per cell (5 us on the denser
+# canopy; the watershed is ~80% of the time). Both are taken from the top of
+# that range, so an estimate errs toward warning.
+SECONDS_PER_CELL = 4e-6
+BYTES_PER_CELL = 100
 
 
 def pit_fill_chm(chm: np.ndarray) -> np.ndarray:
@@ -110,6 +118,28 @@ def pit_fill_chm(chm: np.ndarray) -> np.ndarray:
 def default_cell(crown_scale: float) -> float:
     """CHM cell for a crown scale (see CELL_DIVISOR)."""
     return float(np.clip(crown_scale / CELL_DIVISOR, CELL_MIN_M, CELL_MAX_M))
+
+
+def resolve_cell(cell: Optional[float], crown_scale: float) -> float:
+    """The cell `segment_trees_chm` will use: the caller's, else the default."""
+    if cell is None or not (cell > 0):
+        return default_cell(crown_scale)
+    return float(cell)
+
+
+def _grid(xy: np.ndarray, cell: float) -> tuple[np.ndarray, np.ndarray]:
+    """(origin, shape) of the CHM grid over these XY coordinates."""
+    origin = xy.min(axis=0)
+    return origin, np.floor((xy.max(axis=0) - origin) / cell).astype(int) + 1
+
+
+def grid_cells(points: np.ndarray, cell: float) -> int:
+    """How many CHM cells `segment_trees_chm` allocates for these points."""
+    xy = np.asarray(points, dtype=np.float64)[:, :2]
+    if len(xy) == 0:
+        return 0
+    _, shape = _grid(xy, cell)
+    return int(shape[0]) * int(shape[1])
 
 
 def _fill_nearest(grid: np.ndarray) -> np.ndarray:
@@ -228,16 +258,13 @@ def segment_trees_chm(
         return np.zeros(0, dtype=np.int64)
     if not (crown_scale > 0):
         raise ValueError("crown_scale must be positive")
-    if cell is None or not (cell > 0):
-        cell = default_cell(crown_scale)
-    cell = float(cell)
+    cell = resolve_cell(cell, crown_scale)
     if smooth_sigma is None:
         smooth_sigma = cell
 
     hag = height_above_ground(pts, ground)
 
-    origin = pts[:, :2].min(axis=0)
-    shape = np.floor((pts[:, :2].max(axis=0) - origin) / cell).astype(int) + 1
+    origin, shape = _grid(pts[:, :2], cell)
     ij = np.clip(np.floor((pts[:, :2] - origin) / cell).astype(int), 0, shape - 1)
     flat = ij[:, 0] * shape[1] + ij[:, 1]
 

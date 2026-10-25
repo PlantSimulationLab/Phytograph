@@ -335,3 +335,87 @@ def test_session_chm_reminds_when_ground_was_never_segmented(client, cache_root,
                       json={"method": "chm", "chm_crown_scale": SPACING})
     assert res.status_code == 200, res.text
     assert res.json()["ground_warning"] is True
+
+
+# ---- cost: the grid follows AREA, not points ------------------------------ #
+
+def _far_flung(tmp_path):
+    """The plantation plus one small clump 2 km away: a few thousand points
+    whose CHM spans ~2 km x 2 km (~47 M cells at this crown scale)."""
+    points, _, _, _ = _plantation(density=15.0)
+    far = points[:200] + np.array([2000.0, 2000.0, 0.0])
+    allp = np.vstack([points, far])
+    f = tmp_path / "far_flung.xyz"
+    np.savetxt(f, allp, fmt="%.4f")
+    return f, allp
+
+
+def _budget(monkeypatch, gb):
+    monkeypatch.setattr(main.memory_budget, "budget_bytes", lambda: int(gb * 1e9))
+    monkeypatch.setattr(main.memory_budget, "admission_budget_bytes", lambda: int(gb * 1e9))
+
+
+def test_session_chm_prompts_on_a_large_area_with_few_points(client, cache_root, tmp_path, monkeypatch):
+    """The handler called the CHM "one O(N) pass" and never prompted, but every
+    stage is a dense raster over the bounding box: this cloud has ~3 k points
+    and a ~47 M-cell grid (minutes). It must ask first, as TreeIso does."""
+    _budget(monkeypatch, 256)
+    f, _ = _far_flung(tmp_path)
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z"},
+    ).content)["session_id"]
+    res = client.post(f"/api/cloud/session/{sid}/segment_trees",
+                      json={"method": "chm", "chm_crown_scale": SPACING})
+    assert res.status_code == 409, res.text
+    warning = res.json()["detail"]["cost_warning"]
+    assert "grid cells" in warning["message"]
+    assert warning["estimated_seconds"] >= main._COST_WARNING_SECONDS
+    assert "tree_instance" not in main._cloud_sessions[sid].extras, "ran before confirming"
+
+
+def test_inline_chm_prompts_on_a_large_area(client, tmp_path, monkeypatch):
+    _budget(monkeypatch, 256)
+    _, allp = _far_flung(tmp_path)
+    res = client.post("/api/segment/trees", json={
+        "points": allp.tolist(), "method": "chm", "chm_crown_scale": SPACING})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is False and body["cost_warning"] is not None
+
+
+def test_chm_grid_past_the_memory_budget_is_refused_with_a_cell_that_fits(
+        client, cache_root, tmp_path, monkeypatch):
+    """No "Segment Anyway" past the budget: the grid alone would not fit, so a
+    confirmation would only trade a prompt for swapping or an OOM kill. The
+    refusal names the smallest cell that does fit, and that cell must pass."""
+    _budget(monkeypatch, 1)
+    f, allp = _far_flung(tmp_path)
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z"},
+    ).content)["session_id"]
+    res = client.post(f"/api/cloud/session/{sid}/segment_trees",
+                      json={"method": "chm", "chm_crown_scale": SPACING, "acknowledge_cost": True})
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert "Set CHM cell to at least" in detail
+    fit = float(detail.split("at least ")[1].split(" m")[0])
+
+    def cost(cell):
+        req = main.SessionTreeSegmentRequest(
+            method="chm", chm_crown_scale=SPACING, chm_cell=cell, acknowledge_cost=True)
+        return main._chm_grid_cost(allp, req)
+
+    assert cost(fit)[1] is None, "the suggested cell is itself refused"
+    assert cost(fit * 0.9)[1] is not None, "the suggestion is not the smallest that fits"
+
+
+def test_chm_cost_counts_cells_like_the_segmentation_does():
+    """The estimate and the run share one grid definition (chm_trees._grid)."""
+    points, _, _, _ = _plantation()
+    meta = {}
+    chm_trees.segment_trees_chm(points, crown_scale=SPACING, meta=meta)
+    cell = chm_trees.resolve_cell(None, SPACING)
+    assert meta["cell"] == cell
+    span = points[:, :2].max(axis=0) - points[:, :2].min(axis=0)
+    expected = int(np.prod(np.floor(span / cell).astype(int) + 1))
+    assert chm_trees.grid_cells(points, cell) == expected

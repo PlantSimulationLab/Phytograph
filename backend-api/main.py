@@ -9139,8 +9139,16 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             )
 
         if request.method == "chm":
-            # Canopy-height-model watershed (chm_trees.py). No cost prompt,
-            # tiling or multi-trunk advisory: see _session_segment_trees_chm.
+            # Canopy-height-model watershed (chm_trees.py). No tiling or
+            # multi-trunk advisory, and a cost check on grid cells: see
+            # _session_segment_trees_chm.
+            grid_bytes, refusal, warning = await run_in_threadpool(_chm_grid_cost, pts, request)
+            if refusal:
+                return TreeSegmentationResponse(
+                    success=False, num_points=n_full, error=refusal)
+            if warning:
+                return TreeSegmentationResponse(
+                    success=False, num_points=n_full, cost_warning=warning)
             ground_pts = None
             if ground_excluded:
                 gmask = (np.asarray(request.ground_class) == GROUND_CLASS_GROUND) \
@@ -9151,7 +9159,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
                     "trees", pts, _chm_param_dict(request), http_request=http_request,
                     seeds=(np.asarray(request.seed_points, dtype=np.float64)
                            if request.seed_points else None),
-                    ground=ground_pts,
+                    ground=ground_pts, extra_bytes=grid_bytes,
                 )
             except ClientDisconnected:
                 return TreeSegmentationResponse(
@@ -27292,17 +27300,20 @@ def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
 _KILLABLE_BYTES_PER_POINT = 24 + 24 + 8
 
 
-def _killable_worker_bytes(n_points: int, *, reflectance=None) -> int:
+def _killable_worker_bytes(n_points: int, *, reflectance=None, extra_bytes: int = 0) -> int:
     """Working set of a `_run_killable` worker on `n_points`.
 
     Shared by the admission in `_run_killable` and by the cost advisories that
     warn about the same run BEFORE it starts, so the number the user is shown is
     the number the gate will use. They were two separate expressions, which is
     how TreeIso ended up with a prompt that never mentioned memory at all.
+
+    `extra_bytes` is a working set that does not scale with the points: the
+    CHM's dense grid, sized by the plot's area (`_chm_grid_cost`).
     """
     n = max(0, int(n_points))
     extra = int(reflectance.nbytes) if reflectance is not None else 0
-    return n * _KILLABLE_BYTES_PER_POINT + extra
+    return n * _KILLABLE_BYTES_PER_POINT + extra + max(0, int(extra_bytes))
 
 
 async def _run_killable(
@@ -27317,6 +27328,7 @@ async def _run_killable(
     ground: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
     meta_out: "Optional[dict]" = None,
+    extra_bytes: int = 0,
 ):
     """Run one segmentation compute (`tool` ∈ ground|wood|organs|trees|denoise|skeleton|normals)
     in a KILLABLE child process and return its result.
@@ -27341,7 +27353,7 @@ async def _run_killable(
     # Declare the working set to the memory budget. Acquired off the event loop -
     # a queued job must not stall unrelated requests while it waits.
     n_pts = int(len(points))
-    estimate = _killable_worker_bytes(n_pts, reflectance=reflectance)
+    estimate = _killable_worker_bytes(n_pts, reflectance=reflectance, extra_bytes=extra_bytes)
     admitted = _ADMISSION.admit(estimate, f"{tool} worker on {n_pts:,} pts")
     await run_in_threadpool(admitted.__enter__)
     try:
@@ -42455,21 +42467,64 @@ def _chm_param_dict(request: TreeSegmentationRequest) -> dict:
     return d
 
 
+def _chm_grid_cost(points: np.ndarray, request) -> "tuple[int, Optional[str], Optional[dict]]":
+    """(grid bytes, refusal, cost_warning) for a CHM run on `points`.
+
+    The CHM is a dense raster over the bounding box, so its cost follows the
+    plot's AREA / cell², not the point count, and nothing bounded it: a 2x2 km
+    airborne tile at the default cell is ~90 M cells (~8-10 min), and a user
+    cell of 0.05 m over 1 km² is 400 M (~40 GB). Past the machine's memory
+    budget there is no "wait it out", so that is refused with the cell size
+    that would fit; below it, a long run prompts like TreeIso does.
+    """
+    import chm_trees
+    cell = chm_trees.resolve_cell(request.chm_cell, request.chm_crown_scale)
+    cells = chm_trees.grid_cells(points, cell)
+    grid_bytes = cells * chm_trees.BYTES_PER_CELL
+    budget = memory_budget.budget_bytes()
+    if grid_bytes > budget:
+        fit = math.ceil(cell * math.sqrt(grid_bytes / budget) * 100) / 100
+        return grid_bytes, (
+            f"The canopy height model for this cloud would need {cells:,} cells at "
+            f"{cell:g} m (about {memory_budget.fmt_bytes(grid_bytes)} of memory), more "
+            f"than this machine's {memory_budget.fmt_bytes(budget)} budget. Set CHM cell "
+            f"to at least {fit:g} m, or crop the cloud to a smaller area."), None
+    if getattr(request, "acknowledge_cost", False):
+        return grid_bytes, None, None
+    n = len(points)
+    seconds = (_WORKER_STARTUP_S + n / _RATE_WORKER_STAGE_PTS_PER_S
+               + cells * chm_trees.SECONDS_PER_CELL)
+    warning = _cost_advisory(
+        "CHM tree segmentation", seconds,
+        _killable_worker_bytes(n, extra_bytes=grid_bytes),
+        breakdown=f"{cells / 1e6:,.0f} M grid cells at {cell:g} m")
+    return grid_bytes, None, warning
+
+
 async def _session_segment_trees_chm(session_id: str, sess, request, http_request,
                                      *, n_survivors, plant_pts, plant_mask,
                                      ground_pts, seeds, no_ground_labels, deleted0):
     """The method='chm' branch of `session_segment_trees`: the same inputs
     (ground and misses excluded, labels scattered back onto every survivor),
-    minus what only TreeIso needs. No cost prompt or tiling — the CHM is one
-    O(N) pass (~7 s at 8.4 M points) — and no multi-trunk advisory, which
-    counts stems and an airborne scan has almost none to count. The ground
-    points go to the worker separately, as the DTM."""
+    minus what only TreeIso needs. No tiling, and a cost prompt keyed on grid
+    CELLS rather than points (`_chm_grid_cost`), and no multi-trunk advisory,
+    which counts stems and an airborne scan has almost none to count. The
+    ground points go to the worker separately, as the DTM."""
+    grid_bytes, refusal, warning = await run_in_threadpool(_chm_grid_cost, plant_pts, request)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+    if warning:
+        raise HTTPException(
+            status_code=409,
+            detail={"cost_warning": warning, "message": warning["message"]},
+        )
     meta: dict = {}
     try:
         plant_labels = await _run_killable(
             "trees", plant_pts, _chm_param_dict(request),
             http_request=http_request, seeds=seeds,
             ground=ground_pts if len(ground_pts) else None, meta_out=meta,
+            extra_bytes=grid_bytes,
         )
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")

@@ -984,6 +984,17 @@ amber advisory and a **Segment Anyway** button, which re-sends with
 25 M cloth nodes is refused outright (400) with the coarsest resolution that
 fits, because that is a hang, not a slowdown, and independent of point count.
 
+CHM tree segmentation (`method: "chm"`) has the same shape: every stage is a
+dense raster over the bounding box, so its cost is **area / cell²**, not the
+point count (the same 2 M points took 20 s on 0.25 km² and 116 s on 1 km²).
+`_chm_grid_cost` counts the cells with the segmentation's own grid
+(`chm_trees.grid_cells`) and prices them at `chm_trees.SECONDS_PER_CELL` /
+`BYTES_PER_CELL` (4 µs, 100 B: the top of the 1.1–5 µs, 77–135 B measured).
+A long run prompts; a grid larger than the whole memory budget is refused
+(400) with the smallest **CHM cell** that fits. The grid's bytes are also
+admitted with the worker (`_run_killable(extra_bytes=…)`), which otherwise
+sizes itself from the point count alone.
+
 ### What the memory arm is judged against
 
 `bytes_needed > budget_bytes()` was the wrong comparison twice over, and both
