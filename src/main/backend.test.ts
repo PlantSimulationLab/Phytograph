@@ -415,3 +415,44 @@ describe('a respawn slower than the health poll', () => {
     expect(children.length).toBeLessThanOrEqual(1 + 3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The backend must die with the app, however the app dies
+// ---------------------------------------------------------------------------
+//
+// The sidecar is spawned detached, and every cleanup path (before-quit, signal
+// handlers, process 'exit') is JS that never runs on SIGKILL, Force Quit, an
+// OOM kill or a native crash. The orphan kept every session array in RAM, and
+// the next launch picked another port and never found it. The fix is a stdin
+// pipe the backend reads to EOF (backend-api/parent_watchdog.py), so both
+// halves of the contract are pinned here: the pipe, and the switch that tells
+// the backend to watch it.
+describe('backend exits with the app (orphan guard)', () => {
+  let startBackend: typeof import('./backend.js').startBackend;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => makeFakeChild(4242));
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('nothing on port'); }));
+    process.env.PHYTOGRAPH_BACKEND_PORT = '52997';
+    ({ startBackend } = await import('./backend.js'));
+  });
+
+  afterEach(() => {
+    delete process.env.PHYTOGRAPH_BACKEND_PORT;
+    vi.unstubAllGlobals();
+  });
+
+  it('spawns with a stdin pipe and PHYTOGRAPH_EXIT_WITH_PARENT=1', async () => {
+    await startBackend();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const opts = spawnMock.mock.calls[0][2] as {
+      stdio: string[]; env: Record<string, string>;
+    };
+    // 'ignore' gives the child /dev/null, which reads EOF immediately: the
+    // backend would exit the moment it started.
+    expect(opts.stdio[0]).toBe('pipe');
+    expect(opts.env.PHYTOGRAPH_EXIT_WITH_PARENT).toBe('1');
+  });
+});

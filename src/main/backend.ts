@@ -421,9 +421,16 @@ function spawnChild(binPath: string, port: number): void {
   // %LOCALAPPDATA%) and Linux — the backend wrote octrees the renderer could
   // never fetch, so every import rendered nothing (issue #4). Never drop this:
   // the Python fallback is for standalone backend_wrapper.py launches only.
+  // stdin is a PIPE we never write to: its only job is to close. The OS closes
+  // our end however this process dies — SIGKILL, Force Quit, an OOM kill, a
+  // native crash — none of which runs the JS cleanup in stopBackend(). The
+  // backend reads it to EOF and shuts down (PHYTOGRAPH_EXIT_WITH_PARENT,
+  // backend-api/parent_watchdog.py). Without it the detached sidecar outlived
+  // a hard-killed app holding every session array in RAM, and the next launch
+  // picked a different port and never found it.
   try {
     child = spawn(binPath, [], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       // Detach on POSIX so the child leads its own process group. The bundled
       // backend is a PyInstaller --onedir bootloader that forks the real Python
@@ -437,6 +444,7 @@ function spawnChild(binPath: string, port: number): void {
         PHYTOGRAPH_RESOURCES: resourcesRoot(),
         PHYTOGRAPH_BACKEND_PORT: String(port),
         PHYTOGRAPH_OCTREE_CACHE_ROOT: resolveOctreeCacheRoot(),
+        PHYTOGRAPH_EXIT_WITH_PARENT: '1',
         // macOS libmalloc otherwise keeps freed large blocks cached in the
         // process, dirty and unreclaimable: measured, the backend held 1.1-2.8 GB
         // of freed arrays after a 45.7 M-point import and 5.6 GB after a split,
@@ -463,6 +471,9 @@ function spawnChild(binPath: string, port: number): void {
   }
 
   console.log(`Backend started with PID: ${child.pid}`);
+  // Never written, so an EPIPE here can only mean the backend already exited;
+  // the 'exit' handler deals with that. Unhandled, a stream 'error' would throw.
+  child.stdin?.on('error', () => {});
   // Python's `logging` writes to stderr by default, so most lines here
   // (INFO/WARNING/uvicorn access logs) are not actually errors. Label by
   // stream, not severity. Each chunk is (a) passed through to this process's

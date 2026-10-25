@@ -259,10 +259,18 @@ logger.info("Matplotlib initialized with minimal config")
 
 # Now import and run the main app
 logger.info("Starting Phytograph backend server...")
-from main import app
+from main import app, reap_seg_workers
 import uvicorn
+import parent_watchdog
 
 if __name__ == "__main__":
+    # Exit when the app that launched us dies, however it dies (see
+    # parent_watchdog.py). Armed before uvicorn so an app that dies during our
+    # startup is covered too: until uvicorn installs its handler, the SIGTERM
+    # this raises simply ends the process, which has nothing to save yet.
+    if parent_watchdog.enabled():
+        parent_watchdog.watch_stdin_eof(
+            lambda: parent_watchdog.shutdown_server(reap=reap_seg_workers))
     # Port is normally chosen by whoever spawned us (the Electron supervisor in
     # src/main/backend.ts, or scripts/dev.mjs) and passed via
     # PHYTOGRAPH_BACKEND_PORT so multiple app instances / dev sessions never

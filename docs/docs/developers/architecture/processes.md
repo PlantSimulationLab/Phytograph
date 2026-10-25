@@ -85,6 +85,20 @@ tested as a normal HTTP server.
 - **Clean shutdown.** `stopBackend()` sends SIGTERM, then escalates to
   SIGKILL after 3 s if the process is still alive, so a sidecar stuck in a
   long native call can't orphan and hold its port/RAM.
+- **Dies with the app, however the app dies.** `stopBackend()` is JavaScript,
+  and none of it runs on SIGKILL, Force Quit, an OOM kill or a native crash —
+  the detached sidecar used to survive those holding every session in RAM, on
+  a port the next launch never looks at. So the supervisor spawns it with a
+  stdin **pipe** it never writes and `PHYTOGRAPH_EXIT_WITH_PARENT=1`; the OS
+  closes that pipe whenever the app process ends, and
+  `backend-api/parent_watchdog.py` reads it to EOF, kills the segmentation
+  workers itself (uvicorn re-raises SIGTERM after its shutdown, and that
+  default action skips atexit, so the usual reaper would never run), raises
+  SIGTERM for uvicorn's normal shutdown, and exits outright after 15 s if that
+  stalls. A pipe rather than polling the
+  parent PID: no PID-reuse blind spot, nothing per-platform, and in the
+  packaged app the backend's parent is the PyInstaller bootloader, not
+  Electron. A standalone or dev launch doesn't set the variable.
 
 ## Octree cache location (cross-process contract)
 

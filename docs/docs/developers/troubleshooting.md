@@ -83,7 +83,10 @@ Common causes:
   [Native libraries are signed separately](development/releasing.md#native-libraries-are-signed-separately).
 - First-launch cold start (~30s with onedir, longer on slower disks)
 - An orphaned backend from a previous session (it won't block the new
-  instance, which picks its own port, but it does consume memory):
+  instance, which picks its own port, but it does consume memory). A backend
+  the app launched exits on its own within ~15 s of the app dying, however it
+  died; one that lingers was started by hand, by `npm run dev`, or by a build
+  older than this:
   ```bash
   pkill -f phytograph_backend      # packaged bundle
   pkill -f 'uvicorn main:app'      # dev
