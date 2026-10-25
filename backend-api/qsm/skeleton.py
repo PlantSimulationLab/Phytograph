@@ -174,19 +174,16 @@ def _build_graph(points: np.ndarray, radius: float, max_neighbors: int, bridge_m
     if len(pairs) == 0:
         return coo_matrix((n, n)).tocsr(), tree, pairs
 
-    rows = list(pairs[:, 0])
-    cols = list(pairs[:, 1])
-    d = list(np.linalg.norm(points[pairs[:, 0]] - points[pairs[:, 1]], axis=1))
-
+    w = np.linalg.norm(points[pairs[:, 0]] - points[pairs[:, 1]], axis=1)
+    rows_a, cols_a = pairs[:, 0], pairs[:, 1]
     bridges = _bridge_components(points, pairs, n, bridge_max)
-    for i, j, dist in bridges:
-        rows.append(i)
-        cols.append(j)
-        d.append(dist)
-
-    rows_a = np.asarray(rows)
-    cols_a = np.asarray(cols)
-    w = np.asarray(d)
+    if bridges:
+        # Arrays end to end: round-tripping tens of millions of pair indices
+        # through Python lists cost seconds on a 1 M-point cloud.
+        b = np.asarray(bridges, dtype=np.float64)
+        rows_a = np.concatenate([rows_a, b[:, 0].astype(rows_a.dtype)])
+        cols_a = np.concatenate([cols_a, b[:, 1].astype(cols_a.dtype)])
+        w = np.concatenate([w, b[:, 2]])
     adj = coo_matrix(
         (np.concatenate([w, w]),
          (np.concatenate([rows_a, cols_a]), np.concatenate([cols_a, rows_a]))),
@@ -208,8 +205,8 @@ def _bridge_components(points, pairs, n, bridge_max):
     leaf-on cloud the radius graph fragments into thousands of foliage islands and
     the old loop became quadratic (~minutes); here every candidate bridge edge --
     every inter-component point pair within ``bridge_max`` -- is enumerated ONCE
-    via a single ``query_pairs(bridge_max)`` (any bridge the greedy could add is
-    <= bridge_max, so none are missed), then a bounded Prim grows the main
+    by KD-tree pair queries within ``bridge_max`` (any bridge the greedy could add
+    is <= bridge_max, so none are missed), then a bounded Prim grows the main
     component over the candidate graph. Same greedy choice as before, same
     determinism, no per-iteration KD-tree rebuilds.
     """
@@ -221,41 +218,65 @@ def _bridge_components(points, pairs, n, bridge_max):
     if ncomp <= 1:
         return []
 
+    counts = np.bincount(labels, minlength=ncomp)
+    main = int(np.argmax(counts))
+
     # Every inter-component point pair within bridge_max = the full candidate set.
-    cand = cKDTree(points).query_pairs(bridge_max, output_type="ndarray")
-    if len(cand) == 0:
+    # No such pair has both ends in the main component, so enumerate only pairs
+    # with an end outside it: rest x rest (then drop same-component pairs) and
+    # rest x main (all cross). One query_pairs over the whole cloud produced the
+    # same set by way of every pair INSIDE the main component -- on a dense trunk
+    # surface ~110 M of the ~113 M pairs, 1.8 GB and ~4 s, to keep ~1.7 M.
+    rest = np.flatnonzero(labels != main)
+    core = np.flatnonzero(labels == main)
+    rest_tree = cKDTree(points[rest])
+    rr = rest_tree.query_pairs(bridge_max, output_type="ndarray")
+    a1, b1 = rest[rr[:, 0]], rest[rr[:, 1]]
+    keep = labels[a1] != labels[b1]
+    rc = rest_tree.sparse_distance_matrix(cKDTree(points[core]), bridge_max,
+                                          output_type="ndarray")
+    a = np.concatenate([a1[keep], rest[rc["i"]]])
+    b = np.concatenate([b1[keep], core[rc["j"]]])
+    if len(a) == 0:
         return []
-    a = cand[:, 0]
-    b = cand[:, 1]
-    cross = labels[a] != labels[b]
-    if not np.any(cross):
-        return []
-    a = a[cross]; b = b[cross]
+    # Recomputed rather than taken from the tree, so the heap compares exactly
+    # the floats it always has (ties are broken on them).
     cd = np.linalg.norm(points[a] - points[b], axis=1)
 
-    # Per-component adjacency over candidate edges: comp -> list of
-    # (dist, point_in_comp, point_in_other_comp, other_comp). Built once.
-    from collections import defaultdict
-    comp_edges = defaultdict(list)
-    la = labels[a]; lb = labels[b]
-    for idx in range(len(a)):
-        ca = int(la[idx]); cb = int(lb[idx])
-        ia = int(a[idx]); ib = int(b[idx]); dist = float(cd[idx])
-        comp_edges[ca].append((dist, ia, ib, cb))
-        comp_edges[cb].append((dist, ib, ia, ca))
+    # Per-component adjacency: comp -> (dist, point_in_comp, point_in_other_comp,
+    # other_comp) edges, both directions of each, ordered as the heap orders
+    # them. Kept as arrays grouped by component, and a component's edges become
+    # Python tuples only when Prim reaches it: the old loop built a tuple per
+    # direction of every cross-component candidate (3.4 M on a leaf-on 1 M-point
+    # tree with ~365 k components) although Prim typically reaches a handful.
+    # Heap contents per reached component are exactly as before, so the bridges
+    # (ties included) are unchanged.
+    src = np.concatenate([labels[a], labels[b]])
+    order = np.argsort(src, kind="stable")
+    src = src[order]
+    dst = np.concatenate([labels[b], labels[a]])[order]
+    p = np.concatenate([a, b])[order]
+    q = np.concatenate([b, a])[order]
+    dd = np.concatenate([cd, cd])[order]
+    comp_ids = np.arange(ncomp)
+    starts = np.searchsorted(src, comp_ids, side="left")
+    ends = np.searchsorted(src, comp_ids, side="right")
+
+    def edges_of(c: int):
+        lo, hi = starts[c], ends[c]
+        return zip(dd[lo:hi].tolist(), p[lo:hi].tolist(),
+                   q[lo:hi].tolist(), dst[lo:hi].tolist())
 
     # Prim from the largest component: a min-heap of candidate bridges out of the
     # current merged super-component. Pop the globally nearest; if it reaches a new
     # component, accept the bridge (deterministic: ties broken by (dist, i, j) via
     # the heap tuple) and push that component's outgoing edges.
     # connected_components labels are contiguous in [0, ncomp).
-    counts = np.bincount(labels, minlength=ncomp)
-    main = int(np.argmax(counts))
     merged = np.zeros(ncomp, dtype=bool)
     merged[main] = True
 
     heap: list[tuple[float, int, int, int]] = []
-    for dist, i, j, oc in comp_edges[main]:
+    for dist, i, j, oc in edges_of(main):
         heapq.heappush(heap, (dist, i, j, oc))
 
     bridges: list[tuple[int, int, float]] = []
@@ -267,7 +288,7 @@ def _bridge_components(points, pairs, n, bridge_max):
             continue  # that component already attached
         bridges.append((i, j, float(dist)))
         merged[oc] = True
-        for d2, p2, q2, oc2 in comp_edges[oc]:
+        for d2, p2, q2, oc2 in edges_of(oc):
             if not merged[oc2]:
                 heapq.heappush(heap, (d2, p2, q2, oc2))
     return bridges

@@ -257,3 +257,72 @@ def test_acyclic_check_is_fast_on_a_deep_spine():
     t = time.perf_counter()
     assert g.is_acyclic_single_root()
     assert time.perf_counter() - t < 2.0, "the O(K x depth) walk is back"
+
+
+def _reference_bridges(points, pairs, bridge_max):
+    """The bridging rule, spelled out: Prim from the largest component over
+    EVERY cross-component pair within bridge_max, nearest gap first, ties by
+    (dist, i, j). `_bridge_components` must produce exactly this; it only
+    avoids enumerating pairs inside the main component."""
+    import heapq
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(points)
+    adj = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    ncomp, lab = connected_components(adj, directed=False)
+    if ncomp <= 1:
+        return []
+    cand = cKDTree(points).query_pairs(bridge_max, output_type="ndarray")
+    cand = cand[lab[cand[:, 0]] != lab[cand[:, 1]]]
+    dist = np.linalg.norm(points[cand[:, 0]] - points[cand[:, 1]], axis=1)
+    edges: dict = {}
+    for (i, j), d in zip(cand.tolist(), dist.tolist()):
+        edges.setdefault(lab[i], []).append((d, i, j, lab[j]))
+        edges.setdefault(lab[j], []).append((d, j, i, lab[i]))
+    merged = np.zeros(ncomp, bool)
+    main = int(np.argmax(np.bincount(lab)))
+    merged[main] = True
+    heap = list(edges.get(main, []))
+    heapq.heapify(heap)
+    out = []
+    while heap:
+        d, i, j, oc = heapq.heappop(heap)
+        if d > bridge_max:
+            break
+        if merged[oc]:
+            continue
+        merged[oc] = True
+        out.append((i, j, d))
+        for e in edges.get(oc, []):
+            if not merged[e[3]]:
+                heapq.heappush(heap, e)
+    return out
+
+
+def _islands(seed, n, half):
+    rng = np.random.default_rng(seed)
+    c = rng.uniform(-half, half, (n // 150, 3))
+    return c[rng.integers(0, len(c), n)] + rng.normal(0, 0.03, (n, 3))
+
+
+def _lattice_blocks():
+    # Exact distance ties everywhere: the tie-break is what's under test.
+    g = np.stack(np.meshgrid(*[np.arange(4) * 0.05] * 3), -1).reshape(-1, 3)
+    offs = np.stack(np.meshgrid(*[np.arange(3) * 0.45] * 3), -1).reshape(-1, 3)
+    return (g[None] + offs[:, None]).reshape(-1, 3)
+
+
+@pytest.mark.parametrize("points", [
+    _islands(0, 3000, 0.4), _islands(1, 5000, 0.5), _islands(4, 11000, 0.8),
+    _lattice_blocks(),
+], ids=["islands-3k", "islands-5k", "islands-11k", "tied-lattice"])
+@pytest.mark.parametrize("gap_factor", [8.0, 15.0])
+def test_bridges_match_the_reference_greedy(points, gap_factor):
+    from qsm.skeleton import _bridge_components, _density
+
+    sp = _density(points)
+    pairs = cKDTree(points).query_pairs(4 * sp, output_type="ndarray")
+    expected = _reference_bridges(points, pairs, gap_factor * sp)
+    assert expected, "fixture has nothing to bridge, so it tests nothing"
+    assert _bridge_components(points, pairs, len(points), gap_factor * sp) == expected
