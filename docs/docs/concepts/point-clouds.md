@@ -51,8 +51,12 @@ first non-numeric row as a header if present.
 Phytograph handles clouds of hundreds of millions of points in the
 viewer: an imported cloud is indexed into a level-of-detail octree and the
 GPU draws a fixed budget of points from it per frame (2 million by
-default), whatever the cloud's size, refining the area you look at. If you
-find rotation choppy:
+default), whatever the cloud's size, refining the area you look at. Where
+the budget runs out before an area reaches full detail, its points are drawn
+larger, just enough to cover the same share of the screen the missing points
+would have, so the coarser areas don't show up as sparse rectangles. Areas at
+full detail always draw at your chosen point size. If you find rotation
+choppy:
 
 - **Lower the display point budget** in **Settings → Performance**
   (1 million suits a machine without a discrete GPU); raise it to 8–10 on

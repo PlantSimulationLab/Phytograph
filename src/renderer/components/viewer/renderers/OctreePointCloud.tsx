@@ -16,6 +16,7 @@ import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { isWideOctreeAttribute } from '../../../lib/octreeWideAttributes';
 import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
+import { basePointSize, installCoverageFill } from './octreeCoverageFill';
 import {
   applyCropMaskToVisibleNodes,
   clearCropMaskFromVisibleNodes,
@@ -661,6 +662,9 @@ export function OctreePointCloud({
         // written to basePositionRef, which still describes the drawn octree
         // until the commit.
         if (data.octree?.cacheId) cacheIdOfRef.current.set(pco, data.octree.cacheId);
+        // Before the material effect's first shader build, so the only program
+        // ever linked for this cloud is the patched one.
+        installCoverageFill(pco.material);
         const base = pco.position.clone();
         const seatPose = () => {
           applyOctreePose(
@@ -913,8 +917,13 @@ export function OctreePointCloud({
     // straight to the framebuffer).
     (m as any).inputColorEncoding = 0;
     (m as any).outputColorEncoding = 0;
-    m.pointSizeType = PointSizeType.FIXED;
-    m.size = pointSize;
+    // Coverage fill (see octreeCoverageFill.ts): ADAPTIVE only for potree's
+    // per-point LOD walk — `size` is still pixels, drawn as-is wherever the
+    // cloud is at full detail and grown just enough to keep the same coverage
+    // where the point budget cut the LOD short.
+    m.pointSizeType = PointSizeType.ADAPTIVE;
+    m.size = basePointSize(pointSize);
+    m.minSize = basePointSize(pointSize);
 
     // Height: getElevation() in the shader is
     //   w = (world.z - heightMin) / (heightMax - heightMin)

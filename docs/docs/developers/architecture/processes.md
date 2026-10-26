@@ -396,6 +396,17 @@ Heavy data never crosses IPC as JSON:
       recently — so with several scans loaded the clouds visibly flicker in and
       out every frame, worst during crop preview where the reduced budget puts
       demand above the `2 × pointBudget` eviction threshold.
+    - **Coverage-preserving point size.** When the budget cuts the LOD short,
+      one side of a node boundary is drawn a level coarser (~4× fewer points),
+      which reads as a hard rectangle with fixed-size points.
+      `viewer/renderers/octreeCoverageFill.ts` rides potree's ADAPTIVE
+      per-point LOD walk but replaces its sizing: a point whose octant has
+      undrawn children grows by √((P + C) / P) (its node's points vs. its
+      children's), so coverage, not gaplessness, stays continuous; a point at
+      full detail draws at exactly the user's pixel size. Potree's own adaptive
+      size (sized from octree spacing) was tried and made the boundary worse —
+      real scans aren't gap-free at full detail. It also replaces potree's
+      visibility-texture builder, which throws past 2048 visible nodes.
 - **Binary point-cloud frames.** Point-cloud import and compute responses use a
   packed binary layout (`PHX1` for import via `_pack_pointcloud_response`; `PHB1`
   for array responses) decoded straight into `Float32Array` views, bypassing
