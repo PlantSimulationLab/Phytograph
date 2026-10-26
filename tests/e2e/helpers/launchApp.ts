@@ -1,8 +1,8 @@
 import { _electron, type ElectronApplication, type Page } from '@playwright/test';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { waitForBackend } from './waitForBackend';
 // @ts-expect-error -- plain .mjs helper, shared with the standalone harness scripts
@@ -234,6 +234,15 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
       exited,
       new Promise<void>((r) => setTimeout(r, 5_000)),
     ]);
+    // PHYTOGRAPH_E2E_LOG_ARCHIVE keeps this session's main + backend logs,
+    // which otherwise go down with the profile below (off macOS they live in
+    // <userData>/logs). CI uploads the archive, so a hang on a runner nobody
+    // can log into still leaves the backend's side of the story.
+    const archive = process.env.PHYTOGRAPH_E2E_LOG_ARCHIVE;
+    if (archive && process.platform !== 'darwin') {
+      await cp(join(userDataDir, 'logs'), join(archive, basename(userDataDir)), { recursive: true })
+        .catch(() => {});
+    }
     // Drop this run's private octree cache and Electron profile. Best-effort —
     // a cleanup failure must never fail the test.
     await rm(octreeCacheRoot, { recursive: true, force: true }).catch(() => {});

@@ -344,6 +344,9 @@ jobs:
       - name: E2E (platform subset)
         env:
           PHYTOGRAPH_E2E_PLATFORM: '1'
+          # Keep each app session's main + backend logs (tests/e2e/helpers/
+          # launchApp.ts); uploaded with the Playwright report below.
+          PHYTOGRAPH_E2E_LOG_ARCHIVE: ${{ github.workspace }}/test-results/app-logs
         run: npm run test:e2e
 
       # ---------------- RIEGL reader unit tests ----------------
