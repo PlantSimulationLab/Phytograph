@@ -13,6 +13,16 @@ dies, so reading stdin to EOF is a death notice that needs no PID polling (no
 PID-reuse blind spot, nothing platform-specific). Gated on the env var because
 a terminal launch has a TTY on stdin, and the dev uvicorn is owned by
 scripts/dev.mjs, not the app.
+
+Every child this process spawns must get `stdin=subprocess.DEVNULL`, never
+the default (inherit). On Windows the watchdog's blocking ReadFile on the
+pipe serializes every other query on that file object, and a Python child
+stats its inherited stdin at startup (`create_stdio` -> fstat), so it blocks
+there for as long as the app lives. That is what hung ground segmentation
+(its killable worker is this same binary) in the packaged Windows app.
+Native children like PotreeConverter happened not to stat stdin, which is why
+imports kept working. `tests/test_parent_watchdog.py` pins every spawn in
+main.py.
 """
 from __future__ import annotations
 

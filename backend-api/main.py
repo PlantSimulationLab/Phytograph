@@ -128,7 +128,8 @@ if not _IS_SEG_WORKER and (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
             print("[pyhelios] building from source (this may take a few minutes)...", flush=True)
             # Output is NOT captured: the compiler error streams live to this log so
             # it's visible above the fatal banner (and so a slow build shows progress).
-            _result = subprocess.run(["node", str(_build_script)], cwd=str(_build_script.parent.parent), timeout=1800)
+            _result = subprocess.run(["node", str(_build_script)], cwd=str(_build_script.parent.parent), timeout=1800,
+                                     stdin=subprocess.DEVNULL)
             if _result.returncode == 0 and _lib_path.exists():
                 print("[pyhelios] build complete", flush=True)
             else:
@@ -720,6 +721,7 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True, env=None):
         proc = _SUBPROCESS_RUN(
             [exe] + list(argv[1:]),
             capture_output=True, text=text, timeout=timeout, env=env,
+            stdin=subprocess.DEVNULL,
         )
         return _SpawnResult(proc.returncode, proc.stdout, proc.stderr)
 
@@ -1959,7 +1961,7 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
             else:
                 proc = subprocess.Popen(
                     cmd, stdout=log_handle, stderr=subprocess.STDOUT, env=env,
-                    text=True,
+                    text=True, stdin=subprocess.DEVNULL,
                 )
             started = time.time()
             while proc.poll() is None:
@@ -2962,7 +2964,7 @@ def _run_riegl_container_once(
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=out_handle, stderr=log_handle,
-                    env=env, text=True,
+                    env=env, text=True, stdin=subprocess.DEVNULL,
                 )
             finally:
                 log_handle.close()
@@ -3092,7 +3094,7 @@ def _stream_riegl_container_once(
             else:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=log_handle, env=env,
-                    bufsize=1024 * 1024,
+                    bufsize=1024 * 1024, stdin=subprocess.DEVNULL,
                 )
             try:
                 header = _read_riegl_header(proc.stdout)
@@ -27162,8 +27164,11 @@ def _spawn_seg_worker(env: dict, error_log: str):
         return _SegProc(argv, env, error_log)
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     logf = open(error_log, "wb")
+    # stdin=DEVNULL: never hand a child the parent watchdog's stdin pipe (see
+    # parent_watchdog.py). Every spawn in this file passes it;
+    # tests/test_parent_watchdog.py pins that.
     return subprocess.Popen(argv, env=env, stdout=logf, stderr=logf,
-                            creationflags=creationflags)
+                            stdin=subprocess.DEVNULL, creationflags=creationflags)
 
 
 def _kill_seg_worker(proc) -> None:
@@ -31143,6 +31148,7 @@ def _run_potree_converter(
         try:
             proc = _subprocess.Popen(
                 cmd, stdout=logf, stderr=_subprocess.STDOUT, env=env,
+                stdin=_subprocess.DEVNULL,
                 creationflags=getattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
         finally:

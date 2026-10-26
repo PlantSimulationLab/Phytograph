@@ -103,3 +103,45 @@ def test_the_real_backend_exits_when_its_stdin_closes(tmp_path, exit_with_parent
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=30)
+
+
+# Spawn calls that create a child process. `_SUBPROCESS_RUN` is `_spawn_run`'s
+# captured `subprocess.run` (its Windows branch).
+_SPAWN_NAMES = {"Popen", "run", "call", "check_call", "check_output", "_SUBPROCESS_RUN"}
+
+
+def _spawn_calls_without_stdin(source: str) -> list[int]:
+    import ast
+    missing = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) \
+                and f.value.id in ("subprocess", "_subprocess") and f.attr in _SPAWN_NAMES:
+            pass
+        elif isinstance(f, ast.Name) and f.id == "_SUBPROCESS_RUN":
+            pass
+        else:
+            continue
+        if not any(k.arg == "stdin" for k in node.keywords):
+            missing.append(node.lineno)
+    return missing
+
+
+def test_no_child_inherits_the_watchdog_stdin():
+    """Every spawn in main.py passes stdin explicitly. Inheriting it hands the
+    child the watchdog's pipe, and on Windows a Python child (the killable seg
+    worker is this same binary) then blocks at startup stat-ing it behind the
+    watchdog's pending read: ground segmentation hung forever in the packaged
+    Windows app. Nothing on macOS/Linux can observe it, so this is a source check."""
+    main_py = Path(__file__).resolve().parent.parent / "main.py"
+    missing = _spawn_calls_without_stdin(main_py.read_text(encoding="utf-8"))
+    assert not missing, f"main.py spawns without stdin= at lines {missing}; pass stdin=subprocess.DEVNULL"
+
+
+def test_stdin_check_catches_a_bare_spawn():
+    assert _spawn_calls_without_stdin("import subprocess\nsubprocess.Popen(['x'])\n") == [2]
+    assert _spawn_calls_without_stdin("_SUBPROCESS_RUN(['x'], capture_output=True)\n") == [1]
+    assert _spawn_calls_without_stdin(
+        "import subprocess\nsubprocess.Popen(['x'], stdin=subprocess.DEVNULL)\n") == []
