@@ -99,14 +99,16 @@ tested as a normal HTTP server.
   parent PID: no PID-reuse blind spot, nothing per-platform, and in the
   packaged app the backend's parent is the PyInstaller bootloader, not
   Electron. A standalone or dev launch doesn't set the variable.
-  **Every child the backend spawns must pass `stdin=subprocess.DEVNULL`.**
-  Inheriting stdin hands the child that pipe, and on Windows the watchdog's
-  pending blocking read serializes every other query on it: a Python child
-  (the killable segmentation worker is the same binary) stats its stdin at
-  startup and blocks there for as long as the app lives. Ground segmentation
-  hung exactly that way in the packaged Windows app, while native children
-  like PotreeConverter, which never stat stdin, kept working.
-  `backend-api/tests/test_parent_watchdog.py` checks every spawn in `main.py`.
+  **On Windows the pipe is polled (`PeekNamedPipe`), never read.** A pending
+  synchronous read on a pipe serializes every other query on it, so anything
+  that asks about stdin waits as long as the app lives. Both of these did:
+  the killable segmentation worker (the same binary, which stats an inherited
+  stdin at startup, so every ground segmentation hung), and the backend
+  itself, loading scipy's Fortran fitpack for `griddata`, whose runtime probes
+  the standard handles (so every DEM hung at 15%). Every child also gets
+  `stdin=subprocess.DEVNULL`. `backend-api/tests/test_parent_watchdog.py`
+  checks both: the Windows path never reads, and every spawn in `main.py`
+  passes stdin.
 
 ## Octree cache location (cross-process contract)
 

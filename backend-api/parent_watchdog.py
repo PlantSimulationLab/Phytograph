@@ -14,15 +14,22 @@ PID-reuse blind spot, nothing platform-specific). Gated on the env var because
 a terminal launch has a TTY on stdin, and the dev uvicorn is owned by
 scripts/dev.mjs, not the app.
 
-Every child this process spawns must get `stdin=subprocess.DEVNULL`, never
-the default (inherit). On Windows the watchdog's blocking ReadFile on the
-pipe serializes every other query on that file object, and a Python child
-stats its inherited stdin at startup (`create_stdio` -> fstat), so it blocks
-there for as long as the app lives. That is what hung ground segmentation
-(its killable worker is this same binary) in the packaged Windows app.
-Native children like PotreeConverter happened not to stat stdin, which is why
-imports kept working. `tests/test_parent_watchdog.py` pins every spawn in
-main.py.
+On Windows the pipe must never have a blocking read pending. A synchronous
+ReadFile serializes every other query on that file object, so anything that
+asks about stdin waits for as long as the app lives. Two things did:
+
+- a Python child given the default (inherited) stdin stats it at startup
+  (`create_stdio` -> fstat). The killable segmentation worker is this same
+  binary, so every ground segmentation hung in the packaged Windows app;
+- this process itself, loading a library whose runtime probes the standard
+  handles as it initializes: `from scipy.interpolate import griddata` (its
+  Fortran fitpack) never returned, so every DEM hung at 15%.
+
+So on Windows the watchdog polls with PeekNamedPipe, which returns at once and
+raises BrokenPipeError when the write end closes, and never reads. Every child
+still gets `stdin=subprocess.DEVNULL` too, which `tests/test_parent_watchdog.py`
+pins for every spawn in main.py: a child has no business holding the app's
+death notice.
 """
 from __future__ import annotations
 
@@ -31,6 +38,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -38,22 +46,67 @@ logger = logging.getLogger(__name__)
 ENV_VAR = "PHYTOGRAPH_EXIT_WITH_PARENT"
 # How long uvicorn's graceful shutdown gets before the process is ended outright.
 GRACE_SECONDS = 15.0
+# How often the Windows watchdog peeks at the pipe (see the module docstring).
+POLL_SECONDS = 0.5
 
 
 def enabled() -> bool:
     return os.environ.get(ENV_VAR) == "1"
 
 
+def poll_until_broken(peek: Callable[[], object], interval: float = POLL_SECONDS,
+                      sleep: Callable[[float], None] = time.sleep) -> bool:
+    """Call `peek` every `interval` seconds until it raises BrokenPipeError
+    (the write end closed: return True). Any other OSError means the handle is
+    not a pipe we can watch: return False, so the caller does NOT read it as
+    the app's death and shut down."""
+    while True:
+        try:
+            peek()
+        except BrokenPipeError:
+            return True
+        except OSError as e:
+            logger.warning("Cannot watch stdin for the app's exit: %s", e)
+            return False
+        sleep(interval)
+
+
+def _windows_stdin_peek() -> Optional[Callable[[], object]]:
+    """PeekNamedPipe on this process's stdin, or None if stdin has no handle."""
+    import _winapi
+    import msvcrt
+    try:
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+    except (OSError, ValueError, AttributeError):
+        return None
+    return lambda: _winapi.PeekNamedPipe(handle, 0)
+
+
 def watch_stdin_eof(on_eof: Callable[[], None], stream=None) -> Optional[threading.Thread]:
     """Call `on_eof` (on a daemon thread) once `stream` (default: stdin) closes.
 
-    Returns the thread, or None when there is no stdin to watch.
+    Returns the thread, or None when there is no stdin to watch. On Windows the
+    default stdin is polled, never read (see the module docstring); a `stream`
+    passed in is always read, which is how the tests drive it.
     """
     if stream is None:
         stdin = sys.stdin
         if stdin is None:
             logger.warning("%s set but there is no stdin; not watching for the app's exit", ENV_VAR)
             return None
+        if sys.platform == "win32":
+            peek = _windows_stdin_peek()
+            if peek is None:
+                logger.warning("%s set but stdin has no handle; not watching for the app's exit", ENV_VAR)
+                return None
+
+            def _poll():
+                if poll_until_broken(peek, POLL_SECONDS):
+                    on_eof()
+
+            t = threading.Thread(target=_poll, name="parent-watchdog", daemon=True)
+            t.start()
+            return t
         stream = getattr(stdin, "buffer", stdin)
 
     def _run():

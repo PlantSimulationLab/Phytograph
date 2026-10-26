@@ -145,3 +145,55 @@ def test_stdin_check_catches_a_bare_spawn():
     assert _spawn_calls_without_stdin("_SUBPROCESS_RUN(['x'], capture_output=True)\n") == [1]
     assert _spawn_calls_without_stdin(
         "import subprocess\nsubprocess.Popen(['x'], stdin=subprocess.DEVNULL)\n") == []
+
+
+def test_poll_fires_when_the_pipe_breaks():
+    calls, sleeps = [], []
+
+    def peek():
+        calls.append(1)
+        if len(calls) == 3:
+            raise BrokenPipeError(109, "The pipe has been ended.")
+        return (0, 0)
+
+    assert parent_watchdog.poll_until_broken(peek, interval=0.25, sleep=sleeps.append) is True
+    assert len(calls) == 3 and sleeps == [0.25, 0.25]
+
+
+def test_poll_never_reads_an_unwatchable_handle_as_the_apps_death():
+    def peek():
+        raise OSError(6, "The handle is invalid.")
+
+    assert parent_watchdog.poll_until_broken(peek, sleep=lambda s: None) is False
+
+
+def test_windows_watchdog_polls_and_never_reads_stdin(monkeypatch):
+    """On Windows a pending read on the stdin pipe blocks every other query on
+    it, in this process too: `from scipy.interpolate import griddata` hung every
+    DEM. The default-stdin path must peek, never read."""
+    class _NoRead:
+        def fileno(self):
+            return 0
+
+        def read(self, *a):
+            raise AssertionError("the Windows watchdog read stdin")
+
+        buffer = property(lambda self: self)
+
+    peeks = []
+
+    def fake_peek():
+        peeks.append(1)
+        if len(peeks) == 2:
+            raise BrokenPipeError(109, "The pipe has been ended.")
+        return (0, 0)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdin", _NoRead())
+    monkeypatch.setattr(parent_watchdog, "_windows_stdin_peek", lambda: fake_peek)
+    monkeypatch.setattr(parent_watchdog, "POLL_SECONDS", 0.01)
+    fired = threading.Event()
+    t = parent_watchdog.watch_stdin_eof(fired.set)
+    assert t is not None
+    assert fired.wait(5), "the broken pipe was never noticed"
+    assert len(peeks) == 2
