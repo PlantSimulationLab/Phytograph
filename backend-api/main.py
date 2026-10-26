@@ -21985,15 +21985,18 @@ def create_plant_session(request: PlantSessionCreateRequest):
                 error=f"Unknown plant type '{request.plant_type}'"
             )
 
-        # Load and build plant
-        plantarch.loadPlantModelFromLibrary(request.plant_type)
-        _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
-
         # Reproducibility comes from the Context RNG, NOT a build parameter:
         # no plant model reads a 'random_seed' build parameter, and since
         # PyHelios v0.1.30 passing one raises rather than being ignored.
+        # Seed BEFORE loadPlantModelFromLibrary: loading already draws from the
+        # Context RNG (the model's random parameters), and a Context starts
+        # time-seeded, so seeding after the load never made a plant reproducible.
         if request.random_seed is not None:
             context.seedRandomGenerator(request.random_seed)
+
+        # Load and build plant
+        plantarch.loadPlantModelFromLibrary(request.plant_type)
+        _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
         plant_id = plantarch.buildPlantInstanceFromLibrary(
             base_position=vec3(request.position_x, request.position_y, request.position_z),
@@ -22608,17 +22611,20 @@ def generate_plant_model(request: PlantGenerationRequest):
                         error=f"Unknown plant type '{request.plant_type}'. Available: {', '.join(available_models[:10])}..."
                     )
 
-                # Load plant model
-                plantarch.loadPlantModelFromLibrary(request.plant_type)
-                _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
-
                 # Reproducibility comes from the Context RNG, NOT a build
                 # parameter: no plant model reads a 'random_seed' build
                 # parameter, and since PyHelios v0.1.30 passing one raises
                 # rather than being silently ignored.
+                # Seed BEFORE loadPlantModelFromLibrary: loading already draws from the
+                # Context RNG (the model's random parameters), and a Context starts
+                # time-seeded, so seeding after the load never made a plant reproducible.
                 if request.random_seed is not None:
                     context.seedRandomGenerator(request.random_seed)
                     print(f"[Plant Generation] Using random_seed={request.random_seed} for reproducibility")
+
+                # Load plant model
+                plantarch.loadPlantModelFromLibrary(request.plant_type)
+                _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
                 plant_id = plantarch.buildPlantInstanceFromLibrary(
                     base_position=vec3(request.position_x, request.position_y, request.position_z),
@@ -23075,13 +23081,13 @@ def generate_plant_canopy(request: PlantCanopyRequest):
                         error=f"Unknown plant type '{request.plant_type}'. Available: {', '.join(available_models[:10])}...",
                     )
 
-                plantarch.loadPlantModelFromLibrary(request.plant_type)
-                _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
-
-                # Seed the Context RNG, not a build parameter — see the note in
-                # /api/plant/generate.
+                # Seed the Context RNG, not a build parameter, and before the
+                # load — see the note in /api/plant/generate.
                 if request.random_seed is not None:
                     context.seedRandomGenerator(request.random_seed)
+
+                plantarch.loadPlantModelFromLibrary(request.plant_type)
+                _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
                 plant_ids = plantarch.buildPlantCanopyFromLibrary(
                     canopy_center=vec3(request.center_x, request.center_y, request.center_z),
@@ -23228,13 +23234,13 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                 progress_queue.put(("error", f"Unknown plant type '{request.plant_type}'."))
                 return
 
-            plantarch.loadPlantModelFromLibrary(request.plant_type)
-            _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
-
-            # Seed the Context RNG, not a build parameter — see the note in
-            # /api/plant/generate.
+            # Seed the Context RNG, not a build parameter, and before the load
+            # — see the note in /api/plant/generate.
             if request.random_seed is not None:
                 context.seedRandomGenerator(request.random_seed)
+
+            plantarch.loadPlantModelFromLibrary(request.plant_type)
+            _apply_leaf_inclination(plantarch, request.plant_type, request.leaf_inclination)
 
             # Growth progress (C++ advanceTime) → 0–0.6. The callback fires on a
             # native thread; just enqueue, never touch the event loop here.
