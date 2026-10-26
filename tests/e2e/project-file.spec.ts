@@ -10,6 +10,7 @@ import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { stubMessageBox, getMessageBoxCalls } from './helpers/stubMessageBox';
 import { resetToFreshScene } from './helpers/resetApp';
 import { fixturePoints, pointsDrawnIn } from './helpers/pointColors';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'forest-plot.xyz');
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -62,7 +63,7 @@ test('save a project, open it back, and keep working on it', async () => {
 
     await page.getByTestId('tool-ground-segment').click();
     await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 120_000 });
+    await expectClassLegend(page, 120_000);
     await expect(page.getByTestId('scalar-overlay')).toHaveAttribute('data-active-scalar', 'ground_class');
 
     await page.getByTestId('tool-create-voxel').click();

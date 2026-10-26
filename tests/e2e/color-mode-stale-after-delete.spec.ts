@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { expectClassLegend } from './helpers/classLegend';
 
 const WOOD_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz');
 const PLAIN_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree-view1.xyz');
@@ -38,7 +39,7 @@ test('scalar color mode resets to per-scan after the source cloud is deleted', a
     await page.getByTestId('wood-segment-run-button').click();
 
     const legend = page.getByTestId('class-legend');
-    await expect(legend).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
     await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
 
     // The color-by dropdown now reflects the scalar selection. Open the

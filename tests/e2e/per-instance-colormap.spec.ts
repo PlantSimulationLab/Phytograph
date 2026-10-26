@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -297,7 +298,7 @@ test('two clouds hold different color modes at the same time', async () => {
   await page.getByTestId('wood-segment-run-button').click();
 
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
   await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
 
   // The segmented cloud is in scalar:wood_class…

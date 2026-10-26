@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 // Plant-organ segmentation (the bundled ML model) driven through the real UI
 // against the live backend. Both fixtures come from
@@ -87,7 +88,7 @@ test('labels a potted tomato soil / stem / leaf and numbers its leaflets', async
 
   // Colored categorically by the organ column, with the three named classes.
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 30_000 });
+  await expectClassLegend(page, 30_000);
   await expect(legend).toHaveAttribute('data-legend-attribute', 'plant_organ');
   for (const name of ['Soil', 'Stem', 'Leaf']) {
     await expect(legend.getByText(name, { exact: true })).toBeVisible();

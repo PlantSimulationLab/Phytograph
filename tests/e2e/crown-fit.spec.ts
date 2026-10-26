@@ -7,6 +7,7 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { expectClassLegend } from './helpers/classLegend';
 
 // Split a CSV line, honoring the RFC4180 quoting buildCrownCsv emits.
 function splitCsvLine(line: string): string[] {
@@ -71,7 +72,7 @@ test('fits a crown to leaf points and reports metrics + CSV', async () => {
     await page.getByTestId('wood-segment-run-button').click();
     // Wait for the wood_class recolor (proof segmentation finished).
     const legend = page.getByTestId('class-legend');
-    await expect(legend).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
     await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
 
     // 2) Open Fit Crown & Metrics. The picker lists every cloud with data, so we

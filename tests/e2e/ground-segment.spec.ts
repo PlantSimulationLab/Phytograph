@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 
@@ -63,7 +64,7 @@ test('segments ground vs plant and colors by the ground_class attribute', async 
   // scalar — proves the cloud is colored categorically (ground vs plant),
   // not by a continuous gradient or a solid color.
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
   // The legend's attribute + class swatches prove the cloud is colored by a
   // discrete ground_class scalar (not a gradient or solid color).
   await expect(legend).toHaveAttribute('data-legend-attribute', 'ground_class');
@@ -185,7 +186,7 @@ test('measures the ground tolerance from the scan when asked', async () => {
   await page.getByTestId('ground-split-clouds').check();
 
   await page.getByTestId('ground-segment-run-button').click();
-  await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
 
   // The split proves the measured tolerance separated the fixture correctly:
   // the plant blob starts at z≈0.12, so anything ≥0.12 would swallow it and
@@ -237,7 +238,7 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
   await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.05');
   await page.getByTestId('ground-segment-run-button').click();
-  await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
 
   // Open Filter; ground_class is offered as a categorical scalar field.
   await page.getByTestId('tool-filter').click();
@@ -313,7 +314,7 @@ test('hides the class legend after the segmented cloud is deleted', async () => 
   await page.getByTestId('ground-segment-run-button').click();
 
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
 
   // Delete the (only) cloud via its row trash button, then confirm.
   await cloudRow.locator('button[data-testid^="scan-delete-"]').click();

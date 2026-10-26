@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz');
 
@@ -64,7 +65,7 @@ test('wood/leaf segmentation shows a Cancel button and recovers after cancel', a
     await expect(runButton).toBeEnabled();
     await runButton.click();
     const legend = page.getByTestId('class-legend');
-    await expect(legend).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
     await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
     await expect(legend.getByText('Wood', { exact: true })).toBeVisible();
     await expect(legend.getByText('Leaf', { exact: true })).toBeVisible();

@@ -7,6 +7,7 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
 import { dismissToasts } from './helpers/canvasClick';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'forest-plot.xyz');
 
@@ -66,7 +67,7 @@ test('ground -> DEM -> trees -> inventory -> stand -> QSMs on known stems', asyn
     await page.getByTestId('tool-ground-segment').click();
     await expect(page.getByTestId('ground-segment-panel')).toBeVisible();
     await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 120_000 });
+    await expectClassLegend(page, 120_000);
 
     // 2) DEM with the height-above-ground column (the inventory's ground).
     await page.getByTestId('tool-dem').click();

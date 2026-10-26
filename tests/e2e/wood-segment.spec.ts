@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz');
 const FIXTURE2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf2.xyz');
@@ -57,7 +58,7 @@ test('segments wood vs leaf and colors by the wood_class attribute', async () =>
   // The discrete class legend proves the cloud is colored categorically by
   // wood_class (wood vs leaf), not a continuous gradient or solid color.
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
   await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
   await expect(legend.getByText('Wood', { exact: true })).toBeVisible();
   await expect(legend.getByText('Leaf', { exact: true })).toBeVisible();
@@ -150,7 +151,7 @@ test('segments two checked clouds together and labels both', async () => {
   // Both scans should be labeled by wood_class (the discrete legend appears,
   // and neither scan was deleted — aggregate writes labels back in place).
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
   await expect(legend).toHaveAttribute('data-legend-attribute', 'wood_class');
   await expect(legend.getByText('Wood', { exact: true })).toBeVisible();
   await expect(legend.getByText('Leaf', { exact: true })).toBeVisible();

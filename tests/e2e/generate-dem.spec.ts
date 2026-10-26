@@ -7,6 +7,7 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
 import { resetToFreshScene } from './helpers/resetApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 
@@ -51,7 +52,7 @@ test('generates a DEM from ground points and exports raster grids', async () => 
     await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.05');
     await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
 
     // 2) Generate the DEM. The cloud has a ground class, so NO "no ground" warning.
     await page.getByTestId('tool-dem').click();
@@ -158,7 +159,7 @@ test('generates a CHM (DSM − DTM) with canopy heights, never negative', async 
     await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.05');
     await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
 
     // Open the DEM tool and tick ONLY the CHM surface (untick the default DTM).
     await page.getByTestId('tool-dem').click();
@@ -219,7 +220,7 @@ test('generates DTM, DSM and CHM together in one run', async () => {
   await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.05');
   await page.getByTestId('ground-segment-run-button').click();
-  await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+  await expectClassLegend(page, 60_000);
 
   // Tick all three surfaces (DTM is on by default; add DSM + CHM).
   await page.getByTestId('tool-dem').click();
@@ -279,7 +280,7 @@ test('a DTM carries color-by layers and exports the selected one as a raster', a
     await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.05');
     await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
 
     // Generate a DTM only — the layers come along automatically (no checkboxes).
     await page.getByTestId('tool-dem').click();

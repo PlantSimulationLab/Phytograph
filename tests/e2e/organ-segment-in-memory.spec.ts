@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { launchApp, type LaunchedApp } from './helpers/launchApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 // Plant-organ segmentation on an IN-MEMORY cloud (the renderer's flat path:
 // `ps.hits` sent inline, both result columns scattered back to full length).
@@ -97,7 +98,7 @@ test('labels an in-memory synthetic scan of a generated bean', async () => {
 
   // Both columns landed on the in-memory cloud, which is still in memory.
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible({ timeout: 30_000 });
+  await expectClassLegend(page, 30_000);
   await expect(legend).toHaveAttribute('data-legend-attribute', 'plant_organ');
   await page.getByRole('button', { name: 'Display' }).click();
   const colorMode = page.getByTestId('display-color-mode');

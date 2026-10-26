@@ -5,6 +5,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 
@@ -94,7 +95,7 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   // A categorical field shows the discrete class legend, NOT the continuous
   // colorbar — this is the wizard's categorical mark taking effect end-to-end.
   const legend = page.getByTestId('class-legend');
-  await expect(legend).toBeVisible();
+  await expectClassLegend(page);
   await expect(legend).toHaveAttribute('data-legend-attribute', 'target_index');
   await expect(page.getByTestId('colorbar')).toBeHidden();
 });

@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
+import { expectClassLegend } from './helpers/classLegend';
 
 // End-to-end "snap to ground" terrain-following LAD against the live backend.
 //
@@ -94,7 +95,7 @@ test('snaps a voxel grid to a DEM and LAD follows the slope', async () => {
     await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.1');
     await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+    await expectClassLegend(page, 60_000);
 
     // ── 4. Generate the DEM ──────────────────────────────────────────────
     await page.getByTestId('tool-dem').click();
