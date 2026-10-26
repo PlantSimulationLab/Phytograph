@@ -546,6 +546,12 @@ jobs:
       # A failing script fails this step: an empty file list would otherwise run
       # the entire project.
       - name: E2E tests (Playwright + Electron)
+        env:
+          # Each app session's main + backend logs, uploaded with the report
+          # below (tests/e2e/helpers/launchApp.ts), plus periodic backend
+          # thread stacks (backend_wrapper.py).
+          PHYTOGRAPH_E2E_LOG_ARCHIVE: ${{ github.workspace }}/test-results/app-logs
+          PHYTOGRAPH_STACK_DUMP_SECS: '20'
         run: |
           FILES=$(node scripts/e2e-shard.mjs ${{ matrix.shard }} ${{ strategy.job-total }})
           xvfb-run -a -s "-screen 0 1920x1080x24" npm run test:e2e -- --project=main $FILES

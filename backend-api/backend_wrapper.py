@@ -238,6 +238,23 @@ def _configure_logging():
 _LOG_DIR = _configure_logging()
 logger = logging.getLogger(__name__)
 
+# PHYTOGRAPH_STACK_DUMP_SECS=N writes every thread's stack to a file beside the
+# log every N seconds. For hangs on machines nobody can attach a debugger to:
+# platform.yml sets it for the Windows/macOS E2E runs, whose logs it uploads.
+_stack_dump_secs = os.environ.get("PHYTOGRAPH_STACK_DUMP_SECS")
+if _stack_dump_secs:
+    import faulthandler
+    _session_tag = os.environ.get("PHYTOGRAPH_LOG_SESSION")
+    _stack_path = os.path.join(
+        _LOG_DIR, f"phytograph-backend-{_session_tag}.stacks.log" if _session_tag
+        else "phytograph-backend.stacks.log")
+    try:
+        _stack_file = open(_stack_path, "w", encoding="utf-8")  # held open for the process
+        faulthandler.dump_traceback_later(float(_stack_dump_secs), repeat=True, file=_stack_file)
+        logger.info(f"Dumping thread stacks every {_stack_dump_secs}s to {_stack_path}")
+    except (OSError, ValueError) as _e:
+        logger.warning(f"PHYTOGRAPH_STACK_DUMP_SECS={_stack_dump_secs!r} ignored: {_e}")
+
 # CRITICAL: Disable matplotlib font manager to avoid 30+ second startup delay
 # Use platform-agnostic temp directory (works on Windows, macOS, Linux)
 mpl_config_dir = os.path.join(tempfile.gettempdir(), 'matplotlib')

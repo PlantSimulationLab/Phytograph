@@ -234,6 +234,21 @@ real signed `.app`, whose Developer ID signature seals `Info.plist`, and
 patching it would mean the smoke test no longer exercises the exact
 artifact that ships. It launches once per run, so it costs one flash.
 
+## Reading a CI-only E2E failure from the logs
+
+Off macOS each launch's main and backend logs live in its throwaway profile,
+which `close()` deletes. Two variables keep them, and CI (`ci.yml`'s E2E
+shards, `platform.yml`) sets both, so they arrive with the uploaded
+Playwright report under `test-results/app-logs/<profile>/`:
+
+- `PHYTOGRAPH_E2E_LOG_ARCHIVE=<dir>`: `launchApp`'s `close()` copies the
+  session's `logs/` there first. The main log carries the renderer's console
+  too.
+- `PHYTOGRAPH_STACK_DUMP_SECS=<n>`: the backend writes every thread's stack
+  every *n* seconds to `phytograph-backend-<session>.stacks.log` beside its
+  log (`faulthandler`). A request that never returns shows the line it was
+  blocked on, on a runner nobody can attach a debugger to.
+
 ## Profiling resource usage during E2E
 
 E2E drives two full app instances (Electron + an open3d/pyhelios backend

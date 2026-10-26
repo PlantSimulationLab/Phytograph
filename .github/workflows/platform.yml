@@ -347,6 +347,9 @@ jobs:
           # Keep each app session's main + backend logs (tests/e2e/helpers/
           # launchApp.ts); uploaded with the Playwright report below.
           PHYTOGRAPH_E2E_LOG_ARCHIVE: ${{ github.workspace }}/test-results/app-logs
+          # Every backend thread's stack, every 20 s, beside its log
+          # (backend_wrapper.py): a hang names the line it is stuck on.
+          PHYTOGRAPH_STACK_DUMP_SECS: '20'
         run: npm run test:e2e
 
       # ---------------- RIEGL reader unit tests ----------------
