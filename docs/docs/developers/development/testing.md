@@ -246,8 +246,11 @@ Playwright report under `test-results/app-logs/<profile>/`:
   too.
 - `PHYTOGRAPH_STACK_DUMP_SECS=<n>`: the backend writes every thread's stack
   every *n* seconds to `phytograph-backend-<session>.stacks.log` beside its
-  log (`faulthandler`). A request that never returns shows the line it was
-  blocked on, on a runner nobody can attach a debugger to.
+  log (`faulthandler`), and the crashing traceback on a fatal signal such as
+  SIGSEGV. A request that never returns shows the line it was blocked on, and
+  a native crash shows the call it died in, on a runner nobody can attach a
+  debugger to. The file is appended, so a respawned backend keeps the crashed
+  one's dump.
 
 ## Profiling resource usage during E2E
 

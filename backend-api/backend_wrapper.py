@@ -239,8 +239,11 @@ _LOG_DIR = _configure_logging()
 logger = logging.getLogger(__name__)
 
 # PHYTOGRAPH_STACK_DUMP_SECS=N writes every thread's stack to a file beside the
-# log every N seconds. For hangs on machines nobody can attach a debugger to:
-# platform.yml sets it for the Windows/macOS E2E runs, whose logs it uploads.
+# log every N seconds, and the crashing traceback on a fatal signal (SIGSEGV et
+# al.). For hangs and native crashes on machines nobody can attach a debugger
+# to: ci.yml and platform.yml set it for E2E and upload the logs. Appended, not
+# truncated: a respawned backend reuses the session tag, and truncating erased
+# the dump of the process that crashed.
 _stack_dump_secs = os.environ.get("PHYTOGRAPH_STACK_DUMP_SECS")
 if _stack_dump_secs:
     import faulthandler
@@ -249,7 +252,10 @@ if _stack_dump_secs:
         _LOG_DIR, f"phytograph-backend-{_session_tag}.stacks.log" if _session_tag
         else "phytograph-backend.stacks.log")
     try:
-        _stack_file = open(_stack_path, "w", encoding="utf-8")  # held open for the process
+        _stack_file = open(_stack_path, "a", encoding="utf-8")  # held open for the process
+        _stack_file.write(f"=== backend pid {os.getpid()} ===\n")
+        _stack_file.flush()
+        faulthandler.enable(file=_stack_file, all_threads=True)
         faulthandler.dump_traceback_later(float(_stack_dump_secs), repeat=True, file=_stack_file)
         logger.info(f"Dumping thread stacks every {_stack_dump_secs}s to {_stack_path}")
     except (OSError, ValueError) as _e:
