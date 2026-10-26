@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { useEffect } from 'react';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import type { RieglStatus } from '../utils/backendApi';
 
 // Only the RIEGL reader-image controls are exercised here. The rest of the
@@ -112,8 +112,9 @@ describe('SettingsDialog — RIEGL on a native runtime', () => {
     expect(rivlib.dataset.ok).toBe('false');
     // Names the artifact this platform actually looks for. Telling a Windows
     // user their folder lacks libscanifc.so would send them hunting for a file
-    // the Windows download does not contain.
-    expect(rivlib.textContent).toMatch(/scanifc-mt-s\.dll/i);
+    // the Windows download does not contain. Waited for: the row reads "Not
+    // set" until getSettings() resolves, which can land after the status.
+    await waitFor(() => expect(rivlib.textContent).toMatch(/scanifc-mt-s\.dll/i));
     expect(rivlib.textContent).not.toMatch(/libscanifc\.so/i);
   });
 
@@ -139,7 +140,8 @@ describe('SettingsDialog — RIEGL on a native runtime', () => {
     expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
 
     const rivlib = screen.getByTestId('settings-riegl-check-rivlib');
-    expect(rivlib.textContent).toMatch(/libscanifc\.so/i);
+    // Waited for, as above: "Not set" until the settings load.
+    await waitFor(() => expect(rivlib.textContent).toMatch(/libscanifc\.so/i));
     expect(rivlib.textContent).not.toMatch(/scanifc-mt-s\.dll/i);
 
     const toolchain = screen.getByTestId('settings-riegl-check-toolchain');
@@ -227,7 +229,7 @@ describe('SettingsDialog — RIEGL on a native runtime', () => {
 
     const row = await screen.findByTestId('settings-riegl-check-rivlib');
     expect(row.dataset.ok).toBe('false');
-    expect(row.textContent).toMatch(/32-bit/);
+    await waitFor(() => expect(row.textContent).toMatch(/32-bit/));
     expect(row.textContent).toMatch(/x86_64/);
   });
 
