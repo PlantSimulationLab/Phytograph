@@ -163,6 +163,7 @@ import { buildDepthLimit, depthLimitPredicate, forEachDrawnPoint } from '../lib/
 import { voxelSetAabb, voxelSetPredicate } from '../lib/voxelSet';
 import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules, splitDeletesByClipBudget, MAX_CLIP_BOXES } from '../lib/deletePreview';
 import { stepCounter, stepReporter } from '../lib/stepProgress';
+import { pruneCloudColorModes } from '../lib/cloudColorModes';
 import {
   computeBoundsFromPositions,
   fitGridToBounds,
@@ -23645,26 +23646,13 @@ export default function PointCloudViewer({
   // place. What remains here is ordinary garbage collection, not a workaround:
   // it also covers a field disappearing from a surviving cloud (e.g. an undo
   // that rolls back a segmentation).
+  //
+  // Only a cloud that has been SEEN and is now gone loses its override: one
+  // that was set a tick before the cloud reached `clouds` is waiting for it,
+  // not stale (see pruneCloudColorModes).
+  const seenCloudIdsRef = useRef(new Set<string>());
   useEffect(() => {
-    setCloudColorModes(prev => {
-      if (prev.size === 0) return prev;
-      const byId = new Map(clouds.map(c => [c.id, c]));
-      let changed = false;
-      const next = new Map(prev);
-      for (const [id, entry] of prev) {
-        const cloud = byId.get(id);
-        if (!cloud) { next.delete(id); changed = true; continue; }
-        if (entry.mode !== 'scalar' || !entry.field) continue;
-        const available = cloud.data.octree
-          ? octreeScalarFieldOptions(
-              cloud.data.octree.attributeRanges,
-              cloud.data.octree.attributeLabels,
-            ).map(o => o.value)
-          : Object.keys(cloud.data.scalarFields ?? {});
-        if (!available.includes(entry.field)) { next.delete(id); changed = true; }
-      }
-      return changed ? next : prev;
-    });
+    setCloudColorModes(prev => pruneCloudColorModes(prev, clouds, seenCloudIdsRef.current));
   }, [clouds]);
 
   // A single cloud's OWN data-derived min/max + caption under a given mode.
