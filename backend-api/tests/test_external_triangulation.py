@@ -105,17 +105,30 @@ class TestExternalTriangulationRoundTrip:
             cloud.calculateLeafArea(ctx, 1)
         la_injected, g_injected = self._per_cell(cloud)
 
-        # Two inherent, sub-percent sources of drift between the paths: the mesh
-        # round-trips through float32 export (getTriangleVerticesAll), and injected
-        # triangles are binned to a cell by centroid rather than by first-vertex hit
-        # cell — near a cell boundary a few may bin differently. A 2% per-cell bound
-        # proves equivalence while admitting that drift; it is not a loose rubber stamp
-        # (a real discrepancy in how G(theta) consumes the mesh would blow well past it).
+        # Two inherent sources of drift between the paths: the mesh round-trips
+        # through float32 export (getTriangleVerticesAll), and injected triangles
+        # are binned to a cell by centroid rather than by first-vertex hit cell, so
+        # near a cell boundary some bin differently. Binning moves area BETWEEN
+        # neighboring cells; it does not create or destroy it. So the check is in
+        # two parts. The totals over the grid are held tight: a real discrepancy in
+        # how G(theta) consumes the mesh moves them, binning barely does. Each cell
+        # gets a looser bound that only the binning has to fit inside.
+        #
+        # Measured on this fixture (max per-cell |drift|, then total leaf area):
+        # macOS helios-core 1.3.93 1.15% / 0.1%; Linux x86 1.3.89 1.88%, 1.3.92-1.3.93
+        # 2.80% (cell 7) / 0.26%. The per-cell drift moves with the scan's exact hits
+        # (1.3.92's ray tracer changed Linux's from 47,486 to 47,538, now equal to
+        # macOS's), which is why the old 2% per-cell bound alone broke on a version
+        # bump that changed nothing about mesh injection.
+        assert sum(la_injected) == pytest.approx(sum(la_internal), rel=0.005), \
+            f"total leaf area: internal {sum(la_internal)} vs injected {sum(la_injected)}"
+        assert np.mean(g_injected) == pytest.approx(np.mean(g_internal), rel=0.005), \
+            f"mean G(theta): internal {np.mean(g_internal)} vs injected {np.mean(g_injected)}"
         for i, (a, b) in enumerate(zip(la_internal, la_injected)):
-            assert b == pytest.approx(a, rel=0.02, abs=1e-4), \
+            assert b == pytest.approx(a, rel=0.04, abs=1e-4), \
                 f"cell {i} leaf area: internal {a} vs injected {b}"
         for i, (a, b) in enumerate(zip(g_internal, g_injected)):
-            assert b == pytest.approx(a, rel=0.02, abs=1e-4), \
+            assert b == pytest.approx(a, rel=0.04, abs=1e-4), \
                 f"cell {i} G(theta): internal {a} vs injected {b}"
 
     def test_injected_mesh_recovers_true_lad(self):
