@@ -6,6 +6,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { dismissToasts } from './helpers/canvasClick';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'forest-plot.xyz');
 
@@ -293,6 +294,8 @@ test('ground -> DEM -> trees -> inventory -> stand -> QSMs on known stems', asyn
     await expect(staleNote).toHaveCount(0, { timeout: 120_000 });
     await page.getByTestId('tool-tree-segment').click();
     await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+    // The first segmentation's success toast can still sit over the Run button.
+    await dismissToasts(page);
     await page.getByTestId('tree-segment-run-button').click();
     await expect(page.getByTestId('tree-segment-cancel-button')).toHaveCount(0, { timeout: 180_000 });
     if (!(await page.getByTestId('tree-inventory-panel').isVisible())) {
