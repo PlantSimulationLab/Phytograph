@@ -45455,9 +45455,66 @@ def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
 def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict:
     """Worker for /api/c2c/global-register.
 
+    A heading prior (`yaw_prior_deg`) clamps the yaw sweep to +/-`yaw_search_deg`,
+    which only helps when the prior is TRUE -- when the two scans already share
+    a heading frame. Nothing upstream can guarantee that: a raw RIEGL
+    .riproject is placed by GNSS position alone, each scan keeping its own
+    arbitrary scanner heading, yet it records a scanner origin like any posed
+    import. Measured on WicksonLawn (three scans whose true relative headings
+    are 52 and 183 degrees, against RiSCAN PRO's registration): with the prior
+    the pair landed 15.3 deg / 10.4 m wrong, without it 0.04 deg / 0.10 m.
+
+    So a constrained result that is not confident is checked against the
+    unconstrained search, and the better of the two is returned. The full
+    sweep is a superset of the clamped one, so this can only recover the
+    answer the clamp excluded; it costs a second search only on the run that
+    would otherwise have handed back a wrong pose. `heading_prior_rejected`
+    reports when the full search won, so the caller can say so.
+
+    See `_do_global_register_once` for the stage bands, and _do_c2m_distance for
+    the streaming/cancel/error contract."""
+    if request.yaw_prior_deg is None:
+        return _do_global_register_once(request, progress=progress)
+
+    # Two possible passes, so each gets half the bar and the fractions stay
+    # monotonic whether or not the second one runs.
+    constrained = _do_global_register_once(
+        request, progress=_WindowedProgress(progress, 0.0, 0.5))
+    if (not constrained.get("success") or constrained.get("confident")
+            or constrained.get("needs_scene_confirmation")):
+        if progress is not None:
+            progress(1.0, "Done")
+        return constrained
+
+    free = _do_global_register_once(
+        request.model_copy(update={"yaw_prior_deg": None}),
+        progress=_WindowedProgress(
+            progress, 0.5, 1.0,
+            prefix="Heading did not fit, searching every orientation: "))
+    if progress is not None:
+        progress(1.0, "Done")
+    if not free.get("success"):
+        return constrained
+    # A confident unconstrained answer beats an unconfident constrained one
+    # outright. Between two unconfident answers, keep the better-fitting one --
+    # neither is trusted, but the user still gets the less wrong matrix.
+    if free.get("confident") or (free.get("fitness") or 0.0) > (constrained.get("fitness") or 0.0):
+        logger.info(
+            "Global registration: heading prior %.1f deg gave an unconfident fit "
+            "(fitness %.3f); the unconstrained search was kept (fitness %.3f, "
+            "confident %s)", request.yaw_prior_deg,
+            constrained.get("fitness") or 0.0, free.get("fitness") or 0.0,
+            free.get("confident"))
+        return dict(free, heading_prior_rejected=True)
+    return constrained
+
+
+def _do_global_register_once(request: "GlobalRegisterRequest", progress=None) -> dict:
+    """One coarse search + refine, honoring `yaw_prior_deg` as given.
+
     Progress bands, chosen so the fractions stay monotonic when the optional ICP
     refinement is appended: anchors 0.05→0.45, coarse search 0.45→0.70, refine
-    0.70→1.0. See _do_c2m_distance for the streaming/cancel/error contract."""
+    0.70→1.0."""
     try:
         _cancel_checkpoint(progress)
         if progress is not None:

@@ -18069,15 +18069,29 @@ export default function PointCloudViewer({
             ? 'Too few plants found — matched using surface shape instead.'
             : `Matched ${response.num_anchors_target ?? 0} plants.`;
           if (response.ambiguous) {
-            // A rival alignment scored nearly as well: the scene is too
-            // repetitive to tell them apart, so the result may be rotated onto
-            // the wrong plants while still looking like a clean fit.
-            confidenceNote = `${how} This planting is too regular to be sure — `
-              + 'another alignment fits almost as well, so check the result before continuing.';
+            // A rival alignment scored nearly as well, so the result may be
+            // rotated onto the wrong structure while still looking like a clean
+            // fit. Not worded as "planting": the same flag fires on a built
+            // scene where nothing fit at all.
+            confidenceNote = `${how} Another alignment fits almost as well, so this one `
+              + 'may be wrong — check the result before continuing.';
           } else if (response.confident === false) {
             confidenceNote = `${how} This alignment may be wrong — review it before continuing.`;
           } else {
             confidenceNote = how;
+          }
+          if (response.heading_prior_rejected) {
+            confidenceNote = `${confidenceNote} The recorded scanner heading did not fit, `
+              + 'so every orientation was searched instead.';
+          }
+          // An untrusted result must not arrive as a green, self-dismissing
+          // "Complete" toast. The shared apply path keys its warning styling
+          // on `quality_warning`, so route the note through it. This was the
+          // silent half of a real failure: a pair placed 15 deg / 10 m wrong
+          // reported "Auto-Register Complete" with a plausible RMSE.
+          if ((response.ambiguous || response.confident === false) && !response.quality_warning) {
+            response.quality_warning = confidenceNote;
+            confidenceNote = '';
           }
           // A weak scene-type disagreement (planted vs natural spacing) tunes
           // the same pipeline rather than changing it, so it is never worth a

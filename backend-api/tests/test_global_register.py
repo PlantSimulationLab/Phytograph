@@ -910,3 +910,85 @@ def test_yaw_prior_constrains_the_search_instead_of_skipping_it():
         f"recovered pose is {rot_err:.1f} deg from truth -- a heading prior was "
         f"supplied, so the search should have been constrained to it, not skipped"
     )
+
+
+def _asymmetric_walls(seed: int = 1) -> np.ndarray:
+    """Ground plus a few walls arranged with no rotational symmetry: an L of
+    building, a stub, an inner wall and a detached fence. Every heading is
+    distinguishable, so a pose outside a clamped yaw window fits visibly badly
+    rather than landing on a lookalike."""
+    rng = np.random.default_rng(seed)
+    pts = []
+
+    def wall(x0, y0, x1, y1, h, n=4000):
+        t = rng.random(n)
+        pts.append(np.column_stack([x0 + (x1 - x0) * t, y0 + (y1 - y0) * t,
+                                    rng.random(n) * h]))
+
+    wall(0, 0, 20, 0, 6)
+    wall(0, 0, 0, 12, 6)
+    wall(20, 0, 20, 4, 6)
+    wall(6, 9, 14, 9, 3)
+    wall(25, -6, 25, 6, 8)
+    return _with_ground(np.vstack(pts))
+
+
+def test_a_wrong_heading_prior_is_overruled_by_the_full_search():
+    """A heading prior the scans do not actually share must not fix a wrong pose.
+
+    The dialog offered the prior whenever every scan recorded a POSITION, and a
+    raw RIEGL .riproject records one (GNSS) while each scan keeps its own
+    scanner heading. On WicksonLawn, whose true relative headings are 52 and
+    183 degrees, the clamped +/-30 degree sweep put ScanPos002 15.3 deg / 10.4 m
+    wrong and the run still reported success; unconstrained, 0.04 deg / 0.10 m.
+
+    Here the true turn is 120 degrees and the prior claims 0. The clamped search
+    alone must be unconfident (that is the signal the fallback keys on), and the
+    worker must then return the unconstrained answer and say so.
+    """
+    applied = _rigid(_rot_z(120.0), (3.0, -2.0, 0.0))
+    target, source = _independent_views(_asymmetric_walls(), applied, keep=0.7, seed=3)
+    req = main.GlobalRegisterRequest(
+        target_points=target.ravel().tolist(),
+        source_points=source.ravel().tolist(),
+        yaw_prior_deg=0.0,
+        # Pin the correlation path (the one that reads the prior), as the
+        # WicksonLawn run took it.
+        scene_type="agriculture", scene_type_confirmed=True,
+    )
+
+    clamped = main._do_global_register_once(req, progress=None)
+    clamped_rot, _ = _pose_error(clamped["transformation_matrix"], applied)
+    assert clamped_rot > 30.0 and not clamped["confident"], (
+        "fixture no longer exercises the failure: the clamped search alone got "
+        f"{clamped_rot:.1f} deg, confident={clamped['confident']}")
+
+    result = main._do_global_register(req, progress=None)
+    assert result["success"], result.get("error")
+    rot_err, trans_err = _pose_error(result["transformation_matrix"], applied)
+    assert rot_err < 1.0 and trans_err < 0.2, (
+        f"a wrong heading prior was not overruled: {rot_err:.2f} deg / {trans_err:.3f} m")
+    assert result["confident"]
+    assert result.get("heading_prior_rejected") is True
+
+
+def test_a_confident_heading_prior_is_kept_without_a_second_search(monkeypatch):
+    """The fallback must cost nothing when the prior fits: one pass, prior kept."""
+    calls = []
+    real = main._do_global_register_once
+
+    def counting(request, progress=None):
+        calls.append(request.yaw_prior_deg)
+        return real(request, progress=progress)
+
+    monkeypatch.setattr(main, "_do_global_register_once", counting)
+    applied = _rigid(_rot_z(10.0), (3.0, -2.0, 0.0))
+    target, source = _independent_views(_asymmetric_walls(), applied, keep=0.7, seed=3)
+    result = main._do_global_register(main.GlobalRegisterRequest(
+        target_points=target.ravel().tolist(),
+        source_points=source.ravel().tolist(),
+        yaw_prior_deg=0.0, scene_type="agriculture", scene_type_confirmed=True,
+    ), progress=None)
+    assert result["confident"], result
+    assert calls == [0.0]
+    assert not result.get("heading_prior_rejected")

@@ -249,10 +249,13 @@ result.
 
 ### Use the scanner heading
 
-Most terrestrial scanners record their own position and heading (GNSS,
-inclination sensors, compass). When your scans carry that information, leave
-**Use the scanner heading** ticked — it makes registration markedly more
-reliable, and it is on by default.
+When your scans are already rotated into one shared frame — placed by a
+registration, or by a compass the import applied — tick **Use the scanner
+heading**. It makes registration markedly more reliable on repetitive
+plantings. It is **off by default**, because having a recorded *position* does
+not mean the scans share a *heading*: a raw RIEGL `.riproject` places each scan
+by GNSS position only, and every scan keeps whatever direction the scanner
+happened to face. Ticking the box on such a set asserts something false.
 
 The option is **offered only when every scan in the run recorded a position**.
 On scans imported without one — a plain XYZ or LAS file with no pose — it is
@@ -278,9 +281,17 @@ full 180° out, because fine alignment on its own cannot tell which end of a
 symmetric row it started from. Narrowing the search to the recorded heading
 instead brought every pair to within 0.1°.
 
-Untick the box only if the recorded heading is missing or you know it to be
-wrong — registration then searches every orientation, which is slower and more
-easily fooled on repetitive plantings.
+If the box is ticked and the heading turns out to be wrong, the alignment
+found inside the narrowed search fits poorly. Phytograph then searches every
+orientation as well and keeps the better result, and says so in the result
+message. This costs a second search on that run only.
+
+With the box unticked, registration searches every orientation, which is slower
+and more easily fooled on repetitive plantings.
+
+A result Phytograph is not confident in (a poor fit, or a rival alignment that
+fits almost as well) is reported as a warning that stays on screen. It is never
+shown as a plain "Complete" message.
 
 ### If a run looks wrong
 

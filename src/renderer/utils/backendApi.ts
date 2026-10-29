@@ -4159,6 +4159,9 @@ export interface GlobalRegisterResponse extends ICPRegistrationResponse {
   match_margin?: number | null;
   /** The heading prior actually used, if any. */
   yaw_prior_used?: number | null;
+  /** True when a heading prior was sent but its clamped search gave an
+   *  unconfident fit, and the unconstrained search was returned instead. */
+  heading_prior_rejected?: boolean;
   /** The scene type the run actually used. */
   scene_type_used?: SceneType;
   /** A weak scene-type disagreement — worth showing, never worth blocking. */

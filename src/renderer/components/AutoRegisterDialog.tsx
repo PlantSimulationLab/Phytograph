@@ -58,6 +58,9 @@ export interface AutoRegisterOptions {
    *  179.89 deg / 20.00 m wrong, both reported CONFIDENT, because the correct
    *  answer sat outside the search space entirely. Scans with no recorded pose
    *  cannot support the assertion, so the box is disabled rather than trusted.
+   *  A recorded POSITION is necessary but not sufficient (a GNSS-placed RIEGL
+   *  .riproject has one and no common heading), so the box also starts
+   *  unticked.
    */
   useHeading: boolean;
 }
@@ -78,7 +81,13 @@ export function AutoRegisterDialog({
 }: AutoRegisterDialogProps) {
   const [targetId, setTargetId] = useState<string>('');
   const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
-  const [useHeading, setUseHeading] = useState(true);
+  // OFF by default. `hasOrigin` proves only that each scan recorded a
+  // POSITION, not that the scans share a heading: a raw RIEGL .riproject is
+  // GNSS-placed with every scan keeping its own scanner heading, and with this
+  // ticked the WicksonLawn pair (truly 52 deg apart) came back 15 deg / 10 m
+  // wrong. The backend now re-searches when a prior fits badly, but the box
+  // should still mean "I know these share a heading", which only the user can say.
+  const [useHeading, setUseHeading] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -211,8 +220,9 @@ export function AutoRegisterDialog({
                 Use the scanner heading
                 <span className="block text-[11px] text-neutral-500">
                   {headingAvailable
-                    ? 'These scans recorded their position, so the search can be narrowed '
-                      + 'to the heading they report. Untick it if you know that heading is wrong.'
+                    ? 'Narrows the search to the heading the scans already share. Tick it only '
+                      + 'if they are already rotated into one frame (by a registration or a '
+                      + 'compass) — a recorded position alone does not fix the heading.'
                     : 'Unavailable — these scans did not record a scanner position, so there '
                       + 'is no heading to narrow the search with. Every orientation is searched.'}
                 </span>
