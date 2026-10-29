@@ -11,6 +11,14 @@
 // refinement stops at `minNodePixelSize` (50 px radius), where a PotreeConverter
 // 2 node's spacing (cube / 128 / 2^level) is under half a pixel.
 //
+// So only a child the budget cut may trigger the fill — never one potree
+// skipped for being under `minNodePixelSize`. The shader can't tell those
+// apart (both are "exists in the hierarchy, not drawn"), so the texture builder
+// re-runs potree's own projected-radius test and leaves sub-threshold children
+// out of the alpha mask. Without that, the frontier of EVERY view is filled,
+// which drew practically every point ~1.4-2x the chosen size with nothing
+// truncated at all.
+//
 // Why not potree's own ADAPTIVE size: it sizes a point from the octree SPACING,
 // i.e. to close the gaps between samples. Tried, and it makes the boundary
 // WORSE on real scans: a terrestrial scan is nowhere near gap-free at full
@@ -54,18 +62,31 @@ export const VISIBLE_NODES_TEXTURE_WIDTH = 2048;
 const FACTOR_SCALE = 16;
 export const MAX_FILL_FACTOR = 255 / FACTOR_SCALE;
 
-// potree-core's PointCloudMaterial default `minSize`. Under the FIXED sizing
-// the viewer used before, the shader's `clamp(size, minSize, maxSize)` meant a
-// point size of 1 actually drew at 2 device px; keeping that floor makes the
-// complete (unfilled) regions look exactly as they always have.
-export const POTREE_DEFAULT_MIN_POINT_SIZE = 2;
+// The smallest point drawn, in device px: the smallest size that still
+// rasterizes.
+export const MIN_POINT_SIZE = 1;
 
-/** The device-pixel size an unfilled point draws at for a user point size. */
-export function basePointSize(pointSize: number): number {
-  return Math.max(pointSize, POTREE_DEFAULT_MIN_POINT_SIZE);
+/**
+ * The device-pixel size an unfilled point draws at for a user point size.
+ * The user's size is CSS px, as three.js's PointsMaterial (the flat-cloud
+ * renderer) reads it — it multiplies by the pixel ratio, potree does not. The
+ * two used to agree only on a Retina display and only at size 1, by accident:
+ * potree-core defaults `minSize` to 2 device px, which its shader's
+ * `clamp(size, minSize, maxSize)` applied to every size, so 0.5, 1, 1.5 and 2
+ * all drew identically.
+ */
+export function basePointSize(pointSize: number, pixelRatio = 1): number {
+  return Math.max(pointSize * pixelRatio, MIN_POINT_SIZE);
 }
 
-interface HierarchyChild { numPoints?: number }
+interface HierarchyChild {
+  numPoints?: number;
+  boundingSphere?: { center: THREE.Vector3; radius: number };
+}
+
+/** Decides whether an undrawn hierarchy child was cut by the point budget
+ * (true) rather than skipped for being too small on screen (false). */
+export type ChildCutTest = (child: HierarchyChild) => boolean;
 
 export interface VisibleNodeLike {
   name: string;
@@ -107,13 +128,16 @@ function compareNodes(a: VisibleNodeLike, b: VisibleNodeLike): number {
  * Row 0, per visible node (potree's layout, plus alpha):
  *   r = bitmask of its children that are VISIBLE (drawn this frame)
  *   g,b = offset (16-bit) from this texel to its first visible child
- *   a = bitmask of its children that EXIST in the hierarchy
+ *   a = bitmask of its children that EXIST in the hierarchy and, when
+ *       `wasCut` is given, were cut by the budget rather than skipped as
+ *       too small (a visible child's bit is moot: getLOD descends into it)
  * Row 1: r = fill factor x 16.
  * Nodes past capacity share the reserved last texel, left all-zero.
  */
 export function buildVisibleNodesTexels(
   visibleNodes: readonly VisibleNodeLike[],
   capacity = VISIBLE_NODES_TEXTURE_WIDTH,
+  wasCut?: ChildCutTest,
 ): { data: Uint8Array; offsets: Map<string, number> } {
   const data = new Uint8Array(4 * capacity * 2);
   const row1 = 4 * capacity;
@@ -130,7 +154,10 @@ export function buildVisibleNodesTexels(
     offsets.set(node.name, n);
     const children = hierarchyChildren(node);
     let mask = 0;
-    for (let i = 0; i < 8; i++) if (children[i]) mask |= 1 << i;
+    for (let i = 0; i < 8; i++) {
+      const c = children[i];
+      if (c && (!wasCut || wasCut(c))) mask |= 1 << i;
+    }
     data[4 * n + 3] = mask;
     data[row1 + 4 * n] = Math.round(fillFactor(node) * FACTOR_SCALE);
     if (n === 0) continue;
@@ -191,8 +218,45 @@ export function patchLodShader(vertexShader: string): { source: string; patched:
   return { source, patched: true };
 }
 
+interface FrameContext {
+  octree: THREE.Object3D & { minNodePixelSize?: number };
+  camera: THREE.Camera;
+  renderer: THREE.WebGLRenderer;
+}
+
+const tmpSize = new THREE.Vector2();
+const tmpCam = new THREE.Vector3();
+const tmpInv = new THREE.Matrix4();
+
+/**
+ * potree's own refine test (`updateChildVisibility`), inverted: a child whose
+ * projected bounding-sphere radius reaches `minNodePixelSize` would have been
+ * drawn had the budget allowed, so its absence is a budget cut. A child with
+ * no sphere is treated as cut, which is the pre-test behavior.
+ */
+export function budgetCutTest(ctx: FrameContext): ChildCutTest {
+  const { octree, camera, renderer } = ctx;
+  const minPx = octree.minNodePixelSize ?? 50;
+  const half = 0.5 * renderer.getSize(tmpSize).height * renderer.getPixelRatio();
+  // Spheres are in the octree's local frame, as is potree's camera position.
+  const cam = camera.getWorldPosition(tmpCam).clone().applyMatrix4(tmpInv.copy(octree.matrixWorld).invert());
+  const persp = (camera as THREE.PerspectiveCamera).isPerspectiveCamera;
+  const p = camera as THREE.PerspectiveCamera & THREE.OrthographicCamera;
+  const orthoScale = persp ? 0 : (2 * half) / (p.top - p.bottom) * p.zoom;
+  const tanHalfFov = persp ? Math.tan((p.fov * Math.PI) / 360) : 0;
+  return (child) => {
+    const s = child.boundingSphere;
+    if (!s) return true;
+    if (!persp) return s.radius * orthoScale >= minPx;
+    const d = s.center.distanceTo(cam);
+    if (d < s.radius) return true;
+    return (s.radius * half) / (tanHalfFov * d) >= minPx;
+  };
+}
+
 interface FillMaterial {
   vertexShader: string;
+  updateMaterial: (octree: unknown, nodes: unknown, camera: unknown, renderer: unknown) => void;
   needsUpdate: boolean;
   visibleNodesTexture?: THREE.Texture;
   visibleNodeTextureOffsets?: Map<string, number>;
@@ -224,8 +288,23 @@ export function installCoverageFill(material: unknown): void {
   m.visibleNodesTexture = tex;
   if (m.uniforms.visibleNodes) m.uniforms.visibleNodes.value = tex;
 
+  // potree calls updateVisibilityTextureData from inside updateMaterial, with
+  // the same camera/renderer its visibility pass just used; keep them for it.
+  let frame: FrameContext | null = null;
+  const originalUpdateMaterial = m.updateMaterial.bind(m);
+  m.updateMaterial = (octree, nodes, camera, renderer) => {
+    frame = { octree, camera, renderer } as FrameContext;
+    try {
+      originalUpdateMaterial(octree, nodes, camera, renderer);
+    } finally {
+      frame = null;
+    }
+  };
+
   m.updateVisibilityTextureData = (nodes: VisibleNodeLike[]) => {
-    const { data, offsets } = buildVisibleNodesTexels(nodes);
+    const { data, offsets } = buildVisibleNodesTexels(
+      nodes, VISIBLE_NODES_TEXTURE_WIDTH, frame ? budgetCutTest(frame) : undefined,
+    );
     // potree's own `makeOnBeforeRender` reads this map for each node's vnStart.
     const target = m.visibleNodeTextureOffsets;
     if (target) {

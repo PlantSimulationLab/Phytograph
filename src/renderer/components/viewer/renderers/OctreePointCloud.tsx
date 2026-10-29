@@ -481,6 +481,9 @@ export function OctreePointCloud({
   const [materialVersion, setMaterialVersion] = useState(0);
   const manager = getPotreeManager();
   const { scene, gl } = useThree();
+  // Point size is CSS px (see basePointSize); re-run the material effect when
+  // the window moves to a display with a different pixel ratio.
+  const dpr = useThree((s) => s.viewport.dpr);
   // The class-color texture this cloud's material samples (see below); kept
   // so a replacement or unmount frees the previous one.
   const categoricalTexRef = useRef<THREE.DataTexture | null>(null);
@@ -922,8 +925,8 @@ export function OctreePointCloud({
     // cloud is at full detail and grown just enough to keep the same coverage
     // where the point budget cut the LOD short.
     m.pointSizeType = PointSizeType.ADAPTIVE;
-    m.size = basePointSize(pointSize);
-    m.minSize = basePointSize(pointSize);
+    m.size = basePointSize(pointSize, dpr);
+    m.minSize = basePointSize(pointSize, dpr);
 
     // Height: getElevation() in the shader is
     //   w = (world.z - heightMin) / (heightMax - heightMin)
@@ -1187,7 +1190,7 @@ export function OctreePointCloud({
   // `data.bounds` and `displayOffset` are deps because the height-color range
   // is derived from them: a committed transform moves the bounds, and without
   // these the gradient keeps describing the cloud's previous extent.
-  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme,
+  }, [octree, pointSize, dpr, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme,
       data.bounds.min.z, data.bounds.max.z, displayOffset?.z]);
 
   // ── Clip arbitration ──────────────────────────────────────────────────────

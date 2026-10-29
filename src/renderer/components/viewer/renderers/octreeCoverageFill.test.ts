@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import * as THREE from 'three';
 import { PointCloudMaterial, PointSizeType } from 'potree-core';
 import {
   MAX_FILL_FACTOR,
   VISIBLE_NODES_TEXTURE_WIDTH,
   basePointSize,
+  budgetCutTest,
   buildVisibleNodesTexels,
   fillFactor,
   installCoverageFill,
@@ -106,6 +108,40 @@ describe('buildVisibleNodesTexels', () => {
   });
 });
 
+describe('budget-cut children only', () => {
+  it('leaves a child out of the fill mask when the test says it was skipped, not cut', () => {
+    const r = node('r', { 0: 300, 4: 300 }, 100);
+    const kids = r.geometryNode!.children!;
+    const { data } = buildVisibleNodesTexels([r], VISIBLE_NODES_TEXTURE_WIDTH, (c) => c === kids[4]);
+    expect(texel(data, 0)[3]).toBe(0b10000);
+    // Nothing cut (an unconstrained view): no fill bits at all, so every
+    // point draws at the chosen size.
+    const none = buildVisibleNodesTexels([r], VISIBLE_NODES_TEXTURE_WIDTH, () => false);
+    expect(texel(none.data, 0)[3]).toBe(0);
+  });
+
+  it('reproduces potree\'s projected-radius refine test', () => {
+    // 1000 px tall viewport at pixel ratio 1, 90° vertical FOV: a sphere of
+    // radius R at distance D projects to R * 500 / D px.
+    const renderer = {
+      getSize: (v: THREE.Vector2) => v.set(800, 1000),
+      getPixelRatio: () => 1,
+    } as unknown as THREE.WebGLRenderer;
+    const camera = new THREE.PerspectiveCamera(90, 0.8, 0.1, 1000);
+    camera.updateMatrixWorld();
+    // The octree sits 100 m along +x, so the child spheres are in ITS frame.
+    const octree = Object.assign(new THREE.Object3D(), { minNodePixelSize: 50 });
+    octree.position.set(100, 0, 0);
+    octree.updateMatrixWorld();
+    const test = budgetCutTest({ octree, camera, renderer });
+    const sphere = (x: number, r: number) => ({ boundingSphere: new THREE.Sphere(new THREE.Vector3(x, 0, -100), r) });
+    // World center (0,0,-100) is local (-100,0,-100): distance 100 from the camera.
+    expect(test(sphere(-100, 11))).toBe(true);   // 55 px: would refine → budget cut
+    expect(test(sphere(-100, 9))).toBe(false);   // 45 px: potree skipped it
+    expect(test({})).toBe(true);
+  });
+});
+
 describe('patchLodShader against potree-core', () => {
   it('rewrites the real adaptive shader into the coverage fill', () => {
     const m = new PointCloudMaterial();
@@ -152,8 +188,12 @@ describe('installCoverageFill', () => {
 });
 
 describe('basePointSize', () => {
-  it('floors at what FIXED sizing drew, so full-detail regions are unchanged', () => {
-    expect(basePointSize(1)).toBe(2);
+  it('reads the size as CSS px, like PointsMaterial, down to one device pixel', () => {
+    // Retina: every slider step is distinct, and 1 draws the 2 device px it
+    // always did.
+    expect([0.5, 1, 1.5, 2].map((s) => basePointSize(s, 2))).toEqual([1, 2, 3, 4]);
+    expect(basePointSize(1, 1)).toBe(1);
+    expect(basePointSize(0.5, 1)).toBe(1);
     expect(basePointSize(4)).toBe(4);
   });
 });

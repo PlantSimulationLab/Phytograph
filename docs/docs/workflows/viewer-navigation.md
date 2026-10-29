@@ -244,7 +244,8 @@ move-with-the-cloud and drop-on-rebuild rules as inspect labels.
 The right panel has:
 
 - **Point size slider** — small for large clouds, larger for sparse
-  ones.
+  ones. Sizes are screen pixels (0.5–10), the same for every cloud; on a
+  high-density (Retina) display 0.5 draws a single device pixel.
 - **Colormap selector** — viridis (default), plasma, inferno, magma, turbo,
   jet, coolwarm, grayscale. Applies when coloring by any scalar (height,
   intensity, scalar field).
