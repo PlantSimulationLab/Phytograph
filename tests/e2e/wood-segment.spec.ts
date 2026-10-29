@@ -5,6 +5,9 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { expectClassLegend } from './helpers/classLegend';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz');
 const FIXTURE2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf2.xyz');
@@ -274,6 +277,73 @@ test('re-running the segmentation retires hand corrections to wood_class', async
   // The counts are the NEW segmentation's: wood is back, a real minority.
   await expect.poll(async () => (await counts())['1'] ?? 0, { timeout: 15_000 })
     .toBeGreaterThan(700);
+});
+
+test('wood/leaf labels survive an .xyz export and re-import into the label tool', async () => {
+  // The reported bug: segment, export to .xyz, start over, re-import — and the
+  // label tool showed every point Unclassified. The .xyz had no header, so the
+  // importer could only call the class column `col_N`, never `wood_class`.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
+  await expect(cloudRow).toHaveAttribute('data-point-count', '4240', { timeout: 20_000 });
+
+  await page.getByTestId('tool-wood-segment').click();
+  await expect(page.getByTestId('wood-segment-panel')).toBeVisible();
+  await page.getByTestId('wood-method').selectOption('sota');
+  await page.getByTestId('wood-mode').selectOption('label');
+  await page.getByTestId('wood-segment-run-button').click();
+  await expect(page.getByTestId('class-legend'))
+    .toHaveAttribute('data-legend-attribute', 'wood_class', { timeout: 60_000 });
+
+  // Export with the dialog's defaults — the user changes nothing.
+  const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-wood-xyz-')), 'segmented.xyz');
+  await stubSaveDialog(app, savePath);
+  await page.evaluate(() => (window as any).__openExportPanel?.());
+  await expect(page.getByTestId('export-modal')).toBeVisible();
+  await page.getByTestId('export-format-xyz').click();
+  await page.getByTestId('export-cloud-go').click();
+  await expect(
+    page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }),
+  ).toBeVisible({ timeout: 30_000 });
+  expect(existsSync(savePath)).toBe(true);
+
+  // What the file says: its legend names wood_class, and its per-class counts
+  // are the ground truth the label tool must reproduce.
+  const text = readFileSync(savePath, 'utf8');
+  const legend = text.split('\n')[0].trim();
+  expect(legend.startsWith('#')).toBe(true);
+  const names = legend.slice(1).trim().split(/\s+/);
+  const woodCol = names.indexOf('wood_class');
+  expect(woodCol).toBeGreaterThanOrEqual(3);
+  const fileCounts: Record<string, number> = {};
+  for (const line of text.split('\n')) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    const v = String(Number(line.trim().split(/\s+/)[woodCol]));
+    fileCounts[v] = (fileCounts[v] ?? 0) + 1;
+  }
+  expect(fileCounts['1']).toBeGreaterThan(700);
+  expect(fileCounts['2']).toBeGreaterThan(fileCounts['1']);
+
+  // Start over and bring the export back in, accepting every wizard default.
+  await resetToFreshScene(app, page);
+  await importFiles(app, page, 'import-point-cloud', savePath);
+  await completeImportWizard(page);
+  const back = page.locator('[data-testid="scan-row"][data-scan-name="segmented"]');
+  await expect(back).toHaveAttribute('data-point-count', '4240', { timeout: 20_000 });
+
+  await page.getByTestId('tool-label').click();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('label-column-select').selectOption('wood_class');
+  await expect(panel).toHaveAttribute('data-label-slug', 'wood_class');
+  const counts = async () => JSON.parse(
+    (await panel.getAttribute('data-label-counts')) ?? '{}') as Record<string, number>;
+  await expect.poll(async () => (await counts())['1'] ?? 0, { timeout: 15_000 })
+    .toBe(fileCounts['1']);
+  expect((await counts())['2'] ?? 0).toBe(fileCounts['2']);
+  expect((await counts())['0'] ?? 0).toBe(fileCounts['0'] ?? 0);
 });
 
 // tree_wood_leaf_ground.xyz is tree_wood_leaf.xyz (4240 pts) standing on a flat

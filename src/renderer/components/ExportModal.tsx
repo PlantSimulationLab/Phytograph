@@ -78,6 +78,8 @@ export interface ExportModalProps {
     // LAS/LAZ: which class column fills the standard classification byte.
     // undefined = automatic (hand labels first), null = none (all 0).
     las?: { classificationColumn?: string | null },
+    // xyz/asc: false = write no `#` legend line naming the columns.
+    textHeader?: boolean,
   ) => void;
   // Batch export. `scanIds` the checked objects, `includeMisses`, `writeXml` (bundle vs
   // data-only), `columns` the ordered ASCII column slugs (always includes xyz),
@@ -270,6 +272,11 @@ export function ExportModal({
   const cloudIsLas = cloudFormat === 'las' || cloudFormat === 'laz';
   // '' = automatic, '__none__' = leave the byte at 0, else a column slug.
   const [classByte, setClassByte] = useState('');
+  // xyz/asc: name the columns in a `#` legend line. On by default, because
+  // without it a re-import cannot tell a `wood_class` column from any other
+  // number; off for a downstream reader that rejects comment lines.
+  const cloudIsBareAscii = cloudFormat === 'xyz' || cloudFormat === 'asc';
+  const [xyzHeader, setXyzHeader] = useState(true);
 
   // Columns for a LAS/LAZ export: the standard dimensions it cannot omit
   // (x/y/z, intensity) are forced on and locked; color and scalars stay
@@ -469,6 +476,20 @@ export function ExportModal({
                       </select>
                     </label>
                   )}
+                  {cloudIsBareAscii && (
+                    <label
+                      className="flex items-center gap-1.5 mt-2 text-[10px] text-neutral-300"
+                      title="Name the columns in a leading '# X Y Z …' comment line, so a re-import recovers class columns (wood/leaf, ground…) by name. Turn off for a reader that rejects comment lines. A plain X/Y/Z export never has one."
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid="export-xyz-header"
+                        checked={xyzHeader}
+                        onChange={(e) => setXyzHeader(e.target.checked)}
+                      />
+                      Write column names header
+                    </label>
+                  )}
                   {selectedSlugs(activeCloudColumns).length === 0 && (
                     <div className="text-[10px] text-amber-300 mt-1">Select at least one column.</div>
                   )}
@@ -495,6 +516,7 @@ export function ExportModal({
                   cloudIsLas && classByte
                     ? { classificationColumn: classByte === '__none__' ? null : classByte }
                     : undefined,
+                  cloudIsBareAscii ? xyzHeader : undefined,
                 )}
                 className={`mt-3 w-full px-3 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${
                   cloudFormatTakesColumns && selectedSlugs(activeCloudColumns).length === 0

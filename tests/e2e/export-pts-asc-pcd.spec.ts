@@ -126,20 +126,43 @@ test('PTS offers no column picker — its schema is fixed', async () => {
   await expect(page.getByTestId('export-fixed-schema-note')).toBeVisible();
 });
 
-test('exports ASC as bare positional ASCII with no header line', async () => {
+test('exports ASC with a column legend that names every column', async () => {
   const { savePath, page } = await importAndOpenExport('cloud.asc');
   await page.getByTestId('export-format-asc').click();
   // ASC is xyz-family, so the picker DOES apply here.
   await expect(page.getByTestId('export-column-picker')).toBeVisible();
+  await expect(page.getByTestId('export-xyz-header')).toBeChecked();
   await page.getByTestId('export-cloud-go').click();
 
   const text = await readExported(savePath);
-  // No header at all — a legend line would be read back as a point.
-  expect(text.split('\n')[0].trim().startsWith('#')).toBe(false);
+  // The fixture carries color + intensity, so the default selection goes beyond
+  // x/y/z and the file opens with a `#` legend. Without it a re-import names
+  // every extra column `col_N` (a wood/leaf export lost `wood_class` that way).
+  const legend = text.split('\n')[0].trim();
+  expect(legend.startsWith('#')).toBe(true);
+  const names = legend.slice(1).trim().split(/\s+/).map((n) => n.toLowerCase());
+  expect(names.slice(0, 3)).toEqual(['x', 'y', 'z']);
+  expect(names).toContain('intensity');
   const lines = dataLines(text);
   expect(lines).toHaveLength(POINTS);
   const cols = lines[0].trim().split(/\s+/).map(Number);
-  expect(cols.length).toBeGreaterThanOrEqual(3);
+  expect(cols).toHaveLength(names.length);
+  for (const c of cols) expect(Number.isFinite(c)).toBe(true);
+});
+
+test('exports ASC as bare positional ASCII when the legend is turned off', async () => {
+  const { savePath, page } = await importAndOpenExport('cloud.asc');
+  await page.getByTestId('export-format-asc').click();
+  await page.getByTestId('export-xyz-header').uncheck();
+  await page.getByTestId('export-cloud-go').click();
+
+  const text = await readExported(savePath);
+  // The opt-out, for a reader that rejects comment lines: no header at all.
+  expect(text.split('\n')[0].trim().startsWith('#')).toBe(false);
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  expect(lines).toHaveLength(POINTS);
+  const cols = lines[0].trim().split(/\s+/).map(Number);
+  expect(cols.length).toBeGreaterThan(3);
   for (const c of cols) expect(Number.isFinite(c)).toBe(true);
 });
 

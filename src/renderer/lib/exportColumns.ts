@@ -311,10 +311,19 @@ export function buildAsciiExport(
   return lines.join('\n');
 }
 
-// Build a HEADERLESS whitespace-separated cloud — the `.xyz`/`.asc` body. Split
-// out from `buildAsciiExport` because those two formats carry no legend line at
-// all: their columns are positional, which is exactly what the importer's
-// `ASCII_format` convention reads back.
+// Whether an `.xyz`/`.asc` export gets a `#` legend line. Only when the columns
+// go beyond x/y/z: without the names, a re-import calls every extra column
+// `col_N`, so a wood/leaf export came back with no `wood_class` and the label
+// tool showed every point Unclassified. `headerWanted` is the user's opt-out for
+// a reader that rejects comment lines. Mirrors the backend's
+// `_text_export_layout`, which writes the octree/session-backed exports.
+export function xyzExportHasHeader(slugs: string[], headerWanted: boolean): boolean {
+  return headerWanted && slugs.some((s) => s !== 'x' && s !== 'y' && s !== 'z');
+}
+
+// Build a HEADERLESS whitespace-separated cloud — the `.xyz`/`.asc` body when
+// `xyzExportHasHeader` says no legend line: its columns are positional, which
+// is exactly what the importer's `ASCII_format` convention reads back.
 export function buildBareAsciiExport(
   data: Pick<PointCloudData, 'positions' | 'colors' | 'intensities' | 'scalarFields'> & { pointCount: number },
   slugs: string[],

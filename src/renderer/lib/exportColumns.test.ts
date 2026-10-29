@@ -10,6 +10,7 @@ import {
   cellValue,
   buildAsciiExport,
   buildBareAsciiExport,
+  xyzExportHasHeader,
   buildPtsExport,
   buildPcdExport,
   ptsColumnSlugs,
@@ -412,7 +413,7 @@ describe('buildBareAsciiExport', () => {
     scalarFields: {},
   };
   it('writes no header line at all', () => {
-    // .asc/.xyz columns are positional; a legend line would be read as a point.
+    // The opt-out form of .asc/.xyz: positional columns, nothing else.
     const lines = buildBareAsciiExport(data as never, ['x', 'y', 'z']).split('\n');
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe('0.000000 0.000000 0.000000');
@@ -421,6 +422,21 @@ describe('buildBareAsciiExport', () => {
     const lines = buildBareAsciiExport(data as never, ['z', 'x']).split('\n');
     expect(lines[0]).toBe('0.000000 0.000000');
     expect(lines[1]).toBe('1.000000 1.000000');
+  });
+});
+
+describe('xyzExportHasHeader', () => {
+  it('names the columns once there is more than x/y/z', () => {
+    // Without the legend a re-import calls `wood_class` `col_4`, and the label
+    // tool shows every point Unclassified.
+    expect(xyzExportHasHeader(['x', 'y', 'z', 'wood_class'], true)).toBe(true);
+    expect(xyzExportHasHeader(['z', 'x', 'r', 'g', 'b'], true)).toBe(true);
+  });
+  it('leaves a plain x/y/z file bare', () => {
+    expect(xyzExportHasHeader(['x', 'y', 'z'], true)).toBe(false);
+  });
+  it('honors the opt-out', () => {
+    expect(xyzExportHasHeader(['x', 'y', 'z', 'wood_class'], false)).toBe(false);
   });
 });
 

@@ -538,19 +538,26 @@ need to pick fields or keep other scalars.
 |---|---|
 | `.las` / `.laz` | x, y, z, intensity, color, plus the scalars you select as **named LAS extra dimensions** |
 | `.ply` | The columns you select, each declared as a named `property` |
-| `.xyz` | The columns you select, whitespace-separated, with no header line |
+| `.xyz` | The columns you select, whitespace-separated, with a `#`-prefixed column header when you select more than X/Y/Z |
 | `.txt` | The columns you select, whitespace-separated, with a `#`-prefixed column header |
 | `.csv` | Same columns as `.txt` but comma-separated with a plain header row |
-| `.asc` | The columns you select, whitespace-separated, no header line (same bytes as `.xyz`) |
+| `.asc` | Same bytes as `.xyz` |
 | `.pts` | Point-count line, then `x y z intensity r g b` — **fixed order**, no picker |
 | `.pcd` | Position + color only (PCL ASCII, color packed into one `rgb` field) — no picker |
 
 The `.txt` export writes a leading `#`-prefixed column header (the CloudCompare
 convention, e.g. `# X Y Z is_miss`). Phytograph's own importer reads that header
 to auto-map columns on re-import, and most ASCII readers (CloudCompare included)
-skip the `#` line as a comment. Bare `.xyz` carries no header, so its extra
-columns are positional — use `.txt` or `.csv` when you want the field names
-preserved.
+skip the `#` line as a comment.
+
+`.xyz` and `.asc` write the same `#` header whenever you select a column beyond
+X/Y/Z, so a class column such as `wood_class` or `ground_class` comes back under
+its own name and the [label tool](label-points.md) picks it up. A plain X/Y/Z
+export has no header. If a downstream program rejects comment lines, untick
+**Write column names header** in the Export window to get bare positional
+columns. Re-importing such a file brings the extra columns back as
+**Column 4**, **Column 5**, and so on, and you rename them in the import
+wizard.
 
 For a full-fidelity round trip, use `.las` / `.laz` or `.ply`. LAS/LAZ writes
 each scalar as a named extra dimension, so re-importing the file restores the

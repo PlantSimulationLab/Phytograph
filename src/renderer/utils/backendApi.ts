@@ -2992,6 +2992,9 @@ export interface PointCloudExportRequest {
   // Class palettes by column slug, written into the file as the LAS
   // classification lookup and a Phytograph palette record (F9).
   class_palettes?: Record<string, unknown>;
+  // xyz/asc: false = no `#` legend line naming the columns (default true; a
+  // plain x/y/z selection is bare either way).
+  text_header?: boolean;
 }
 
 export interface PointCloudExportResponse {

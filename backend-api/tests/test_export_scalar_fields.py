@@ -167,17 +167,73 @@ def test_deselected_scalar_is_omitted(client, scalar_session, tmp_path):
     assert len(lines[1].split()) == 4
 
 
-def test_xyz_export_carries_scalars_as_extra_columns(client, scalar_session, tmp_path):
-    """Bare XYZ has no header, but the selected scalars still ride as columns —
-    the same whitespace convention the importer's ASCII_format reads back."""
+def _export_xyz(client, session_id, dest, columns, text_header=None):
+    body = {"source": {"session_id": session_id}, "format": dest.suffix[1:],
+            "dest_path": str(dest), "columns": columns}
+    if text_header is not None:
+        body["text_header"] = text_header
+    resp = client.post("/api/pointcloud/export", json=body)
+    assert resp.status_code == 200, resp.text
+    assert decode_streamed_json(resp.content)["success"] is True
+
+
+@pytest.mark.parametrize("ext", ["xyz", "asc"])
+def test_xyz_export_names_its_scalar_columns(client, scalar_session, tmp_path, ext):
+    """A selection beyond x/y/z gets a `#` legend line naming every column, so a
+    re-import recovers the scalars by name rather than as anonymous `col_N`."""
+    dest = tmp_path / f"out.{ext}"
+    _export_xyz(client, scalar_session, dest, ["x", "y", "z", "reflectance"])
+
+    lines = [l for l in dest.read_text().splitlines() if l.strip()]
+    assert lines[0] == "# X Y Z reflectance"
+    assert len(lines) == 6
+    for line in lines[1:]:
+        assert len(line.split()) == 4
+    assert float(lines[1].split()[3]) == pytest.approx(0.5)
+
+
+def test_xyz_export_header_opt_out_writes_bare_columns(client, scalar_session, tmp_path):
+    """`text_header: false` is the opt-out for readers that reject comment lines."""
     dest = tmp_path / "out.xyz"
-    _export(client, scalar_session, "xyz", dest, columns=["x", "y", "z", "reflectance"])
+    _export_xyz(client, scalar_session, dest, ["x", "y", "z", "reflectance"], text_header=False)
 
     lines = [l for l in dest.read_text().splitlines() if l.strip()]
     assert len(lines) == 5
     for line in lines:
         assert len(line.split()) == 4
     assert float(lines[0].split()[3]) == pytest.approx(0.5)
+
+
+def test_plain_xyz_export_stays_bare(client, scalar_session, tmp_path):
+    """A legend adds nothing to x/y/z alone, so that file keeps no header."""
+    dest = tmp_path / "out.xyz"
+    _export_xyz(client, scalar_session, dest, ["x", "y", "z"])
+    lines = [l for l in dest.read_text().splitlines() if l.strip()]
+    assert len(lines) == 5
+    assert not lines[0].startswith("#")
+
+
+def test_xyz_class_column_round_trips_by_name(client, make_file_session, scalar_cloud, tmp_path):
+    """The reported bug: wood/leaf segmentation, export to .xyz, re-import, and
+    the label tool showed every point Unclassified, because the headerless file
+    brought `wood_class` back as `col_4`. Re-importing must name it `wood_class`
+    and offer it as a Label, with the values intact."""
+    wood = np.array([1, 2, 2, 1, 2], dtype=np.float32)
+    sid = make_file_session(scalar_cloud, "x y z", extras={"wood_class": wood.copy()})
+    dest = tmp_path / "wood.xyz"
+    _export_xyz(client, sid, dest, ["x", "y", "z", "wood_class"])
+
+    preview = main._preview_ascii(str(dest), None, 10)
+    by_slug = {c.suggested_slug: c for c in preview.columns}
+    assert "wood_class" in by_slug, [c.suggested_slug for c in preview.columns]
+    assert by_slug["wood_class"].detected_role == "label"
+    assert [c.detected_role for c in preview.columns[:3]] == ["x", "y", "z"]
+
+    # And the import reads every point, values included — the legend line must
+    # not be eaten as data or cost a row.
+    data = np.loadtxt(dest)
+    assert data.shape == (5, 4)
+    np.testing.assert_array_equal(data[:, 3], wood)
 
 
 def test_ply_declares_selected_scalars_as_properties(client, scalar_session, tmp_path):

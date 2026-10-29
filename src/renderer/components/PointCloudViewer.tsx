@@ -318,7 +318,7 @@ import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
 import { ExportModal } from './ExportModal';
-import { defaultExportColumns, buildAsciiExport, buildBareAsciiExport, buildPtsExport, buildPcdExport, cellValue, type ExportColumn } from '../lib/exportColumns';
+import { defaultExportColumns, buildAsciiExport, buildBareAsciiExport, xyzExportHasHeader, buildPtsExport, buildPcdExport, cellValue, type ExportColumn } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
@@ -12576,6 +12576,8 @@ export default function PointCloudViewer({
     opts?: {
       signal?: AbortSignal; onProgress?: BinaryFrameProgress; onRunId?: (runId: string) => void;
       las?: { classificationColumn?: string | null };
+      // xyz/asc: false = no `#` legend line (see xyzExportHasHeader).
+      textHeader?: boolean;
     },
   ): Promise<{ fileName: string; pointCount: number } | null> => {
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
@@ -12606,6 +12608,7 @@ export default function PointCloudViewer({
             ? { classification_column: opts.las.classificationColumn ?? '' } : {}),
           ...(cloud.data.octree?.classPalettes
             ? { class_palettes: cloud.data.octree.classPalettes } : {}),
+          ...(opts?.textHeader === false ? { text_header: false } : {}),
         }, opts?.signal, opts?.onProgress, opts?.onRunId);
         if (response.success) {
           return { fileName: response.filename || destName, pointCount: response.point_count };
@@ -12684,25 +12687,17 @@ export default function PointCloudViewer({
       return { fileName: saved, pointCount: data.pointCount };
     }
 
-    if (format === 'asc') {
-      // ASC is bare positional ASCII — the same bytes as .xyz under the
-      // extension GIS tools expect, so it carries NO header line (matching the
-      // backend's octree-backed writer and what our importer reads back).
-      let slugs = columns ?? [];
-      if (slugs.length === 0) slugs = ['x', 'y', 'z'];
-      const saved = await writeToPath(buildBareAsciiExport(data, slugs), destPath);
-      return { fileName: saved, pointCount: data.pointCount };
-    }
-
-    if (format === 'xyz' || format === 'txt' || format === 'csv') {
+    if (format === 'xyz' || format === 'asc' || format === 'txt' || format === 'csv') {
       // ASCII export: honor the column list + order chosen in the export modal.
-      // Fall back to a sensible default when none was passed (xyz; plus rgb /
-      // intensity / scalars for txt/csv). CSV uses a plain header row + commas;
-      // xyz/txt use a '#'-prefixed header (CloudCompare convention) + spaces.
+      // Fall back to a sensible default when none was passed (xyz/asc: x/y/z;
+      // txt/csv: plus rgb / intensity / scalars). CSV uses a plain header row +
+      // commas; txt a '#'-prefixed header (CloudCompare convention) + spaces.
+      // xyz/asc (the same bytes under two extensions) carry that '#' header only
+      // when there is something to name — see xyzExportHasHeader.
       let slugs = columns ?? [];
       if (slugs.length === 0) {
         slugs = ['x', 'y', 'z'];
-        if (format !== 'xyz') {
+        if (format === 'txt' || format === 'csv') {
           if (data.colors) slugs.push('r', 'g', 'b');
           if (data.intensities) slugs.push('intensity');
           for (const f of Object.keys(data.scalarFields ?? {})) {
@@ -12710,13 +12705,13 @@ export default function PointCloudViewer({
           }
         }
       }
-      const delimiter = format === 'csv' ? ',' : ' ';
-      const headerPrefix = format === 'csv' ? '' : '# ';
-      const text = buildAsciiExport(data, slugs, delimiter, headerPrefix);
-      {
-        const saved = await writeToPath(text, destPath);
-        return { fileName: saved, pointCount: data.pointCount };
-      }
+      const text = (format === 'xyz' || format === 'asc')
+        ? (xyzExportHasHeader(slugs, opts?.textHeader ?? true)
+          ? buildAsciiExport(data, slugs, ' ', '# ')
+          : buildBareAsciiExport(data, slugs))
+        : buildAsciiExport(data, slugs, format === 'csv' ? ',' : ' ', format === 'csv' ? '' : '# ');
+      const saved = await writeToPath(text, destPath);
+      return { fileName: saved, pointCount: data.pointCount };
     } else if (format === 'ply') {
       // PLY takes a column selection (an ASCII PLY names each column as a
       // `property`, so a chosen scalar round-trips by name). Honor the picker's
@@ -12899,6 +12894,7 @@ export default function PointCloudViewer({
     // selection). Other callers still mean "the selected cloud".
     cloudId?: string,
     las?: { classificationColumn?: string | null },
+    textHeader?: boolean,
   ) => {
     const id = cloudId ?? (selectedIds.size === 1 ? Array.from(selectedIds)[0] : undefined);
     if (!id) return;
@@ -12935,6 +12931,7 @@ export default function PointCloudViewer({
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const result = await exportPointCloudInner(format, columns, cloud, destPath, {
         las,
+        textHeader,
         signal: controller.signal,
         onProgress: (fraction, message) =>
           setExportProgress({ fraction, label: message || 'Exporting…' }),

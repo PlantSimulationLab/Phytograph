@@ -23739,6 +23739,9 @@ class PointCloudExportRequest(BaseModel):
     # Class palettes by column slug ({slug: {classes: [{value, label, color}]}}),
     # written as the LAS classification lookup and a Phytograph palette record.
     class_palettes: Optional[Dict[str, Any]] = None
+    # xyz/asc: write a `# X Y Z <scalar> ...` legend line when the selection goes
+    # beyond x/y/z (see `_text_export_layout`). False = the bare positional file.
+    text_header: bool = True
 
 
 class PointCloudExportResponse(BaseModel):
@@ -23789,6 +23792,7 @@ def _format_points_as_text(
     progress=None,
     extras=None,
     columns=None,
+    text_header: bool = True,
 ) -> str:
     """Format an (N,3) point array (+ optional 0-1 colors, intensity, scalar
     `extras`) as XYZ / TXT / CSV / PLY / OBJ text. Column conventions match the
@@ -23846,7 +23850,8 @@ def _format_points_as_text(
         return "".join(parts).rstrip("\n")
 
     header, cols, fmts, sep = _text_export_layout(
-        fmt, points, colors, intensity, extras=extras, columns=columns)
+        fmt, points, colors, intensity, extras=extras, columns=columns,
+        text_header=text_header)
     body = _savetxt(cols, fmts, sep) if len(points) else ""
     # Join header to body with exactly one newline, and emit no trailing newline
     # in any case — matches the streaming writer, which suppresses the separating
@@ -23927,7 +23932,8 @@ def _resolve_export_columns(
     return [(s, available[s][0], available[s][1]) for s in slugs]
 
 
-def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=None):
+def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=None,
+                        text_header=True):
     """Resolve one text format into (header_lines, columns, per-column formats,
     separator) — the single description both the string and streaming writers
     build from, so they cannot drift.
@@ -23971,11 +23977,18 @@ def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=Non
     fmts = [f for _, _, f in resolved]
 
     if fmt in ("xyz", "asc"):
-        # Bare XYZ carries no header line, so a selection beyond x/y/z is written
-        # as extra whitespace-separated columns — the same convention the
-        # importer's ASCII_format reads back. ASC is the same bytes under the
-        # extension GIS tools expect (and the one Phytograph's own importer
-        # already treats as an xyz-family file).
+        # A selection beyond x/y/z gets a `#`-commented legend line. Without it
+        # the extra columns are positional only, so a re-import named them
+        # `col_N`: a wood/leaf export came back with no `wood_class` at all and
+        # the label tool showed every point Unclassified. `#` is a comment to
+        # our importer (`_read_ascii_header_names` reads it as the legend), to
+        # pandas/np.loadtxt and to CloudCompare. A plain x/y/z file stays bare,
+        # since a legend adds nothing there, and `text_header=False` is the
+        # opt-out for a reader that rejects any comment line. ASC is the same
+        # bytes under the extension GIS tools expect.
+        if text_header and any(s not in ("x", "y", "z") for s in slugs):
+            head = [_TEXT_EXPORT_SLUG_HEADERS.get(s, s) for s in slugs]
+            return ["# " + " ".join(head)], cols, fmts, " "
         return [], cols, fmts, " "
 
     if fmt == "pts":
@@ -24019,6 +24032,7 @@ def _write_points_as_text(
     progress=None,
     extras=None,
     columns=None,
+    text_header: bool = True,
 ) -> None:
     """Format and write a point cloud to `dest` WITHOUT building the whole file
     in memory first.
@@ -24034,7 +24048,8 @@ def _write_points_as_text(
     written without its last newline).
     """
     header, cols, fmts, sep = _text_export_layout(
-        fmt, points, colors, intensity, extras=extras, columns=columns)
+        fmt, points, colors, intensity, extras=extras, columns=columns,
+        text_header=text_header)
     stacked = np.column_stack(cols) if len(points) else None
     total = len(points)
     row_fmt = sep.join(fmts) + "\n"
@@ -24562,7 +24577,7 @@ def _do_point_cloud_export(
                         _write_points_as_text(
                             dest, fmt, points, src_colors, src_intensity,
                             progress=_fmt_progress, extras=src_extras,
-                            columns=request.columns)
+                            columns=request.columns, text_header=request.text_header)
                     text = None
                 elif fmt == "pcd":
                     # PCD has no in-memory formatter (it is written structurally,
@@ -24578,7 +24593,8 @@ def _do_point_cloud_export(
                 else:
                     text = _format_points_as_text(
                         fmt, points, src_colors, src_intensity, progress=_fmt_progress,
-                        extras=src_extras, columns=request.columns)
+                        extras=src_extras, columns=request.columns,
+                        text_header=request.text_header)
             except (HTTPException, ScanCanceled):
                 # ScanCanceled is a plain Exception, so the broad handler below
                 # would swallow it and report a user cancel as "Export failed".
