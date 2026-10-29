@@ -6038,6 +6038,16 @@ export interface QSMRankMetrics {
   mean_branch_angle_deg: number | null;
 }
 
+/** Box-counting dimension of the QSM's woody surface (backend qsm/fractal.py). */
+export interface QSMFractalMetrics {
+  dimension: number;
+  r_squared: number;
+  local_slope_min: number;
+  local_slope_max: number;
+  box_sizes_m: number[];   // largest -> smallest, halving each step
+  box_counts: number[];    // occupied boxes per size
+}
+
 export interface QSMMetrics {
   tcsa_m2: number;
   trunk_diameter_mm: number;
@@ -6052,6 +6062,8 @@ export interface QSMMetrics {
   canopy_width_m: number;
   canopy_height_m: number;
   per_rank: QSMRankMetrics[];
+  // Null when the model spans too few scales to fit (or predates the metric).
+  fractal?: QSMFractalMetrics | null;
 }
 
 export interface QSMBuildResponse {

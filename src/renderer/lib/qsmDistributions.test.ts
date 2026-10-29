@@ -17,6 +17,7 @@ import {
   qaSummary,
   perShootRows,
   treeBaseZ,
+  fractalPlot,
   SURF_COV_FULL_TRUST,
 } from './qsmDistributions';
 
@@ -343,5 +344,38 @@ describe('perShootRows', () => {
     ];
     const shoots = [shoot({ shoot_id: 0, cylinder_ids: [0, 1] })];
     expect(perShootRows(cyls, shoots)[0].lowCoverage).toBe(true);
+  });
+});
+
+describe('fractalPlot', () => {
+  it('returns nothing without fractal data', () => {
+    expect(fractalPlot(null)).toEqual([]);
+    expect(fractalPlot(undefined)).toEqual([]);
+  });
+
+  it('puts a power law on a straight log10 line with slope = dimension', () => {
+    // N = s^-1.5 exactly: the fit passes through every point.
+    const sizes = [8, 4, 2, 1, 0.5];
+    const pts = fractalPlot({
+      dimension: 1.5, r_squared: 1, local_slope_min: 1.5, local_slope_max: 1.5,
+      box_sizes_m: sizes, box_counts: sizes.map(s => s ** -1.5),
+    });
+    expect(pts).toHaveLength(5);
+    for (const p of pts) expect(p.fit).toBeCloseTo(p.log10Count, 10);
+    const slope = (pts[4].fit - pts[0].fit) / (pts[4].log10InvSize - pts[0].log10InvSize);
+    expect(slope).toBeCloseTo(1.5, 10);
+    expect(pts[0].log10InvSize).toBeCloseTo(Math.log10(1 / 8), 10);
+    expect(pts[2].sizeM).toBe(2);
+  });
+
+  it('fits a least-squares line through counts that are not a power law', () => {
+    const pts = fractalPlot({
+      dimension: 0, r_squared: 0, local_slope_min: 0, local_slope_max: 0,
+      box_sizes_m: [1, 0.1, 0.01], box_counts: [1, 100, 1000],
+    });
+    // x = 0, 1, 2; y = 0, 2, 3 -> slope 1.5, intercept 1/6.
+    expect(pts.map(p => p.fit)).toEqual([
+      expect.closeTo(1 / 6, 10), expect.closeTo(5 / 3, 10), expect.closeTo(19 / 6, 10),
+    ]);
   });
 });

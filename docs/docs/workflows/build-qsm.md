@@ -125,8 +125,9 @@ re-computation, it reads the model already in memory:
   grade means the structure is largely one-sided and the model is inferring more
   than it measures (add more scan positions), not that the fit is wrong.
 - **Whole-tree summary** — TCSA, trunk diameter, height, canopy extent,
-  total/stem/branch volume, total length, scaffold and shoot counts, plus
-  a **reconstructed DBH** interpolated from the trunk taper at 1.3 m.
+  total/stem/branch volume, total length, scaffold and shoot counts, the
+  **fractal dimension** with its R² (see below), plus a **reconstructed
+  DBH** interpolated from the trunk taper at 1.3 m.
 - **Stem taper** — trunk diameter narrowing with height; one-sided
   (under-covered) trunk cylinders are tinted amber.
 - **Branch-order distribution** — shoot count, total length, or woody
@@ -138,6 +139,21 @@ re-computation, it reads the model already in memory:
   information.
 - **Vertical profile** — woody volume (or length) binned by height, reading
   as a tree silhouette — useful for biomass partitioning.
+- **Fractal dimension** — the box-counting dimension *D* of the model's
+  woody surface, with its log-log plot: the number of cubes the wood
+  touches, counted at box sizes halving from the tree's extent down to its
+  median branch diameter. A single straight stem reads 1 and wood that
+  fills a plane reads 2; denser, more self-similar crowns read higher.
+  Two numbers judge the fit. **R²** is the straight-line fit that
+  publications report, but box counts almost always fit well, so treat
+  ~0.99 as ordinary and much below 0.98 as poor. The **local slope range**
+  (the slope between each pair of neighboring box sizes) is the stricter
+  test: a true fractal has the same slope at every scale, so a narrow range
+  means *D* describes the whole tree, while a wide one means the trunk-scale
+  and crown-scale structure differ and *D* averages them. It is computed
+  from the cylinders, not the points, so scan density and occlusion holes
+  the model filled in don't affect it. A model too small to span four box
+  sizes (e.g. a trunk-only stub) shows **—**.
 - **Per-shoot table** — every shoot with its rank, length, base diameter,
   fork angle, child count, and volume-weighted surface coverage; click a
   column header to sort. One-sided shoots are tinted so you can see which

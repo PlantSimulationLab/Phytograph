@@ -541,6 +541,7 @@ One row per tree of a batch QSM, failed trees included:
 | `tree_height_m`, `total_length_m` | Model height and summed cylinder length. |
 | `n_scaffolds`, `n_shoots_total`, `max_rank` | Branching structure (see [QSM](../concepts/qsm.md)). |
 | `canopy_width_m`, `canopy_height_m` | Canopy extent of the model. |
+| `fractal_dimension`, `fractal_r2` | Box-counting fractal dimension of the model's woody surface and the R² of its log-log fit (empty when the model spans too few scales). See [Build a QSM](../workflows/build-qsm.md#view-detailed-results). |
 
 ## Skeletons
 

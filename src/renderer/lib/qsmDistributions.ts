@@ -16,7 +16,7 @@
 // Units: cylinder radius/positions are METERS. We surface diameters in mm and
 // lengths/heights in m, matching the existing QSM metrics UI.
 
-import type { QSMCylinder, QSMShoot, QSMMetrics } from '../utils/backendApi';
+import type { QSMCylinder, QSMShoot, QSMMetrics, QSMFractalMetrics } from '../utils/backendApi';
 
 // ---------------------------------------------------------------------------
 // Per-cylinder derived geometry
@@ -497,4 +497,39 @@ export function perShootRows(cyls: QSMCylinder[], shoots: QSMShoot[]): ShootRow[
     });
   }
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Fractal (box-counting) log-log plot
+// ---------------------------------------------------------------------------
+
+export interface FractalPlotPoint {
+  log10InvSize: number; // log10(1 / box edge in m)
+  log10Count: number;   // log10(occupied boxes)
+  fit: number;          // the least-squares line at this x
+  sizeM: number;
+  count: number;
+}
+
+// The box-counting data as log10 points plus the fitted line, so the user can
+// see whether one straight line really describes them. The backend fits in
+// natural log; the slope (the dimension) is the same in any base, so the line is
+// refitted here in log10 rather than converting the backend's intercept.
+export function fractalPlot(f: QSMFractalMetrics | null | undefined): FractalPlotPoint[] {
+  if (!f || f.box_sizes_m.length < 2 || f.box_sizes_m.length !== f.box_counts.length) return [];
+  const xs = f.box_sizes_m.map(s => Math.log10(1 / s));
+  const ys = f.box_counts.map(n => Math.log10(n));
+  const n = xs.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0;
+  for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; }
+  const slope = sxx > 0 ? sxy / sxx : 0;
+  return xs.map((x, i) => ({
+    log10InvSize: x,
+    log10Count: ys[i],
+    fit: my + slope * (x - mx),
+    sizeM: f.box_sizes_m[i],
+    count: f.box_counts[i],
+  }));
 }

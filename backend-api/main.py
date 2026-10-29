@@ -21,6 +21,7 @@ import shutil
 import struct
 # Aliased: `warnings` is used as a local variable name in several converters.
 import warnings as warnings_module
+from dataclasses import asdict as _dc_asdict
 from pathlib import Path
 # Noise-filter criteria (SOR / ROR / voxel-count) + the noise_class
 # constants. Also the single implementation `_reject_sparse_voxels` and
@@ -20996,6 +20997,16 @@ class QSMRankMetrics(BaseModel):
     mean_branch_angle_deg: Optional[float] = None
 
 
+class QSMFractalMetrics(BaseModel):
+    """Box-counting dimension of the woody surface (see qsm/fractal.py)."""
+    dimension: float
+    r_squared: float
+    local_slope_min: float
+    local_slope_max: float
+    box_sizes_m: List[float]
+    box_counts: List[int]
+
+
 class QSMMetricsResponse(BaseModel):
     tcsa_m2: float
     trunk_diameter_mm: float
@@ -21010,6 +21021,7 @@ class QSMMetricsResponse(BaseModel):
     canopy_width_m: float
     canopy_height_m: float
     per_rank: List[QSMRankMetrics]
+    fractal: Optional[QSMFractalMetrics] = None
 
 
 class QSMBuildResponse(BaseModel):
@@ -21070,6 +21082,7 @@ def _qsm_to_response(qsm, m, points_used: int = 0) -> QSMBuildResponse:
                 )
                 for pr in m.per_rank
             ],
+            fractal=QSMFractalMetrics(**_dc_asdict(m.fractal)) if m.fractal else None,
         ),
     )
 

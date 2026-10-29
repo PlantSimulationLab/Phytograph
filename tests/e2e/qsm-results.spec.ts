@@ -64,6 +64,21 @@ test('opens the QSM results window and renders detailed analytics', async () => 
     for (const id of ['qsm-taper-chart', 'qsm-rank-chart', 'qsm-angle-chart', 'qsm-profile-chart']) {
       await expect(page.getByTestId(id).locator('svg').first()).toBeVisible();
     }
+    // Fractal dimension: the Y-shaped plant is three nearly straight axes, so
+    // its box-counting dimension sits just above a single stick's 1 (the live
+    // backend measures ~1.14 on this fixture), with a near-perfect log-log fit.
+    const fractalText = await page.getByTestId('qsm-fractal-dimension').textContent();
+    const fractalMatch = fractalText?.match(/^([\d.]+) \(R² ([\d.]+)\)$/);
+    expect(fractalMatch, `fractal row read "${fractalText}"`).not.toBeNull();
+    const dim = parseFloat(fractalMatch![1]);
+    const r2 = parseFloat(fractalMatch![2]);
+    expect(dim).toBeGreaterThan(1.0);
+    expect(dim).toBeLessThan(1.4);
+    expect(r2).toBeGreaterThan(0.98);
+    expect(r2).toBeLessThanOrEqual(1.0);
+    await expect(page.getByTestId('qsm-fractal-section')).toContainText(`D = ${dim.toFixed(2)}`);
+    await expect(page.getByTestId('qsm-fractal-chart').locator('svg').first()).toBeVisible();
+
     // QA panel has its two histograms.
     await expect(page.getByTestId('qsm-qa-charts').locator('svg')).toHaveCount(2);
 

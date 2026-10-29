@@ -202,6 +202,7 @@ export const TREE_QSM_CSV_HEADER = [
   'n_cylinders', 'n_shoots', 'total_woody_volume_m3', 'stem_volume_m3', 'branch_volume_m3',
   'trunk_diameter_mm', 'tcsa_m2', 'tree_height_m', 'total_length_m', 'n_scaffolds',
   'n_shoots_total', 'max_rank', 'canopy_width_m', 'canopy_height_m',
+  'fractal_dimension', 'fractal_r2',
 ] as const;
 
 /** One row per tree of a batch QSM, failed trees included with their error. */
@@ -216,6 +217,7 @@ export function buildTreeQsmCsv(scanName: string, results: TreeQSMResult[]): str
       num(m?.trunk_diameter_mm, 1), num(m?.tcsa_m2, 6), num(m?.tree_height_m, 3),
       num(m?.total_length_m, 3), m ? String(m.n_scaffolds) : '', m ? String(m.n_shoots_total) : '',
       m ? String(m.max_rank) : '', num(m?.canopy_width_m, 3), num(m?.canopy_height_m, 3),
+      num(m?.fractal?.dimension, 3), num(m?.fractal?.r_squared, 4),
     ];
   });
   return [TREE_QSM_CSV_HEADER as readonly string[], ...rows]

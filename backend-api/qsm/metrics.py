@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .fractal import FractalMetrics, compute_fractal_dimension
 from .model import QSM, NO_PARENT
 
 
@@ -61,6 +62,10 @@ class QSMMetrics:
     canopy_height_m: float  # vertical extent of rank>=1 wood (crown)
 
     per_rank: list[RankMetrics] = field(default_factory=list)
+
+    # Box-counting fractal dimension of the woody surface (qsm/fractal.py);
+    # None when the model spans too few scales to fit one.
+    fractal: FractalMetrics | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -192,4 +197,5 @@ def compute_metrics(qsm: QSM) -> QSMMetrics:
         canopy_width_m=canopy_width,
         canopy_height_m=canopy_height,
         per_rank=per_rank,
+        fractal=compute_fractal_dimension(qsm),
     )

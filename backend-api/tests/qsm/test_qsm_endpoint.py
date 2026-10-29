@@ -160,6 +160,14 @@ def test_build_qsm_metrics_plausible(client, cloud_points):
     # Per-rank diameters present and tapering.
     by_rank = {pr["rank"]: pr for pr in m["per_rank"]}
     assert by_rank[0]["mean_diameter_mm"] > by_rank[1]["mean_diameter_mm"]
+    # Box-counting dimension of a branched tree: more than a stick, less than
+    # a surface, fitted over at least the minimum number of octaves.
+    f = m["fractal"]
+    assert f is not None
+    assert 1.0 < f["dimension"] < 2.0, f["dimension"]
+    assert 0.9 < f["r_squared"] <= 1.0, f["r_squared"]
+    assert f["local_slope_min"] <= f["dimension"] <= f["local_slope_max"]
+    assert len(f["box_sizes_m"]) == len(f["box_counts"]) >= 4
 
 
 def test_build_qsm_radii_corrected_and_quality_populated(client, cloud_points):
@@ -530,9 +538,14 @@ def test_import_qsm_recomputes_identical_metrics(client, exported_csv):
     want, got = built["metrics"], body["metrics"]
     assert got is not None
     for field, value in want.items():
-        if field == "per_rank":
+        if field in ("per_rank", "fractal"):
             continue
         assert got[field] == pytest.approx(value, rel=1e-9), field
+
+    assert want["fractal"] is not None
+    assert got["fractal"]["box_counts"] == want["fractal"]["box_counts"]
+    for field in ("dimension", "r_squared", "local_slope_min", "local_slope_max"):
+        assert got["fractal"][field] == pytest.approx(want["fractal"][field], rel=1e-9), field
 
     assert len(got["per_rank"]) == len(want["per_rank"])
     for g, w in zip(got["per_rank"], want["per_rank"]):

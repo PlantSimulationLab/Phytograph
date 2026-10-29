@@ -64,6 +64,10 @@ breakdown:
 - **Tree height** and **canopy** extent.
 - **Scaffold count** — the number of rank-1 shoots.
 - **Woody volume**, split into **stem** (rank 0) and **branch** (rank ≥ 1).
+- **Fractal dimension** — the box-counting dimension of the woody surface
+  (1 = a single stick, 2 = fills a plane), with the R² of its log-log fit and
+  the range of local slopes across scales as measures of how fractal the
+  tree really is.
 - **Per rank**: shoot count, total and mean shoot length,
   length-weighted mean diameter, mean crotch angle, woody volume.
 - **Per shoot**: rank, length, and mean diameter.

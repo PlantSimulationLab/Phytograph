@@ -8,7 +8,7 @@ import type { QSMEntry } from '../lib/pointCloudTypes';
 import {
   taperProfile, diameterAtHeight, rankBars, branchAngleHistogram,
   heightProfile, surfCovHistogram, madHistogram, qaSummary, perShootRows,
-  rankLabel, LOW_COVERAGE,
+  rankLabel, LOW_COVERAGE, fractalPlot,
   type CoverageGrade, type ShootRow,
 } from '../lib/qsmDistributions';
 
@@ -73,6 +73,8 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
   const surfHist = useMemo(() => surfCovHistogram(cyls, 20), [cyls]);
   const madHist = useMemo(() => madHistogram(cyls, 20), [cyls]);
   const shootRows = useMemo(() => perShootRows(cyls, shoots), [cyls, shoots]);
+  const fractal = metrics?.fractal ?? null;
+  const fractalData = useMemo(() => fractalPlot(fractal), [fractal]);
 
   const sortedShoots = useMemo(() => {
     const dir = sortDesc ? -1 : 1;
@@ -175,6 +177,11 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
                     <Row k="Stem / branch vol" v={`${(metrics.stem_volume_m3 * 1e6).toFixed(0)} / ${(metrics.branch_volume_m3 * 1e6).toFixed(0)} cm³`} />
                     <Row k="Scaffolds" v={`${metrics.n_scaffolds}`} />
                     <Row k="Shoots / max rank" v={`${metrics.n_shoots_total} / ${metrics.max_rank}`} />
+                    <Row
+                      k="Fractal dimension"
+                      v={fractal ? `${fractal.dimension.toFixed(2)} (R² ${fractal.r_squared.toFixed(3)})` : '—'}
+                      testId="qsm-fractal-dimension"
+                    />
                   </div>
                 </div>
               )}
@@ -297,6 +304,52 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
                 </div>
               </div>
 
+              {/* Box-counting fractal dimension: the log-log data and its fit,
+                  so a curved run of points is visible rather than hidden
+                  behind a high R². */}
+              {fractal && fractalData.length > 0 && (
+                <div data-testid="qsm-fractal-section">
+                  <h3 className="text-xs font-medium text-neutral-300 mb-1">
+                    Fractal dimension (box counting): D = {fractal.dimension.toFixed(2)}
+                  </h3>
+                  <p className="text-[10px] text-neutral-500 mb-1.5 max-w-prose">
+                    Slope of occupied boxes against box size, from the tree's
+                    extent ({fractal.box_sizes_m[0].toFixed(2)} m) down to its
+                    median branch diameter ({(fractal.box_sizes_m[fractal.box_sizes_m.length - 1] * 100).toFixed(1)} cm).
+                    1 is a single stick, 2 fills a plane. R² {fractal.r_squared.toFixed(3)} is
+                    the line's fit; box counts always fit well, so watch the local
+                    slope between octaves ({fractal.local_slope_min.toFixed(2)}–{fractal.local_slope_max.toFixed(2)}):
+                    a narrow range means the tree is self-similar across scales.
+                  </p>
+                  <div style={{ width: '100%', height: 220 }} data-testid="qsm-fractal-chart">
+                    <ResponsiveContainer width="100%" height={220}>
+                      <ComposedChart data={fractalData} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
+                        <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
+                        <XAxis
+                          dataKey="log10InvSize" type="number" domain={['dataMin', 'dataMax']}
+                          tick={AXIS_TICK} tickFormatter={(v: number) => v.toFixed(1)}
+                          label={{ value: 'log₁₀(1 / box size, m)', position: 'insideBottom', offset: -8, fill: '#a1a1aa', fontSize: 11 }}
+                        />
+                        <YAxis
+                          type="number" tick={AXIS_TICK} tickFormatter={(v: number) => v.toFixed(1)}
+                          label={{ value: 'log₁₀(boxes)', angle: -90, position: 'insideLeft', fill: '#a1a1aa', fontSize: 11 }}
+                        />
+                        <Tooltip
+                          contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#e4e4e7' }}
+                          labelFormatter={(_, payload) => {
+                            const p = payload?.[0]?.payload as { sizeM?: number; count?: number } | undefined;
+                            return p?.sizeM != null ? `box ${p.sizeM.toFixed(3)} m: ${p.count} boxes` : '';
+                          }}
+                          formatter={(v) => (typeof v === 'number' ? v.toFixed(3) : String(v ?? ''))}
+                        />
+                        <Line dataKey="fit" name="fit" stroke={NEUTRAL_BAR_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                        <Scatter dataKey="log10Count" name="log₁₀ boxes" fill={RANK_BAR_COLOR} isAnimationActive={false} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
               {/* Per-shoot table */}
               <div>
                 <h3 className="text-xs font-medium text-neutral-300 mb-1">Shoots ({shootRows.length})</h3>
@@ -362,11 +415,11 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
   );
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function Row({ k, v, testId }: { k: string; v: string; testId?: string }) {
   return (
     <>
       <span>{k}</span>
-      <span className="text-neutral-200 text-right">{v}</span>
+      <span className="text-neutral-200 text-right" data-testid={testId}>{v}</span>
     </>
   );
 }

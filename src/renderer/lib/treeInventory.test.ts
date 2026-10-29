@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import type { TreeInventoryTree, StemCurveRow } from '../utils/backendApi';
+import type { TreeInventoryTree, StemCurveRow, TreeQSMResult, QSMMetrics } from '../utils/backendApi';
 import {
   sortTrees, carryOverEdits, buildTreeListCsv, buildStemCurveCsv, TREE_LIST_CSV_HEADER,
-  STEM_CURVE_CSV_HEADER, treeFrameTarget, treeOverlaySegments, describeFlags,
+  STEM_CURVE_CSV_HEADER, buildTreeQsmCsv, TREE_QSM_CSV_HEADER, treeFrameTarget, treeOverlaySegments, describeFlags,
 } from './treeInventory';
 
 function tree(id: number, over: Partial<TreeInventoryTree> = {}): TreeInventoryTree {
@@ -121,6 +121,37 @@ describe('buildStemCurveCsv', () => {
     expect(rows[0]).toEqual([...STEM_CURVE_CSV_HEADER]);
     expect(rows.slice(1).map(r => `${r[1]}@${r[2]}`)).toEqual(['1@0.500', '1@1.500', '2@1.000', '2@2.500']);
     expect(rows[4][11]).toBe('false');
+  });
+});
+
+describe('buildTreeQsmCsv fractal columns', () => {
+  const metrics = (fractal: QSMMetrics['fractal']): QSMMetrics => ({
+    tcsa_m2: 0.01, trunk_diameter_mm: 100, tree_height_m: 5, n_scaffolds: 3,
+    n_shoots_total: 10, max_rank: 2, total_woody_volume_m3: 0.1, stem_volume_m3: 0.06,
+    branch_volume_m3: 0.04, total_length_m: 20, canopy_width_m: 3, canopy_height_m: 3,
+    per_rank: [], fractal,
+  });
+  const result = (tree_id: number, m: QSMMetrics | null): TreeQSMResult => ({
+    tree_id, success: m != null, points_in_tree: 1000, points_used: 1000, voxel_m: null,
+    wood_only: false, n_cylinders: 10, n_shoots: 10, metrics: m,
+  });
+
+  it('appends the dimension and R² at the end of each row', () => {
+    const csv = buildTreeQsmCsv('scan', [
+      result(1, metrics({
+        dimension: 1.6234, r_squared: 0.99123, local_slope_min: 1.2, local_slope_max: 2.0,
+        box_sizes_m: [1, 0.5], box_counts: [1, 3],
+      })),
+      result(2, metrics(null)),
+      result(3, null),
+    ]).trim().split('\n').map(l => l.split(','));
+    expect(csv[0].slice(-2)).toEqual(['fractal_dimension', 'fractal_r2']);
+    expect(TREE_QSM_CSV_HEADER.slice(-2)).toEqual(['fractal_dimension', 'fractal_r2']);
+    expect(csv[1].slice(-2)).toEqual(['1.623', '0.9912']);
+    // Too few scales to fit, and a failed tree: blank, not 0.
+    expect(csv[2].slice(-2)).toEqual(['', '']);
+    expect(csv[3].slice(-2)).toEqual(['', '']);
+    for (const row of csv) expect(row).toHaveLength(TREE_QSM_CSV_HEADER.length);
   });
 });
 
