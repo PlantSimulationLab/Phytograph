@@ -382,7 +382,10 @@ color, as Blender and Helios write it — see
 [File formats](../reference/file-formats.md). An `.obj` with no `.mtl`
 (and `.stl`, which has no materials) imports as plain geometry. See
 [Meshes: Textures](../concepts/meshes.md#textures). Meshes imported from a file
-default to fully opaque.
+default to fully opaque. If the `.obj` names its parts with `o` / `g` lines,
+they are kept as the mesh's **object groups**. You can show, hide, select,
+transform, recolor, extract, or delete each one from the Meshes panel. See
+[Meshes: Object groups](../concepts/meshes.md#object-groups).
 
 A `.ply` is imported as a mesh when its header declares faces (otherwise it
 imports as a point cloud — see

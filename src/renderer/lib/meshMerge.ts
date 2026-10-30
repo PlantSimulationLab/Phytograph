@@ -11,6 +11,7 @@ import { meshCropBlockReason } from './meshCrop';
 import { analyzeMeshOverlap, blendOverlapPositions, matchOverlapColors, overlapTriangleKeepMasks } from './meshOverlap';
 import { bakeTransformIntoMeshData } from './meshTransform';
 import type { MeshData, MeshEntry, PlantMaterialDef } from './pointCloudTypes';
+import { compactGroups, hasGroups } from './meshGroups';
 
 /** Whether a mesh renders through the textured material-group path. */
 export function isTexturedMeshData(data: MeshData, materials?: PlantMaterialDef[]): boolean {
@@ -56,6 +57,8 @@ export interface MeshMergePart {
   /** The mesh's solid display color (CSS hex), used where it has no vertex colors. */
   color: string;
   materials?: PlantMaterialDef[];
+  /** Display name; becomes this part's object-group name when the merged mesh carries groups. */
+  name?: string;
 }
 
 export interface MeshMergeOptions {
@@ -124,8 +127,14 @@ function dropTriangles(data: MeshData, materials: PlantMaterialDef[] | undefined
     return out;
   };
   const normals = pick(data.normals, 3), vertexColors = pick(data.vertexColors, 3), uvCoordinates = pick(data.uvCoordinates, 2);
+  let groups: Pick<MeshData, 'triangleGroupIds' | 'groupNames'> = {};
+  if (data.triangleGroupIds && data.groupNames && data.triangleGroupIds.length === data.triangleCount) {
+    const triangleGroupIds = new Uint32Array(triangleCount);
+    for (let t = 0; t < data.triangleCount; t++) if (triRemap[t] >= 0) triangleGroupIds[triRemap[t]] = data.triangleGroupIds[t];
+    groups = { triangleGroupIds, groupNames: data.groupNames };
+  }
   return {
-    data: {
+    data: compactGroups({
       vertices: pick(data.vertices, 3)!,
       indices,
       ...(normals ? { normals } : {}),
@@ -133,7 +142,8 @@ function dropTriangles(data: MeshData, materials: PlantMaterialDef[] | undefined
       ...(uvCoordinates ? { uvCoordinates } : {}),
       vertexCount,
       triangleCount,
-    },
+      ...groups,
+    }),
     ...(materials ? {
       materials: materials
         .map(m => ({ ...m, triangleIndices: m.triangleIndices.filter(t => triRemap[t] >= 0).map(t => triRemap[t]) }))
@@ -153,6 +163,9 @@ function dropTriangles(data: MeshData, materials: PlantMaterialDef[] | undefined
  *   materials, with triangle ordinals offset and colliding names made unique.
  * - Backend per-triangle metadata (scan ids, cell ids, edge stats) is not
  *   carried: the mergeable kinds do not have it.
+ * - Object groups ARE carried, because they are how a merged mesh keeps track
+ *   of its parts: when any part has groups, the result keeps every part's
+ *   groups and a part without any becomes one group named after it.
  * - Where the parts cover the same surface nothing is reconciled unless `opts`
  *   asks: by default both surfaces stay, each with its own colors.
  */
@@ -187,6 +200,17 @@ export function mergeMeshData(parts: MeshMergePart[], opts: MeshMergeOptions = {
   const uvCoordinates = textured ? new Float32Array(vertexCount * 2) : undefined;
   const materials: PlantMaterialDef[] = [];
   const takenNames = new Set<string>();
+  const wantGroups = parts.some(p => hasGroups(p.data));
+  const triangleGroupIds = wantGroups ? new Uint32Array(triangleCount) : undefined;
+  const groupNames: string[] = [];
+  const takenGroupNames = new Set<string>();
+  const addGroupName = (base: string) => {
+    let name = base;
+    for (let n = 2; takenGroupNames.has(name); n++) name = `${base}_${n}`;
+    takenGroupNames.add(name);
+    groupNames.push(name);
+    return groupNames.length - 1;
+  };
 
   let v0 = 0, t0 = 0;
   parts.forEach((part, k) => {
@@ -207,6 +231,15 @@ export function mergeMeshData(parts: MeshMergePart[], opts: MeshMergeOptions = {
       }
     }
     if (uvCoordinates) uvCoordinates.set(d.uvCoordinates!.subarray(0, d.vertexCount * 2), v0 * 2);
+    if (triangleGroupIds) {
+      if (hasGroups(part.data)) {
+        const remap = part.data.groupNames!.map(addGroupName);
+        const ids = part.data.triangleGroupIds!;
+        for (let t = 0; t < d.triangleCount; t++) triangleGroupIds[t0 + t] = remap[ids[t]];
+      } else {
+        triangleGroupIds.fill(addGroupName(part.name ?? `Mesh ${k + 1}`), t0, t0 + d.triangleCount);
+      }
+    }
     if (allMaterials) {
       for (const m of part.materials!) {
         let name = m.name;
@@ -228,6 +261,7 @@ export function mergeMeshData(parts: MeshMergePart[], opts: MeshMergeOptions = {
       ...(uvCoordinates ? { uvCoordinates } : {}),
       vertexCount,
       triangleCount,
+      ...(triangleGroupIds ? { triangleGroupIds, groupNames } : {}),
     },
     ...(allMaterials ? { materials } : {}),
   };

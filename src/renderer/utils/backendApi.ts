@@ -3457,6 +3457,12 @@ export async function importTexturedMesh(
       uvCoordinates: buffers.uv_coordinates as Float32Array | undefined,
       vertexCount: meta.vertex_count as number,
       triangleCount: meta.triangle_count as number,
+      ...(buffers.triangle_group_ids && Array.isArray(meta.group_names)
+        ? {
+            triangleGroupIds: buffers.triangle_group_ids as Uint32Array,
+            groupNames: meta.group_names as string[],
+          }
+        : {}),
     },
     plantMaterials,
     filename: meta.filename as string | undefined,

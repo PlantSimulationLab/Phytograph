@@ -5394,7 +5394,7 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
                 if k not in ("vertices", "triangles", "indices", "normals", "colors", "uv_coordinates")}
         return _bin_frame_bytes(meta, [])
     array_keys = {"vertices", "triangles", "indices", "normals", "colors", "uv_coordinates",
-                  "triangle_cell_ids"}
+                  "triangle_cell_ids", "triangle_group_ids"}
     meta = {k: v for k, v in result.items() if k not in array_keys}
     buffers = [("vertices", result["vertices"], "f32"), ("indices", result[index_key], "u32")]
     for opt in ("normals", "colors", "uv_coordinates"):
@@ -5407,6 +5407,9 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
     if cell_ids is not None and len(cell_ids) > 0:
         buffers.append(("triangle_cell_ids",
                         np.asarray(cell_ids).astype(np.int64) & 0xFFFFFFFF, "u32"))
+    group_ids = result.get("triangle_group_ids")
+    if group_ids is not None and len(group_ids) > 0:
+        buffers.append(("triangle_group_ids", group_ids, "u32"))
     return _bin_frame_bytes(meta, buffers)
 
 
@@ -23723,6 +23726,10 @@ def _do_mesh_import(request: MeshImportRequest) -> dict:
         "triangle_count": len(out_faces),
         "filename": obj_path.name,
         "has_textures": has_textures,
+        # OBJ `o`/`g` object groups, one id per triangle (absent when the file
+        # declares none). The renderer lists them as sub-groups of the mesh.
+        "triangle_group_ids": tpl.get("tri_group"),
+        "group_names": tpl.get("group_names"),
     }
 
 

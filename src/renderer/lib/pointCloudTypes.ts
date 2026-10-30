@@ -574,6 +574,13 @@ export interface MeshData {
   // Helios triangulation mesh and on the filtered views derived from it.
   triEdgeMax?: Float32Array;
   triAspect?: Float32Array;
+  // Object groups from an imported OBJ's `o`/`g` lines: the group index per
+  // triangle (aligned 1:1 with `indices`/3) and each group's name. Both are
+  // present or both absent. The Meshes panel lists them as the mesh's sub-groups,
+  // and group operations (transform, recolor, delete, extract) act on the
+  // triangles tagged with the selected ids. See lib/meshGroups.ts.
+  triangleGroupIds?: Uint32Array;
+  groupNames?: string[];
 }
 
 // Per-triangle pseudocolor modes for a triangulated mesh. 'solid' uses the
@@ -700,6 +707,9 @@ export interface MeshEntry {
   regenerationKey?: number;  // Counter that increments on each regeneration to force React remount
   heliosXml?: string;  // Plant structure XML for Helios simulation export
   plantMaterials?: PlantMaterialDef[];  // Materials with textures for plant rendering
+  // Ids (into `data.groupNames`) of object groups whose eye is off in the
+  // Meshes panel. View state like `visible`: not undoable, saved with the project.
+  hiddenGroups?: number[];
   // Canopy-specific: grid dimensions when this plant mesh is a multi-plant canopy.
   // Drives the display name (e.g. "bean canopy 3×3 (30d)"); absent for single plants.
   plantCanopy?: { countX: number; countY: number; plantCount: number };

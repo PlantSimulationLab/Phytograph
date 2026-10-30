@@ -15,6 +15,7 @@ import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTarg
 import { bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
 import { mergeMeshData, mergedMeshName, meshMergeBlockReason, meshMergeSetBlockReason } from '../lib/meshMerge';
 import { countMask, cropMeshEntry, meshCropBlockReason, meshTriangleRegionMask, meshWorldBounds, subsetMaterials, subsetMeshData } from '../lib/meshCrop';
+import { groupDisplayColor, groupLocalCentroid, groupTriangleMask, hasGroups, intersectTriangleMasks, recolorGroups, remapHiddenGroups, splitGroups, transformGroups, visibleTriangleMask } from '../lib/meshGroups';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
@@ -1080,6 +1081,9 @@ export default function PointCloudViewer({
   const [selectedMeshLayer, setSelectedMeshLayer] = useState<Map<string, string>>(new Map());
   // Which mesh rows have their inline "Color by" section expanded.
   const [expandedMeshIds, setExpandedMeshIds] = useState<Set<string>>(new Set());
+  // Which mesh rows have their object-group list (an OBJ's `o`/`g` parts)
+  // expanded. Collapsed by default.
+  const [expandedMeshGroupIds, setExpandedMeshGroupIds] = useState<Set<string>>(new Set());
   // Inline rename: which mesh row is being edited, and the in-progress text.
   const [renamingMeshId, setRenamingMeshId] = useState<string | null>(null);
   const [renamingMeshValue, setRenamingMeshValue] = useState('');
@@ -1087,6 +1091,11 @@ export default function PointCloudViewer({
   // (the swatch's bounding rect) so the popover can render as a fixed overlay —
   // escaping the panel's overflow clip and backdrop-blur stacking context.
   const [colorPopoverMeshId, setColorPopoverMeshId] = useState<string | null>(null);
+  // When the popover was opened from an object-group row: the groups it
+  // recolors, and the color being picked. A group recolor rewrites the mesh's
+  // vertex colors, so it commits once, when the popover closes, rather than on
+  // every step of a picker drag.
+  const [colorPopoverGroups, setColorPopoverGroups] = useState<{ groups: number[]; draft: string } | null>(null);
   const [colorPopoverAnchor, setColorPopoverAnchor] = useState<{ top: number; left: number } | null>(null);
   // Same anchored-overlay pattern for per-scan color, keyed by scan id.
   const [colorPopoverScanId, setColorPopoverScanId] = useState<string | null>(null);
@@ -1537,6 +1546,17 @@ export default function PointCloudViewer({
   const [selectedMeshIds, setSelectedMeshIds] = useState<Set<string>>(new Set());
   // Derived single mesh ID for backward compatibility (first selected mesh)
   const selectedMeshId = selectedMeshIds.size > 0 ? Array.from(selectedMeshIds)[0] : null;
+  // A selection INSIDE one mesh: some of its object groups (lib/meshGroups.ts).
+  // Exclusive with selectedMeshIds, so "the mesh is selected" and "part of it
+  // is" can never both drive a gesture: t/r/s act on exactly the groups.
+  const [selectedMeshGroups, setSelectedMeshGroups] = useState<{ meshId: string; groups: Set<number> } | null>(null);
+  const lastSelectedMeshGroupRef = useRef<number | null>(null);
+  // Live preview of a t/r/s gesture on the selected groups: the mesh-LOCAL
+  // matrix their triangles are drawn through until the gesture commits (which
+  // bakes it into the vertices) or is canceled.
+  const [groupTransformPreview, setGroupTransformPreview] = useState<{ meshId: string; matrix: THREE.Matrix4 } | null>(null);
+  const selectedMeshGroupsRef = useRef(selectedMeshGroups);
+  selectedMeshGroupsRef.current = selectedMeshGroups;
   // Skeletons are multi-selectable (Set) like meshes; selectedSkeletonId is the
   // back-compat first-element derive that the translate gizmo / edit memos read
   // as "the focused skeleton".
@@ -1569,9 +1589,11 @@ export default function PointCloudViewer({
   // row's trash button, N for a header bulk delete); `label` is either the one
   // item's name or a count like "3 scans".
   const [deleteConfirm, setDeleteConfirm] = useState<{
-    type: 'mesh' | 'skeleton' | 'cloud' | 'qsm';
+    // 'group': object groups of one mesh — `ids` are group indices, `meshId` the mesh.
+    type: 'mesh' | 'skeleton' | 'cloud' | 'qsm' | 'group';
     ids: string[];
     label: string;
+    meshId?: string;
   } | null>(null);
 
   // "Remove flagged points" confirmation for the noise filter. Held as the
@@ -3191,6 +3213,13 @@ export default function PointCloudViewer({
   const meshPositionsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
   const meshRotationsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
   const meshScalesRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+  // A mesh's current local → world matrix, read through the refs so it is
+  // never a render behind a gesture.
+  const meshWorldMatrixOf = useCallback((id: string) => meshWorldMatrix(
+    meshPositionsRef.current.get(id) || { x: 0, y: 0, z: 0 },
+    meshRotationsRef.current.get(id) || { x: 0, y: 0, z: 0 },
+    meshScalesRef.current.get(id) || { x: 1, y: 1, z: 1 },
+  ), []);
   // Latest scene grid options, mirrored for callbacks defined before the memo
   // (e.g. exportScanXmlBundle) so they can resolve grid ids without a stale dep.
   const heliosGridOptionsRef = useRef<GridOption[]>([]);
@@ -3206,8 +3235,17 @@ export default function PointCloudViewer({
     pivot: { x: number; y: number; z: number };
     // 'tool' = the open Transformation tool: the gesture drives its shared
     // delta (every checked cloud and mesh), never an object directly.
-    target: 'mesh' | 'skeleton' | 'pose' | 'scan' | 'tool';
+    target: 'mesh' | 'skeleton' | 'pose' | 'scan' | 'tool' | 'meshGroup';
     originalDelta?: AffineDelta;
+    // 'meshGroup': object groups inside one mesh. The gesture builds a WORLD
+    // delta about `groupWorldPivot`, previews it as `groupLocal` = L⁻¹·D·L
+    // (L = the mesh's local → world matrix, captured up front), and on commit
+    // bakes `groupLocal` into the groups' vertices.
+    groupMeshId?: string;
+    groupIds?: number[];
+    groupWorldPivot?: THREE.Vector3;
+    groupL?: THREE.Matrix4;
+    groupLocal?: THREE.Matrix4;
     // Every selected mesh / skeleton, not just the first: t/s/r transform the
     // whole selection as a group about a shared pivot (the centroid of the set).
     // The originals are per-id, captured up front, so each object's delta is
@@ -10260,6 +10298,26 @@ export default function PointCloudViewer({
     }
     return out;
   }, [editMode, isApplyingCrop, cropSegment, boxDrawing, cropMeshTargets, meshes, cropInvert, buildCropPredicate, meshCropMatrixOf]);
+
+  // Draw masks for meshes with object groups: `main` leaves out hidden and
+  // selected groups (and whatever a crop preview cuts); `selected` is the
+  // selected, visible groups, drawn separately so they can be outlined and
+  // follow a t/r/s gesture. Memoized so the renderers' index rebuilds happen
+  // only when one of these actually changes, not on every viewer render.
+  const meshGroupMasks = useMemo(() => {
+    const out = new Map<string, { main: Uint8Array | null; selected: Uint8Array | null }>();
+    for (const mesh of meshes) {
+      if (!hasGroups(mesh.data)) continue;
+      const sel = selectedMeshGroups?.meshId === mesh.id ? selectedMeshGroups.groups : undefined;
+      const crop = meshCropPreview.get(mesh.id)?.mask ?? null;
+      const main = intersectTriangleMasks(visibleTriangleMask(mesh.data, mesh.hiddenGroups, sel), crop);
+      const selected = sel
+        ? intersectTriangleMasks(intersectTriangleMasks(groupTriangleMask(mesh.data, sel), visibleTriangleMask(mesh.data, mesh.hiddenGroups)), crop)
+        : null;
+      if (main || selected) out.set(mesh.id, { main, selected });
+    }
+    return out;
+  }, [meshes, selectedMeshGroups, meshCropPreview]);
   // Triangles the preview is drawing across the checked meshes ('' when no
   // region is being previewed) — the crop panel's data-mesh-preview-kept.
   const meshCropPreviewKeptStr = useMemo(() => {
@@ -13597,6 +13655,7 @@ export default function PointCloudViewer({
       matrix: toPivot.clone().multiply(matrices[i]),
       color: m.color,
       materials: m.plantMaterials,
+      name: displayNameOfMesh(m),
     })), { matchColors: opts?.matchColors === true, removeOverlap: opts?.removeOverlap === true });
     // Say what the overlap options did — including nothing, since "no overlap
     // found" (meshes not aligned, or facing opposite ways) otherwise looks
@@ -18644,6 +18703,155 @@ export default function PointCloudViewer({
     commitProperty('mesh', meshId, 'color', before, color, 'Change mesh color');
   }, [scene, commitProperty]);
 
+  // ---- Object groups (an imported OBJ's `o`/`g` parts; lib/meshGroups.ts) ----
+  // A group is a set of the mesh's triangles, so each edit below rewrites the
+  // mesh's arrays and commits ONE undoable replaceObject. Group visibility is
+  // view state like the mesh's own eye: written without history.
+
+  const handleSelectMeshGroup = useCallback((meshId: string, group: number, additive: boolean, range: boolean) => {
+    const mesh = meshes.find(m => m.id === meshId);
+    if (!mesh?.data.groupNames) return;
+    const order = mesh.data.groupNames.map((_, i) => String(i));
+    setSelectedMeshGroups(prev => {
+      const same = prev?.meshId === meshId;
+      const prevIds = new Set(same ? [...prev!.groups].map(String) : []);
+      const anchor = same && lastSelectedMeshGroupRef.current !== null ? String(lastSelectedMeshGroupRef.current) : null;
+      const next = nextSelection(prevIds, String(group), order, anchor, additive, range);
+      return next.size > 0 ? { meshId, groups: new Set([...next].map(Number)) } : null;
+    });
+    if (!range) lastSelectedMeshGroupRef.current = group;
+    // Single focus: a group selection replaces every other selection.
+    setSelectedMeshIds(new Set());
+    setSelectedSkeletonIds(new Set());
+    setSelectedQSMIds(new Set());
+    onDeselectAll();
+  }, [meshes, onDeselectAll]);
+
+  // Undo/redo or an edit can renumber or remove groups: drop selected ids that
+  // no longer exist.
+  useEffect(() => {
+    setSelectedMeshGroups(prev => {
+      if (!prev) return prev;
+      const n = meshes.find(m => m.id === prev.meshId)?.data.groupNames?.length ?? 0;
+      const kept = [...prev.groups].filter(g => g < n);
+      if (kept.length === prev.groups.size) return prev;
+      return kept.length > 0 ? { meshId: prev.meshId, groups: new Set(kept) } : null;
+    });
+  }, [meshes]);
+
+  const handleToggleMeshGroupVisibility = useCallback((meshId: string, group: number) => {
+    setMeshes(prev => prev.map(m => {
+      if (m.id !== meshId) return m;
+      const hidden = new Set(m.hiddenGroups ?? []);
+      if (hidden.has(group)) hidden.delete(group); else hidden.add(group);
+      return { ...m, hiddenGroups: hidden.size > 0 ? [...hidden].sort((a, b) => a - b) : undefined };
+    }));
+  }, []);
+
+  const handleSetMeshGroupColor = useCallback((meshId: string, groups: number[], color: string) => {
+    const before = scene.state.meshes.find(m => m.id === meshId);
+    if (!before || groups.length === 0) return;
+    const after: MeshEntry = { ...before, data: recolorGroups(before.data, new Set(groups), color, before.color) };
+    scene.commit({ label: 'recolor group', actions: [{ t: 'replaceObject', kind: 'mesh', id: meshId, before, after }] });
+  }, [scene]);
+
+  // Delete: the mesh without those triangles. Deleting every group deletes the mesh.
+  const deleteMeshGroups = useCallback((meshId: string, groups: number[]) => {
+    const before = scene.state.meshes.find(m => m.id === meshId);
+    if (!before || groups.length === 0) return;
+    const { rest } = splitGroups(before.data, before.plantMaterials, new Set(groups));
+    setSelectedMeshGroups(null);
+    if (!rest) {
+      removeObjects('mesh', [meshId]);
+      return;
+    }
+    const after: MeshEntry = {
+      ...before,
+      data: rest.data,
+      ...(before.plantMaterials ? { plantMaterials: rest.materials } : {}),
+      hiddenGroups: remapHiddenGroups(before.hiddenGroups, before.data.groupNames, rest.data.groupNames),
+    };
+    scene.commit({ label: groups.length > 1 ? 'delete groups' : 'delete group', actions: [{ t: 'replaceObject', kind: 'mesh', id: meshId, before, after }] });
+  }, [scene, removeObjects]);
+
+  const handleRequestDeleteMeshGroups = useCallback((meshId: string, groups: number[]) => {
+    const mesh = meshes.find(m => m.id === meshId);
+    if (!mesh?.data.groupNames || groups.length === 0) return;
+    setDeleteConfirm({
+      type: 'group',
+      ids: groups.map(String),
+      meshId,
+      label: groups.length > 1 ? `${groups.length} groups` : mesh.data.groupNames[groups[0]],
+    });
+  }, [meshes]);
+
+  // Extract: the groups become a new mesh with the same transform and look;
+  // the source keeps the rest. Extracting every group just renames nothing
+  // useful, so it is refused rather than leaving an empty source.
+  const handleExtractMeshGroups = useCallback((meshId: string, groups: number[]) => {
+    const before = scene.state.meshes.find(m => m.id === meshId);
+    if (!before?.data.groupNames || groups.length === 0) return;
+    const { rest, taken } = splitGroups(before.data, before.plantMaterials, new Set(groups));
+    if (!taken) return;
+    if (!rest) {
+      showToast({ type: 'warning', title: 'Nothing would be left of the mesh', message: 'Extract needs at least one group to stay behind.' });
+      return;
+    }
+    const sourceName = displayNameOfMesh(before);
+    const groupLabel = groups.length === 1 ? before.data.groupNames[groups[0]] : `${groups.length} groups`;
+    const takenNames = new Set(meshes.map(displayNameOfMesh));
+    let name = `${sourceName} – ${groupLabel}`;
+    for (let n = 2; takenNames.has(name); n++) name = `${sourceName} – ${groupLabel} (${n})`;
+    const extracted: MeshEntry = {
+      ...before,
+      id: crypto.randomUUID(),
+      name,
+      visible: true,
+      data: taken.data,
+      ...(before.plantMaterials ? { plantMaterials: taken.materials } : {}),
+      hiddenGroups: remapHiddenGroups(before.hiddenGroups, before.data.groupNames, taken.data.groupNames),
+    };
+    const after: MeshEntry = {
+      ...before,
+      data: rest.data,
+      ...(before.plantMaterials ? { plantMaterials: rest.materials } : {}),
+      hiddenGroups: remapHiddenGroups(before.hiddenGroups, before.data.groupNames, rest.data.groupNames),
+    };
+    const transform: TransformState = {
+      position: { ...(meshPositions.get(meshId) || { x: 0, y: 0, z: 0 }) },
+      rotation: { ...(meshRotations.get(meshId) || { x: 0, y: 0, z: 0 }) },
+      scale: { ...(meshScales.get(meshId) || { x: 1, y: 1, z: 1 }) },
+    };
+    scene.commit({
+      label: 'extract group',
+      actions: [
+        { t: 'replaceObject', kind: 'mesh', id: meshId, before, after },
+        { t: 'add', kind: 'mesh', id: extracted.id, object: extracted, transform },
+      ],
+    });
+    const carry = <V,>(prev: Map<string, V>): Map<string, V> => {
+      const v = prev.get(meshId);
+      if (v === undefined) return prev;
+      const next = new Map(prev);
+      next.set(extracted.id, v);
+      return next;
+    };
+    setMeshOpacities(carry);
+    setMeshColorModes(carry);
+    setSelectedMeshGroups(null);
+    setSelectedMeshIds(new Set([extracted.id]));
+    showToast({ type: 'success', title: `Extracted ${groupLabel} to a new mesh (${taken.data.triangleCount.toLocaleString()} triangles)` });
+  }, [scene, meshes, displayNameOfMesh, meshPositions, meshRotations, meshScales, showToast]);
+
+  // Commit a t/r/s gesture on the selected groups: bake the mesh-local matrix
+  // into their vertices.
+  const commitMeshGroupTransform = useCallback((meshId: string, groups: number[], local: THREE.Matrix4) => {
+    const before = scene.state.meshes.find(m => m.id === meshId);
+    if (!before || groups.length === 0 || local.equals(IDENTITY_MATRIX4)) return;
+    const after: MeshEntry = { ...before, data: transformGroups(before.data, new Set(groups), local) };
+    scene.commit({ label: 'transform group', actions: [{ t: 'replaceObject', kind: 'mesh', id: meshId, before, after }] });
+  }, [scene]);
+
   // Extract skeleton from selected point cloud
   // One skeleton per checked cloud, one cloud after another. Clouds are read
   // through `cloudsRef` each iteration: the callback is not re-created while
@@ -19262,7 +19470,9 @@ export default function PointCloudViewer({
     const { type, ids } = deleteConfirm;
 
     // Each kind deletes as ONE undoable transaction → a single Cmd+Z restores all.
-    if (type === 'mesh') {
+    if (type === 'group') {
+      if (deleteConfirm.meshId) deleteMeshGroups(deleteConfirm.meshId, ids.map(Number));
+    } else if (type === 'mesh') {
       removeObjects('mesh', ids);
       setSelectedMeshIds(prev => {
         const next = new Set(prev);
@@ -19295,7 +19505,7 @@ export default function PointCloudViewer({
     }
 
     setDeleteConfirm(null);
-  }, [deleteConfirm, removeObjects, onRemoveCloud]);
+  }, [deleteConfirm, removeObjects, onRemoveCloud, deleteMeshGroups]);
 
   // Toggle skeleton visibility
   const handleToggleSkeletonVisibility = useCallback((skeletonId: string) => {
@@ -19307,6 +19517,7 @@ export default function PointCloudViewer({
   // skeleton + cloud selection (single-focus for the gizmo); additive clicks
   // leave other panels alone so a multi-select can be built up.
   const handleSelectMesh = useCallback((meshId: string, additive: boolean, range: boolean) => {
+    setSelectedMeshGroups(null);
     setSelectedMeshIds(prev => nextSelection(prev, meshId, meshes.map(m => m.id), lastSelectedMeshIdRef.current, additive, range));
     if (!range) lastSelectedMeshIdRef.current = meshId;
     if (!additive && !range) {
@@ -19363,6 +19574,7 @@ export default function PointCloudViewer({
       setSelectedMeshIds(new Set());
       setSelectedSkeletonIds(new Set());
     }
+    if (selectedIds.size > 0) setSelectedMeshGroups(null);
   }, [selectedIds]);
 
   // Display name for a skeleton row / delete dialog (source cloud filename).
@@ -19496,6 +19708,15 @@ export default function PointCloudViewer({
           return { x: d.x - ws[0], y: d.y - ws[1], z: d.z - ws[2] };
         }
         return null;
+      }
+      // Object groups: the centroid of the groups' own vertices.
+      const groupSel = selectedMeshGroupsRef.current;
+      if (groupSel) {
+        const mesh = meshes.find(m => m.id === groupSel.meshId);
+        const c = mesh ? groupLocalCentroid(mesh.data, groupSel.groups) : null;
+        if (!mesh || !c) return null;
+        c.applyMatrix4(meshWorldMatrixOf(mesh.id));
+        return { x: c.x, y: c.y, z: c.z };
       }
       // Meshes: ONE shared pivot for the whole selection — the mean of each
       // selected mesh's world centroid. With several meshes selected, a
@@ -19714,7 +19935,36 @@ export default function PointCloudViewer({
       return deg;
     };
 
+    // Preview a WORLD-frame delta `d` on the selected object groups.
+    const applyGroupDelta = (modal: TransformModalState, d: THREE.Matrix4) => {
+      if (!modal.groupL || !modal.groupMeshId) return;
+      const local = modal.groupL.clone().invert().multiply(d).multiply(modal.groupL);
+      modal.groupLocal = local;
+      setGroupTransformPreview({ meshId: modal.groupMeshId, matrix: local });
+    };
+    // T(p)·M·T(−p): `m` about the group pivot.
+    const aboutGroupPivot = (modal: TransformModalState, m: THREE.Matrix4): THREE.Matrix4 => {
+      const p = modal.groupWorldPivot ?? new THREE.Vector3();
+      return new THREE.Matrix4().makeTranslation(p.x, p.y, p.z)
+        .multiply(m)
+        .multiply(new THREE.Matrix4().makeTranslation(-p.x, -p.y, -p.z));
+    };
+
     const applyRotate = (modal: TransformModalState, angleDeg: number) => {
+      if (modal.target === 'meshGroup') {
+        // World axes, like the mesh gesture's Euler components: free turns
+        // about Z, and a plane lock turns about both of its axes.
+        const a = THREE.MathUtils.degToRad(angleDeg);
+        const ax = modal.axis;
+        const e = new THREE.Euler(
+          ax === 'x' || ax === 'xz' || ax === 'xy' ? a : 0,
+          ax === 'y' || ax === 'yz' || ax === 'xy' ? a : 0,
+          ax === 'z' || ax === 'free' || ax === 'yz' || ax === 'xz' ? a : 0,
+          'XYZ',
+        );
+        applyGroupDelta(modal, aboutGroupPivot(modal, new THREE.Matrix4().makeRotationFromEuler(e)));
+        return;
+      }
       if (modal.target === 'tool') {
         const o = modal.originalDelta ?? IDENTITY_DELTA;
         const r = { ...o.r };
@@ -19796,6 +20046,10 @@ export default function PointCloudViewer({
     };
 
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
+      if (modal.target === 'meshGroup') {
+        applyGroupDelta(modal, new THREE.Matrix4().makeTranslation(delta.x, delta.y, delta.z));
+        return;
+      }
       if (modal.target === 'tool') {
         const o = modal.originalDelta ?? IDENTITY_DELTA;
         applyTransformDelta({ ...o, t: { x: o.t.x + delta.x, y: o.t.y + delta.y, z: o.t.z + delta.z } });
@@ -19863,6 +20117,11 @@ export default function PointCloudViewer({
     };
 
     const applyScale = (modal: TransformModalState, factor: { x: number; y: number; z: number }) => {
+      if (modal.target === 'meshGroup') {
+        const f = (v: number) => Math.max(0.001, v);
+        applyGroupDelta(modal, aboutGroupPivot(modal, new THREE.Matrix4().makeScale(f(factor.x), f(factor.y), f(factor.z))));
+        return;
+      }
       if (modal.target === 'tool') {
         const o = modal.originalDelta ?? IDENTITY_DELTA;
         applyTransformDelta({
@@ -19958,6 +20217,14 @@ export default function PointCloudViewer({
     const cancelModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
+      if (modal.target === 'meshGroup') {
+        // Nothing was written yet: dropping the preview IS the restore.
+        setGroupTransformPreview(null);
+        transformModalRef.current = null;
+        setTransformModal(null);
+        setGizmoDragging(false);
+        return;
+      }
       if (modal.target === 'tool') {
         applyTransformDelta(modal.originalDelta ?? IDENTITY_DELTA);
         pendingHistoryRef.current = null;
@@ -20060,7 +20327,13 @@ export default function PointCloudViewer({
       // can represent, and handleUpdateScanParams dispatches the non-undoable
       // replaceCollection. Same gap pose edits already have. Explicit rather
       // than relying on commitHistoryEntry's no-pending early return.
-      if (modal.target === 'scan' || modal.target === 'tool') {
+      if (modal.target === 'meshGroup') {
+        // Its own history: one replaceObject with the baked vertices.
+        if (modal.groupMeshId && modal.groupIds && modal.groupLocal) {
+          commitMeshGroupTransform(modal.groupMeshId, modal.groupIds, modal.groupLocal);
+        }
+        setGroupTransformPreview(null);
+      } else if (modal.target === 'scan' || modal.target === 'tool') {
         pendingHistoryRef.current = null;  // drop the BEFORE from startModal
       } else {
         commitHistoryEntry();
@@ -20135,6 +20408,20 @@ export default function PointCloudViewer({
           pivot: op === 'translate' ? pivot : { x: o[0] - off.x, y: o[1] - off.y, z: o[2] - off.z },
           target: 'tool',
           originalDelta: transformDeltaRef.current,
+          numericBuffer: '',
+        };
+      } else if (selectedMeshGroupsRef.current) {
+        const sel = selectedMeshGroupsRef.current;
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'meshGroup',
+          groupMeshId: sel.meshId,
+          groupIds: [...sel.groups],
+          groupWorldPivot: new THREE.Vector3(worldPivot.x, worldPivot.y, worldPivot.z),
+          groupL: meshWorldMatrixOf(sel.meshId),
           numericBuffer: '',
         };
       } else if (selectedMeshes.length > 0) {
@@ -20340,6 +20627,11 @@ export default function PointCloudViewer({
     clouds,
     editStates,
     editMode,
+    // Object-group gestures: the mesh data for the pivot, and the commit.
+    // The selection itself is read through selectedMeshGroupsRef.
+    meshes,
+    meshWorldMatrixOf,
+    commitMeshGroupTransform,
     startHistoryEntry,
     commitHistoryEntry,
     closeAllToolPanels,
@@ -24588,6 +24880,7 @@ export default function PointCloudViewer({
               {mesh.gridGroundSnap || meshCropPreview.get(mesh.id)?.textured === null ? null :
                mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
                mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData) ? (
+                <>
                 <TexturedPlantMesh
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
                   // Crop preview: the pre-cut copy while this mesh is a checked
@@ -24596,7 +24889,28 @@ export default function PointCloudViewer({
                   plantMaterials={meshCropPreview.get(mesh.id)?.textured?.plantMaterials ?? mesh.plantMaterials}
                   opacity={1}
                   wireframe={meshWireframe}
+                  triangleMask={meshGroupMasks.get(mesh.id)?.main ?? null}
                 />
+                {/* Selected object groups: their own outline, and the live
+                    t/r/s preview matrix (see groupTransformPreview). */}
+                {meshGroupMasks.get(mesh.id)?.selected && (
+                  <group
+                    matrixAutoUpdate={false}
+                    matrix={groupTransformPreview?.meshId === mesh.id ? groupTransformPreview.matrix : IDENTITY_MATRIX4}
+                    onUpdate={(self) => { self.matrixWorldNeedsUpdate = true; }}
+                  >
+                    <OutlineSelect enabled>
+                      <TexturedPlantMesh
+                        data={mesh.data}
+                        plantMaterials={mesh.plantMaterials}
+                        opacity={1}
+                        wireframe={meshWireframe}
+                        triangleMask={meshGroupMasks.get(mesh.id)!.selected}
+                      />
+                    </OutlineSelect>
+                  </group>
+                )}
+                </>
               ) : (
                 <TriangleMesh
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
@@ -24606,7 +24920,17 @@ export default function PointCloudViewer({
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
                   triangleColors={meshTriangleColors.get(mesh.id) ?? null}
-                  triangleMask={meshCropPreview.get(mesh.id)?.mask ?? null}
+                  // A grouped mesh's mask already folds in the crop preview.
+                  triangleMask={meshGroupMasks.has(mesh.id)
+                    ? meshGroupMasks.get(mesh.id)!.main
+                    : meshCropPreview.get(mesh.id)?.mask ?? null}
+                  subset={meshGroupMasks.get(mesh.id)?.selected
+                    ? {
+                        mask: meshGroupMasks.get(mesh.id)!.selected!,
+                        matrix: groupTransformPreview?.meshId === mesh.id ? groupTransformPreview.matrix : IDENTITY_MATRIX4,
+                        outlined: true,
+                      }
+                    : null}
                   // Transparent-pass draw order (three.js sorts by renderOrder,
                   // then camera distance):
                   //  • voxel box (+1): always blend LAST over the surface mesh it
@@ -26404,40 +26728,56 @@ export default function PointCloudViewer({
       {colorPopoverMeshId && colorPopoverAnchor && (() => {
         const popoverMesh = meshes.find(m => m.id === colorPopoverMeshId);
         if (!popoverMesh) return null;
+        // From a group row, the picker edits a draft that is committed once on
+        // close (each commit rewrites the vertex colors and adds an undo step).
+        const groupTarget = colorPopoverGroups;
+        const value = groupTarget ? groupTarget.draft : popoverMesh.color;
+        const setValue = (v: string) => {
+          if (groupTarget) setColorPopoverGroups({ ...groupTarget, draft: v });
+          else handleSetMeshColor(popoverMesh.id, v);
+        };
+        const close = () => {
+          if (groupTarget && groupTarget.draft.toLowerCase() !== (groupDisplayColor(popoverMesh.data, groupTarget.groups[0]) ?? popoverMesh.color).toLowerCase()) {
+            handleSetMeshGroupColor(popoverMesh.id, groupTarget.groups, groupTarget.draft);
+          }
+          setColorPopoverGroups(null);
+          setColorPopoverMeshId(null);
+        };
         return (
           <>
             {/* Click-catcher: dismiss on any outside click. */}
             <div
               className="fixed inset-0 z-[59]"
-              onClick={() => setColorPopoverMeshId(null)}
+              onClick={close}
             />
             <div
               data-testid="mesh-color-popover"
+              data-target={groupTarget ? 'group' : 'mesh'}
               onClick={(e) => e.stopPropagation()}
               style={{ top: colorPopoverAnchor.top, left: colorPopoverAnchor.left }}
               className="fixed z-[60] flex items-center gap-2 p-2 bg-neutral-900 border border-neutral-700 rounded shadow-lg"
             >
               <input
                 type="color"
-                value={popoverMesh.color}
-                onChange={(e) => handleSetMeshColor(popoverMesh.id, e.target.value)}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
                 className="w-8 h-8 rounded cursor-pointer bg-transparent border-0 p-0"
                 title="Pick color"
               />
               <input
                 type="text"
-                value={popoverMesh.color}
+                value={value}
                 onChange={(e) => {
                   const v = e.target.value;
                   // Only commit a complete, valid hex so the render path
                   // (TriangleMesh) never receives a partial value.
-                  if (/^#[0-9a-fA-F]{6}$/.test(v)) handleSetMeshColor(popoverMesh.id, v);
+                  if (/^#[0-9a-fA-F]{6}$/.test(v)) setValue(v);
                 }}
                 className="w-20 px-1.5 py-1 text-[11px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200 font-mono"
                 maxLength={7}
               />
               <button
-                onClick={() => setColorPopoverMeshId(null)}
+                onClick={close}
                 className="text-[10px] text-neutral-400 hover:text-neutral-200 px-1"
                 title="Close"
               >
@@ -27312,7 +27652,7 @@ export default function PointCloudViewer({
             }}
             onRename={handleRenameMesh}
             onRenamingChange={(id, value) => { setRenamingMeshId(id); setRenamingMeshValue(value); }}
-            onOpenColorPopover={(id, anchor) => { setColorPopoverAnchor(anchor); setColorPopoverMeshId(id); }}
+            onOpenColorPopover={(id, anchor) => { setColorPopoverGroups(null); setColorPopoverAnchor(anchor); setColorPopoverMeshId(id); }}
             onCloseColorPopover={() => setColorPopoverMeshId(null)}
             onColorModeChange={(id, value) => {
               // The select value is either a bare MeshColorMode or `layer:<name>`
@@ -27341,6 +27681,24 @@ export default function PointCloudViewer({
             onHeliosFilterChange={handleHeliosFilterChange}
             onCheckSpacing={handleCheckSpacing}
             ladIneligibilityReason={ladIneligibilityReason}
+            expandedGroupMeshIds={expandedMeshGroupIds}
+            onToggleGroupsExpanded={(id) => setExpandedMeshGroupIds(prev => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id); else next.add(id);
+              return next;
+            })}
+            selectedMeshGroups={selectedMeshGroups}
+            onSelectGroup={handleSelectMeshGroup}
+            onToggleGroupVisibility={handleToggleMeshGroupVisibility}
+            onOpenGroupColorPopover={(id, groups, anchor) => {
+              const mesh = meshes.find(m => m.id === id);
+              if (!mesh) return;
+              setColorPopoverGroups({ groups, draft: groupDisplayColor(mesh.data, groups[0]) ?? mesh.color });
+              setColorPopoverAnchor(anchor);
+              setColorPopoverMeshId(id);
+            }}
+            onExtractGroups={handleExtractMeshGroups}
+            onDeleteGroups={handleRequestDeleteMeshGroups}
           />
         )}
 

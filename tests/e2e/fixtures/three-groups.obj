@@ -1,0 +1,47 @@
+# Three unit cubes, one per object group, 3 m apart along X.
+# Group lines mix `o` and `g` on purpose: the importer treats both as a group.
+o cube_a
+v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+v 0 0 1
+v 1 0 1
+v 1 1 1
+v 0 1 1
+f 1 2 3 4
+f 5 8 7 6
+f 1 5 6 2
+f 2 6 7 3
+f 3 7 8 4
+f 5 1 4 8
+g cube_b
+v 3 0 0
+v 4 0 0
+v 4 1 0
+v 3 1 0
+v 3 0 1
+v 4 0 1
+v 4 1 1
+v 3 1 1
+f 9 10 11 12
+f 13 16 15 14
+f 9 13 14 10
+f 10 14 15 11
+f 11 15 16 12
+f 13 9 12 16
+g cube_c
+v 6 0 0
+v 7 0 0
+v 7 1 0
+v 6 1 0
+v 6 0 1
+v 7 0 1
+v 7 1 1
+v 6 1 1
+f 17 18 19 20
+f 21 24 23 22
+f 17 21 22 18
+f 18 22 23 19
+f 19 23 24 20
+f 21 17 20 24

@@ -183,6 +183,11 @@ meshes, or a scan position. A point cloud rotates and scales about the **scene
 origin**, the same pivot as the Transform tool's rotation rings; with no axis
 locked a rotation turns about Z.
 
+With [object groups](../concepts/meshes.md#object-groups) of a mesh selected
+(from its group list in the Meshes panel), all three gestures act on **only
+those groups**, about their own center, and the result is written into their
+vertices.
+
 All three gestures apply to **every** selected mesh (or skeleton), not just
 one — select several from the Meshes panel (<kbd>Ctrl</kbd>/<kbd>Cmd</kbd>-click,
 or **Select All**) and they move, turn, and scale together. Each object is

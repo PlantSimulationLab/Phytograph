@@ -29,23 +29,33 @@ import * as THREE from 'three';
 // historical default (10) and three's common picks.
 export const OUTLINE_LAYER = 11;
 
+// userData flag marking an <OutlineSelect> group (see the nesting note below).
+const OUTLINE_SELECT_ROOT = 'outlineSelectRoot';
+
 // Marks its descendant meshes for outlining by toggling OUTLINE_LAYER. Enabling
 // the layer is additive — the mesh stays on layer 0 too, so the normal scene
 // render is unaffected; only the mask camera (restricted to OUTLINE_LAYER) picks
 // it up. Mirrors the proven traverse pattern from postprocessing's <Select>.
+//
+// A NESTED <OutlineSelect> owns its own subtree: the walk stops there. That lets
+// one part of an unselected mesh be outlined (a selected object group inside
+// it), which a plain traverse could not — child effects run before parent
+// effects, so the outer, disabled select would always switch it back off.
 export function OutlineSelect({ enabled, children }: { enabled: boolean; children: React.ReactNode }) {
   const ref = useRef<THREE.Group>(null);
   useEffect(() => {
     const group = ref.current;
     if (!group) return;
-    group.traverse(o => {
+    const walk = (o: THREE.Object3D) => {
       if ((o as THREE.Mesh).isMesh) {
         if (enabled) o.layers.enable(OUTLINE_LAYER);
         else o.layers.disable(OUTLINE_LAYER);
       }
-    });
+      for (const c of o.children) if (!c.userData[OUTLINE_SELECT_ROOT]) walk(c);
+    };
+    walk(group);
   });
-  return <group ref={ref}>{children}</group>;
+  return <group ref={ref} userData={{ [OUTLINE_SELECT_ROOT]: true }}>{children}</group>;
 }
 
 const FS_VERT = /* glsl */ `

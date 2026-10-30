@@ -20,6 +20,7 @@ import * as THREE from 'three';
 
 import type { CropPredicate } from './cropGeometry';
 import type { MeshData, MeshEntry, PlantMaterialDef } from './pointCloudTypes';
+import { compactGroups, remapHiddenGroups } from './meshGroups';
 import { applyTriangleFilter } from './triangleFilter';
 
 /**
@@ -203,7 +204,15 @@ export function subsetMeshData(data: MeshData, mask: Uint8Array, value: 0 | 1): 
     triangleCellIds: pickTriangles(data.triangleCellIds, n, mask, value, kept),
     triEdgeMax: pickTriangles(data.triEdgeMax, n, mask, value, kept),
     triAspect: pickTriangles(data.triAspect, n, mask, value, kept),
+    ...compactedGroups(data, pickTriangles(data.triangleGroupIds, n, mask, value, kept)),
   };
+}
+
+/** The subset's group fields: its picked tags with emptied groups compacted away (see meshGroups.ts). */
+function compactedGroups(data: MeshData, triangleGroupIds: Uint32Array | undefined): Pick<MeshData, 'triangleGroupIds' | 'groupNames'> {
+  if (!triangleGroupIds || !data.groupNames) return { triangleGroupIds: undefined, groupNames: undefined };
+  const c = compactGroups({ ...data, triangleCount: triangleGroupIds.length, triangleGroupIds });
+  return { triangleGroupIds: c.triangleGroupIds, groupNames: c.groupNames };
 }
 
 /**
@@ -262,6 +271,8 @@ function meshSide(
     ...mesh,
     data,
     ...(mesh.plantMaterials ? { plantMaterials: subsetMaterials(mesh.plantMaterials, mask, value) } : {}),
+    // A group the cut emptied is compacted out, which renumbers the rest.
+    hiddenGroups: remapHiddenGroups(mesh.hiddenGroups, mesh.data.groupNames, data.groupNames),
   };
 }
 

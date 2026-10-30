@@ -1474,7 +1474,13 @@ export interface ParsedMesh {
   vertexCount: number;
   triangleCount: number;
   fileName: string;
+  // OBJ `o`/`g` object groups (see MeshData.triangleGroupIds); present iff the file has group lines.
+  triangleGroupIds?: Uint32Array;
+  groupNames?: string[];
 }
+
+/** Name of the group holding faces written before an OBJ's first `o`/`g` line. Matches the backend loader. */
+export const UNGROUPED_OBJ_GROUP = '(ungrouped)';
 
 // Parse OBJ mesh format
 export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
@@ -1484,7 +1490,15 @@ export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
   const vertices: number[] = [];
   const normals: number[] = [];
   const faces: number[][] = [];
-  const faceNormals: number[][] = [];
+  const faceNormals: (number[] | null)[] = [];
+  // Object groups, mirroring backend-api/qsm/obj_loader.py: slot 0 holds faces
+  // before the first `o`/`g`, a re-entered name rejoins its group, and `o` and
+  // `g` are treated alike.
+  const groupNames: string[] = [UNGROUPED_OBJ_GROUP];
+  const groupIndex = new Map<string, number>();
+  const faceGroups: number[] = [];
+  let currentGroup = 0;
+  let sawGroupLine = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -1497,6 +1511,16 @@ export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
       vertices.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
     } else if (cmd === 'vn') {
       normals.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+    } else if (cmd === 'o' || cmd === 'g') {
+      sawGroupLine = true;
+      const name = parts.slice(1).join(' ') || 'default';
+      let gi = groupIndex.get(name);
+      if (gi === undefined) {
+        gi = groupNames.length;
+        groupIndex.set(name, gi);
+        groupNames.push(name);
+      }
+      currentGroup = gi;
     } else if (cmd === 'f') {
       const faceIndices: number[] = [];
       const faceNormalIndices: number[] = [];
@@ -1510,9 +1534,10 @@ export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
       // Triangulate if more than 3 vertices (fan triangulation)
       for (let i = 1; i < faceIndices.length - 1; i++) {
         faces.push([faceIndices[0], faceIndices[i], faceIndices[i + 1]]);
-        if (faceNormalIndices.length > 0) {
-          faceNormals.push([faceNormalIndices[0], faceNormalIndices[i], faceNormalIndices[i + 1]]);
-        }
+        faceNormals.push(faceNormalIndices.length === faceIndices.length
+          ? [faceNormalIndices[0], faceNormalIndices[i], faceNormalIndices[i + 1]]
+          : null);
+        faceGroups.push(currentGroup);
       }
     }
   }
@@ -1541,8 +1566,30 @@ export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
     fileName: file.name,
   };
 
-  if (normals.length > 0) {
-    result.normals = new Float32Array(normals);
+  // Per-vertex normals from the faces' `vn` references. The raw `vn` table is
+  // not aligned with `v`, so it can't be passed through as-is; a vertex takes the
+  // normal of the last face corner that names it. Only when every face carries
+  // normals — otherwise the renderer computes them.
+  if (normals.length > 0 && faceNormals.every((fn) => fn !== null)) {
+    const perVertex = new Float32Array(vertexCount * 3);
+    for (let t = 0; t < triangleCount; t++) {
+      const fn = faceNormals[t]!;
+      for (let k = 0; k < 3; k++) {
+        const v = faces[t][k], n = fn[k];
+        perVertex[v * 3] = normals[n * 3];
+        perVertex[v * 3 + 1] = normals[n * 3 + 1];
+        perVertex[v * 3 + 2] = normals[n * 3 + 2];
+      }
+    }
+    result.normals = perVertex;
+  }
+
+  if (sawGroupLine) {
+    // Compact away groups no face landed in.
+    const used = [...new Set(faceGroups)].sort((a, b) => a - b);
+    const remap = new Map(used.map((g, i) => [g, i]));
+    result.triangleGroupIds = Uint32Array.from(faceGroups, (g) => remap.get(g)!);
+    result.groupNames = used.map((g) => groupNames[g]);
   }
 
   return result;

@@ -303,7 +303,7 @@ neither, the inversion warns that its result is likely to be inaccurate.
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.obj` | ✅ | ✅ | Vertices + faces + normals + UVs + materials. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied; on export, that `.mtl` and its texture images are written back alongside the `.obj`. |
+| `.obj` | ✅ | ✅ | Vertices + faces + normals + UVs + materials + object groups. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied; on export, that `.mtl` and its texture images are written back alongside the `.obj`. `o` / `g` object groups are kept as the mesh's [object groups](../concepts/meshes.md#object-groups) and written back as `g` lines. |
 | `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. A mesh of a georeferenced (world-shifted) cloud is exported with `double` coordinates, since a `float` cannot hold a UTM coordinate to better than about half a meter. |
 | `.stl` | ✅ | ✅ | Triangles only — no topology metadata. ASCII **and** binary on import; exported as ASCII. Binary STL's non-standard per-facet color is read only for facets that set its "color valid" bit. |
 

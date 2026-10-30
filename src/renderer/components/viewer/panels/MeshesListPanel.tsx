@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2, Download, CheckSquare, XSquare } from 'lucide-react';
+import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2, Download, CheckSquare, XSquare, SquareArrowOutUpRight } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS, DEM_SURFACE_LABELS, DEM_LAYER_ORDER } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
+import { groupDisplayColor, groupTriangleCounts, hasGroups } from '../../../lib/meshGroups';
 import { CROWN_SHAPE_LABELS, type CrownShape } from '../../../lib/crownFit';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
@@ -470,6 +471,18 @@ interface MeshesListPanelProps {
   // mesh row so the reason is visible where the mesh lives, not only in the LAD
   // dialog. Computed in the parent (it needs the scan list for the position check).
   ladIneligibilityReason?: (mesh: MeshEntry) => string | null;
+  // ---- Object groups (an imported OBJ's `o`/`g` parts; lib/meshGroups.ts) ----
+  // Meshes whose group list is expanded (collapsed by default).
+  expandedGroupMeshIds: Set<string>;
+  onToggleGroupsExpanded: (id: string) => void;
+  // The selected groups, all inside one mesh (exclusive with selectedMeshIds).
+  selectedMeshGroups: { meshId: string; groups: Set<number> } | null;
+  onSelectGroup: (meshId: string, group: number, additive: boolean, range: boolean) => void;
+  onToggleGroupVisibility: (meshId: string, group: number) => void;
+  // Opens the color popover for these groups, anchored to the swatch's screen rect.
+  onOpenGroupColorPopover: (meshId: string, groups: number[], anchor: { top: number; left: number }) => void;
+  onExtractGroups: (meshId: string, groups: number[]) => void;
+  onDeleteGroups: (meshId: string, groups: number[]) => void;
 }
 
 export function MeshesListPanel({
@@ -520,6 +533,14 @@ export function MeshesListPanel({
   onHeliosFilterChange,
   onCheckSpacing,
   ladIneligibilityReason,
+  expandedGroupMeshIds,
+  onToggleGroupsExpanded,
+  selectedMeshGroups,
+  onSelectGroup,
+  onToggleGroupVisibility,
+  onOpenGroupColorPopover,
+  onExtractGroups,
+  onDeleteGroups,
 }: MeshesListPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">
@@ -601,6 +622,8 @@ export function MeshesListPanel({
             || !!mesh.triangulationParams
             || !!mesh.gridSubdivisions || !!mesh.isPlane || !!mesh.crownMetrics;
           const isExpanded = expandedMeshIds.has(mesh.id);
+          const meshGroupNames = hasGroups(mesh.data) ? mesh.data.groupNames! : null;
+          const groupsExpanded = !!meshGroupNames && expandedGroupMeshIds.has(mesh.id);
           const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
           const meshOpacity = meshOpacities.get(mesh.id) ?? defaultOpacityFor(mesh);
           return (
@@ -731,10 +754,28 @@ export function MeshesListPanel({
                     {`H ${mesh.crownMetrics.tree_height_m.toFixed(2)} m · Vol ${mesh.crownMetrics.crown_volume_m3.toFixed(2)} m³`}
                   </div>
                 ) : (
-                  <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
-                    {mesh.data.triangleCount.toLocaleString()} triangles
-                    {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
-                    {mesh.isPlant && ' · Helios Plant'}
+                  <div className="text-[10px] text-neutral-500 flex items-center gap-1 min-w-0">
+                    <span className="truncate" data-testid="mesh-row-count">
+                      {mesh.data.triangleCount.toLocaleString()} triangles
+                      {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
+                      {mesh.isPlant && ' · Helios Plant'}
+                    </span>
+                    {meshGroupNames && (
+                      // Disclosure for the object-group list below the row.
+                      // Its own control, separate from the options chevron.
+                      <button
+                        data-testid="mesh-groups-expand"
+                        data-expanded={groupsExpanded ? 'true' : 'false'}
+                        onClick={(e) => { e.stopPropagation(); onToggleGroupsExpanded(mesh.id); }}
+                        className="flex items-center gap-0.5 px-1 rounded hover:bg-neutral-600 text-neutral-400 hover:text-neutral-200 flex-shrink-0"
+                        title={groupsExpanded ? 'Hide object groups' : 'Show object groups'}
+                      >
+                        {groupsExpanded
+                          ? <ChevronDown className="w-3 h-3" />
+                          : <ChevronRight className="w-3 h-3" />}
+                        {meshGroupNames.length} {meshGroupNames.length === 1 ? 'group' : 'groups'}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -770,6 +811,93 @@ export function MeshesListPanel({
                 <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
               </button>
             </div>
+
+            {/* Object groups: one row each, with its own eye and (for a
+                vertex-colorable mesh) swatch. Selecting rows scopes t/r/s,
+                Extract and Delete to those groups. */}
+            {groupsExpanded && meshGroupNames && (() => {
+              const counts = groupTriangleCounts(mesh.data);
+              const hidden = new Set(mesh.hiddenGroups ?? []);
+              const sel = selectedMeshGroups?.meshId === mesh.id ? selectedMeshGroups.groups : null;
+              const selList = sel ? [...sel].sort((a, b) => a - b) : [];
+              return (
+                <div className="ml-6 mr-1 mb-1 space-y-0.5" data-testid="mesh-group-list">
+                  {meshGroupNames.map((name, g) => {
+                    const groupSelected = !!sel?.has(g);
+                    const visible = !hidden.has(g);
+                    return (
+                      <div
+                        key={g}
+                        data-testid="mesh-group-row"
+                        data-group-index={g}
+                        data-group-name={name}
+                        data-triangle-count={counts[g]}
+                        data-selected={groupSelected ? 'true' : 'false'}
+                        data-visible={visible ? 'true' : 'false'}
+                        onClick={(e) => onSelectGroup(mesh.id, g, e.ctrlKey || e.metaKey, e.shiftKey)}
+                        className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer select-none transition-colors ${
+                          groupSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
+                        }`}
+                      >
+                        {showColorSwatch ? (
+                          <button
+                            data-testid="mesh-group-color-swatch"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              // A swatch on a selected row recolors the whole selection.
+                              onOpenGroupColorPopover(mesh.id, groupSelected ? selList : [g], { top: r.bottom + 4, left: r.left });
+                            }}
+                            className="w-2.5 h-2.5 rounded-sm ring-1 ring-white/20 hover:ring-white/60 flex-shrink-0"
+                            style={{ backgroundColor: groupDisplayColor(mesh.data, g) ?? mesh.color }}
+                            title="Set group color"
+                          />
+                        ) : (
+                          <div className="w-2.5 flex-shrink-0" />
+                        )}
+                        <div className={`flex-1 min-w-0 text-[11px] truncate ${visible ? 'text-neutral-300' : 'text-neutral-500'}`} title={name}>
+                          {name}
+                        </div>
+                        <div className="text-[10px] text-neutral-500 flex-shrink-0">{counts[g].toLocaleString()}</div>
+                        <button
+                          data-testid="mesh-group-visibility"
+                          onClick={(e) => { e.stopPropagation(); onToggleGroupVisibility(mesh.id, g); }}
+                          className="p-0.5 hover:bg-neutral-600 rounded flex-shrink-0"
+                          title={visible ? 'Hide group' : 'Show group'}
+                        >
+                          {visible
+                            ? <Eye className="w-3 h-3 text-neutral-400" />
+                            : <EyeOff className="w-3 h-3 text-neutral-600" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {selList.length > 0 && (
+                    <div className="flex items-center gap-1 px-2 pt-0.5" data-testid="mesh-group-actions">
+                      <div className="flex-1 text-[10px] text-neutral-500">
+                        {selList.length === 1 ? '1 group' : `${selList.length} groups`} · T / R / S to transform
+                      </div>
+                      <button
+                        data-testid="mesh-group-extract"
+                        onClick={(e) => { e.stopPropagation(); onExtractGroups(mesh.id, selList); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Extract to a new mesh"
+                      >
+                        <SquareArrowOutUpRight className="w-3 h-3 text-neutral-400" />
+                      </button>
+                      <button
+                        data-testid="mesh-group-delete"
+                        onClick={(e) => { e.stopPropagation(); onDeleteGroups(mesh.id, selList); }}
+                        className="p-1 hover:bg-red-600/30 rounded"
+                        title="Delete group"
+                      >
+                        <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Inline per-mesh options, expanded from the chevron. */}
             {isExpanded && (

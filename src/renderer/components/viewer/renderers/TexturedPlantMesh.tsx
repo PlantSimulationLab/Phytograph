@@ -155,9 +155,13 @@ export interface TexturedPlantMeshProps {
   plantMaterials: PlantMaterialDef[];
   opacity?: number;
   wireframe?: boolean;
+  // One entry per triangle of `data`, 1 = draw it (hidden or separately drawn
+  // object groups). Unlike TriangleMesh's mask this rebuilds the submeshes,
+  // which are copies already. Null = draw all.
+  triangleMask?: Uint8Array | null;
 }
 
-export function TexturedPlantMesh({ data, plantMaterials, opacity = 1, wireframe }: TexturedPlantMeshProps) {
+export function TexturedPlantMesh({ data, plantMaterials, opacity = 1, wireframe, triangleMask = null }: TexturedPlantMeshProps) {
   // Partition triangles into one textured submesh per material group plus a
   // single untextured remainder (stems, branches, flowers — vertex-colored).
   // Plant geometry is non-indexed and triangle-expanded: triangle t occupies
@@ -172,20 +176,27 @@ export function TexturedPlantMesh({ data, plantMaterials, opacity = 1, wireframe
 
     const totalTris = data.triangleCount;
     const hasUVs = !!(data.uvCoordinates && data.uvCoordinates.length > 0);
+    // A masked-out triangle is pre-claimed, so neither pass draws it.
+    const mask = triangleMask && triangleMask.length === totalTris ? triangleMask : null;
     const claimed = new Uint8Array(totalTris);
+    if (mask) for (let t = 0; t < totalTris; t++) claimed[t] = mask[t] ? 0 : 1;
 
     if (hasUVs) {
       for (const mat of plantMaterials) {
         if (!mat.textureData || mat.triangleIndices.length === 0) continue;
+        const triangleIndices = mask
+          ? mat.triangleIndices.filter((t) => t < totalTris && mask[t])
+          : mat.triangleIndices;
+        if (triangleIndices.length === 0) continue;
 
-        const numTris = mat.triangleIndices.length;
+        const numTris = triangleIndices.length;
         const numVerts = numTris * 3;
         const verts = new Float32Array(numVerts * 3);
         const uvs = new Float32Array(numVerts * 2);
         const norms = data.normals ? new Float32Array(numVerts * 3) : undefined;
 
         for (let t = 0; t < numTris; t++) {
-          const triIdx = mat.triangleIndices[t];
+          const triIdx = triangleIndices[t];
           if (triIdx < totalTris) claimed[triIdx] = 1;
           for (let v = 0; v < 3; v++) {
             const src = triIdx * 3 + v;
@@ -255,7 +266,7 @@ export function TexturedPlantMesh({ data, plantMaterials, opacity = 1, wireframe
     }
 
     return { submeshes: subs, untexturedMesh: remainder };
-  }, [data, plantMaterials]);
+  }, [data, plantMaterials, triangleMask]);
 
   return (
     <group>

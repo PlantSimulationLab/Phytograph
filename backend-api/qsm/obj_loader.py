@@ -31,6 +31,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+UNGROUPED_NAME = "(ungrouped)"
+
 
 def parse_mtl(mtl_path: Path) -> Dict[str, dict]:
     """Parse a .mtl file into ``{material_name: {"Kd": [r,g,b], "map_Kd": str}}``.
@@ -78,6 +80,13 @@ def load_obj_template(obj_path: Path) -> dict:
     - ``faces``: ``List[List[int]]`` — triangle index triples into ``vertices``
       (``[[0,1,2],[3,4,5],...]``).
     - ``tri_material``: ``List[Optional[str]]`` — active material name per triangle.
+    - ``tri_group`` / ``group_names``: present ONLY when the file has ``o`` or
+      ``g`` lines. ``tri_group[t]`` indexes ``group_names``; faces written before
+      the first ``o``/``g`` fall in an ``"(ungrouped)"`` group. A name that comes
+      back later in the file rejoins its existing group, and a multi-name
+      ``g a b`` line is one group named ``"a b"``. ``o`` and ``g`` are treated
+      alike: exporters disagree on which one marks an object, and the renderer
+      only needs one level.
     - ``mtl_materials``: ``Dict[str, dict]`` — parsed MTL props per material name.
     - ``textures``: ``Dict[str, str]`` — base64 PNG/image bytes keyed by basename.
     - ``material_texture_name``: ``Dict[str, str]`` — material -> texture basename.
@@ -102,6 +111,14 @@ def load_obj_template(obj_path: Path) -> dict:
 
     current_material: Optional[str] = None
     vertex_index = 0
+
+    # Object groups (`o` / `g`). Group 0 is reserved for faces before the first
+    # group line; it is dropped from the output if no face landed in it.
+    group_names: List[str] = [UNGROUPED_NAME]
+    group_index: Dict[str, int] = {}
+    tri_group: List[int] = []
+    current_group = 0
+    saw_group_line = False
 
     def _idx(token: str, table_len: int) -> Optional[int]:
         """Resolve an OBJ index token (1-based, negatives relative to end)."""
@@ -129,6 +146,13 @@ def load_obj_template(obj_path: Path) -> dict:
                     mtl_libs.append(" ".join(parts[1:]))
                 elif cmd == "usemtl" and len(parts) >= 2:
                     current_material = parts[1]
+                elif cmd in ("o", "g"):
+                    saw_group_line = True
+                    name = " ".join(parts[1:]) or "default"
+                    if name not in group_index:
+                        group_index[name] = len(group_names)
+                        group_names.append(name)
+                    current_group = group_index[name]
                 elif cmd == "f" and len(parts) >= 4:
                     # Resolve each corner to (pos, vt, vn) indices.
                     corners = []
@@ -163,6 +187,7 @@ def load_obj_template(obj_path: Path) -> dict:
                             continue
                         out_faces.append(face_idx)
                         tri_material.append(current_material)
+                        tri_group.append(current_group)
     except Exception as e:  # noqa: BLE001 - surface as a clean error
         raise ValueError(f"Failed to parse OBJ: {e}")
 
@@ -208,7 +233,19 @@ def load_obj_template(obj_path: Path) -> dict:
                 except Exception:
                     pass
 
+    result_groups: dict = {}
+    if saw_group_line:
+        # Compact away groups no face landed in (the reserved "(ungrouped)" slot
+        # when every face follows a group line, or a `g` with no faces after it).
+        used = sorted(set(tri_group))
+        remap = {old: new for new, old in enumerate(used)}
+        result_groups = {
+            "tri_group": [remap[g] for g in tri_group],
+            "group_names": [group_names[g] for g in used],
+        }
+
     return {
+        **result_groups,
         "vertices": out_vertices,
         "normals": out_normals,
         "uvs": out_uvs,

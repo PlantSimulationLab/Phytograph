@@ -152,8 +152,10 @@ export function applyTriangleFilter(
   const indices = new Uint32Array(keptCount * 3);
   const hasScanIds = !!data.triangleScanIds && data.triangleScanIds.length === n;
   const hasCellIds = !!data.triangleCellIds && data.triangleCellIds.length === n;
+  const hasGroupIds = !!data.triangleGroupIds && data.triangleGroupIds.length === n;
   const scanIds = hasScanIds ? new Uint32Array(keptCount) : undefined;
   const cellIds = hasCellIds ? new Uint32Array(keptCount) : undefined;
+  const groupIds = hasGroupIds ? new Uint32Array(keptCount) : undefined;
   const edgeMaxOut = new Float32Array(keptCount);
   const aspectOut = new Float32Array(keptCount);
 
@@ -170,6 +172,7 @@ export function applyTriangleFilter(
     indices[w * 3 + 2] = i2;
     if (scanIds) scanIds[w] = data.triangleScanIds![t];
     if (cellIds) cellIds[w] = data.triangleCellIds![t];
+    if (groupIds) groupIds[w] = data.triangleGroupIds![t];
     edgeMaxOut[w] = edgeMax[t];
     aspectOut[w] = aspect[t];
 
@@ -193,6 +196,10 @@ export function applyTriangleFilter(
     surfaceArea: area,
     triangleScanIds: scanIds,
     triangleCellIds: cellIds,
+    // Not compacted: a group the filter empties comes back when the filter
+    // loosens, so it keeps its row (at 0 triangles) and its id.
+    triangleGroupIds: groupIds,
+    groupNames: groupIds ? data.groupNames : undefined,
     triEdgeMax: edgeMaxOut,
     triAspect: aspectOut,
     // Drop vertex normals so the renderer recomputes them over the kept

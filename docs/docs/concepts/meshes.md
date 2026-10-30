@@ -91,11 +91,50 @@ the "shrink-wrap" artifacts that come from cloud-only methods. See
 | Filter triangles (Lmax / aspect) | Expand a **Helios** mesh row → **Filter** — drops long or mis-shapen triangles live. Helios-only: cloud methods (ball pivot, Poisson, alpha shape, Delaunay) apply their length scale during reconstruction, so there's nothing left to filter |
 | Plot leaf angles | Expand the mesh row → **Leaf angles…** — inclination PDF + azimuth rose + de Wit fit from the triangle normals; works on any triangulation method, and on a generated plant's leaves ([details](../workflows/triangulate.md#plot-leaf-angles-any-method)) |
 | Translate / rotate / scale | **Transform** in the Tools toolbar moves, rotates and scales any checked meshes and clouds together, relative to where they are ([details](../workflows/clean-point-cloud.md#transform-move-rotate-and-scale)). For exact *absolute* values on one mesh — plus grid subdivisions and **Fit to Scans** — use the **⤢** (double-arrow) button on the mesh's row in the Meshes panel |
+| Work on one part of a mesh | An `.obj` with `o` / `g` object groups keeps them — see [Object groups](#object-groups) |
 | Crop | **Crop** in the Tools toolbar cuts any checked meshes (and clouds) to a box, rectangle or polygon — keep inside, keep outside, or split in two. Cuts along triangle edges; undoable ([details](../workflows/clean-point-cloud.md#cropping-meshes)) |
 | Scan it into a point cloud | [Synthetic LiDAR scan](../workflows/simulate-scan.md) |
 | Align two meshes (ICP) | [Register & compare: M2M](../workflows/register-compare.md#mesh-to-mesh-icp) |
 | Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh-distance) |
 | Export | [Import & export](../workflows/import-export.md#export) |
+
+## Object groups
+
+An `.obj` that names its parts with `o` or `g` lines imports as **one** mesh
+that still knows its parts. Its row in the Meshes panel shows **▸ N groups**
+under the name. Click it to list the groups (the list starts collapsed). Each
+group row shows the group's name and triangle count, plus:
+
+- an **eye** that hides or shows just that group, separately from the mesh's
+  own eye;
+- a **color swatch** (meshes without textures only) that recolors just that
+  group. The color is written into the mesh's vertex colors. It is applied
+  when you close the picker and can be undone.
+
+**Click a group row to select it.** <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>-click
+toggles more groups of the same mesh, and <kbd>Shift</kbd>-click selects a
+range. Selecting a group replaces any other selection, and the selected groups
+are outlined in the viewer. While groups are selected:
+
+- <kbd>T</kbd> / <kbd>R</kbd> / <kbd>S</kbd> move, rotate, or scale **only
+  those groups**, with the same axis locks and typed values as for whole
+  meshes ([shortcuts](../reference/shortcuts.md#transform-gestures-blender-style)). Rotation and
+  scaling happen about the groups' own center. The change is written into the
+  groups' vertices, so the mesh's own position, rotation and scale don't
+  change.
+- **Extract** (the arrow button under the list) moves the groups into a new
+  mesh. The new mesh has the same transform and look as the original and is
+  named `<mesh> – <group>`.
+- **Delete** (the trash button under the list) removes the groups' triangles,
+  after you confirm.
+
+Each of these is a single undo step. Faces written before the file's first
+`o`/`g` line go into a group named `(ungrouped)`. A name that appears again
+later in the file adds faces to the existing group rather than making a new
+one. Crop and Merge keep each triangle's group too. Merging meshes that have
+groups keeps every part's groups, and a merged mesh that had no groups becomes
+one group named after it. Exporting to `.obj` writes the groups back as `g`
+lines, so the file re-imports with the same groups.
 
 ## Display options
 

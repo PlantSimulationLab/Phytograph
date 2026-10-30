@@ -2,6 +2,9 @@ import { useRef, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import type { MeshData } from '../../../lib/pointCloudTypes';
 import { buildBoundsTree, freeBoundsTree } from '../../../lib/bvhRaycast';
+import { OutlineSelect } from '../outline/JFAOutline';
+
+const NO_RAYCAST = () => {};
 
 // Triangle mesh component for rendering triangulated surfaces
 export interface TriangleMeshProps {
@@ -40,9 +43,44 @@ export interface TriangleMeshProps {
   // alone — so dragging the crop box over a multi-million-triangle mesh costs
   // an index upload per change rather than a full rebuild. Null = draw all.
   triangleMask?: Uint8Array | null;
+  // A second draw of some of the same triangles (a mesh's selected object
+  // groups), sharing every vertex buffer like `triangleMask` does, under its own
+  // matrix (the live preview of a group transform, in the mesh's local frame)
+  // and its own selection outline. Pair it with a `triangleMask` that leaves
+  // these triangles out, or they draw twice.
+  subset?: { mask: Uint8Array; matrix: THREE.Matrix4; outlined: boolean } | null;
 }
 
-export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false, forceDepthWrite = false, triangleMask = null }: TriangleMeshProps) {
+// An index-only geometry over `geometry`'s attributes, drawing the triangles
+// `mask` keeps. `src` is the triangle index buffer, or null when the geometry is
+// non-indexed (triangle t owns vertices 3t..3t+2).
+function maskedIndexGeometry(geometry: THREE.BufferGeometry, mask: Uint8Array, src: Uint32Array | null): THREE.BufferGeometry {
+  let kept = 0;
+  for (let t = 0; t < mask.length; t++) kept += mask[t];
+  const index = new Uint32Array(kept * 3);
+  let w = 0;
+  for (let t = 0; t < mask.length; t++) {
+    if (!mask[t]) continue;
+    index[w++] = src ? src[t * 3] : t * 3;
+    index[w++] = src ? src[t * 3 + 1] : t * 3 + 1;
+    index[w++] = src ? src[t * 3 + 2] : t * 3 + 2;
+  }
+  const geo = new THREE.BufferGeometry();
+  for (const name of Object.keys(geometry.attributes)) {
+    geo.setAttribute(name, geometry.attributes[name]);
+  }
+  geo.setIndex(new THREE.BufferAttribute(index, 1));
+  return geo;
+}
+
+// Detach the shared attributes first: dispose() frees the GPU buffer of every
+// attribute still on the geometry, and these belong to the real geometry.
+function disposeMaskedGeometry(geo: THREE.BufferGeometry) {
+  for (const name of Object.keys(geo.attributes)) geo.deleteAttribute(name);
+  geo.dispose();
+}
+
+export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false, forceDepthWrite = false, triangleMask = null, subset = null }: TriangleMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const hasLoggedRef = useRef(false);
 
@@ -139,37 +177,25 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
   // The masked view: a second geometry that SHARES every attribute of the real
   // one and differs only in its index. Sharing the BufferAttribute objects
   // means no vertex data is copied or re-uploaded.
+  // The pseudocolor geometry is non-indexed; the plain one draws through data.indices.
   const maskedGeometry = useMemo(() => {
     if (!triangleMask || triangleMask.length !== data.triangleCount) return null;
-    let kept = 0;
-    for (let t = 0; t < triangleMask.length; t++) kept += triangleMask[t];
-    const index = new Uint32Array(kept * 3);
-    // The pseudocolor geometry is non-indexed (triangle t owns vertices
-    // 3t..3t+2); the plain one draws through data.indices.
-    const src = trianglePositions ? null : data.indices;
-    let w = 0;
-    for (let t = 0; t < triangleMask.length; t++) {
-      if (!triangleMask[t]) continue;
-      index[w++] = src ? src[t * 3] : t * 3;
-      index[w++] = src ? src[t * 3 + 1] : t * 3 + 1;
-      index[w++] = src ? src[t * 3 + 2] : t * 3 + 2;
-    }
-    const geo = new THREE.BufferGeometry();
-    for (const name of Object.keys(geometry.attributes)) {
-      geo.setAttribute(name, geometry.attributes[name]);
-    }
-    geo.setIndex(new THREE.BufferAttribute(index, 1));
-    return geo;
+    return maskedIndexGeometry(geometry, triangleMask, trianglePositions ? null : data.indices);
   }, [geometry, triangleMask, data, trianglePositions]);
   useEffect(() => {
     if (!maskedGeometry) return;
-    return () => {
-      // Detach the shared attributes first: dispose() frees the GPU buffer of
-      // every attribute still on the geometry, and these belong to `geometry`.
-      for (const name of Object.keys(maskedGeometry.attributes)) maskedGeometry.deleteAttribute(name);
-      maskedGeometry.dispose();
-    };
+    return () => disposeMaskedGeometry(maskedGeometry);
   }, [maskedGeometry]);
+
+  const subsetMask = subset?.mask ?? null;
+  const subsetGeometry = useMemo(() => {
+    if (!subsetMask || subsetMask.length !== data.triangleCount) return null;
+    return maskedIndexGeometry(geometry, subsetMask, trianglePositions ? null : data.indices);
+  }, [geometry, subsetMask, data, trianglePositions]);
+  useEffect(() => {
+    if (!subsetGeometry) return;
+    return () => disposeMaskedGeometry(subsetGeometry);
+  }, [subsetGeometry]);
 
   const useColorAttr = hasTriangleColors || hasVertexColors;
 
@@ -243,5 +269,22 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
   }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);
 
-  return <mesh ref={meshRef} geometry={maskedGeometry ?? geometry} material={material} renderOrder={renderOrder} />;
+  const main = <mesh ref={meshRef} geometry={maskedGeometry ?? geometry} material={material} renderOrder={renderOrder} />;
+  if (!subset || !subsetGeometry) return main;
+  return (
+    <>
+      {main}
+      <group
+        matrixAutoUpdate={false}
+        matrix={subset.matrix}
+        onUpdate={(self) => { self.matrixWorldNeedsUpdate = true; }}
+      >
+        <OutlineSelect enabled={subset.outlined}>
+          {/* Not a pick target: it has no BVH, and the main draw beside it
+              already answers a click on this mesh. */}
+          <mesh geometry={subsetGeometry} material={material} renderOrder={renderOrder} raycast={NO_RAYCAST} />
+        </OutlineSelect>
+      </group>
+    </>
+  );
 }

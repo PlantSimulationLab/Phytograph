@@ -9,6 +9,7 @@
 // OBJ writer here emits the whole bundle: geometry + material library + texture
 // images, all cross-referenced by name.
 
+import { hasGroups } from './meshGroups';
 import type { MeshData, PlantMaterialDef } from './pointCloudTypes';
 
 // One file in an export bundle. Text files carry a string; texture images carry
@@ -371,31 +372,40 @@ export function serializeMeshObj(
   // loads with a warning (or a black surface) in some readers.
   let usedDefault = false;
 
-  if (resolved.length === 0) {
-    for (let t = 0; t < triangleCount; t++) lines.push(faceLine(t));
-  } else {
-    // Group faces under their material. First claim wins, so overlapping
-    // material groups can't duplicate a face. Triangles no material claims are
-    // still written — silently dropping them would shrink the mesh on export.
-    const written = new Uint8Array(triangleCount);
-    for (const mat of resolved) {
-      const tris = mat.triangleIndices.filter(t => t >= 0 && t < triangleCount && !written[t]);
-      if (tris.length === 0) continue;
-      lines.push(`usemtl ${mat.mtlName}`);
-      for (const t of tris) {
-        written[t] = 1;
-        lines.push(faceLine(t));
-      }
+  // Each face's material: the first material that claims it (so overlapping
+  // material groups can't duplicate a face), else -1 = `default`. Triangles no
+  // material claims are still written — silently dropping them would shrink
+  // the mesh on export.
+  const matOf = new Int32Array(triangleCount).fill(-1);
+  resolved.forEach((mat, mi) => {
+    for (const t of mat.triangleIndices) if (t >= 0 && t < triangleCount && matOf[t] < 0) matOf[t] = mi;
+  });
+  // Object groups (an imported OBJ's `o`/`g` parts) are written as `g` lines, so
+  // a re-import gets the same groups back. Faces are ordered group-major, then
+  // by material, so each group is one contiguous block.
+  const groupIds = hasGroups(data) ? data.triangleGroupIds! : null;
+  // Names are written as-is: a name with a space reads back whole here (the
+  // importers join a multi-name `g` line), though other readers may split it.
+  const groupNames = groupIds ? data.groupNames!.map(n => n.trim() || 'group') : [];
+  // `default` sorts after every real material, as it always has.
+  const matKey = (t: number) => (matOf[t] < 0 ? resolved.length : matOf[t]);
+  const order = Array.from({ length: triangleCount }, (_, t) => t);
+  if (resolved.length > 0 || groupIds) {
+    order.sort((a, b) => ((groupIds ? groupIds[a] - groupIds[b] : 0) || matKey(a) - matKey(b) || a - b));
+  }
+  let lastGroup = -1, lastMat = -2;
+  for (const t of order) {
+    if (groupIds && groupIds[t] !== lastGroup) {
+      lastGroup = groupIds[t];
+      lines.push(`g ${groupNames[lastGroup]}`);
+      lastMat = -2;  // re-state the material inside each group block
     }
-    // Only reachable when the mesh has no vertex colors to derive a material
-    // from (color grouping otherwise covers every unclaimed triangle).
-    const orphans: number[] = [];
-    for (let t = 0; t < triangleCount; t++) if (!written[t]) orphans.push(t);
-    if (orphans.length > 0) {
-      usedDefault = true;
-      lines.push('usemtl default');
-      for (const t of orphans) lines.push(faceLine(t));
+    if (resolved.length > 0 && matOf[t] !== lastMat) {
+      lastMat = matOf[t];
+      if (lastMat < 0) usedDefault = true;
+      lines.push(`usemtl ${lastMat < 0 ? 'default' : resolved[lastMat].mtlName}`);
     }
+    lines.push(faceLine(t));
   }
 
   const files: MeshExportFile[] = [{ name: `${baseName}.obj`, text: lines.join('\n') }];
