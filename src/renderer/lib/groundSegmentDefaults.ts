@@ -93,6 +93,26 @@ const SLOPE_RELIEF_RATIO = 0.2;
 // is the clearest demonstration that the box measures the tree, not the ground.
 const VEGETATION_RELIEF_RATIO = 0.7;
 
+// The ratio cannot tell a slope from a tree at small extents, and the conforming
+// recipe is the wrong answer there even on a real slope. A 3.6 m apple tree on a
+// 6.5 m footprint scores 0.55, squarely "sloped". Its far side is occluded, so
+// a few m² of the plan hold only canopy returns, and at the 5 cm floor a rigidness-1
+// cloth drops through that hole and settles on the canopy; slope smoothing then
+// pins it there. Everything near the crown top reads as ground and NO tolerance
+// can undo it, because the cloth itself is up there: ground fraction 55%, against
+// 36% for the flat recipe. Crops of real scans fail the same way at every extent
+// tried up to 40 m (Wickson oak, 40 m, 9% of points >1 m up labeled ground vs 0%).
+//
+// Shearing the clouds to impose a real slope shows the flat recipe still wins
+// when the terrain really is steep. Overall accuracy at 0 / 10 / 20 / 30 deg:
+//   apple crop   flat 0.98 / 0.97 / 0.96 / 0.94   conforming 0.81 / 0.87 / 0.83 / 0.72
+//   bean fixture flat 0.99 / 0.96 / 0.87 / 0.82   conforming 0.98 / 0.67 / 0.81 / 0.65
+// (tree_1 and tree_4 stay above 0.996 on both.) The conforming recipe only earns
+// its place on a 50 m tile: Mission1 sheared to 30 deg loses 41% of its ground on
+// the flat recipe and under 1% on the conforming one, while at 20 deg and below
+// the flat recipe still holds. So it is reserved for tiles at least this wide.
+const SLOPE_MIN_EXTENT_M = 50;
+
 // Airborne (ALS) clouds need a different recipe entirely, and the extent-scaled
 // one above is actively harmful there. Measured over all 15 samples of the ISPRS
 // filtertest benchmark (the standard ground-filtering reference, with per-point
@@ -188,7 +208,8 @@ export function groundSegmentDefaultsForExtent(
   const relief = Number.isFinite(verticalReliefM) && verticalReliefM > 0 ? verticalReliefM : 0;
   const reliefRatio = relief / ext;
 
-  if (reliefRatio >= SLOPE_RELIEF_RATIO && reliefRatio < VEGETATION_RELIEF_RATIO) {
+  if (ext >= SLOPE_MIN_EXTENT_M
+      && reliefRatio >= SLOPE_RELIEF_RATIO && reliefRatio < VEGETATION_RELIEF_RATIO) {
     // Sloped / undulating terrain: fine, low-rigidness, slope-smoothed cloth so
     // it conforms to the slope rather than bridging onto the valley floor.
     const cloth = Math.min(ext * SLOPE_CLOTH_FRACTION, SLOPE_CLOTH_MAX);

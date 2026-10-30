@@ -99,6 +99,20 @@ describe('groundSegmentDefaultsForExtent', () => {
       expect(d.slopeSmooth).toBe(false);
     });
 
+    it('never gives a small cloud the conforming recipe', () => {
+      // ScanPos014 crop: a 3.57 m apple tree on a 6.5 m footprint, ratio 0.55.
+      // The conforming recipe settles the cloth on the canopy here, which no
+      // tolerance can undo.
+      const apple = groundSegmentDefaultsForExtent(6.545, 3.57);
+      expect(apple.rigidness).toBe(3);
+      expect(apple.slopeSmooth).toBe(false);
+      expect(apple.clothResolution).toBe(0.065);
+      // Just under the extent gate, inside the sloped ratio band.
+      const wide = groundSegmentDefaultsForExtent(49, 15);
+      expect(wide.rigidness).toBe(3);
+      expect(wide.slopeSmooth).toBe(false);
+    });
+
     it('still treats a genuine slope as sloped', () => {
       // BR04: 186 m wide, 81 m of relief (~15 deg). Ratio 0.44 — real terrain,
       // and it must keep the conforming recipe.

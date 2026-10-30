@@ -218,7 +218,7 @@ export function GroundSegmentPanel({
           data-testid="ground-slope-smooth-help"
           label="Slope smoothing"
           align="right"
-          text="Enable the cloth's slope-handling pass for undulating or steep terrain. Together with a low rigidness it lets the cloth conform to a slope instead of draping flat and bridging over it. Auto-enabled when the cloud's vertical relief is large relative to its footprint; leave off for flat ground."
+          text="Enable the cloth's slope-handling pass for undulating or steep terrain. Together with a low rigidness it lets the cloth conform to a slope instead of draping flat and bridging over it. Auto-enabled for tiles at least 50 m wide whose vertical relief is large relative to their footprint; leave off for flat ground and for single trees, where the cloth can settle on the canopy."
         />
       </div>
 

@@ -345,6 +345,65 @@ def test_band_floor_still_applies_when_there_is_air_above_the_band():
     assert 0.10 <= threshold <= 0.30, meta
 
 
+def _measured_heights(name: str) -> "tuple[np.ndarray, float]":
+    """Height above the settled cloth on a crop of a real scan, from a histogram
+    fixture binned at the estimator's own bin width. A hand-built density curve
+    does not reproduce this failure: its steps give the knee something to find."""
+    path = FIXTURE.parent / f"ground_height_hist_{name}.txt"
+    cloth = float(path.read_text().split("cloth_resolution=")[1].split()[0])
+    table = np.loadtxt(path)
+    return np.repeat(table[:, 0], table[:, 1].astype(int)), cloth
+
+
+@pytest.mark.parametrize("name", ["orchard_8m", "lawn_oak_30m"])
+def test_estimate_class_threshold_stops_where_a_sharp_band_ends(name):
+    """Density climbs or plateaus gradually above the band, too slowly for the
+    knee's short window, and the tail's 1% of peak can equal the plateau. Uncapped
+    these crops cut at 2.7 m and 3.95 m, labeling 93-94% of points ground."""
+    h, cloth = _measured_heights(name)
+    threshold, meta = main._estimate_class_threshold(h, cloth, 0.1)
+    assert meta["method"] == "elbow", meta
+    assert 0.05 <= threshold <= 0.5, meta
+
+
+@pytest.mark.parametrize("name", ["orchard_8m", "lawn_oak_30m"])
+def test_estimate_class_threshold_cap_is_off_for_airborne(name):
+    """Capping an airborne cut costs ISPRS accuracy (samp53 0.77 -> 0.67), and its
+    mode reads as sharp too, so the regime is what switches the cap off. This is
+    also the failure the cap exists for: without it the cut lands in the canopy."""
+    h, cloth = _measured_heights(name)
+    threshold, meta = main._estimate_class_threshold(h, cloth, 0.1, cap_band_end=False)
+    assert meta["method"] != "elbow", meta
+    assert threshold > 1.0, meta
+
+
+def _standing_tree_cloud(n: int = 40_000) -> np.ndarray:
+    """A 3.57 m tree on a flat 6.5 m footprint, the shape of the ScanPos014 crop."""
+    rng = np.random.default_rng(0)
+    ground = np.column_stack([rng.uniform(0, 6.5, (n, 2)), rng.normal(0, 0.01, n)])
+    crown = np.column_stack([rng.uniform(2, 5, (n, 2)), rng.uniform(1.0, 3.57, n)])
+    return np.vstack([ground, crown])
+
+
+def test_auto_csf_params_does_not_read_a_tree_as_a_slope():
+    """The DEM tool's auto path takes the same recipe gates as the panel: a
+    conforming cloth settles on the canopy and no tolerance can undo it."""
+    csf = main._auto_csf_params(_standing_tree_cloud())
+    assert csf["rigidness"] == 3
+    assert csf["slope_smooth"] is False
+
+
+def test_auto_csf_params_keeps_a_wide_slope_conforming(monkeypatch):
+    # A terrestrial hillside: spacing below the airborne cutoff.
+    monkeypatch.setattr(main, "_regime_point_spacing", lambda _pts: 0.01)
+    rng = np.random.default_rng(0)
+    xy = rng.uniform(0, 186, (20_000, 2))
+    pts = np.column_stack([xy, 0.44 * xy[:, 0]])
+    csf = main._auto_csf_params(pts)
+    assert csf["rigidness"] == 1
+    assert csf["slope_smooth"] is True
+
+
 def test_desnag_cloth_pulls_down_a_snagged_node():
     """A node hung up on a trunk is pulled back to local terrain; flat terrain
     and genuine relief are left alone.

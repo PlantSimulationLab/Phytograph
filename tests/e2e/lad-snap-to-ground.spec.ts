@@ -89,7 +89,9 @@ test('snaps a voxel grid to a DEM and LAD follows the slope', async () => {
 
     // ── 3. Segment ground (so the DEM grids the ground points) ───────────
     await page.getByTestId('tool-ground-segment').click();
-    await page.getByTestId('ground-cloth-resolution').fill('0.3');
+    // The seeded cloth, deliberately: this is a real 20-degree slope on a 5 m
+    // footprint, which the seed must handle with its stiff fine cloth. A hand-set
+    // coarse cloth (0.3 m) bridges the slope and loses the uphill ground.
     // Measuring from the scan is the default; this test wants its own
     // fixture-tuned tolerance, so turn the measurement off first.
     await page.getByTestId('ground-auto-class-threshold').uncheck();

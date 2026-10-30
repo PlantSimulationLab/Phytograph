@@ -21,13 +21,15 @@ labels the points the cloth settles onto as ground.
    of cloth resolution for a pot/plot-scale scan, scaling up to tens of
    centimeters for a field- or orchard-scale scan. The seed also reads the
    cloud's **vertical relief**: a large *flat* field gets a coarse, stiff
-   cloth, but a large *sloped* tile (e.g. an aerial scan of a hillside forest)
-   gets a **finer cloth, low rigidness, and slope smoothing on** so the cloth
-   can bend to follow the slope instead of draping flat and catching only the
-   valley floor. Relief that is very large compared with the footprint — a
-   single tall tree standing on flat ground, say — is read as *vegetation*
-   rather than terrain, and keeps the flat-ground recipe: a conforming cloth
-   would climb the trunk.
+   cloth, but a *sloped* tile at least 50 m wide (e.g. a hillside forest) gets
+   a **finer cloth, low rigidness, and slope smoothing on** so the cloth can
+   bend to follow the slope instead of draping flat and catching only the
+   valley floor. Anything narrower keeps the stiff recipe however tall it is:
+   at that size the relief is usually a tree rather than terrain, and a
+   conforming cloth falls through the unseen ground behind the tree and settles
+   on the canopy. If points near the top of the canopy come out as ground, the
+   **cloth** is up there and lowering the tolerance won't help. Raise the
+   rigidness to 3, turn slope smoothing off, or use a coarser cloth.
    **Airborne (ALS) scans get a different recipe entirely.** Phytograph
    recognizes them by their point spacing — meters apart, against millimeters
    for a tripod scan — and switches to a fixed 0.75 m cloth with slope
@@ -70,8 +72,8 @@ labels the points the cloth settles onto as ground.
       bend to follow the slope instead of bridging over it.
     - **Slope smoothing** — enables CSF's slope-handling pass. Leave it off for
       flat ground; turn it on (together with a low rigidness) for undulating or
-      steep terrain. It's auto-enabled when the cloud's vertical relief is
-      large relative to its footprint — but not when it's so large that the
+      steep terrain. It's auto-enabled on tiles at least 50 m wide when the
+      cloud's vertical relief is large relative to its footprint — but not when it's so large that the
       height clearly comes from vegetation rather than terrain.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two
    new clouds — ground and non-ground — alongside the classified original. The

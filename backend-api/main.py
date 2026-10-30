@@ -6886,6 +6886,9 @@ _ALS_SPACING_M = 0.1
 _ALS_MIN_EXTENT_M = 50.0
 _ALS_CLOTH = 0.75
 _ALS_CLASS_THRESHOLD = 0.5
+# Mirrored from groundSegmentDefaults.ts.
+_SLOPE_MIN_EXTENT_M = 50.0
+_VEGETATION_RELIEF_RATIO = 0.7
 
 
 def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
@@ -6940,6 +6943,12 @@ def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
     return float(np.median(nn)) if nn.size else 0.0
 
 
+def _is_airborne_cloud(points: np.ndarray) -> bool:
+    """The airborne regime test (see _ALS_SPACING_M): wide AND sparsely spaced."""
+    ext = float(max(np.ptp(points[:, 0]), np.ptp(points[:, 1])))
+    return ext >= _ALS_MIN_EXTENT_M and _regime_point_spacing(points) >= _ALS_SPACING_M
+
+
 def _auto_csf_params(points: np.ndarray) -> dict:
     """Extent-scaled CSF parameters for the DEM tool's automatic ground
     extraction. CSF's cloth resolution is an ABSOLUTE distance: a 5 cm cloth
@@ -6978,12 +6987,14 @@ def _auto_csf_params(points: np.ndarray) -> dict:
     # reads as wide-spaced (the sky shell is sparse) and so lands here, and an
     # unfloored 0.5 m cloth over its ~1000x-inflated extent is 4000 nodes per
     # side — precisely the hang the backstop exists to prevent.
-    if ext >= _ALS_MIN_EXTENT_M and _regime_point_spacing(points) >= _ALS_SPACING_M:
+    if _is_airborne_cloud(points):
         return {"cloth_resolution": max(_ALS_CLOTH, cloth_floor),
                 "class_threshold": _ALS_CLASS_THRESHOLD,
                 "rigidness": 2, "slope_smooth": True}
 
-    if ratio >= 0.2:
+    # Same gates as groundSegmentDefaults.ts; see SLOPE_MIN_EXTENT_M there for why
+    # a small cloud never takes the conforming recipe.
+    if ext >= _SLOPE_MIN_EXTENT_M and 0.2 <= ratio < _VEGETATION_RELIEF_RATIO:
         cloth = min(ext / 200.0, 1.0)
         return {"cloth_resolution": max(float(np.clip(cloth, CLOTH_MIN, CLOTH_MAX)), cloth_floor),
                 "class_threshold": 0.5, "rigidness": 1, "slope_smooth": True}
@@ -18127,9 +18138,44 @@ _BAND_FLOOR_MAX_HWHM = 20.0
 # ground.
 _BAND_FLOOR_MAX_CLOTH = 8.0
 
+# The cut may not sit past the point where the ground mode has finished decaying.
+# Neither rule above can see that point on a sharp mode. The knee's persistence
+# window is a few mode-widths (~4.5 cm on an orchard scan), and density climbing
+# gradually into a canopy over half a meter never rises 25% in that span, so the
+# walk runs on to some sharper feature up in the crown. The tail's "1% of peak"
+# is a level, and on a sharp mode that level can equal the canopy's own plateau.
+# Measured on crops of orchard and lawn scans: 2.7 m and 3.95 m, labeling 94% of
+# points ground, where the band ends near 0.2 m.
+#
+# So find the first bin the density does not fall appreciably below over the next
+# ELBOW_SPAN (a valley or a plateau, either way the band is over) and cap the cut
+# there. Sharp modes on close-range clouds only: an airborne cut has to clear
+# low vegetation the sparse returns cannot separate, and uncapped it scores better
+# against ISPRS (samp53 0.77 vs 0.67, cap at 1.2 m). Its mode reads as sharp too,
+# being one or two bins wide, so `cap_band_end` is the airborne regime test rather
+# than a width. tree_1, tree_4, the bean fixture and Mission1 do not move at all.
+_ELBOW_SPAN_HWHM = 10.0
+_ELBOW_SPAN_MIN_M = 0.25
+_ELBOW_FLAT_RATIO = 0.8
+
+
+def _density_elbow(smooth: np.ndarray, centers: np.ndarray, peak: int, hwhm: float,
+                   binw: float) -> "Optional[float]":
+    """Height where the ground mode's falloff ends: the first bin past the mode's
+    shoulder whose density stays within _ELBOW_FLAT_RATIO of itself over the next
+    span. None when the density decays all the way through the histogram."""
+    from scipy.ndimage import minimum_filter1d
+
+    span = max(1, int(round(max(_ELBOW_SPAN_HWHM * hwhm, _ELBOW_SPAN_MIN_M) / binw)))
+    ahead = minimum_filter1d(smooth, size=span, origin=-(span // 2), mode="nearest")
+    start = peak + max(1, int(round(hwhm / binw)))
+    done = (smooth[start:] <= 0.5 * smooth[peak]) & (ahead[start:] >= _ELBOW_FLAT_RATIO * smooth[start:])
+    hits = np.flatnonzero(done)
+    return float(centers[start + hits[0]]) if hits.size else None
+
 
 def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
-                              fallback: float) -> "tuple[float, dict]":
+                              fallback: float, cap_band_end: bool = True) -> "tuple[float, dict]":
     """Pick a CSF `class_threshold` from the settled cloth instead of from the
     cloud's horizontal extent. Returns (threshold, meta).
 
@@ -18298,7 +18344,13 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
             # sparse tail the density fraction alone can run far away from the
             # band (51 m on BR04) before it is reached.
             band_floor = min(float(centers[reached[0]]), _BAND_FLOOR_MAX_HWHM * hwhm)
-    threshold = float(np.clip(max(knee, centers[peak] + hwhm, band_floor), 0.02, 5.0))
+    cut = max(knee, centers[peak] + hwhm, band_floor)
+    if cap_band_end and hwhm < _BAND_FLOOR_SHARP_HWHM * cloth_resolution:
+        elbow = _density_elbow(smooth, centers, peak, hwhm, binw)
+        if elbow is not None and max(elbow, centers[peak] + hwhm, band_floor) < cut:
+            cut = max(elbow, centers[peak] + hwhm, band_floor)
+            meta["method"] = "elbow"
+    threshold = float(np.clip(cut, 0.02, 5.0))
     meta.update({
         "class_threshold": threshold,
         "mode": float(centers[peak]),
@@ -18438,7 +18490,8 @@ def segment_ground(
             cloth_nodes, n_desnagged = _desnag_cloth(cloth_nodes)
             height = _height_above_cloth(points[:, :3].astype(np.float64), cloth_nodes)
             threshold, est = _estimate_class_threshold(
-                height, float(cloth_resolution), float(class_threshold))
+                height, float(cloth_resolution), float(class_threshold),
+                cap_band_end=not _is_airborne_cloud(points))
             est["desnagged_nodes"] = n_desnagged
             labels = np.where(np.abs(height) < threshold,
                               GROUND_CLASS_GROUND, GROUND_CLASS_PLANT).astype(np.int32)
