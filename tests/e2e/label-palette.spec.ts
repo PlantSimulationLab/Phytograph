@@ -9,6 +9,7 @@ import { resetToFreshScene } from './helpers/resetApp';
 import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { readLasClasses } from './helpers/lasClasses';
+import { drawPointsSolid } from './helpers/pointColors';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -627,6 +628,7 @@ test('a hundred trees each draw in their own color', async () => {
   // (a derived palette never passes through the editor, which used to be the
   // only place the warning appeared).
   await expect(page.getByTestId('label-palette-warning')).toContainText('101 classes');
+  await drawPointsSolid(page);
 
   const expected: Record<number, string> = {};
   for (let k = 1; k <= 100; k++) {

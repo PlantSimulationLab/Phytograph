@@ -1,11 +1,32 @@
 import { readFileSync } from 'node:fs';
-import type { Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 /** The x/y/z rows of an ASCII point fixture (comment lines skipped). */
 export function fixturePoints(path: string): Array<[number, number, number]> {
   return readFileSync(path, 'utf8').split('\n')
     .filter((l) => l.trim() && !l.startsWith('#'))
     .map((l) => l.trim().split(/\s+/).slice(0, 3).map(Number) as [number, number, number]);
+}
+
+/**
+ * Set the Display panel's point size to 2, for a spec that reads a point's
+ * color back from the screen. At the default size on a 1x display a point is
+ * exactly 1 device px, and antialiasing can leave it partly covered: the same
+ * hue at ~73% over the background, depending on where it lands in the pixel.
+ * That is outside any tolerance tight enough to tell one class color from the
+ * next, so widening `tol` is not the fix.
+ */
+export async function drawPointsSolid(page: Page): Promise<void> {
+  const display = page.getByRole('button', { name: 'Display', exact: true });
+  await display.click();
+  const increase = page.getByTitle('Increase Point Size');
+  await expect(increase).toBeVisible();
+  const size = page.getByText(/^Point Size: [\d.]+px$/);
+  const current = parseFloat((await size.textContent())!.replace(/[^\d.]/g, ''));
+  for (let s = current; s < 2; s += 0.5) await increase.click();
+  await expect(size).toHaveText('Point Size: 2.0px');
+  await display.click();
+  await expect(increase).toHaveCount(0);
 }
 
 /** What a drawn pixel must look like to count — see pointsDrawnIn / pointsDrawnGray. */

@@ -8,7 +8,7 @@ import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { readLasClasses } from './helpers/lasClasses';
-import { fixturePoints, pointsDrawnIn } from './helpers/pointColors';
+import { drawPointsSolid, fixturePoints, pointsDrawnIn } from './helpers/pointColors';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
@@ -113,6 +113,7 @@ async function closeAndAwaitBake(page: LaunchedApp['page'], color: string) {
   const committed = async () => (await row.getAttribute('data-overlay-columns') ?? '')
     .split(',').find((c) => c.startsWith('manual_class:')) ?? null;
   const before = await committed();
+  await drawPointsSolid(page);
   await panel.getByRole('button', { name: 'Close' }).click();
   await expect(panel).toHaveCount(0);
   const samples: Array<{ matched: number; landed: boolean; pill: boolean }> = [];

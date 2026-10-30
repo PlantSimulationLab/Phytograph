@@ -9,7 +9,7 @@ import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { stubMessageBox, getMessageBoxCalls } from './helpers/stubMessageBox';
 import { resetToFreshScene } from './helpers/resetApp';
-import { fixturePoints, pointsDrawnIn } from './helpers/pointColors';
+import { drawPointsSolid, fixturePoints, pointsDrawnIn } from './helpers/pointColors';
 import { expectClassLegend } from './helpers/classLegend';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'forest-plot.xyz');
@@ -165,6 +165,7 @@ test('labels painted but not yet baked are still drawn after save and open', asy
     await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
     await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
     await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+    await drawPointsSolid(page);
 
     await page.getByTestId('tool-label').click();
     const panel = page.getByTestId('label-panel');
@@ -196,6 +197,14 @@ test('labels painted but not yet baked are still drawn after save and open', asy
     await expect(page.locator('[data-testid="toast-success"]').filter({ hasText: 'Project Opened' }))
       .toBeVisible({ timeout: 60_000 });
     await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]')).toHaveCount(1);
+
+    // The point size set before the save comes back with the project, and
+    // stays once the settings read on the remounted viewer has resolved.
+    const display = page.getByRole('button', { name: 'Display', exact: true });
+    await display.click();
+    await page.waitForTimeout(2_000);
+    await expect(page.getByText(/^Point Size: [\d.]+px$/)).toHaveText('Point Size: 2.0px');
+    await display.click();
 
     const pts = fixturePoints(TINY);
     await expect.poll(async () => (await pointsDrawnIn(page, pts, color, 40)).matched, {

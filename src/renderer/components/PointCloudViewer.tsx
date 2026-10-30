@@ -22714,6 +22714,9 @@ export default function PointCloudViewer({
     setSelectedScalarField(v.selectedScalarField ?? undefined);
     if (v.colormap) setColormap(v.colormap);
     if (v.colormapOverrides instanceof Map) setColormapOverrides(v.colormapOverrides);
+    // Opening a project remounts the viewer, so the launch seed (background,
+    // point size) hasn't run yet and would land on top of the saved size.
+    settingsSeededRef.current = true;
     if (typeof v.pointSize === 'number') setPointSize(v.pointSize);
     if (Array.isArray(v.measurements)) setMeasurements(v.measurements);
     if (Array.isArray(v.pickedPoints)) setPickedPoints(v.pickedPoints);
