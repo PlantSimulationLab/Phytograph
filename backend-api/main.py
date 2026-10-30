@@ -226,12 +226,33 @@ def _assert_pyhelios_native() -> None:
     print("[pyhelios] native LiDAR + plant-architecture wrappers verified (not mock)", flush=True)
 
 
+# Helios resolves a plant's textures against the working directory, then against
+# HELIOS_BUILD. PyHelios finds them by `os.chdir`-ing around each PlantArchitecture
+# call, but the working directory belongs to the whole process: when two builds
+# overlap (cancel a canopy, start another plant while it unwinds), the first to
+# finish moves it out from under the second. PyHelios only sets HELIOS_BUILD when
+# it finds helios-core, which a packaged build doesn't ship, so there the build
+# failed with "Could not resolve asset file". Pin it so resolution doesn't depend
+# on the working directory.
+def _pin_helios_build() -> None:
+    if os.environ.get("HELIOS_BUILD"):
+        return
+    try:
+        from pyhelios.assets import get_asset_manager
+    except ImportError:
+        return  # PYHELIOS_ALLOW_MOCK unit tests without pyhelios
+    build_path = get_asset_manager()._get_helios_build_path()
+    if build_path is not None and build_path.exists():
+        os.environ["HELIOS_BUILD"] = str(build_path)
+
+
 # The seg-worker never calls pyhelios (segmentation is CSF/open3d/cut-pursuit) and
 # deliberately did NOT preload it (see the GLFW double-load note above), so the
 # native-mode assertion would needlessly import — and crash on — libhelios. Skip it
 # in the worker; the parent backend still enforces native mode at its own startup.
 if not _IS_SEG_WORKER:
     _assert_pyhelios_native()
+    _pin_helios_build()
 
 # Unicode subscript to ASCII conversion for phytorch compatibility
 SUBSCRIPT_TO_ASCII = {
