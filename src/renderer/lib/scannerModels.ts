@@ -8,10 +8,12 @@
 //   2. Auto-fills the acquisition parameters that are a fixed property of the
 //      instrument's optics and deflection unit — beam diameter/divergence, scan
 //      pattern, return type (single/multi + maxReturns/selection), per-channel
-//      elevations, and the maximum angular sweep. Resolution (point counts) is a
-//      user choice, so it is left alone. Every auto-filled value remains editable
-//      afterward. (Whether to simulate an idealized exact scan is a per-run choice
-//      — set rays per pulse to 1 — not an instrument property.)
+//      elevations, and the maximum angular sweep. It also suggests a typical
+//      resolution (point counts), which is a survey setting rather than a fixed
+//      property, so it never replaces a grid the user or a file supplied — see
+//      applyScannerModel. Every auto-filled value remains editable afterward.
+//      (Whether to simulate an idealized exact scan is a per-run choice — set
+//      rays per pulse to 1 — not an instrument property.)
 //
 // The "generic" model is the default: an unknown or user-customized scanner. It
 // carries no preset (the form keeps DEFAULT_SCAN_PARAMETERS) and renders the
@@ -117,7 +119,7 @@
 //   The Livox Mid-100 is OMITTED: it is a 3-head device (three Mid-40 cones at
 //   azimuth −30°/0°/+30°), which a single prism stack cannot represent.
 
-import type { ScanParameters } from './scanParameters';
+import { DEFAULT_SCAN_PARAMETERS, type ScanParameters } from './scanParameters';
 
 import sphereUrl from '../assets/models/sphere.ply?url';
 import faroFocusUrl from '../assets/models/FaroFocus.obj?url';
@@ -146,11 +148,10 @@ export type ScannerModelId =
 
 export type ScannerMeshFormat = 'ply' | 'obj';
 
-// The subset of ScanParameters an instrument fixes. Placement (origin, tilt)
-// and the zenith point count are never part of a preset. Resolution is normally
-// the user's choice too, but a spinning sensor whose datasheet pins an angular
-// step width per revolution may preset `azimuthPoints` (points/revolution) as a
-// datasheet-faithful starting value — still freely editable afterward.
+// The subset of ScanParameters an instrument presets. Placement (origin, tilt)
+// is never part of a preset. `zenithPoints`/`azimuthPoints` are a typical survey
+// resolution over the preset's sweep, not a fixed property, so they are applied
+// only over a grid nobody chose (see applyScannerModel).
 export type ScannerModelPreset = Partial<
   Pick<
     ScanParameters,
@@ -165,6 +166,7 @@ export type ScannerModelPreset = Partial<
     | 'zenithMaxDeg'
     | 'azimuthMinDeg'
     | 'azimuthMaxDeg'
+    | 'zenithPoints'
     | 'azimuthPoints'
     | 'pulseRateHz'
     | 'risleyPrisms'
@@ -231,6 +233,10 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 130,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // 0.03° line × 0.06° frame over 100° × 360°, the step real RIEGL
+      // acquisitions command (SCN_SET_RECT_FOV in example-datasets' .pat files).
+      zenithPoints: 3333,
+      azimuthPoints: 6000,
       // Effective measurement rate up to ~1.2 MHz (datasheet PRR modes).
       pulseRateHz: 1200000,
     },
@@ -260,6 +266,9 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 130,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // Same 0.03° × 0.06° step as the VZ-400i preset.
+      zenithPoints: 3333,
+      azimuthPoints: 6000,
       // Effective measurement rate up to 122 kHz (datasheet, long-range mode).
       // A real capture reported pulse_repetition_rate = 291,971 Hz, which is
       // the laser PRR rather than the effective measurement rate; the latter is
@@ -290,6 +299,9 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 130,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // Same 0.03° × 0.06° step as the VZ-400i preset.
+      zenithPoints: 3333,
+      azimuthPoints: 6000,
       // Beam divergence and pulse rate are deliberately ABSENT. This instrument
       // reports them per scan program: the reference capture ran the "300 kHz"
       // program and reported pulse_repetition_rate = 300,671 Hz, which is the
@@ -341,6 +353,10 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 145,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // 6.3 mm @ 10 m (0.0361° step) over 145° × 360°. Spacing is user-definable
+      // on this instrument; this is a mid-range survey setting.
+      zenithPoints: 4017,
+      azimuthPoints: 9973,
       // ~1 MHz effective scan rate (datasheet).
       pulseRateHz: 1000000,
     },
@@ -367,6 +383,10 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 150,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // 12 mm @ 10 m (0.0688° step) over 150° × 360°. Borrowed from the G2's
+      // settings; the G1 spec sheet names its modes without quoting a spacing.
+      zenithPoints: 2182,
+      azimuthPoints: 5236,
       // Up to 360,000 points/s (datasheet measurement rate).
       pulseRateHz: 360000,
     },
@@ -394,6 +414,10 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 135,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // 12 mm @ 10 m (0.0688° step) over 135° × 360°, the second of the G2's four
+      // settings (6/12/25/50 mm @ 10 m, G2 spec sheet).
+      zenithPoints: 1964,
+      azimuthPoints: 5236,
       // Up to 680,000 points/s — ~1.9× the G1 (G2 spec sheet).
       pulseRateHz: 680000,
     },
@@ -419,6 +443,9 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 150,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // FARO's 1/4 resolution setting: 10,240 points per 360°, ~44 MPts in all.
+      zenithPoints: 4267,
+      azimuthPoints: 10240,
       // Up to ~976 kHz points/s (datasheet measurement rate).
       pulseRateHz: 976000,
     },
@@ -568,4 +595,35 @@ export function getScannerModel(id: ScannerModelId | undefined): ScannerModel {
     SCANNER_MODELS.find(m => m.id === id) ??
     SCANNER_MODELS.find(m => m.id === DEFAULT_SCANNER_MODEL)!
   );
+}
+
+// The form default before it was made realistic. Scans saved with it still count
+// as "nobody chose this grid".
+const LEGACY_DEFAULT_GRID = { zenithPoints: 100, azimuthPoints: 360 };
+
+// True when a grid is only ever a default or a preset, never a value someone
+// entered or a file reported. Checked as a pair: a half-custom grid is custom.
+function isStockGrid(p: Pick<ScanParameters, 'zenithPoints' | 'azimuthPoints'>): boolean {
+  const presets = SCANNER_MODELS.map(m => m.preset);
+  const zeniths = [DEFAULT_SCAN_PARAMETERS.zenithPoints, LEGACY_DEFAULT_GRID.zenithPoints];
+  const azimuths = [DEFAULT_SCAN_PARAMETERS.azimuthPoints, LEGACY_DEFAULT_GRID.azimuthPoints];
+  for (const preset of presets) {
+    if (preset.zenithPoints !== undefined) zeniths.push(preset.zenithPoints);
+    if (preset.azimuthPoints !== undefined) azimuths.push(preset.azimuthPoints);
+  }
+  return zeniths.includes(p.zenithPoints) && azimuths.includes(p.azimuthPoints);
+}
+
+// Record the chosen instrument and overwrite what it fixes. The suggested
+// resolution applies only over a stock grid: the gap filler reads these counts as
+// the scan's REAL grid, so replacing a size from a file or the user with a typical
+// value would silently change its results.
+export function applyScannerModel(p: ScanParameters, id: ScannerModelId): ScanParameters {
+  const { zenithPoints, azimuthPoints, ...fixed } = getScannerModel(id).preset;
+  const next: ScanParameters = { ...p, ...fixed, scannerModel: id };
+  if (isStockGrid(p)) {
+    if (zenithPoints !== undefined) next.zenithPoints = zenithPoints;
+    if (azimuthPoints !== undefined) next.azimuthPoints = azimuthPoints;
+  }
+  return next;
 }

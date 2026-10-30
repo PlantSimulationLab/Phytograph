@@ -31,8 +31,11 @@ You need geometry in the scene to scan: typically a generated
       real-world size (a Velodyne puck is ~14 cm; a Leica P40 ~40 cm).
     - **Auto-fills the instrument-fixed parameters** — scan pattern,
       per-channel beam elevations (for spinning sensors), and the maximum
-      angular sweep — from the manufacturer's datasheet. Resolution (point
-      counts) is yours to set, and every auto-filled value stays editable.
+      angular sweep — from the manufacturer's datasheet. It also suggests a
+      typical survey resolution (for example 3,333 × 6,000 on a RIEGL VZ-400i,
+      about 20 million rays), unless you entered a resolution or it came from
+      a file. Every auto-filled value stays editable, and for a quick test
+      simulation you will usually want a much coarser grid.
 
     Picking a model also records that instrument's datasheet **return type and
     beam optics** on the scan. Those are kept as the instrument's identity —
@@ -45,9 +48,9 @@ You need geometry in the scene to scan: typically a generated
     **plane** (not a tilted cone — that conical geometry is the separate
     miniVUX-1DL), modeled as a spinning multibeam with a single 0° beam
     elevation. Its datasheet pins the azimuth resolution (a 0.018°–0.36°
-    step, so 1,000–20,000 points per revolution), so unlike the
-    terrestrial scanners it also presets a points-per-revolution starting
-    value (~3,600 ≈ 0.1°). Like the Velodyne, it is a moving-platform
+    step, so 1,000–20,000 points per revolution), so it presets a
+    points-per-revolution starting value (~3,600 ≈ 0.1°). Like the
+    Velodyne, it is a moving-platform
     sensor and so requires a trajectory.
 
     The three **Livox** models are non-repeating rosettes (Risley-prism

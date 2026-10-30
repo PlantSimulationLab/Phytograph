@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   SCANNER_MODELS,
+  applyScannerModel,
   getScannerModel,
   DEFAULT_SCANNER_MODEL,
   type ScannerModelId,
 } from './scannerModels';
+import { BLANK_ORIGIN, DEFAULT_SCAN_PARAMETERS, hasOrigin } from './scanParameters';
 
 describe('scannerModels catalog', () => {
   it('exposes generic plus the bundled instruments (incl. the Livox rosettes)', () => {
@@ -172,10 +174,82 @@ describe('scannerModels catalog', () => {
     expect(velo.azimuthPoints).toBe(1800); // 10 Hz ≈ 0.2° setting (0.1°–0.4° range)
     const minivux = getScannerModel('riegl_minivux3uav').preset;
     expect(minivux.azimuthPoints).toBe(3600); // ~0.1° step
-    // The terrestrial rasters leave resolution to the user — no azimuthPoints.
-    expect(getScannerModel('riegl_vz400i').preset.azimuthPoints).toBeUndefined();
-    expect(getScannerModel('leica_p40').preset.azimuthPoints).toBeUndefined();
   });
+
+  it('presets a realistic terrestrial grid: the step each count implies over its sweep', () => {
+    const stepDeg = (id: ScannerModelId) => {
+      const p = getScannerModel(id).preset;
+      return {
+        zenith: (p.zenithMaxDeg! - p.zenithMinDeg!) / p.zenithPoints!,
+        azimuth: (p.azimuthMaxDeg! - p.azimuthMinDeg!) / p.azimuthPoints!,
+      };
+    };
+    // RIEGL's commanded pattern in real .pat files: 0.03° line × 0.06° frame.
+    for (const id of ['riegl_vz400i', 'riegl_vz1000', 'riegl_vz2000i'] as ScannerModelId[]) {
+      expect(stepDeg(id).zenith).toBeCloseTo(0.03, 3);
+      expect(stepDeg(id).azimuth).toBeCloseTo(0.06, 3);
+    }
+    // 6.3 mm @ 10 m is 0.0361°; 12 mm @ 10 m is 0.0688°; FARO 1/4 is 360/10240.
+    expect(stepDeg('leica_p40').zenith).toBeCloseTo(0.0361, 3);
+    expect(stepDeg('leica_p40').azimuth).toBeCloseTo(0.0361, 3);
+    for (const id of ['leica_blk360', 'leica_blk360_g2'] as ScannerModelId[]) {
+      expect(stepDeg(id).zenith).toBeCloseTo(0.0688, 3);
+      expect(stepDeg(id).azimuth).toBeCloseTo(0.0688, 3);
+    }
+    expect(stepDeg('faro_focus_s350').zenith).toBeCloseTo(360 / 10240, 3);
+    // An unidentified VZ has no sweep to spread a grid over, so it presets none.
+    expect(getScannerModel('riegl_vz_series').preset.zenithPoints).toBeUndefined();
+  });
+});
+
+describe('applyScannerModel', () => {
+  it('replaces a default grid, including the old 100x360 on a saved scan', () => {
+    const fresh = applyScannerModel({ ...DEFAULT_SCAN_PARAMETERS }, 'riegl_vz400i');
+    expect([fresh.zenithPoints, fresh.azimuthPoints]).toEqual([3333, 6000]);
+    const saved = applyScannerModel(
+      { ...DEFAULT_SCAN_PARAMETERS, zenithPoints: 100, azimuthPoints: 360 },
+      'riegl_vz400i',
+    );
+    expect([saved.zenithPoints, saved.azimuthPoints]).toEqual([3333, 6000]);
+  });
+
+  it('moves from one preset grid to the next when the model changes', () => {
+    const vz = applyScannerModel({ ...DEFAULT_SCAN_PARAMETERS }, 'riegl_vz400i');
+    const faro = applyScannerModel(vz, 'faro_focus_s350');
+    expect([faro.zenithPoints, faro.azimuthPoints]).toEqual([4267, 10240]);
+  });
+
+  it('keeps a grid from a file or the user, while still applying the optics', () => {
+    const real = { ...DEFAULT_SCAN_PARAMETERS, zenithPoints: 3415, azimuthPoints: 8122 };
+    const next = applyScannerModel(real, 'riegl_vz400i');
+    expect([next.zenithPoints, next.azimuthPoints]).toEqual([3415, 8122]);
+    expect(next.beamDivergenceMrad).toBeCloseTo(0.35);
+    expect(next.scannerModel).toBe('riegl_vz400i');
+  });
+
+  it('treats a half-custom grid as custom', () => {
+    const next = applyScannerModel(
+      { ...DEFAULT_SCAN_PARAMETERS, zenithPoints: 500 },
+      'riegl_vz400i',
+    );
+    expect([next.zenithPoints, next.azimuthPoints]).toEqual([500, DEFAULT_SCAN_PARAMETERS.azimuthPoints]);
+  });
+
+  it('leaves every value alone for generic', () => {
+    const vz = applyScannerModel({ ...DEFAULT_SCAN_PARAMETERS }, 'riegl_vz400i');
+    expect(applyScannerModel(vz, 'generic')).toEqual({ ...vz, scannerModel: 'generic' });
+  });
+});
+
+describe('hasOrigin', () => {
+  it('is false for a blank or partly entered origin, true once all three are set', () => {
+    expect(hasOrigin({ origin: BLANK_ORIGIN })).toBe(false);
+    expect(hasOrigin({ origin: { ...BLANK_ORIGIN, x: 1, y: 2 } })).toBe(false);
+    expect(hasOrigin({ origin: { x: 0, y: 0, z: 0 } })).toBe(true);
+  });
+});
+
+describe('scanner catalog (continued)', () => {
 
   it('models the Livox rosettes as risley_prism with verified prism stacks', () => {
     // Parameters are verbatim from HELIOS++ data/scanners_tls.xml (Mid-40

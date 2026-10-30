@@ -165,8 +165,10 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   origin: { x: 0, y: 0, z: 0 },
   scannerModel: 'generic',
   pattern: 'raster',
-  zenithPoints: 100,
-  azimuthPoints: 360,
+  // A 0.1° step on both axes: the coarse end of what a terrestrial scanner is
+  // actually run at. Model presets set their own (see ./scannerModels).
+  zenithPoints: 1800,
+  azimuthPoints: 3600,
   zenithMinDeg: 0,
   zenithMaxDeg: 180,
   azimuthMinDeg: 0,
@@ -189,6 +191,17 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   // used by a synthetic moving scan.
   pulseRateHz: 300000,
 };
+
+// An origin nobody has entered yet, for the Scan Parameters form only. A scan's
+// true origin can't be inferred from its points (the center of the bounds is
+// almost never where the scanner stood), so attaching metadata to a cloud starts
+// blank rather than offering a plausible wrong answer. NaN renders as an empty
+// DebouncedNumberInput; hasOrigin() must pass before params leave the form.
+export const BLANK_ORIGIN: ScanParameters['origin'] = { x: NaN, y: NaN, z: NaN };
+
+export function hasOrigin(p: Pick<ScanParameters, 'origin'>): boolean {
+  return Number.isFinite(p.origin.x) && Number.isFinite(p.origin.y) && Number.isFinite(p.origin.z);
+}
 
 // Migrate a persisted scan-params blob to the current shape. Older scans (and
 // electron-store entries) carried `returnType: 'single' | 'multi'` and no

@@ -3,12 +3,15 @@ import { X, Radio, FileUp, Pencil } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
   DEFAULT_SCAN_PARAMETERS,
+  BLANK_ORIGIN,
   applyTrajectoryToParams,
+  hasOrigin,
   type ScanParameters,
   type ScanPattern,
 } from '../lib/scanParameters';
 import {
   SCANNER_MODELS,
+  applyScannerModel,
   getScannerModel,
   type ScannerModelId,
 } from '../lib/scannerModels';
@@ -217,8 +220,14 @@ export function ScanParametersPopup({
     }
   };
 
+  // Importing a trajectory anchored origin to its first pose. When attaching
+  // metadata, go back to blank rather than leave that behind as a static origin.
   const clearTrajectory = () => {
-    setParams(p => ({ ...p, trajectory: undefined }));
+    setParams(p => ({
+      ...p,
+      trajectory: undefined,
+      origin: activeMode === 'attach' ? { ...BLANK_ORIGIN } : p.origin,
+    }));
   };
 
   // The azimuth sweep (degrees) the point count is spread over: a full 360° for
@@ -285,6 +294,7 @@ export function ScanParametersPopup({
   // and eats the keystroke.
   const setOrigin = (axis: 'x' | 'y' | 'z') => (v: number) => {
     setParams(p => ({ ...p, origin: { ...p.origin, [axis]: v } }));
+    if (submitError) setSubmitError(null);
   };
 
   // Tilt roll/pitch and the heading offset are signed angles (a scanner can lean
@@ -309,24 +319,20 @@ export function ScanParametersPopup({
   };
 
   // Selecting a scanner model records the choice (drives the marker mesh) and
-  // overwrites the instrument-fixed parameters with that model's preset. The
-  // preset touches optics/pattern/return/elevations/sweep — and, for a spinning
-  // sensor whose datasheet pins a per-revolution step width, azimuthPoints too.
-  // Origin, tilt, heading, and the zenith point count are user choices and stay
-  // as-is. Everything remains editable afterward. 'generic' carries an empty
-  // preset, so picking it just sets the mesh back to the sphere without
-  // disturbing current values.
+  // overwrites the instrument-fixed parameters with that model's preset: optics/
+  // pattern/return/elevations/sweep, plus a typical resolution unless the grid was
+  // entered or came from a file (see applyScannerModel). Origin, tilt, and heading
+  // are user choices and stay as-is. Everything remains editable afterward.
+  // 'generic' carries an empty preset, so picking it just sets the mesh back to
+  // the sphere without disturbing current values.
   const setModel = (id: ScannerModelId) => {
     const preset = getScannerModel(id).preset;
-    setParams(p => {
-      const next: ScanParameters = { ...p, ...preset, scannerModel: id };
-      // Keep the free-text elevation field in sync when the preset (de)fines
-      // channel elevations (e.g. switching to the Velodyne fills 32 channels).
-      if (preset.beamElevationAnglesDeg) {
-        setElevationText(preset.beamElevationAnglesDeg.join(', '));
-      }
-      return next;
-    });
+    // Keep the free-text elevation field in sync when the preset (de)fines
+    // channel elevations (e.g. switching to the Velodyne fills 32 channels).
+    if (preset.beamElevationAnglesDeg) {
+      setElevationText(preset.beamElevationAnglesDeg.join(', '));
+    }
+    setParams(p => applyScannerModel(p, id));
     if (submitError) setSubmitError(null);
   };
 
@@ -338,6 +344,12 @@ export function ScanParametersPopup({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // A trajectory anchors the origin to its first pose, so this only ever stops
+    // a static scan whose origin was left blank.
+    if (!hasOrigin(params)) {
+      setSubmitError('Enter the scan origin (x, y and z) — where the scanner stood.');
+      return;
+    }
     if (params.pattern === 'spinning_multibeam' && params.beamElevationAnglesDeg.length < 1) {
       setSubmitError('Enter at least one beam elevation angle for a spinning-multibeam scan.');
       return;
@@ -485,8 +497,9 @@ export function ScanParametersPopup({
             </select>
             <p className="mt-1 text-[11px] text-neutral-500">
               Picking a specific instrument fills its beam optics, scan pattern, return
-              type, and angular sweep below (all still editable). “Generic / custom” leaves
-              the values untouched and marks the position with a plain sphere.
+              type, angular sweep, and a typical resolution below (all still editable).
+              “Generic / custom” leaves the values untouched and marks the position with a
+              plain sphere.
             </p>
           </div>
 

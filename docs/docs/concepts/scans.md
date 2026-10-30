@@ -27,8 +27,9 @@ metadata was lost. Most analyses still work:
 Analyses that need per-pulse direction (notably the
 [Helios triangulation](../workflows/triangulate.md#helios-method)
 mode) are disabled until parameters are added. Click the radio icon
-on the row to add them — the origin pre-fills to the scan's bounds
-center as a starting point.
+on the row to add them. The origin starts blank and must be entered,
+because nothing in the points says where the scanner stood. (Importing
+or building a trajectory sets it from the first pose instead.)
 
 ## When a scan has only parameters
 

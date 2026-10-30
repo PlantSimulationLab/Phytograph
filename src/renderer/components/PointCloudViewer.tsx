@@ -96,7 +96,7 @@ import StatusPill, { ChannelStatusPill } from './StatusPill';
 import { createProgressChannel } from '../lib/progressChannel';
 import { createDisplayIndicesCache } from '../lib/displayIndicesCache';
 import { meshVertexOffset, rebaseVec3s, shiftToStored } from '../lib/meshFrame';
-import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
+import { type ScanParameters, BLANK_ORIGIN, hasOrigin, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
 import { treeSegmentDefaultsForExtent, CHM_TREE_DEFAULTS } from '../lib/treeSegmentDefaults';
@@ -9656,17 +9656,12 @@ export default function PointCloudViewer({
     setScanPopupState({ kind: 'add' });
   }, [combinedBounds, scansAll.length]);
 
-  // Open the params popup pre-filled to attach scan params to an existing
-  // data-only scan. The origin defaults to the scan's bounds center.
+  // Open the params popup to attach scan params to an existing data-only scan.
+  // The origin starts blank: nothing in the points says where the scanner stood.
   const openAddParamsPopupFor = useCallback((scan: Scan) => {
-    const origin = scan.data?.bounds.center
-      ? roundCoord3(scan.data.bounds.center)
-      : combinedBounds.center
-        ? roundCoord3(combinedBounds.center)
-        : undefined;
-    setScanDefaults({ label: scan.label, params: { origin } });
+    setScanDefaults({ label: scan.label, params: { origin: { ...BLANK_ORIGIN } } });
     setScanPopupState({ kind: 'add-params-to', id: scan.id });
-  }, [combinedBounds]);
+  }, []);
 
   // ---- Manual trajectory editor entry points -----------------------------
   // Open the editor for an EXISTING scan's trajectory (from the Scans panel or
@@ -9726,7 +9721,7 @@ export default function PointCloudViewer({
     if (ed.scanId) {
       // Editing an EXISTING scan's trajectory: update it in place.
       const scan = scans.find(s => s.id === ed.scanId);
-      const nextParams = applyTrajectoryToParams(scan?.params, stream);
+      const nextParams = applyTrajectoryToParams(ed.pendingParams ?? scan?.params, stream);
       onUpdateScanParams(ed.scanId, nextParams);
       closeTrajectoryEditor();
     } else {
@@ -30400,12 +30395,25 @@ export default function PointCloudViewer({
               ? { frame: traj.frame, leverArm: traj.leverArm, boresightRpy: traj.boresightRpy, label: traj.label ?? label }
               : { ...DEFAULT_TRAJECTORY_TEMPLATE, label };
             // Persist the popup's other param edits before entering the editor so
-            // Save's applyTrajectoryToParams builds on the latest params.
-            onUpdateScanParams(scanId, params);
+            // Save's applyTrajectoryToParams builds on the latest params. With the
+            // origin still blank they can't be stored yet (canceling the editor
+            // would leave a NaN origin), so the editor carries them until Save
+            // anchors the origin to the first pose.
+            const originSet = hasOrigin(params);
+            if (originSet) onUpdateScanParams(scanId, params);
             const editScan = scans.find(s => s.id === scanId);
             const worldShift = (editScan?.data?.octree?.worldShift ?? [0, 0, 0]) as [number, number, number];
             setScanPopupState({ kind: 'closed' });
-            setTrajectoryEditor({ scanId, drafts, template, selectedIndex: 0, worldShift, previewPlaying: false, previewEpoch: 0 });
+            setTrajectoryEditor({
+              scanId,
+              pendingParams: originSet ? undefined : params,
+              drafts,
+              template,
+              selectedIndex: 0,
+              worldShift,
+              previewPlaying: false,
+              previewEpoch: 0,
+            });
           } else {
             openTrajectoryEditorForNew(label, params);
           }

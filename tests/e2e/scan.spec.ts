@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
 import { completeImportWizard } from './helpers/importWizard';
+import { importFiles } from './helpers/importFiles';
 import { resetToFreshScene } from './helpers/resetApp';
 
 // Shared session: one app + backend for the whole file; File → New resets the
@@ -17,6 +18,60 @@ test.afterAll(async () => {
 });
 test.beforeEach(async () => {
   await resetToFreshScene(session.app, session.page);
+});
+
+// Attaching metadata to an imported cloud: nothing in a bare .xyz says where the
+// scanner stood, so the origin must start blank and be required, and picking an
+// instrument must fill a realistic grid rather than the old 100x360.
+test('attaching metadata to an imported cloud starts with a blank, required origin', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz'));
+  await completeImportWizard(page);
+  const row = page.getByTestId('scans-panel').locator('[data-testid="scan-row"]');
+  await expect(row).toHaveCount(1, { timeout: 40_000 });
+  await expect(row).toHaveAttribute('data-has-params', 'false');
+
+  await row.locator('[data-testid^="scan-attach-params-"]').click();
+  const popup = page.getByTestId('scan-parameters-popup');
+  await expect(popup).toBeVisible();
+  for (const axis of ['x', 'y', 'z']) {
+    await expect(page.getByTestId(`scan-origin-${axis}`)).toHaveValue('');
+  }
+
+  // Generic starts at a 0.1° grid; the VZ-400i fills its 0.03° x 0.06° one.
+  await expect(page.getByTestId('scan-zenith-points')).toHaveValue('1800');
+  await expect(page.getByTestId('scan-azimuth-points')).toHaveValue('3600');
+  await page.getByTestId('scan-model-select').selectOption('riegl_vz400i');
+  await expect(page.getByTestId('scan-zenith-points')).toHaveValue('3333');
+  await expect(page.getByTestId('scan-azimuth-points')).toHaveValue('6000');
+
+  // A typed grid survives changing the instrument again.
+  await page.getByTestId('scan-zenith-points').fill('2500');
+  await page.getByTestId('scan-zenith-points').blur();
+  await page.getByTestId('scan-azimuth-points').fill('9000');
+  await page.getByTestId('scan-azimuth-points').blur();
+  await page.getByTestId('scan-model-select').selectOption('faro_focus_s350');
+  await expect(page.getByTestId('scan-zenith-points')).toHaveValue('2500');
+  await expect(page.getByTestId('scan-azimuth-points')).toHaveValue('9000');
+
+  // Blank and partly entered origins are both refused, with the dialog left open.
+  await page.getByTestId('scan-submit').click();
+  await expect(page.getByTestId('scan-submit-error')).toContainText('scan origin');
+  await page.getByTestId('scan-origin-x').fill('4');
+  await page.getByTestId('scan-origin-x').blur();
+  await page.getByTestId('scan-submit').click();
+  await expect(page.getByTestId('scan-submit-error')).toContainText('scan origin');
+  await expect(row).toHaveAttribute('data-has-params', 'false');
+
+  await page.getByTestId('scan-origin-y').fill('-3');
+  await page.getByTestId('scan-origin-y').blur();
+  await page.getByTestId('scan-origin-z').fill('1.5');
+  await page.getByTestId('scan-origin-z').blur();
+  await page.getByTestId('scan-submit').click();
+  await expect(popup).not.toBeVisible();
+  await expect(row).toHaveAttribute('data-has-params', 'true');
+  await expect(row).toContainText('origin (4.00, -3.00, 1.50)');
 });
 
 // Exercises the scan creation/edit/delete flow end-to-end via the unified
