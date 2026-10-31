@@ -17,7 +17,10 @@ Each macOS job packages only its own architecture, and a final
 `merge-latest-mac` job merges the two `latest-mac.yml` auto-updater
 manifests so in-app updates work on both. The Intel job runs on
 `macos-15-intel`, GitHub's last x86_64 image — it retires in August
-2027, at which point Intel macOS builds end.
+2027, at which point Intel macOS builds end. The arm64 job runs on
+`macos-15` and pins `MACOSX_DEPLOYMENT_TARGET=14.0`, because compiled code
+otherwise targets the runner's own OS. `scripts/check-macos-floor.mjs`
+fails the job if any bundled binary needs newer than that.
 
 ## Publishing and download links
 

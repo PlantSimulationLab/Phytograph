@@ -85,8 +85,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14
+          # Holds the macOS 14 floor that the old macos-14 runner gave us by
+          # default; `macos-15` alone would raise libhelios and PotreeConverter
+          # to 15. Bumping this runner must not silently drop supported OSes.
+          - platform: macos-15
             arch: arm64
+            macos_deployment_target: '14.0'
             backend_name: phytograph_backend
             pip_cache: 'pip'
           # Intel macOS. This job exists because the PyInstaller backend (and
@@ -145,6 +149,13 @@ jobs:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: package-lock.json
+
+      # Compiled code targets the runner's own OS unless told otherwise, so the
+      # runner label would otherwise decide the oldest macOS we support. Set
+      # before Setup Python so that everything compiled later in the job inherits it.
+      - name: Pin macOS deployment target
+        if: matrix.macos_deployment_target
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_deployment_target }}" >> "$GITHUB_ENV"
 
       # pip caching is per-platform (matrix.pip_cache), not unconditional.
       #
@@ -232,7 +243,7 @@ jobs:
           # If a new top-level package under backend-api/ is imported by the
           # backend, ADD IT HERE — omitting it would restore a stale binary
           # built from different sources, which is far worse than a cache miss.
-          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt', 'docker/riegl/rxp_reader.py', 'docker/riegl/rxp_shim.cpp', 'docker/riegl/rxpshim.def', 'scripts/build-backend.mjs', 'scripts/backend-version.mjs') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
+          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt', 'docker/riegl/rxp_reader.py', 'docker/riegl/rxp_shim.cpp', 'docker/riegl/rxpshim.def', 'scripts/build-backend.mjs', 'scripts/backend-version.mjs') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda${{ matrix.macos_deployment_target && format('-macos{0}', matrix.macos_deployment_target) || '' }}
           # No fallback on purpose: a partial-match restore would ship a backend
           # built from different sources than the commit being released. Better
           # to pay the rebuild than to publish a stale binary.
@@ -603,7 +614,7 @@ jobs:
           path: resources/potree_converter
           # Pinned to PR #686. Bump the suffix or rotate the key when
           # tracking a different patchset.
-          key: potree-${{ runner.os }}-${{ matrix.arch }}-pr686-${{ steps.potree-key-unix.outputs.key || steps.potree-key-win.outputs.key }}
+          key: potree-${{ runner.os }}-${{ matrix.arch }}-pr686-${{ steps.potree-key-unix.outputs.key || steps.potree-key-win.outputs.key }}${{ matrix.macos_deployment_target && format('-macos{0}', matrix.macos_deployment_target) || '' }}
 
       - name: Install TBB (macOS)
         if: steps.potree-cache.outputs.cache-hit != 'true' && startsWith(matrix.platform, 'macos') && !inputs.signing_test
@@ -644,6 +655,12 @@ jobs:
             exit 1
           fi
           echo "PASS: PotreeConverter launches"
+
+      # Not gated on a cache hit, for the same reason as the glibc check: a
+      # restored bundle may have come from a different runner image.
+      - name: Verify macOS floor
+        if: matrix.macos_deployment_target && !inputs.signing_test
+        run: node scripts/check-macos-floor.mjs
 
       # How old a Linux can run what we just built. The answer is decided by the
       # BUILD HOST — PyInstaller bundles its libpython/libstdc++, and libhelios
