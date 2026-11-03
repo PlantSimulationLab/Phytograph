@@ -28,8 +28,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
-from phytograph import _download  # noqa: E402
-from phytograph._version import EXPECTED_BACKEND_VERSION  # noqa: E402
+import _stdlib_import  # noqa: E402  (no httpx/numpy on the release runner's Python)
+
+_download = _stdlib_import.load("_download")
+EXPECTED_BACKEND_VERSION = _stdlib_import.load("_version").EXPECTED_BACKEND_VERSION
 
 # (source dir relative to the repo, path inside the archive). Mirrors the app's
 # extraResources (package.json): resources/{phytograph_backend,potree_converter,

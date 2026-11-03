@@ -87,7 +87,8 @@ def build(out_dir: Path, *, backend_digests: "dict | None" = None,
         raise SystemExit("build_wheel: phytograph/__init__.py is missing")
     if backend_digests is not None:
         sys.path.insert(0, str(HERE))
-        from phytograph import _download
+        import _stdlib_import   # the release runner's Python has no httpx/numpy
+        _download = _stdlib_import.load("_download")
         expected = {_download.asset_name(p["version"], o, a) for o, a in _download.SUPPORTED}
         unknown = set(backend_digests) - expected
         if unknown:
