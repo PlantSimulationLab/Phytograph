@@ -83,7 +83,8 @@ test('File → New clears all data and frees backend sessions', async () => {
     // no longer existed (deleted:false) — the proof New released backend RAM,
     // not just the renderer's view of it.
     const deleted = await page.evaluate(async (url) => {
-      const res = await fetch(url, { method: 'DELETE' });
+      const { token } = await (window as any).electronAPI.backend.getInfo();
+      const res = await fetch(url, { method: 'DELETE', headers: { 'X-Phytograph-Token': token } });
       return res.json();
     }, sessionUrl);
     expect(deleted.deleted).toBe(false);

@@ -10,6 +10,7 @@
 // backend venv isn't present.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -148,10 +149,14 @@ async function runOnce(cmd, args) {
   console.log(`[dev] electron user data:  ${devUserDataDir}`);
 
   let uvicorn = null;
+  const backendToken = process.env.PHYTOGRAPH_BACKEND_TOKEN || randomBytes(32).toString('hex');
   const electronEnv = {
     ...process.env,
     PHYTOGRAPH_RENDERER_PORT: String(rendererPort),
     PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot,
+    // uvicorn and Electron start side by side, so the secret and the renderer's
+    // origin are decided here and handed to both, as the ports are.
+    PHYTOGRAPH_BACKEND_TOKEN: backendToken,
   };
 
   if (existsSync(venvPython)) {
@@ -195,6 +200,8 @@ async function runOnce(cmd, args) {
         // MallocLargeCache: see spawnChild in src/main/backend.ts.
         env: {
           ...process.env, PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot,
+          PHYTOGRAPH_BACKEND_TOKEN: backendToken,
+          PHYTOGRAPH_RENDERER_PORT: String(rendererPort),
           MallocLargeCache: process.env.MallocLargeCache ?? '0', ...devMemoryBudgetEnv(),
         },
       },

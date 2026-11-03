@@ -401,8 +401,12 @@ genuinely solved as empty air keeps a real `0.0`. The summary counts occluded
 voxels separately from the leaf-area total, so its LAI never absorbs them.
 
 Rasters require a regular, north-up lattice, so the GeoTIFF option is
-unavailable for a **rotated** or **terrain-following** grid — use CSV or `.vox`,
-which store each voxel's own position.
+unavailable for a **rotated** or **terrain-following** grid. Use CSV, which writes
+each voxel's true position, including its rotation about the grid center and any
+terrain offset. A `.vox` file keys rows by `i j k` on the unrotated lattice, so for
+a rotated grid its header adds `#rotation_z_deg` and `#rotation_center`, and the
+summary `.txt` states the rotation. A `.vox` does not record terrain offsets, so
+use CSV for a terrain-following grid.
 
 ### PLY: point cloud or mesh?
 

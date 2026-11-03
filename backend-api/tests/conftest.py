@@ -4,11 +4,17 @@
 to sys.path so `import main` works without needing an editable install.
 """
 
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+# TestClient addresses the app as http://testserver, which LocalRequestGuard
+# would refuse as a non-loopback Host. test_local_request_guard.py clears this.
+os.environ["PHYTOGRAPH_EXTRA_ALLOWED_HOSTS"] = "testserver"
+os.environ.pop("PHYTOGRAPH_BACKEND_TOKEN", None)
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:

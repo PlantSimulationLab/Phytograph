@@ -230,8 +230,11 @@ describe('a committed transform keeps render pose and geometry in step', () => {
     // bounds, the pivot and the renderer live; session_transform applies it to
     // (stored + shift). Sending the stored-frame matrix moved a rotated or
     // scaled UTM-shifted scan by (L·shift − shift) — kilometers.
-    expect(src).toMatch(/const sessionRowMajor = toRowMajor\(conjugateByShift\(M, cloud\.data\.octree\?\.worldShift\)\)/);
+    expect(src).toMatch(/const worldM = conjugateByShift\(M, cloud\.data\.octree\?\.worldShift\)/);
+    expect(src).toMatch(/const sessionRowMajor = toRowMajor\(worldM\)/);
     expect(src).toMatch(/await sessionTransform\(octreeInfo\.sessionId, sessionRowMajor, 'pose'\)/);
+    // The scanner's position data is world-frame too, so it takes the same matrix.
+    expect(src).toMatch(/transformScanParamsToWorld\(p, worldM, q\)/);
   });
 
   it('records the pose against the cache id it was measured on', async () => {

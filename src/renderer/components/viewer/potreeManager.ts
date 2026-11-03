@@ -2,6 +2,7 @@ import { Potree } from 'potree-core';
 import type { PointCloudOctree } from 'potree-core';
 import type * as THREE from 'three';
 import type { PotreeRequestManager } from '../../lib/pointCloudTypes';
+import { trackedFetch } from '../../lib/renderActivity';
 import { isMaskedGeometry } from './renderers/octreeCropMask';
 
 // =====================================================================
@@ -116,7 +117,16 @@ export function registerOctreeForFrame(entry: OctreeFrameEntry): () => void {
 
 // The single per-frame potree update for the whole scene. Call from exactly one
 // useFrame — calling it per cloud reintroduces the budget/LRU bug above.
+let _streaming = false;
+
+/** Whether the last update still had tiles to fetch or upload, which takes more
+ *  frames to finish: potree only advances them from inside its update. */
+export function potreeIsStreaming(): boolean {
+  return _streaming;
+}
+
 export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGLRenderer): void {
+  _streaming = false;
   if (_frameEntries.size === 0) return;
   const manager = getPotreeManager();
 
@@ -131,7 +141,8 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
     active.push(entry);
   }
   if (active.length > 0) {
-    manager.updatePointClouds(active.map((e) => e.octree), camera, renderer);
+    const result = manager.updatePointClouds(active.map((e) => e.octree), camera, renderer);
+    _streaming = result.nodeLoadPromises.length > 0 || result.exceededMaxLoadsToGPU;
     (globalThis as any).__potreeClipLive = active.map((e) => {
       const m = (e.octree as any).material ?? {};
       return {
@@ -206,6 +217,6 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
 // the `app://` scheme registered as supportFetchAPI, the global fetch
 // works transparently.
 export const OctreeRequestManager: PotreeRequestManager = {
-  fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
+  fetch: (input: RequestInfo | URL, init?: RequestInit) => trackedFetch(() => fetch(input, init)),
   getUrl: async (url: string) => url,
 };

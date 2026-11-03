@@ -9,6 +9,7 @@ import Store from 'electron-store';
 import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_PROD } from '../shared/constants.js';
 import { IPC, type BackendStatusPayload } from '../shared/ipc.js';
 import { backendLog } from './logger.js';
+import { backendAcceptsToken, getBackendToken } from './backendToken.js';
 import { resolveOctreeCacheRoot } from './octreeCacheRoot.js';
 import { findFreePort, PORT_BANDS } from '../../scripts/free-port.mjs';
 
@@ -313,13 +314,12 @@ export async function startBackend(): Promise<void> {
   intentionalStop = false;
   restartAttempts = 0;
 
-  const port = await resolvePort();
-
   // PHYTOGRAPH_DEV_BACKEND=1 is set by scripts/dev.mjs when it has spawned
   // uvicorn --reload against backend-api/venv. In that case the supervisor
   // must stand down — killing the port and respawning the bundle would
   // defeat the whole point of hot-reload.
   if (process.env.PHYTOGRAPH_DEV_BACKEND === '1') {
+    const port = await resolvePort();
     const v = await fetchVersion(port);
     if (v) {
       console.log(`Dev backend (uvicorn --reload) running v${v} on port ${port}; supervisor standing down.`);
@@ -329,11 +329,19 @@ export async function startBackend(): Promise<void> {
     return;
   }
 
+  let port = await resolvePort();
   const existingVersion = await fetchVersion(port);
   let shouldStart = true;
 
   if (existingVersion) {
-    if (existingVersion === EXPECTED_BACKEND_VERSION) {
+    if (existingVersion === EXPECTED_BACKEND_VERSION && !(await backendAcceptsToken(port, getBackendToken()))) {
+      // Right version, but another instance's: it holds that instance's sessions
+      // and answers us with 401 forever. Leave it running and take another port.
+      console.log(`Compatible backend on port ${port} belongs to another instance; choosing a new port`);
+      port = await findFreePort(PORT_BANDS.app);
+      resolvedPort = port;
+      process.env.PHYTOGRAPH_BACKEND_PORT = String(port);
+    } else if (existingVersion === EXPECTED_BACKEND_VERSION) {
       // A COMPATIBLE backend is already serving this port. Reuse it — never
       // kill it. This is what lets a second app instance (or an E2E run that
       // happened to land on the same port) coexist with a running dev backend
@@ -443,6 +451,7 @@ function spawnChild(binPath: string, port: number): void {
         ...process.env,
         PHYTOGRAPH_RESOURCES: resourcesRoot(),
         PHYTOGRAPH_BACKEND_PORT: String(port),
+        PHYTOGRAPH_BACKEND_TOKEN: getBackendToken(),
         PHYTOGRAPH_OCTREE_CACHE_ROOT: resolveOctreeCacheRoot(),
         PHYTOGRAPH_EXIT_WITH_PARENT: '1',
         // macOS libmalloc otherwise keeps freed large blocks cached in the

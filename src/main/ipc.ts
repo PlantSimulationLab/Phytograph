@@ -18,6 +18,7 @@ import {
 } from '../shared/ipc.js';
 import { EXPECTED_BACKEND_VERSION } from '../shared/constants.js';
 import { getBackendPort } from './backend.js';
+import { getBackendToken } from './backendToken.js';
 import { allowPath, isPathAllowed, isWriteAllowed } from './fsAllowlist.js';
 import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
 // Generated at build time by scripts/gen-version-info.mjs (gitignored).
@@ -53,6 +54,7 @@ export function registerIpc(): void {
       // per-instance). This is the renderer's source of truth — getBackendUrl()
       // in the renderer fetches this once at startup and caches it.
       url: `http://127.0.0.1:${getBackendPort()}`,
+      token: getBackendToken(),
       expectedVersion: EXPECTED_BACKEND_VERSION,
       isDev,
       appVersion: app.getVersion(),

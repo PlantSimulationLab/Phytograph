@@ -8,6 +8,11 @@ compute-heavy operations to the renderer over HTTP. It lives in
   dynamically per app instance; the renderer resolves it over the
   `backend.getInfo` IPC. `8008` is only a standalone-launch fallback.
 - **All routes** are prefixed with `/api/` except `/`, `/health`, `/version`.
+- **Access**: requests must address a loopback Host, and any `Origin` must be
+  the renderer's own. Anything but `/health` and `/version` also needs an
+  `X-Phytograph-Token` header when the backend was started with
+  `PHYTOGRAPH_BACKEND_TOKEN`, which the app and `npm run dev` always do. See
+  [Backend request guard](../architecture/processes.md#backend-request-guard).
 - **Versioning**: `/version` returns `BACKEND_VERSION`. The supervisor refuses
   to run a backend whose version doesn't match the renderer's
   `EXPECTED_BACKEND_VERSION` — see [Version Lock](../architecture/version-lock.md).

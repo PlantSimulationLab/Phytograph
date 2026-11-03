@@ -10,7 +10,7 @@ import { classViewFilters } from '../lib/octreeFilterSpec';
 import { octreeMaskStatsKey } from './viewer/renderers/octreeCropMask';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
-import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields } from '../lib/affineDelta';
+import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields, transformScanParamsToWorld } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
 import { bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
 import { mergeMeshData, mergedMeshName, meshMergeBlockReason, meshMergeSetBlockReason } from '../lib/meshMerge';
@@ -231,6 +231,7 @@ import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOctree } from './viewer/renderers/MissOctree';
 import { PotreeFrameDriver } from './viewer/renderers/PotreeFrameDriver';
+import { IdleFrameGovernor } from './viewer/renderers/IdleFrameGovernor';
 import { CropCornerMarker } from './viewer/gizmos/CropCornerMarker';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
@@ -11829,14 +11830,12 @@ export default function PointCloudViewer({
         const v = new THREE.Vector3(x, y, z).applyMatrix4(M);
         return [v.x, v.y, v.z];
       };
-      // Row-major flat 4x4 for transformPoseStream (stored-frame, like the
-      // params it moves).
-      const rowMajor = toRowMajor(M);
       // What `session_transform` gets: the same move, re-expressed in TRUE
       // WORLD coordinates. The session holds points with the import-time shift
       // subtracted and applies the matrix to (stored + shift), so a stored-frame
       // matrix with any rotation or scale lands (L·shift − shift) away.
-      const sessionRowMajor = toRowMajor(conjugateByShift(M, cloud.data.octree?.worldShift));
+      const worldM = conjugateByShift(M, cloud.data.octree?.worldShift);
+      const sessionRowMajor = toRowMajor(worldM);
 
       // The scanner ORIGIN (and, for a moving-platform scan, the whole trajectory
       // of per-pose emission points) is WORLD-frame geometry that must move WITH
@@ -11846,25 +11845,23 @@ export default function PointCloudViewer({
       // is the primary copy; `octree.scanOrigin` is a fallback copy for clouds
       // imported without scan params (e.g. E57 pose). Transform whichever exist,
       // on both the session and flat paths, so the origin can never drift.
+      //
+      // They take `worldM`, not `M`: `M` is a STORED-frame matrix, and applying it
+      // to a world-frame position lands (I − L)·worldShift away, which is 7 km for
+      // 0.1° at UTM coordinates. A pure translation has L = I, so only a rotation
+      // or scale of a shifted cloud ever showed it. LAD then read the wrong beam
+      // directions without a word (+82% on a measured case).
       const transformScanParams = () => {
         const p = cloud.params;
         if (!p) return;
-        const o = applyAffine(p.origin.x, p.origin.y, p.origin.z);
-        const nextParams: ScanParameters = {
-          ...p,
-          origin: { x: o[0], y: o[1], z: o[2] },
-          // Moving-platform trajectory: full rigid transform of pose positions +
-          // attitude quaternions (transformPoseStream pre-multiplies each pose's
-          // attitude by q, keeping LAD beam directions consistent post-rotation).
-          trajectory: p.trajectory
-            ? transformPoseStream(p.trajectory, rowMajor, { x: q.x, y: q.y, z: q.z, w: q.w })
-            : p.trajectory,
-        };
-        onUpdateScanParams(cloudId, nextParams);
+        onUpdateScanParams(cloudId, transformScanParamsToWorld(p, worldM, q));
       };
       // Transform the octree's fallback scanOrigin copy for buildSessionOctreeData.
-      const transformedScanOrigin = (o: [number, number, number] | null | undefined) =>
-        o ? applyAffine(o[0], o[1], o[2]) : o;
+      const transformedScanOrigin = (o: [number, number, number] | null | undefined) => {
+        if (!o) return o;
+        const v = new THREE.Vector3(o[0], o[1], o[2]).applyMatrix4(worldM);
+        return [v.x, v.y, v.z] as [number, number, number];
+      };
 
       const octreeInfo = cloud.data.octree;
       if (octreeInfo?.sessionId) {
@@ -22565,17 +22562,56 @@ export default function PointCloudViewer({
       projectAbortRef.current = abort;
       setProjectBusy({ label: 'Saving project…', value: null });
       const { doc, snapshot } = collectProjectDocument();
-      const token = await uploadProjectScene(encodeProjectScene(doc));
       const refs = sceneBackendRefs((snapshot.state as typeof scene.state).scans as never);
-      const res = await saveProject({ path, scene_token: token, session_ids: refs.sessionIds, octree_ids: refs.octreeIds },
+      const writeProject = async (target: string, replaceWithMissing: boolean) => saveProject(
+        { path: target, scene_token: await uploadProjectScene(encodeProjectScene(doc)),
+          session_ids: refs.sessionIds, octree_ids: refs.octreeIds, replace_with_missing: replaceWithMissing },
         abort.signal, (value, label) => setProjectBusy({ label, value }),
         (runId) => { projectRunIdRef.current = runId; });
+      const cloudNames = (sessionIds: string[] | undefined) => (sessionIds ?? []).map((sid) =>
+        (snapshot.state as typeof scene.state).scans.find((sc) => sc.data?.octree?.sessionId === sid)?.label ?? sid);
+      let res = await writeProject(path, false);
       if (abort.signal.aborted) return;
+      if (res.code === 'missing_sessions_would_overwrite') {
+        // The backend lost these clouds (a crash, usually) and the file on disk
+        // may be the only copy of them, so it refused to replace it. Saving
+        // elsewhere keeps both; replacing anyway takes an explicit second yes.
+        const lostNames = cloudNames(res.missing_sessions).join(', ');
+        const name = path.split(/[\\/]/).pop();
+        setProjectBusy(null);
+        const choice = await window.electronAPI.dialog.messageBox({
+          type: 'warning', title: 'Save Project',
+          message: `Saving would remove clouds from "${name}"`,
+          detail: `The backend no longer has the data for: ${lostNames}. ${name} still holds them and has not been changed. Save the rest of the project under a new name to keep both.`,
+          buttons: ['Save As…', 'Cancel'], defaultId: 0, cancelId: 1,
+        });
+        if (choice.response !== 0) return;
+        const nextPath = await window.electronAPI.dialog.save({
+          title: 'Save Project As',
+          defaultPath: 'project-recovered.phyto',
+          filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
+        });
+        if (!nextPath) return;
+        path = /\.phyto$/i.test(nextPath) ? nextPath : `${nextPath}.phyto`;
+        let replace = false;
+        if (await window.electronAPI.fs.exists(path)) {
+          const confirm = await window.electronAPI.dialog.messageBox({
+            type: 'warning', title: 'Save Project',
+            message: `Replace "${path.split(/[\\/]/).pop()}" without these clouds?`,
+            detail: `${lostNames} will not be in the new file, and whatever that file holds now will be lost.`,
+            buttons: ['Replace', 'Cancel'], defaultId: 1, cancelId: 1,
+          });
+          if (confirm.response !== 0) return;
+          replace = true;
+        }
+        setProjectBusy({ label: 'Saving project…', value: null });
+        res = await writeProject(path, replace);
+        if (abort.signal.aborted) return;
+      }
       if (!res.success) throw new Error(res.error ?? 'Save failed.');
       projectPathRef.current = path;
       markProjectClean(snapshot);
-      const lost = (res.missing_sessions ?? []).map((sid) =>
-        (snapshot.state as typeof scene.state).scans.find((sc) => sc.data?.octree?.sessionId === sid)?.label ?? sid);
+      const lost = cloudNames(res.missing_sessions);
       showToast(lost.length
         ? { type: 'warning', title: 'Project Saved',
           message: `Saved ${path.split(/[\\/]/).pop()}, but ${lost.length} cloud(s) had no data left on the backend and were not saved: ${lost.join(', ')}.` }
@@ -24410,6 +24446,7 @@ export default function PointCloudViewer({
         {/* The one per-frame potree LOD/budget update for every octree in the
             scene. Must stay a single instance — see PotreeFrameDriver. */}
         <PotreeFrameDriver />
+        <IdleFrameGovernor animating={isAnimating || !!trajectoryEditor?.previewPlaying} />
 
         {/* Render all visible clouds.
             We pass the source `cloud.data` straight to <PointCloud> without

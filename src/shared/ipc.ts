@@ -90,6 +90,8 @@ export type BackendStatusPayload =
 
 export interface BackendInfo {
   url: string;
+  /** Per-launch secret the backend requires on /api/* (src/main/backendToken.ts). */
+  token: string;
   expectedVersion: string;
   isDev: boolean;
   /** App version (Electron app.getVersion(), reads package.json). */

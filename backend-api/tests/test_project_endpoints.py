@@ -138,6 +138,79 @@ def test_failed_save_keeps_the_existing_file(client, cache_root, tmp_path, monke
     assert not list(tmp_path.glob("*.partial"))
 
 
+def _scene_token(client):
+    return client.post("/api/project/scene", content=b"x",
+                       headers={"Content-Type": "application/octet-stream"}).json()["token"]
+
+
+def _saved_project_with_a_cloud(client, tmp_path):
+    f, _pts = _cloud_file(tmp_path)
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)["session_id"]
+    target = tmp_path / "plot.phyto"
+    saved = _post_stream(client, "/api/project/save",
+                         {"path": str(target), "scene_token": _scene_token(client), "session_ids": [sid]})
+    assert saved["success"], saved
+    return sid, target
+
+
+def test_save_after_a_crash_does_not_replace_the_project(client, cache_root, tmp_path):
+    """The whole scenario: the backend lost its sessions (a respawn) and Cmd+S
+    names the file that still holds them. That used to report success and swap
+    the project for a 362-byte shell."""
+    sid, target = _saved_project_with_a_cloud(client, tmp_path)
+    before = target.read_bytes()
+    main._cloud_sessions.pop(sid)      # what a respawn leaves behind
+
+    res = _post_stream(client, "/api/project/save",
+                       {"path": str(target), "scene_token": _scene_token(client), "session_ids": [sid]})
+
+    assert not res["success"]
+    assert res["code"] == "missing_sessions_would_overwrite"
+    assert res["missing_sessions"] == [sid]
+    assert target.read_bytes() == before
+    assert not list(tmp_path.glob("*.partial"))
+    # And the project still opens, with its cloud.
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"] and sid in opened["session_map"]
+
+
+def test_refused_save_can_go_to_a_new_file_instead(client, cache_root, tmp_path):
+    sid, target = _saved_project_with_a_cloud(client, tmp_path)
+    before = target.read_bytes()
+    main._cloud_sessions.pop(sid)
+    other = tmp_path / "recovered.phyto"
+    res = _post_stream(client, "/api/project/save",
+                       {"path": str(other), "scene_token": _scene_token(client), "session_ids": [sid]})
+    assert res["success"] and res["missing_sessions"] == [sid]
+    assert other.is_file()
+    assert target.read_bytes() == before
+
+
+def test_refused_save_can_replace_only_when_told_to(client, cache_root, tmp_path):
+    sid, target = _saved_project_with_a_cloud(client, tmp_path)
+    before = target.read_bytes()
+    main._cloud_sessions.pop(sid)
+    res = _post_stream(client, "/api/project/save",
+                       {"path": str(target), "scene_token": _scene_token(client), "session_ids": [sid],
+                        "replace_with_missing": True})
+    assert res["success"] and res["missing_sessions"] == [sid]
+    assert target.read_bytes() != before
+
+
+def test_refused_save_drops_its_staged_scene(client, cache_root, tmp_path):
+    """The renderer stages a fresh one for the retry; this one would otherwise
+    sit on disk until the next launch."""
+    sid, target = _saved_project_with_a_cloud(client, tmp_path)
+    main._cloud_sessions.pop(sid)
+    token = _scene_token(client)
+    _post_stream(client, "/api/project/save", {"path": str(target), "scene_token": token, "session_ids": [sid]})
+    with pytest.raises(main.HTTPException) as gone:
+        main._project_blob_path(token)
+    assert gone.value.status_code == 404
+
+
 def test_endpoints_are_plain_def():
     import inspect
     assert not inspect.iscoroutinefunction(main.project_save)

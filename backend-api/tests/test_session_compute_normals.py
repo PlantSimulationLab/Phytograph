@@ -431,3 +431,26 @@ async def test_a_wrong_shaped_result_is_rejected_rather_than_scattered(session,
         await _compute(session)
     assert e.value.status_code == 500
     assert "nx" not in session.extras
+
+
+ROTATE_90_ABOUT_X = [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_transform_during_the_compute_refuses_the_result(session, spy, monkeypatch):
+    """A transform leaves the rows alone, so a mask comparison passes. Rotate a
+    flat plane into a wall mid-run and its old normals (nz = 1, verticality 0)
+    would land on the right rows, marked fresh."""
+    real = main._run_killable
+
+    async def rotating(tool, points, params, **kw):
+        out = await real(tool, points, params, **kw)
+        main.session_transform(session.session_id, main.SessionTransformRequest(
+            matrix=ROTATE_90_ABOUT_X, octree_mode="pose"))
+        return out
+
+    monkeypatch.setattr(main, "_run_killable", rotating)
+    with pytest.raises(main.HTTPException) as e:
+        await _compute(session)
+    assert e.value.status_code == 409
+    assert normals_mod.NORMAL_Z_SLUG not in session.extras

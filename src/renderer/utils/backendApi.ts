@@ -229,6 +229,7 @@ export interface TriangulationResult {
 }
 
 import { BACKEND_PORT_PROD } from '../../shared/constants';
+import { trackedFetch } from '../lib/renderActivity';
 // The wire shape of the backend `scan_params` dict (E57/PCD scan-pattern
 // metadata). Canonically defined in scanParameters.ts alongside the converter
 // that turns it into ScanParameters; imported here for CloudSessionMetadata and
@@ -246,6 +247,22 @@ import type { VoxelSetRegion } from '../lib/voxelSet';
 // callers. Until that resolves we fall back to the prod default (8008), which
 // is correct for any single-instance run.
 let cachedBackendUrl = `http://127.0.0.1:${BACKEND_PORT_PROD}`;
+let cachedBackendToken = '';
+
+/**
+ * Every request in this module goes through here, and it deliberately SHADOWS
+ * the global so a new endpoint cannot forget the token: the backend answers a
+ * request without it with 401. Only requests to the backend carry the secret.
+ */
+const BACKEND_TOKEN_HEADER = 'X-Phytograph-Token';
+function fetch(input: string, init?: RequestInit): Promise<Response> {
+  return trackedFetch(() => {
+    if (!cachedBackendToken || !input.startsWith(cachedBackendUrl)) return globalThis.fetch(input, init);
+    const headers = new Headers(init?.headers);
+    headers.set(BACKEND_TOKEN_HEADER, cachedBackendToken);
+    return globalThis.fetch(input, { ...init, headers });
+  });
+}
 
 /**
  * Fetch the real backend URL from the main process and cache it. Call once at
@@ -257,6 +274,7 @@ export async function initBackendUrl(): Promise<string> {
   try {
     const info = await window.electronAPI?.backend?.getInfo?.();
     if (info?.url) cachedBackendUrl = info.url;
+    if (info?.token) cachedBackendToken = info.token;
   } catch {
     // Keep the default; getBackendUrl() stays usable.
   }
@@ -6437,6 +6455,9 @@ export interface ProjectSaveResult {
   success: boolean; path?: string; bytes?: number; error?: string;
   // Session ids the backend no longer had (their clouds are left out).
   missing_sessions?: string[];
+  // 'missing_sessions_would_overwrite': nothing was written, because replacing
+  // the existing file would lose `missing_sessions`.
+  code?: string;
 }
 export interface ProjectOpenResult {
   success: boolean; scene_token?: string; session_map?: Record<string, string>;
@@ -6449,7 +6470,7 @@ export interface ProjectOpenResult {
 }
 
 export async function saveProject(
-  request: { path: string; scene_token: string; session_ids: string[]; octree_ids: string[] },
+  request: { path: string; scene_token: string; session_ids: string[]; octree_ids: string[]; replace_with_missing?: boolean },
   signal?: AbortSignal, onProgress?: BinaryFrameProgress, onRunId?: (runId: string) => void,
 ): Promise<ProjectSaveResult> {
   return await fetchJsonWithProgress<ProjectSaveResult>('/api/project/save', request, signal, 3600000, onProgress, onRunId);

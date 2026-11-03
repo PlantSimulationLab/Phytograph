@@ -1059,3 +1059,100 @@ def test_backfill_with_no_deletions_restores_nothing(stub_pyhelios):
     ingested = [c for c in cloud.calls if c[0] == "addHitPointsWithData"]
     assert len(ingested) == 1 and ingested[0][2] == len(_TS_POSITIONS)
     assert resp["restored_deleted_hits"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The session changing, or Cancel arriving, during the gapfill
+# ---------------------------------------------------------------------------
+
+def _during_gapfill(monkeypatch, action):
+    real = main._run_gapfill_extract
+
+    def wrapped(cloud):
+        out = real(cloud)
+        action()
+        return out
+
+    monkeypatch.setattr(main, "_run_gapfill_extract", wrapped)
+
+
+def _ts_session():
+    sess = _make_session(_TS_POSITIONS, {"timestamp": [1.0, 2.0, 3.0]},
+                         [{"slug": "timestamp", "label": "Timestamp"}])
+    _register(sess)
+    return sess
+
+
+def test_a_cancel_during_the_gapfill_stores_nothing(stub_pyhelios, monkeypatch):
+    """The gapfill is one native call, so a cancel can only land after it. It used
+    to land nowhere: the buffer and miss octree were stored anyway."""
+    sess = _ts_session()
+    events = []
+    real_token = main._new_cancel_token
+
+    def recording_token():
+        run_id, event = real_token()
+        events.append(event)
+        return run_id, event
+
+    monkeypatch.setattr(main, "_new_cancel_token", recording_token)
+    built = []
+    monkeypatch.setattr(main, "_build_miss_octree", lambda *a, **k: built.append(a) or "miss")
+    _during_gapfill(monkeypatch, lambda: events[0].set())
+
+    try:
+        _call(sess.session_id, origin=[0, 0, 5])
+    except Exception:
+        pass   # a canceled stream need not carry a JSON tail
+    assert sess.backfilled_misses is None
+    assert built == []
+
+
+def test_a_transform_during_the_gapfill_refuses_the_buffer(stub_pyhelios, monkeypatch):
+    """Stored, these misses would be in the old frame, with `stale` and `moved`
+    cleared, so LAD would invert them without a warning."""
+    sess = _ts_session()
+    monkeypatch.setattr(main, "_session_rebuild", lambda s, **k: ("c", main._Path("/tmp/x"), {}))
+    _during_gapfill(monkeypatch, lambda: main.session_transform(
+        sess.session_id, main.SessionTransformRequest(
+            matrix=[0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], octree_mode="pose")))
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+    assert "moved" in resp["error"]
+    assert resp["backfilled"] == 0
+    assert sess.backfilled_misses is None
+
+
+def test_a_crop_during_the_gapfill_keeps_the_stale_flag(stub_pyhelios, monkeypatch):
+    sess = _ts_session()
+
+    def crop():
+        with main._cloud_session_lock:
+            sess.deleted[0] = True
+
+    _during_gapfill(monkeypatch, crop)
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    assert sess.backfilled_misses is not None
+    assert sess.backfilled_misses_stale is True
+
+
+def test_a_bake_during_the_gapfill_keeps_its_lost_hits_counted(stub_pyhelios, monkeypatch):
+    """Those hits were in the gapfill's input, so it recreated nothing for them."""
+    sess = _ts_session()
+    sess.unrestorable_hit_count = 1
+
+    def bake():
+        with main._cloud_session_lock:
+            sess.unrestorable_hit_count = 2
+
+    _during_gapfill(monkeypatch, bake)
+    _call(sess.session_id, origin=[0, 0, 5])
+    assert sess.unrestorable_hit_count == 2
+
+
+def test_an_undisturbed_gapfill_still_clears_the_loss_count(stub_pyhelios):
+    sess = _ts_session()
+    sess.unrestorable_hit_count = 1
+    _call(sess.session_id, origin=[0, 0, 5])
+    assert sess.unrestorable_hit_count == 0
+    assert sess.backfilled_misses_stale is False

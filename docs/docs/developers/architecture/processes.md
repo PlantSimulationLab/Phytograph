@@ -368,6 +368,26 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
 
 All five limits are environment-overridable.
 
+## Backend request guard
+
+The backend can read and overwrite any path the user can, and binding
+`127.0.0.1` does not limit who can send it a request. `LocalRequestGuard`
+(`backend-api/main.py`) refuses a request unless all of these hold:
+
+- **Host** is a loopback name. A web page that rebinds its domain to `127.0.0.1`
+  is same-origin with the backend, so CORS never applies, but its domain is
+  still in Host.
+- **Origin**, when sent, is the renderer's own: `file://`, `app://localhost`, or
+  the dev server's port from `PHYTOGRAPH_RENDERER_PORT`. CORS alone only hides
+  the response from a foreign page; it does not stop the request from running.
+- **`X-Phytograph-Token`** matches the per-launch `PHYTOGRAPH_BACKEND_TOKEN`
+  (`src/main/backendToken.ts`). This covers everything else on the machine, such
+  as another account's process. `/health` and `/version` are exempt so launch
+  probes work, and a standalone `backend_wrapper.py` has no token to check.
+
+The renderer gets the token from `backend.getInfo`. `backendApi.ts` shadows
+`fetch` at module scope, so every request it makes carries it.
+
 ## Filesystem access (allowlist)
 
 The `fs` bridge enforces "user-selected paths only" — it isn't a blanket

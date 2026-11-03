@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
@@ -1495,6 +1495,72 @@ test.describe('translate cloud', () => {
     }, { timeout: 20_000, intervals: [100, 250, 500] }).toBe(true);
     return row;
   }
+
+  // A ROTATION of a georeferenced scan. The points are stored with a large shift
+  // subtracted while the origin stays in world coordinates, so a stored-frame
+  // matrix applied to the origin lands (I − L)·shift away: thousands of km here,
+  // and LAD then reads wrong beam directions without a word. A translation has
+  // L = I and can never show it, which is why the test above never did. 90°
+  // because it maps the box onto a box, so its center is exact from the bounds.
+  test('a baked rotation keeps a georeferenced scanner in place relative to the cloud', async () => {
+    const { app, page } = session;
+    const SHIFT = [512_345, 4_271_234, 87];
+    const ORIGIN = [0.5, -1.0, 0.25].map((v, i) => v + SHIFT[i]);
+    const dir = mkdtempSync(join(tmpdir(), 'rotate-georef-'));
+    try {
+      const rows = readFileSync(FIXTURE, 'utf8').split('\n').filter(l => l.trim() && !l.startsWith('#'))
+        .map(l => l.trim().split(/\s+/).slice(0, 3).map((v, i) => Number(v) + SHIFT[i]));
+      writeFileSync(join(dir, 'tiny_utm.xyz'), rows.map(r => r.map(v => v.toFixed(6)).join(' ')).join('\n') + '\n');
+      const xml = join(dir, 'tiny_utm.xml');
+      writeFileSync(xml, `<?xml version="1.0"?>
+<scan>
+  <filename> tiny_utm.xyz </filename>
+  <origin> ${ORIGIN.join(' ')} </origin>
+  <size> 30 60 </size>
+  <thetaMin> 0 </thetaMin>
+  <thetaMax> 1.570796 </thetaMax>
+</scan>
+`);
+      await stubOpenDialog(app, xml);
+      await page.getByTestId('tool-add-scan').click();
+      const popup = page.getByTestId('scan-parameters-popup');
+      await expect(popup).toBeVisible();
+      await page.getByTestId('scan-import-xml').click();
+      await expect(popup).not.toBeVisible({ timeout: 15_000 });
+      await completeImportWizard(page);
+
+      const row = page.locator('[data-testid="scan-row"][data-has-params="true"]').first();
+      await expect(row).toHaveAttribute('data-scan-origin', ORIGIN.map(v => v.toFixed(3)).join(','), { timeout: 20_000 });
+
+      const center = (raw: string | null) => {
+        const n = raw!.split(',').map(Number);
+        return [0, 1, 2].map(i => (n[i] + n[i + 3]) / 2);
+      };
+      const worldCenter = [0, 1, 2].map(i => {
+        const vals = rows.map(r => r[i]);
+        return (Math.min(...vals) + Math.max(...vals)) / 2;
+      });
+      const storedBefore = center(await row.getAttribute('data-scan-bounds'));
+      const shift = worldCenter.map((v, i) => v - storedBefore[i]);
+      // Otherwise this test proves nothing: with no shift the two matrices agree.
+      expect(Math.hypot(...shift)).toBeGreaterThan(1e6);
+      const before = ORIGIN.map((v, i) => v - worldCenter[i]);
+
+      await openTranslateTool();
+      await typeRotate('z', '90');
+      await clickOK();
+
+      await expect.poll(async () => {
+        const origin = (await row.getAttribute('data-scan-origin'))!.split(',').map(Number);
+        const c = center(await row.getAttribute('data-scan-bounds'));
+        // The scanner-to-cloud vector, in world coordinates, rotated 90° about z.
+        const after = origin.map((v, i) => v - (c[i] + shift[i]));
+        return Math.hypot(after[0] + before[1], after[1] - before[0], after[2] - before[2]);
+      }, { timeout: 60_000, message: 'the scanner must keep its place relative to the rotated cloud' }).toBeLessThan(0.01);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   // The scanner ORIGIN must travel WITH the cloud when a translate is baked —
   // otherwise the recorded scanner position no longer matches the points and

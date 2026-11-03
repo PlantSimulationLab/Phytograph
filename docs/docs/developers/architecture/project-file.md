@@ -190,7 +190,12 @@ from their (possibly memory-mapped) columns in chunks, so saving a
 no longer has (its spill trimmed) is left out and named in
 `missing_sessions`, rather than failing the save: that cloud is already
 unusable, and failing stopped the user saving anything else. The renderer
-names those clouds in its warning.
+names those clouds in its warning. The exception is a target that already
+exists: after a backend crash every session is gone while that file still holds
+them, so the save writes nothing and returns
+`code: "missing_sessions_would_overwrite"`. The renderer then offers Save As, and
+sends `replace_with_missing` only if the user chooses an existing file and
+confirms losing those clouds.
 
 The renderer makes a save (and an open) **modal**: an overlay covers the
 window, keys are swallowed and menu commands refused until it finishes. An

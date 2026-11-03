@@ -170,3 +170,29 @@ def test_no_usable_ground_column_with_csf_falls_back_to_in_memory(stubs, monkeyp
         out = main._do_session_dem(sess, req)
     assert called == [req]
     assert out["error"] == "inner"
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_a_transform_during_the_dem_writes_no_height_column(stubs, monkeypatch, streamed):
+    """Height above ground is measured in the frame the run started in. After a
+    rotation it would land on the right rows and be wrong everywhere."""
+    sess = _session(_scene(seed=11))
+    main._cloud_sessions[sess.session_id] = sess
+    try:
+        target = "_dem_ground_sampler" if streamed else "_compute_dem_layers"
+        real = getattr(main, target)
+
+        def moving(*a, **k):
+            out = real(*a, **k)
+            main.session_transform(sess.session_id, main.SessionTransformRequest(
+                matrix=[0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], octree_mode="pose"))
+            return out
+
+        monkeypatch.setattr(main, target, moving)
+        req = main.SessionDemRequest(surface_type="dtm", cell_size=0.5, ground_percentile=50.0,
+                                     add_height_column=True, auto_segment_ground=False)
+        out = _run(monkeypatch, sess, req, streamed=streamed)
+        assert out["success"] is False and "edited" in out["error"]
+        assert main.HEIGHT_ABOVE_GROUND_SLUG not in sess.extras
+    finally:
+        main._cloud_sessions.pop(sess.session_id, None)

@@ -532,3 +532,59 @@ def test_geotiff_can_carry_the_filled_flag_as_its_own_band(client):
     files = _files(client, "tif", cells=cells, variables=["lad_filled"])
     data = tifffile.imread(io.BytesIO(files["lad_lad_filled.tif"]))
     assert data[lk, (2 - 1) - lj, li] == pytest.approx(0.0)      # measured
+
+
+# ------------------------------------------------------------ rotated grids ----
+
+def _rows_by_ijk(files):
+    _, rows = _csv_rows(files["lad_voxels.csv"])
+    return {(int(r["i"]), int(r["j"]), int(r["k"])): r for r in rows}
+
+
+def test_csv_of_a_rotated_grid_writes_where_the_voxels_really_are(client):
+    """A 2x2 grid of 0.5 m cells pivots about its center, ORIGIN + 0.5. Voxel
+    (0, 0) sits at (-0.25, -0.25) from it, so 90° about +z puts it at (+0.25, -0.25)."""
+    rows = _rows_by_ijk(_files(client, "csv", grid_rotation=90.0))
+    px, py = ORIGIN[0] + 0.5, ORIGIN[1] + 0.5
+    assert float(rows[0, 0, 0]["x"]) == pytest.approx(px + 0.25, abs=1e-3)
+    assert float(rows[0, 0, 0]["y"]) == pytest.approx(py - 0.25, abs=1e-3)
+    assert float(rows[1, 1, 1]["x"]) == pytest.approx(px - 0.25, abs=1e-3)
+    assert float(rows[1, 1, 1]["y"]) == pytest.approx(py + 0.25, abs=1e-3)
+    assert float(rows[0, 0, 1]["z"]) == pytest.approx(ORIGIN[2] + 0.75, abs=1e-3)
+
+
+def test_rotation_moves_voxels_rigidly_and_keeps_their_values(client):
+    plain = _rows_by_ijk(_files(client, "csv"))
+    turned = _rows_by_ijk(_files(client, "csv", grid_rotation=30.0))
+    assert plain.keys() == turned.keys()
+    keys = sorted(plain)
+    for a in keys:
+        assert turned[a]["lad"] == plain[a]["lad"]
+        assert turned[a]["size_x"] == plain[a]["size_x"]
+        for b in keys:
+            def dist(rows):
+                return np.hypot(float(rows[a]["x"]) - float(rows[b]["x"]),
+                                float(rows[a]["y"]) - float(rows[b]["y"]))
+            assert dist(turned) == pytest.approx(dist(plain), abs=2e-3)
+    assert float(turned[0, 0, 0]["x"]) != pytest.approx(float(plain[0, 0, 0]["x"]), abs=1e-3)
+
+
+def test_an_unrotated_grid_is_written_as_it_always_was(client):
+    rows = _rows_by_ijk(_files(client, "csv"))
+    assert float(rows[0, 0, 0]["x"]) == pytest.approx(ORIGIN[0] + 0.25, abs=1e-3)
+    text = _files(client, "vox")["lad.vox"].decode("utf-8")
+    assert "rotation" not in text
+
+
+def test_vox_of_a_rotated_grid_says_how_to_place_its_voxels(client):
+    """`i j k` index the unrotated lattice; without these it cannot be placed."""
+    lines = _files(client, "vox", grid_rotation=23.5)["lad.vox"].decode("utf-8").split("\n")
+    header = {ln.split(":")[0].lstrip("#").strip(): ln.split(":", 1)[1].strip()
+              for ln in lines if ln.startswith("#")}
+    assert float(header["rotation_z_deg"]) == pytest.approx(23.5)
+    assert [float(v) for v in header["rotation_center"].split()] == pytest.approx(
+        [ORIGIN[0] + 0.5, ORIGIN[1] + 0.5], abs=1e-3)
+    assert [float(v) for v in header["min_corner"].split()] == pytest.approx(ORIGIN)
+    # The column-header row still comes straight after the header block.
+    columns = next(i for i, ln in enumerate(lines) if ln.startswith("i j k"))
+    assert all(ln.startswith("#") or ln == "VOXEL SPACE" for ln in lines[:columns])

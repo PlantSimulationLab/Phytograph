@@ -4,6 +4,8 @@ import {
   NORMAL_X_ATTRIBUTE, NORMAL_Y_ATTRIBUTE, NORMAL_Z_ATTRIBUTE, VERTICALITY_ATTRIBUTE,
 } from './classification';
 import type { ScalarField } from './pointCloudTypes';
+import { transformPoseStream } from './poseStream';
+import type { ScanParameters } from './scanParameters';
 
 /**
  * Helpers for baking the Transformation tool's AFFINE draft (move, rotate and
@@ -72,6 +74,32 @@ export function conjugateByShift(
     .makeTranslation(shift[0], shift[1], shift[2])
     .multiply(m)
     .multiply(new THREE.Matrix4().makeTranslation(-shift[0], -shift[1], -shift[2]));
+}
+
+/**
+ * Move a scan's WORLD-frame position data (the scanner origin, plus a moving
+ * platform's trajectory poses and their attitudes) by a TRUE-WORLD matrix.
+ *
+ * Takes the `conjugateByShift` result, never the stored-frame matrix: `params`
+ * is world-frame even though the points it describes are drawn shifted, so a
+ * stored-frame matrix strands the origin (I − L)·shift from the cloud.
+ */
+export function transformScanParamsToWorld(
+  params: ScanParameters,
+  worldMatrix: THREE.Matrix4,
+  rotation: THREE.Quaternion,
+): ScanParameters {
+  const o = new THREE.Vector3(params.origin.x, params.origin.y, params.origin.z).applyMatrix4(worldMatrix);
+  return {
+    ...params,
+    origin: { x: o.x, y: o.y, z: o.z },
+    // transformPoseStream pre-multiplies each pose's attitude by the rotation,
+    // keeping LAD beam directions consistent with the moved positions.
+    trajectory: params.trajectory
+      ? transformPoseStream(params.trajectory, toRowMajor(worldMatrix),
+        { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w })
+      : params.trajectory,
+  };
 }
 
 /** The rotation quaternion of an Euler XYZ draft in DEGREES. */

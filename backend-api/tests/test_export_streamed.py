@@ -169,7 +169,9 @@ def test_column_selection_drops_rgb_to_format_6_and_filters_scalars(client, edit
     f = _read(dest)
     assert out["has_colors"] is False and f.point_format.id == 6
     names = set(f.point_format.extra_dimension_names)
-    assert names == {"reflectance"}
+    # is_miss is not optional while the export writes miss rows; see
+    # test_a_column_list_without_is_miss_still_flags_the_miss_rows.
+    assert names == {"reflectance", "is_miss"}
     # Intensity was deselected: the dimension exists (core record) but is zero.
     assert not np.any(np.asarray(f.intensity))
     # No class column selected: classification byte stays zero.
@@ -188,3 +190,83 @@ def test_export_progress_advances_in_steps_and_cleans_up_a_partial_file(client, 
     assert fractions == sorted(fractions) and fractions[-1] == pytest.approx(1.0)
     assert max(b - a for a, b in zip(fractions, fractions[1:])) < 0.5
     assert not list(tmp.glob("*.partial*"))
+
+
+def _miss_export(client, sid, fmt, dest, columns):
+    res = client.post("/api/pointcloud/export", json={
+        "source": {"session_id": sid}, "format": fmt, "filename": f"o.{fmt}",
+        "dest_path": str(dest), "columns": columns})
+    assert res.status_code == 200, res.text
+    return decode_streamed_json(res.content)
+
+
+@pytest.mark.parametrize("fmt", ["las", "laz", "xyz", "csv"])
+def test_a_column_list_without_is_miss_still_flags_the_miss_rows(client, edited_session, fmt):
+    """The picker leaves is_miss out on its own: a session's hits-only octree
+    reports it as all zeros, which reads as a degenerate schema dimension. The
+    miss rows are written regardless, so unflagged they re-import as real
+    returns ~1 km out. Assert on the whole round trip."""
+    sid, _las, tmp = edited_session
+    sess = main._get_cloud_session(sid)
+    alive = ~np.asarray(sess.deleted)
+    n_miss = int((np.asarray(sess.extras["is_miss"])[alive] != 0).sum())
+    assert n_miss > 0
+    dest = tmp / f"out.{fmt}"
+
+    out = _miss_export(client, sid, fmt, dest, ["x", "y", "z", "intensity"])
+    assert out["point_count"] == int(alive.sum())
+
+    res = client.post("/api/cloud/session/create", json={"source_path": str(dest)})
+    assert res.status_code == 200, res.text
+    again = main._get_cloud_session(decode_streamed_json(res.content)["session_id"])
+    assert "is_miss" in again.extras, "the miss rows came back as real returns"
+    assert int((np.asarray(again.extras["is_miss"]) != 0).sum()) == n_miss
+
+
+@pytest.mark.parametrize("fmt", ["las", "xyz"])
+def test_user_columns_keep_their_order_and_is_miss_is_not_duplicated(client, edited_session, fmt):
+    sid, _las, tmp = edited_session
+    assert main._columns_keeping_miss_flag(["z", "x", "y"], True) == ["z", "x", "y", "is_miss"]
+    assert main._columns_keeping_miss_flag(["x", "is_miss", "y"], True) == ["x", "is_miss", "y"]
+    assert main._columns_keeping_miss_flag(None, True) is None
+    dest = tmp / f"keep.{fmt}"
+    _miss_export(client, sid, fmt, dest, ["x", "y", "z", "is_miss"])
+    assert dest.is_file()
+
+
+def test_a_cloud_with_no_misses_gets_no_flag(client, edited_session):
+    """A hits-only cloud must not grow an all-zero column it never had."""
+    sid, _las, tmp = edited_session
+    sess = main._get_cloud_session(sid)
+    with main._cloud_session_lock:
+        sess.deleted[np.asarray(sess.extras["is_miss"]) != 0] = True
+    dest = tmp / "hits.las"
+    _miss_export(client, sid, "las", dest, ["x", "y", "z", "intensity"])
+    assert "is_miss" not in {d.name for d in _read(dest).point_format.extra_dimensions}
+
+
+def test_a_transform_during_the_export_cannot_tear_the_file(client, edited_session, monkeypatch):
+    """Re-reading `sess.positions` per block wrote half the points in the old
+    frame and half 1000 m away, with success=True and a header that disagreed."""
+    sid, _las, tmp = edited_session
+    sess = main._get_cloud_session(sid)
+    monkeypatch.setattr(main, "_LAS_WRITE_CHUNK", 500)
+    monkeypatch.setattr(main, "_session_rebuild", lambda s, **k: ("c", main.Path("/tmp/x"), {}))
+    survivors = np.asarray(sess.positions)[~np.asarray(sess.deleted)].copy()
+    reads = []
+
+    def progress(_frac, msg):
+        if msg == "Reading points":
+            reads.append(msg)
+            if len(reads) == 2:
+                main.session_transform(sid, main.SessionTransformRequest(
+                    matrix=[1, 0, 0, 1000, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], octree_mode="pose"))
+
+    dest = tmp / "torn.las"
+    out = main._export_session_to_las(sess, dest, fmt="las", columns=None, translation=None, progress=progress)
+    assert out["success"] and len(reads) > 2
+    f = _read(dest)
+    # All of it is the cloud as it was when the export started.
+    shift = np.asarray(sess.world_shift, dtype=np.float64)
+    np.testing.assert_allclose(np.asarray(f.x), survivors[:, 0] + shift[0], atol=2e-3)
+    assert f.header.maxs[0] == pytest.approx(np.asarray(f.x).max(), abs=2e-3)

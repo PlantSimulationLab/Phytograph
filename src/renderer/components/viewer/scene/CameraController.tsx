@@ -4,6 +4,7 @@ import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { zoomLimits, clampDollyToSurface } from '../../../lib/cameraScale';
+import { noteRenderActivity } from '../../../lib/renderActivity';
 
 // View direction type
 export type ViewDirection = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
@@ -307,6 +308,9 @@ export function CameraController({
     camera.position.copy(center).addScaledVector(dir, distance);
     controls.target.copy(center);
     controls.update();
+    // The move has no React render behind it, and from the native menu no DOM
+    // input either, so wake the idle render loop to show it now.
+    noteRenderActivity();
   }, [camera, displayCenter, ensureDefaultPose]);
 
   // Frame the scene origin explicitly: keep the current viewing angle, but
@@ -1114,6 +1118,7 @@ export function CameraController({
       userMovedCameraRef.current = true;
       hasFramedContentRef.current = true;
       framedRobustRef.current = true;
+      noteRenderActivity();
     };
     // Test hook: read live camera + controls + scene state without poking
     // R3F's internal store. Used by the M2 verification smoke test.

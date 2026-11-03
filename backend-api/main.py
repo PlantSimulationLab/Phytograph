@@ -7,7 +7,8 @@ import pandas as pd
 import numpy as np
 import io
 import json
-from typing import Optional, List, Dict, Any, Literal, Sequence, Union, Iterable, Tuple
+import secrets
+from typing import Optional, List, Dict, Any, Literal, NamedTuple, Sequence, Union, Iterable, Tuple
 from scipy.optimize import curve_fit, minimize
 import re
 import math
@@ -300,24 +301,93 @@ logger = logging.getLogger("phytograph")
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
-# Configure CORS. The renderer's dev-server origin is now a *dynamic* port
-# (scripts/dev.mjs picks a free one per session), so a fixed allowlist of
-# localhost:<port> entries no longer matches — it broke the splash, which
-# fetches /version cross-origin from http://localhost:<dynamic>. Allow any
-# loopback origin via regex instead. This is safe: the backend only ever binds
-# 127.0.0.1, so only processes on this machine can reach it regardless of CORS,
-# and CORS is a browser-enforced policy, not a network boundary. The packaged
-# app loads from app:///file:// (covered by allow_origins below); dev and any
-# localhost tooling are covered by the regex.
+def _allowed_origins() -> "List[str]":
+    """The origins this backend answers. A browser's Origin header is the one
+    thing a page cannot forge, and any other page in the user's browser is not
+    this app. The packaged app and E2E load from file://; `npm run dev` loads
+    from the Vite port it passes as PHYTOGRAPH_RENDERER_PORT. It used to be any
+    `localhost:*`, so any local web server's page qualified."""
+    origins = ["app://localhost", "file://"]
+    port = os.environ.get("PHYTOGRAPH_RENDERER_PORT")
+    if port:
+        origins += [f"http://localhost:{port}", f"http://127.0.0.1:{port}"]
+    return origins
+
+
+class LocalRequestGuard:
+    """Refuse requests that did not come from this app.
+
+    The backend reads and overwrites any path the user can (export, preview,
+    project save), so binding 127.0.0.1 is not enough:
+
+      * Host: a web page can rebind its own domain to 127.0.0.1. It is then
+        same-origin with this server, so CORS never applies, and the request
+        arrives with that domain in Host. Only a loopback name passes.
+      * Origin: CORS stops a page READING a response, not the request running.
+      * Token: everything else on the machine, such as another user's process.
+        Set by whoever spawned this backend. A standalone `backend_wrapper.py`
+        launch has none and skips this check; Host and Origin still apply.
+
+    /health and /version stay open to token-less callers because the launch
+    probes and packaging smoke tests hit them. Raw ASGI, for the same reason as
+    SlowRequestLogger below: `_run_killable` needs client disconnects intact.
+    Added before CORSMiddleware, so a preflight is answered there and a refusal
+    still carries the CORS headers the app needs to read it."""
+
+    _OPEN_PATHS = {"/health", "/version"}
+    _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    def _refusal(scope) -> "Optional[tuple]":
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        host = headers.get("host", "")
+        if not host.endswith("]"):       # "[::1]" has colons but no port
+            host = host.rsplit(":", 1)[0]
+        allowed_hosts = LocalRequestGuard._LOOPBACK_HOSTS | set(
+            filter(None, os.environ.get("PHYTOGRAPH_EXTRA_ALLOWED_HOSTS", "").split(",")))
+        if host.lower() not in allowed_hosts:
+            return 403, "Refused: this backend only answers requests addressed to the local machine."
+        origin = headers.get("origin")
+        if origin is not None and origin not in _allowed_origins():
+            return 403, "Refused: this origin may not use the Phytograph backend."
+        expected = os.environ.get("PHYTOGRAPH_BACKEND_TOKEN")
+        if (expected and scope.get("path") not in LocalRequestGuard._OPEN_PATHS
+                and not secrets.compare_digest(headers.get("x-phytograph-token", "").encode(), expected.encode())):
+            return 401, "Refused: missing or wrong backend token."
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        refusal = self._refusal(scope)
+        if refusal is None:
+            return await self.app(scope, receive, send)
+        status, detail = refusal
+        body = json.dumps({"detail": detail}).encode("utf-8")
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(LocalRequestGuard)
+
+
+@app.get("/api/token-check")
+def token_check():
+    """200 only past LocalRequestGuard: how a supervisor tells that a backend on
+    its port is its own, since /version answers anyone."""
+    return {"ok": True}
+
+
+# Configure CORS. Only the renderer's own origins; see `_allowed_origins`. The
+# dev-server origin is a dynamic port, which is why this is computed.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "tauri://localhost",
-        "app://localhost",
-        "file://",
-    ],
-    # http(s)://localhost:<anyport> and http(s)://127.0.0.1:<anyport>
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -7867,6 +7937,26 @@ def _lad_geotiff_bytes(request: "LADExportRequest", variable: str) -> bytes:
     )
 
 
+def _lad_grid_pivot(request: "LADExportRequest") -> "tuple[float, float]":
+    """The XY the grid's azimuth rotates about: the center of its lattice."""
+    return (float(request.origin[0]) + float(request.cell_size[0]) * request.nx / 2.0,
+            float(request.origin[1]) + float(request.cell_size[1]) * request.ny / 2.0)
+
+
+def _lad_true_xy(cell: "LADExportCell", request: "LADExportRequest") -> "tuple[float, float]":
+    """Where a voxel really is. A cell's `center` is its position on the UNROTATED
+    lattice (which is how `_lad_cell_ijk` indexes it), so writing that for a
+    rotated grid put voxels 2r·sin(θ/2) from where they were measured: about 6 m
+    for a voxel 6 m from the pivot of a 45° grid, with the values untouched."""
+    x, y = float(cell.center[0]), float(cell.center[1])
+    rotation = float(request.grid_rotation)
+    if abs(rotation) <= 1e-9:
+        return x, y
+    px, py = _lad_grid_pivot(request)
+    c, s = math.cos(math.radians(rotation)), math.sin(math.radians(rotation))
+    return px + c * (x - px) - s * (y - py), py + s * (x - px) + c * (y - py)
+
+
 def _lad_csv_bytes(request: "LADExportRequest") -> bytes:
     """One row per voxel, every field. The lossless format.
 
@@ -7883,9 +7973,10 @@ def _lad_csv_bytes(request: "LADExportRequest") -> bytes:
         i, j, k = _lad_cell_ijk(cell, request.origin, request.cell_size,
                                 request.nx, request.ny, request.nz)
         solved = _lad_is_solved(cell)
+        x, y = _lad_true_xy(cell, request)
         rows.append(",".join([
             str(i), str(j), str(k),
-            num(cell.center[0], 4), num(cell.center[1], 4), num(cell.center[2], 4),
+            num(x, 4), num(y, 4), num(cell.center[2], 4),
             num(cell.size[0], 4), num(cell.size[1], 4), num(cell.size[2], 4),
             num(cell.lad) if solved else "",
             num(cell.leaf_area) if solved else "",
@@ -7933,8 +8024,14 @@ def _lad_vox_bytes(request: "LADExportRequest") -> bytes:
         f"#split: {request.nx} {request.ny} {request.nz}",
         f"#res: {dx:.4f}",
         "#type: LAD",
-        "i j k PadBVTotal nbSampling nbEchos lMeanTotal angleMean",
     ]
+    # `i j k` and the corners describe the UNROTATED lattice, so a rotated grid
+    # needs these to place a voxel. Only then: a plain grid's file stays as it was.
+    if abs(float(request.grid_rotation)) > 1e-9:
+        px, py = _lad_grid_pivot(request)
+        lines += [f"#rotation_z_deg: {float(request.grid_rotation):.6f}",
+                  f"#rotation_center: {px:.4f} {py:.4f}"]
+    lines.append("i j k PadBVTotal nbSampling nbEchos lMeanTotal angleMean")
     for cell in request.cells:
         if not _lad_is_solved(cell):
             continue
@@ -7992,6 +8089,8 @@ def _lad_statistics_bytes(request: "LADExportRequest") -> bytes:
     lines = [
         f"voxel size: {dx:.3f} {dy:.3f} {dz:.3f}",
         f"grid size: {request.nx} {request.ny} {request.nz}",
+        *([f"grid rotation about z (deg): {float(request.grid_rotation):g}"]
+          if abs(float(request.grid_rotation)) > 1e-9 else []),
         f"number of voxels reported {total}",
         f"number of occluded voxels {occluded}",
         f"proportion of occlusion {(occluded / total if total else 0.0):.4f}",
@@ -8061,14 +8160,14 @@ def export_lad(request: LADExportRequest):
             raise HTTPException(
                 status_code=400,
                 detail=(f"This LAD grid is rotated {request.grid_rotation:g}°, so it has no "
-                        "axis-aligned raster lattice. Export CSV or .vox instead — both "
-                        "carry the true per-voxel positions."))
+                        "axis-aligned raster lattice. Export CSV, which carries each voxel's "
+                        "true position, or .vox, whose header records the rotation."))
         if request.terrain_follow:
             raise HTTPException(
                 status_code=400,
                 detail=("This LAD grid follows the terrain, so its voxel columns are not a "
-                        "regular raster lattice. Export CSV or .vox instead — both carry "
-                        "the true per-voxel positions."))
+                        "regular raster lattice. Export CSV instead: it carries each "
+                        "voxel's true position, which .vox cannot."))
         unknown = [v for v in request.variables if v not in _LAD_EXPORT_VARIABLES]
         if unknown:
             raise HTTPException(status_code=400,
@@ -24430,6 +24529,22 @@ def _las_export_point_format(want_color: bool) -> int:
     return 7 if want_color else 6
 
 
+def _columns_keeping_miss_flag(columns: "Optional[List[str]]", has_miss_rows: bool) -> "Optional[List[str]]":
+    """`columns`, with `is_miss` added when the export is writing miss rows.
+
+    An export always writes a cloud's sky/miss rows, so the flag is not an
+    optional column: without it those rows re-import as real returns ~1 km out,
+    with `has_misses=False` and an extent that hangs every compute tool. It can
+    go missing without the user asking, too: a session's display octree is
+    hits-only, so it reports `is_miss` as all zeros and the export picker drops
+    it as a degenerate schema dimension. Appended rather than inserted so the
+    columns the user ordered keep their positions. None (write everything) needs
+    no help. The scan export does the same (`include_misses` in its writer)."""
+    if not columns or not has_miss_rows or _MISS_SLUG in columns:
+        return columns
+    return [*columns, _MISS_SLUG]
+
+
 def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                            columns: "Optional[List[str]]", translation,
                            progress=None, classification_column: "Optional[str]" = None,
@@ -24445,9 +24560,11 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
     session lock, then each `_LAS_WRITE_CHUNK` block is gathered under the
     lock (a slice copy) and written outside it, so the transient is one block
     and the lock is held for microseconds per block rather than for the LAZ
-    compression. An edit landing mid-export can therefore differ between
-    blocks - the PDAL streaming trade-off; the export modal is not a mutating
-    tool, so in practice the cloud is idle.
+    compression. The column arrays are captured once, up front: a transform or
+    a compacting bake REPLACES them, so an edit landing mid-export cannot tear
+    the file (re-reading `sess.positions` per block wrote half the points in the
+    old frame and half in the new, with success=True). The file is the cloud as
+    it was when the export started.
 
     Column semantics match the generic path exactly: misses included, world
     shift and the source translation added back, `columns` selecting the
@@ -24464,6 +24581,8 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
         n = int(idx.shape[0])
         world_shift = (np.asarray(sess.world_shift, dtype=np.float64)
                        if sess.world_shift is not None else np.zeros(3))
+        positions_col, colors_col, intensity_col = sess.positions, sess.colors, sess.intensity
+        timestamps_col, extras_cols = sess.timestamps, dict(sess.extras)
         has_colors = sess.colors is not None
         has_intensity = sess.intensity is not None
         extra_slugs = [ed["slug"] for ed in sess.extra_dims_meta
@@ -24478,6 +24597,11 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
             if b.shape[0]:
                 pos_min = np.minimum(pos_min, b.min(axis=0))
                 pos_max = np.maximum(pos_max, b.max(axis=0))
+        miss_col = sess.extras.get(_MISS_SLUG)
+        has_miss_rows = miss_col is not None and any(
+            bool(np.any(miss_col[idx[start:start + _LAS_WRITE_CHUNK]] != 0))
+            for start in range(0, n, _LAS_WRITE_CHUNK))
+    columns = _columns_keeping_miss_flag(columns, has_miss_rows)
     shift = world_shift + (np.asarray(translation, dtype=np.float64).reshape(3)
                            if translation is not None else 0.0)
     if n == 0:
@@ -24532,11 +24656,11 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                 share = 0.9 * m / n
                 _stage(base, "Reading points")
                 with _cloud_session_lock:
-                    bpos = np.asarray(sess.positions[block], dtype=np.float64) + shift
-                    bcol = sess.colors[block] if want_color else None
-                    bint = sess.intensity[block] if want_intensity else None
-                    bext = {sl: np.asarray(sess.extras[sl][block], dtype=np.float32) for sl in export_slugs}
-                    bts = (np.asarray(sess.timestamps[block], dtype=np.float64)
+                    bpos = np.asarray(positions_col[block], dtype=np.float64) + shift
+                    bcol = colors_col[block] if want_color else None
+                    bint = intensity_col[block] if want_intensity else None
+                    bext = {sl: np.asarray(extras_cols[sl][block], dtype=np.float32) for sl in export_slugs}
+                    bts = (np.asarray(timestamps_col[block], dtype=np.float64)
                            if write_timestamp else None)
                 _stage(base + 0.3 * share, "Packing coordinates")
                 record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
@@ -24644,6 +24768,9 @@ def _do_point_cloud_export(
                     n_extras=8, colors=True, intensity=True, timestamps=True),
                 f"export {n_src:,} pts"):
             points, src_colors, src_intensity, src_extras = _read_points_and_extras(src)
+        src_miss = src_extras.get(_MISS_SLUG)
+        request = request.model_copy(update={"columns": _columns_keeping_miss_flag(
+            request.columns, src_miss is not None and bool(np.any(src_miss != 0)))})
         if fmt in _TEXT_EXPORT_FORMATS or fmt == "pcd":
             try:
                 # Formatting is ~97% of a text export's wall time; report it as
@@ -24785,7 +24912,9 @@ def _do_point_cloud_export(
         # omittable.) Omitting `columns` still writes everything, so the default
         # export stays lossless.
         if request.columns:
-            wanted = set(request.columns)
+            inline_miss = export_extras.get(_MISS_SLUG)
+            wanted = set(_columns_keeping_miss_flag(
+                request.columns, inline_miss is not None and bool(np.any(np.asarray(inline_miss) != 0))))
             export_extras = {k: v for k, v in export_extras.items() if k in wanted}
 
         # Point format: 7 = XYZ + intensity + RGB + GPS time, 6 = the same minus
@@ -33192,7 +33321,6 @@ def _session_scalar_column(sess, slug: str) -> "Optional[np.ndarray]":
     return None
 
 
-
 def _session_scalar_slugs(sess) -> "List[str]":
     """Every slug `_session_scalar_column` would resolve, for error messages."""
     slugs = list(sess.extras)
@@ -33370,6 +33498,14 @@ def _region_pixels(positions: "np.ndarray", region: dict) -> "np.ndarray":
     result via `_region_mask(..., pixels=...)`. The projection is O(N) over the
     whole cloud and dominates the cost of a stroke, so re-projecting per stamp
     turns one pass over a 50 M-point cloud into k passes."""
+    if positions.shape[0] <= _REGION_BLOCK_ROWS:
+        return _project_block_to_pixel(
+            positions,
+            np.asarray(region["projection"], dtype=np.float64),
+            np.asarray(region["view"], dtype=np.float64),
+            int(region["canvas"]["width"]),
+            int(region["canvas"]["height"]),
+        )
     return _project_world_to_pixel(
         positions,
         np.asarray(region["projection"], dtype=np.float64),
@@ -33424,13 +33560,17 @@ def _region_mask(
                 status_code=400,
                 detail="region.points must be at least 3 [x, y] entries.",
             )
-        px = pixels if pixels is not None else _region_pixels(positions, region)
-        mask = _points_in_polygon_mask(px, polygon)
+        if pixels is not None:
+            mask = _points_in_polygon_mask(pixels, polygon)
+        else:
+            mask = _screen_region_mask(positions, region, lambda px: _points_in_polygon_mask(px, polygon))
     elif kind == "squares_union":
         centers = np.asarray(region["centers"], dtype=np.float64)
         half_sizes = np.asarray(region["half_sizes"], dtype=np.float64)
-        px = pixels if pixels is not None else _region_pixels(positions, region)
-        mask = _squares_union_mask(px, centers, half_sizes)
+        if pixels is not None:
+            mask = _squares_union_mask(pixels, centers, half_sizes)
+        else:
+            mask = _screen_region_mask(positions, region, lambda px: _squares_union_mask(px, centers, half_sizes))
     elif kind == "spheres_union":
         # World-space, so it never touches `pixels` — no projection needed.
         mask = _spheres_union_mask(
@@ -33452,6 +33592,33 @@ def _region_mask(
     if bool(region.get("invert", False)):
         mask = ~mask
     return mask
+
+
+def _selection_outside_lock(sess: "CloudSession", region: Optional[dict]):
+    """A region's mask over ALL of `sess`'s rows, computed without the global
+    lock, plus the state to validate it against. The selection is the whole cost
+    of a spatial edit and held under the lock it stalled every other request on
+    every cloud. Survivors are picked out afterward, which also avoids copying
+    `positions[survivors]` (24 B/pt) just to test it. Same pattern as
+    `delete_cloud_region`; pair with `_selection_current_locked`."""
+    if region is None:
+        return None
+    with _cloud_session_lock:
+        positions = sess.positions
+        gen = sess.octree_stale_gen
+    return _region_mask(positions, region), positions, gen
+
+
+def _selection_current_locked(sess: "CloudSession", region: Optional[dict], selection, surv: "np.ndarray") -> "np.ndarray":
+    """The mask over the SURVIVORS `surv`. Recomputed here, under the lock, if an
+    edit landed since `_selection_outside_lock`: a transform moves the geometry
+    and a compacting bake replaces `positions`. Caller holds the lock."""
+    if selection is None:
+        return np.ones(int(np.count_nonzero(surv)), dtype=bool)
+    select, positions, gen = selection
+    if sess.positions is not positions or sess.octree_stale_gen != gen:
+        select = _region_mask(sess.positions, region)
+    return select[surv]
 
 
 def _region_candidates(positions: "np.ndarray", region: dict, pixels_for=None) -> "np.ndarray":
@@ -33491,6 +33658,9 @@ def _region_candidates(positions: "np.ndarray", region: dict, pixels_for=None) -
     return np.flatnonzero(_region_mask(positions, region, pixels=pixels)).astype(np.int64)
 
 
+_REGION_BLOCK_ROWS = 2_000_000
+
+
 def _project_world_to_pixel(
     positions: np.ndarray,
     projection: np.ndarray,
@@ -33505,11 +33675,43 @@ def _project_world_to_pixel(
 
     THREE.js stores matrices in column-major order, so the renderer's
     `Matrix4.elements` array applied as `m * v` is `elements.T @ v` in NumPy.
+
+    Holds 16 B/pt for its result. A caller that only needs a mask should use
+    `_screen_region_mask`, which holds one block.
     """
     n = positions.shape[0]
-    if n == 0:
-        return np.zeros((0, 2), dtype=np.float64)
+    pixels = np.empty((n, 2), dtype=np.float64)
+    for start in range(0, n, _REGION_BLOCK_ROWS):
+        block = positions[start:start + _REGION_BLOCK_ROWS]
+        pixels[start:start + block.shape[0]] = _project_block_to_pixel(
+            block, projection, view, canvas_w, canvas_h)
+    return pixels
 
+
+def _screen_region_mask(positions: np.ndarray, region: dict, test) -> np.ndarray:
+    """`test(pixels)` over `positions`, one block at a time.
+
+    A screen-space selection never needs a pixel again once it has been tested,
+    so projecting the whole cloud first only cost memory: 121 B/pt at its peak,
+    about 12 GB at 100 M points, with no admission gate in front of it. This
+    holds the 1 B/pt mask and one block."""
+    n = positions.shape[0]
+    mask = np.zeros(n, dtype=bool)
+    for start in range(0, n, _REGION_BLOCK_ROWS):
+        block = positions[start:start + _REGION_BLOCK_ROWS]
+        mask[start:start + block.shape[0]] = test(_region_pixels(block, region))
+    return mask
+
+
+def _project_block_to_pixel(
+    positions: np.ndarray,
+    projection: np.ndarray,
+    view: np.ndarray,
+    canvas_w: int,
+    canvas_h: int,
+) -> np.ndarray:
+    """`_project_world_to_pixel` for one block. Transient of ~120 B/pt."""
+    n = positions.shape[0]
     # column-major flat → 4x4 row-major: transpose
     P = projection.reshape(4, 4, order="F").astype(np.float64)
     V = view.reshape(4, 4, order="F").astype(np.float64)
@@ -33517,7 +33719,7 @@ def _project_world_to_pixel(
 
     # Homogeneous Nx4
     ones = np.ones((n, 1), dtype=np.float64)
-    homo = np.concatenate([positions.astype(np.float64), ones], axis=1)  # Nx4
+    homo = np.concatenate([np.asarray(positions).astype(np.float64), ones], axis=1)  # Nx4
     clip = homo @ M.T  # Nx4 = (4x4 @ 4xN).T -> Nx4
 
     w = clip[:, 3]
@@ -33546,12 +33748,22 @@ def _points_in_polygon_mask(pixels: np.ndarray, polygon: np.ndarray) -> np.ndarr
     crosses an odd number of edges)."""
     n = pixels.shape[0]
     m = polygon.shape[0]
+    mask = np.zeros(n, dtype=bool)
     if n == 0 or m < 3:
-        return np.zeros(n, dtype=bool)
+        return mask
 
-    inside = np.zeros(n, dtype=bool)
-    px = pixels[:, 0]
-    py = pixels[:, 1]
+    # Only points in the polygon's bounding box can be inside it: above or below
+    # it no edge straddles the point's ray, and beside it the crossing count is
+    # zero or even. A small lasso over a big cloud then tests almost nothing.
+    # `<=` on the right keeps this a superset under rounding of intersect_x.
+    lo, hi = polygon.min(axis=0), polygon.max(axis=0)
+    cand = np.flatnonzero((pixels[:, 1] >= lo[1]) & (pixels[:, 1] <= hi[1])
+                          & (pixels[:, 0] >= lo[0]) & (pixels[:, 0] <= hi[0]))
+    if cand.size == 0:
+        return mask
+    px = pixels[cand, 0]
+    py = pixels[cand, 1]
+    inside = np.zeros(cand.size, dtype=bool)
     # Edges: (polygon[i], polygon[j]) with j = i-1 wrap-around.
     j = m - 1
     for i in range(m):
@@ -33559,18 +33771,16 @@ def _points_in_polygon_mask(pixels: np.ndarray, polygon: np.ndarray) -> np.ndarr
         xj, yj = polygon[j, 0], polygon[j, 1]
         # Edge straddles the horizontal ray from the point (yi-py and yj-py
         # have opposite signs). Compute intersection x; flip `inside` when
-        # the test point is to the left of that intersection.
-        cond1 = (yi > py) != (yj > py)
-        # Guard against zero-length vertical span (parallel edge): if (yj-yi)
-        # is 0, cond1 is False for all points anyway.
-        denom = (yj - yi)
-        # Where denom is 0, intersect_x is irrelevant (cond1 is False).
-        with np.errstate(divide="ignore", invalid="ignore"):
-            intersect_x = np.where(denom != 0, (xj - xi) * (py - yi) / denom + xi, 0.0)
-        cond2 = px < intersect_x
-        inside = np.where(cond1 & cond2, ~inside, inside)
+        # the test point is to the left of that intersection. An edge with no
+        # vertical span straddles nothing, so `straddling` is empty and the
+        # division below never sees a zero denominator.
+        straddling = np.flatnonzero((yi > py) != (yj > py))
+        if straddling.size:
+            intersect_x = (xj - xi) * (py[straddling] - yi) / (yj - yi) + xi
+            inside[straddling[px[straddling] < intersect_x]] ^= True
         j = i
-    return inside
+    mask[cand[inside]] = True
+    return mask
 
 
 class CropOctreeRegion(BaseModel):
@@ -34279,8 +34489,33 @@ def _session_reattach_store(sess: "CloudSession", store_dir) -> None:
     sess.store = store
 
 
-def _compact_session_store_locked(sess: "CloudSession", keep: np.ndarray) -> None:
-    """Compact a STORE-BACKED session to the rows in `keep`, on disk.
+def _session_column_refs_locked(sess: "CloudSession") -> dict:
+    """Every column array and store a compaction reads, by identity, and the
+    in-place write counter. Equal before and after means the columns it copied
+    are still what the session holds. Caller holds the lock."""
+    return {
+        "store": sess.store,
+        "writes": sess.column_write_gen,
+        "fields": {f: getattr(sess, f, None) for f in _SESSION_STORE_ARRAY_FIELDS},
+        "extras": dict(sess.extras),
+    }
+
+
+def _session_columns_unchanged_locked(sess: "CloudSession", refs: dict) -> bool:
+    # Evicted meanwhile: the registry's copy is a different object, and installing
+    # into this one would delete the store that copy still depends on.
+    if _cloud_sessions.get(sess.session_id) is not sess:
+        return False
+    if sess.store is not refs["store"] or sess.column_write_gen != refs["writes"]:
+        return False
+    if any(getattr(sess, f, None) is not arr for f, arr in refs["fields"].items()):
+        return False
+    return (list(sess.extras) == list(refs["extras"])
+            and all(sess.extras[k] is v for k, v in refs["extras"].items()))
+
+
+def _write_compacted_store(sess: "CloudSession", refs: dict, keep: np.ndarray) -> dict:
+    """Compact a STORE-BACKED session's columns to the rows in `keep`, on disk.
 
     `bake` removes deleted rows by boolean-indexing every point-aligned array.
     On memory-mapped columns that produced a full in-RAM copy of the survivors
@@ -34298,49 +34533,63 @@ def _compact_session_store_locked(sess: "CloudSession", keep: np.ndarray) -> Non
     survive an unlink on POSIX, and on Windows the delete is best-effort, with
     the per-process spill root reaped at the next start.
 
-    Caller holds `_cloud_session_lock`."""
-    old = sess.store
+    Runs WITHOUT `_cloud_session_lock`, reading the arrays captured in `refs`:
+    this is multi-GB of I/O (1.6 s per 5 M points, ~32 s at 100 M), and under the
+    lock every request on every cloud waited it out. The session is untouched
+    until `_install_compacted_store_locked`, which refuses if it changed. The
+    directory name is unique per attempt because two of these can now overlap,
+    and a shared name meant one deleting the other's files."""
+    old = refs["store"]
     idx = np.flatnonzero(keep)
     n_new = int(idx.shape[0])
-    new_root = _session_spill_root() / f"{sess.session_id}.g{old.generation + 1}.store"
-    if new_root.exists():
-        _shutil.rmtree(new_root, ignore_errors=True)
+    generation = old.generation + 1
+    new_root = _session_spill_root() / f"{sess.session_id}.g{generation}-{uuid.uuid4().hex[:8]}.store"
     new = session_store.SessionStore.create(new_root, n_new, attrs=dict(old.attrs))
-    # Carry the generation forward so the next bake names a fresh directory.
-    while new.generation < old.generation + 1:
-        new.bump_generation()
+    try:
+        # Carry the generation forward.
+        while new.generation < generation:
+            new.bump_generation()
 
-    def _gather(name, arr):
-        m = new.allocate_column(name, arr.dtype, arr.shape[1:])
-        for a, b in session_store.iter_ranges(n_new):
-            m[a:b] = arr[idx[a:b]]
-        return m
+        def _gather(name, arr):
+            m = new.allocate_column(name, arr.dtype, arr.shape[1:])
+            for a, b in session_store.iter_ranges(n_new):
+                m[a:b] = arr[idx[a:b]]
+            return m
 
-    fields = {}
+        fields = {}
+        for f, arr in refs["fields"].items():
+            if arr is None or f == "deleted_base":
+                continue                      # bake clears deleted_base itself
+            if f == "deleted":
+                fields[f] = new.allocate_column(f, np.bool_)   # nothing is deleted after a bake
+                continue
+            fields[f] = _gather(f, arr)
+        extras = {}
+        mapping: Dict[str, str] = {}
+        used: set = set()
+        for slug, arr in refs["extras"].items():
+            col = _next_extra_column(new, used)
+            used.add(col)
+            extras[slug] = _gather(col, arr)
+            mapping[col] = slug
+        new.set_attr("extras", mapping)
+        new.set_attr("extras_order", list(refs["extras"].keys()))
+        new.flush()
+    except BaseException:
+        new.close()
+        _delete_session_store_dir(new_root)
+        raise
+    return {"store": new, "fields": fields, "extras": extras}
+
+
+def _install_compacted_store_locked(sess: "CloudSession", compacted: dict) -> None:
+    """Point the session at a `_write_compacted_store` result and drop the old
+    store. Caller holds `_cloud_session_lock` and has checked nothing changed."""
+    old = sess.store
     for f in _SESSION_STORE_ARRAY_FIELDS:
-        arr = getattr(sess, f, None)
-        if arr is None or f == "deleted_base":
-            continue                      # bake clears deleted_base itself
-        if f == "deleted":
-            fields[f] = new.allocate_column(f, np.bool_)   # nothing is deleted after a bake
-            continue
-        fields[f] = _gather(f, arr)
-    extras = {}
-    mapping: Dict[str, str] = {}
-    used: set = set()
-    for slug, arr in sess.extras.items():
-        col = _next_extra_column(new, used)
-        used.add(col)
-        extras[slug] = _gather(col, arr)
-        mapping[col] = slug
-    new.set_attr("extras", mapping)
-    new.set_attr("extras_order", list(sess.extras.keys()))
-    new.flush()
-
-    for f in _SESSION_STORE_ARRAY_FIELDS:
-        setattr(sess, f, fields.get(f))
-    sess.extras = extras
-    sess.store = new
+        setattr(sess, f, compacted["fields"].get(f))
+    sess.extras = compacted["extras"]
+    sess.store = compacted["store"]
     old_root = old.root
     old.close()
     _delete_session_store_dir(old_root)
@@ -35060,6 +35309,15 @@ class CloudSession:
     # after the converter: a changed value means an edit landed mid-build, so
     # the new octree must not be claimed as current.
     octree_stale_gen: int = 0
+    # Bumped by every IN-PLACE write to a column (a label stroke or its undo),
+    # which changes neither a column's identity nor the mask. A compaction copies
+    # the columns outside the lock and uses this to notice one it would lose.
+    column_write_gen: int = 0
+    # Bumped by every transform. A tool that computes outside the lock compares
+    # this before writing back: rows still line up after a transform, so the mask
+    # cannot tell, but the result describes the OLD frame. An array identity check
+    # would pin the old positions for the run and misfire on a spill and restore.
+    geometry_gen: int = 0
     # True when the stored normal columns predate a geometry edit.
     #
     # A normal is a NEIGHBORHOOD statistic, so deleting or cropping points
@@ -37483,7 +37741,8 @@ def create_multi_cloud_session(request: CloudSessionCreateRequest, http_request:
 
 
 def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None,
-                        n_restored: int = 0) -> dict:
+                        n_restored: int = 0, edit_mark: "Optional[_SessionEditMark]" = None,
+                        unrestorable0: int = 0) -> dict:
     """Build an ephemeral PyHelios cloud from a session's hits, gap-fill the misses,
     and persist them in `sess.backfilled_misses`. Returns the result dict.
 
@@ -37696,19 +37955,36 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         buffer["origins"] = np.tile(np.asarray(origin, dtype=np.float64),
                                     (synth_xyz.shape[0], 1))
 
+    # The gapfill is one uninterruptible native call, so this is where a cancel
+    # lands. Without it a canceled run still replaced the buffer and miss octree,
+    # and a cancel-and-rerun with corrected parameters was last-writer-wins.
+    _cancel_checkpoint(progress)
+
     with _cloud_session_lock:
+        # A transform during the gapfill: these misses are in the old frame, and
+        # storing them would also clear the flags that make LAD warn. Refused
+        # rather than flagged, because nothing downstream could correct the frame.
+        if edit_mark is not None and sess.geometry_gen != edit_mark.geometry_gen:
+            return {"backfilled": 0, "miss_count": 0, "has_misses": False,
+                    "scan_origin": list(origin),
+                    "error": "The cloud was moved while its sky/miss points were being "
+                             "recovered; run Backfill again."}
         sess.backfilled_misses = buffer if count > 0 else None
         # Freshly computed against the current hits — no longer stale, and the
-        # scan origin is now known for the display projection.
-        sess.backfilled_misses_stale = False
+        # scan origin is now known for the display projection. A crop that landed
+        # during the run keeps its stale flag, as a crop after the run would set it.
+        sess.backfilled_misses_stale = (
+            edit_mark is not None and not np.array_equal(sess.deleted, edit_mark.deleted))
         sess.backfilled_misses_moved = False
         if count > 0:
             # Gap-filling against the CURRENT hits re-creates, as misses, the
             # pulses whose returns were compacted away or left in another cloud
             # (target_count places the partly removed ones), so they are no
             # longer lost: measured 2.4723 vs 2.4676 uncropped after a bake,
-            # against 2.8613 without the re-run.
-            sess.unrestorable_hit_count = 0
+            # against 2.8613 without the re-run. A bake during the run lost hits
+            # this gapfill never saw go, so those stay counted.
+            if edit_mark is None or sess.unrestorable_hit_count == unrestorable0:
+                sess.unrestorable_hit_count = 0
             sess.miss_octree_origin = list(origin)
         sess.last_accessed = time.time()
 
@@ -37810,6 +38086,8 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
                     if _deleted is not None and _deleted.shape[0] == len(sess.positions)
                     else None)
         n_restored = int(_restore.sum()) if _restore is not None else 0
+        edit_mark = _session_edit_mark_locked(sess)
+        unrestorable0 = int(getattr(sess, "unrestorable_hit_count", 0) or 0)
         # A static scan's rounded timestamps are dropped rather than used: a
         # pulse clock built from them is the rounding step, and helios-core
         # refuses them. The returns are then placed through their row/column
@@ -37890,7 +38168,8 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
             _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags,
-                                progress=progress, n_restored=n_restored)).encode("utf-8"),
+                                progress=progress, n_restored=n_restored,
+                                edit_mark=edit_mark, unrestorable0=unrestorable0)).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
@@ -38196,6 +38475,7 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
                 ))
                 col = _column_widen_for_locked(sess, slug, target[changing])
                 col[changed_idx] = target[changing]
+                sess.column_write_gen += 1
             applied.append({
                 "stroke_id": stroke.stroke_id,
                 "selected_count": selected_count,
@@ -38561,6 +38841,7 @@ def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
         if col is not None:
             for delta in reversed(hist[k:]):
                 _apply_label_delta_reverse(col, delta)
+            sess.column_write_gen += 1
         sess.label_history[slug] = hist[:k]
         editable = _session_editable_mask_locked(sess)
         class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
@@ -38795,23 +39076,44 @@ def _compact_baked_session(sess: "CloudSession", cache_key: str,
     # Compact the in-RAM arrays to the survivors and clear the mask + history, so
     # the session's source of truth matches the baked octree and further edits
     # start from the reduced set.
-    with _cloud_session_lock:
+    def _refuse_if_edited_locked():
         if (sess.octree_stale_gen != built_gen
                 or not np.array_equal(np.asarray(sess.deleted), built_mask)):
             raise HTTPException(
                 status_code=409,
                 detail="The cloud was edited while deletions were being applied; "
                        "apply them again.")
+
+    # Store-backed: compact ON DISK into a new store, outside the lock (see the
+    # helper). Nothing deleted means nothing to move; the maps stay as they are.
+    compacted = refs = None
+    with _cloud_session_lock:
+        _refuse_if_edited_locked()
+        keep = np.asarray(~sess.deleted)
+        if sess.store is not None and not keep.all():
+            refs = _session_column_refs_locked(sess)
+    if refs is not None:
+        compacted = _write_compacted_store(sess, refs, keep)
+    with _cloud_session_lock:
+        try:
+            _refuse_if_edited_locked()
+            if refs is not None and not _session_columns_unchanged_locked(sess, refs):
+                raise HTTPException(
+                    status_code=409,
+                    detail="The cloud was edited while deletions were being applied; "
+                           "apply them again.")
+        except HTTPException:
+            if compacted is not None:
+                compacted["store"].close()
+                _delete_session_store_dir(compacted["store"].root)
+            raise
         keep = np.asarray(~sess.deleted)
         miss_col = sess.extras.get(_MISS_SLUG)
         dropped = ~keep if miss_col is None else (~keep) & (np.asarray(miss_col) == 0)
         sess.unrestorable_hit_count += int(dropped.sum())
-        if sess.store is not None:
-            # Store-backed: compact ON DISK into a new store (see the helper).
-            # Nothing deleted means nothing to move; the maps stay as they are.
-            if not keep.all():
-                _compact_session_store_locked(sess, keep)
-        elif not keep.all():
+        if compacted is not None:
+            _install_compacted_store_locked(sess, compacted)
+        elif sess.store is None and not keep.all():
             # Nothing deleted means nothing to drop: a full copy of every array
             # under the global lock bought nothing (a deferred-column rebuild
             # after a split is exactly this case).
@@ -39811,12 +40113,12 @@ def session_split(session_id: str, request: SessionSplitRequest):
     # the survivor snapshot used for the index scatter can't go stale against a
     # concurrent edit on the same session (the leftover subset is built from the
     # same snapshot before the lock is released for the slow rebuilds).
+    selection = _selection_outside_lock(sess, region_dict)
     with _ADMISSION.admit(
             _session_mutation_bytes([sess], copies=2.0),
             f"split {session_id}"), _cloud_session_lock:
         surv = ~sess.deleted
-        pos = sess.positions[surv]
-        keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
+        keep = _selection_current_locked(sess, region_dict, selection, surv)
         for f in (request.scalar_filters or []):
             col = _session_scalar_column(sess, f.slug)
             if col is None:
@@ -39902,12 +40204,12 @@ def session_extract(session_id: str, request: SessionExtractRequest):
 
     # Survivor slice plus the extracted child's own columns; see `split` above
     # for why this is admitted outside the session lock.
+    selection = _selection_outside_lock(sess, region_dict)
     with _ADMISSION.admit(
             _session_mutation_bytes([sess], copies=2.0),
             f"extract from {session_id}"), _cloud_session_lock:
         surv = ~sess.deleted
-        pos = sess.positions[surv]
-        sel = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
+        sel = _selection_current_locked(sess, region_dict, selection, surv)
         for f in (request.scalar_filters or []):
             col = _session_scalar_column(sess, f.slug)
             if col is None:
@@ -40975,6 +41277,9 @@ class ProjectSaveRequest(BaseModel):
     # Octree cache ids the scene displays beyond the sessions' own (e.g. a
     # synthetic scan's), so reopening needs no reconvert.
     octree_ids: List[str] = []
+    # The user confirmed replacing `path` with a project that is missing the
+    # clouds a failed save reported. See `_do_project_save`.
+    replace_with_missing: bool = False
 
 
 class ProjectOpenRequest(BaseModel):
@@ -41111,6 +41416,17 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                 _project_blob_drop(request.scene_token)
                 raise
             missing_sessions.append(sid)
+    # ...but never at the price of the only copy. After a backend crash every
+    # session is gone while the file on disk still holds those clouds, and
+    # Cmd+S names that same file: writing here replaced a real project with an
+    # empty shell, reported success, and cleared the unsaved-changes prompt. A
+    # new path destroys nothing, so only an existing target is refused.
+    if missing_sessions and target.exists() and not request.replace_with_missing:
+        _project_blob_drop(request.scene_token)
+        return {"success": False, "code": "missing_sessions_would_overwrite",
+                "error": f"{target.name} was not changed: replacing it would lose "
+                         f"{len(missing_sessions)} cloud(s) the backend no longer has.",
+                "missing_sessions": missing_sessions}
     n_total = sum(int(len(s.positions)) for _sid, s in sessions)
     # Unique per run, so nothing else can ever write into this archive.
     partial = target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.partial")
@@ -41493,9 +41809,9 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
             # back over all survivors (misses default 0, dropped from the octree at
             # rebuild). See _session_survivor_hit_mask.
             hit = _session_survivor_hit_mask(sess)
-            return hit, _session_hit_positions_locked(sess, hit), sess.deleted.copy()
+            return hit, _session_hit_positions_locked(sess, hit), _session_edit_mark_locked(sess)
 
-    hit, pts, deleted0 = await run_in_threadpool(_snapshot)
+    hit, pts, edit_mark = await run_in_threadpool(_snapshot)
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
     # Cost gate, BEFORE the worker is spawned: a cloth too fine for the extent
@@ -41551,7 +41867,7 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         labels = np.zeros(len(hit), dtype=np.int64)
         labels[hit] = np.asarray(hit_labels)
         with _cloud_session_lock:
-            _raise_if_session_edited_locked(sess, deleted0, "ground segmentation")
+            _raise_if_session_edited_locked(sess, edit_mark, "ground segmentation")
             _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
             # Shown on the drawn octree by row lookup: no rebuild at all.
             overlaid = _overlay_column_locked(sess, GROUND_CLASS_SLUG)
@@ -41690,9 +42006,9 @@ async def session_compute_normals(session_id: str,
             pts = _session_hit_positions_locked(sess, hit)
             origin, origin_source = _session_normal_origins_locked(
                 sess, hit, request.viewpoint)
-            return hit, pts, origin, origin_source, sess.deleted.copy()
+            return hit, pts, origin, origin_source, _session_edit_mark_locked(sess)
 
-    hit, pts, origin, origin_source, deleted0 = await run_in_threadpool(_snapshot)
+    hit, pts, origin, origin_source, edit_mark = await run_in_threadpool(_snapshot)
     if len(pts) < normals_mod.MIN_POINTS:
         raise HTTPException(
             status_code=400,
@@ -41764,7 +42080,7 @@ async def session_compute_normals(session_id: str,
         full = np.zeros((len(hit), normals_mod.N_COLUMNS), dtype=np.float32)
         full[hit] = values
         with _cloud_session_lock:
-            _raise_if_session_edited_locked(sess, deleted0, "normal estimation")
+            _raise_if_session_edited_locked(sess, edit_mark, "normal estimation")
             for col, (slug, label) in enumerate(normals_mod.COLUMNS):
                 _session_add_extra_column(sess, slug, label, full[:, col])
             # These normals describe the geometry as it stands right now.
@@ -41856,9 +42172,9 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
             hit = _session_survivor_hit_mask(sess)
             pts = _session_hit_positions_locked(sess, hit)
             return (hit, pts, denoise.NOISE_CLASS_SLUG in sess.extras,
-                    sess.deleted.copy())
+                    _session_edit_mark_locked(sess))
 
-    hit, pts, already_denoised, deleted0 = await run_in_threadpool(_snapshot)
+    hit, pts, already_denoised, edit_mark = await run_in_threadpool(_snapshot)
     if int(hit.sum()) < denoise.MIN_POINTS:
         raise HTTPException(
             status_code=400,
@@ -41887,7 +42203,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
         labels = np.full(len(hit), denoise.NOISE_CLEAN, dtype=np.int64)
         labels[hit] = np.asarray(hit_labels)
         with _cloud_session_lock:
-            _raise_if_session_edited_locked(sess, deleted0, "noise detection")
+            _raise_if_session_edited_locked(sess, edit_mark, "noise detection")
             _session_add_extra_column(sess, denoise.NOISE_CLASS_SLUG,
                                       denoise.NOISE_CLASS_LABEL, labels)
 
@@ -42109,6 +42425,7 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
                 intensity_col = None
             snap = {"n": n, "positions": sess.positions,
                     "deleted": np.array(sess.deleted, dtype=bool),
+                    "geometry_gen": sess.geometry_gen,
                     "miss": sess.extras.get(_MISS_SLUG),
                     "ground": sess.extras.get(GROUND_CLASS_SLUG),
                     "ti": sess.extras.get("target_index"),
@@ -42340,7 +42657,8 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
                     hag[offset:offset + n_s][hit[surv]] = hag_hits
                 offset += n_s
             with _cloud_session_lock:
-                if not np.array_equal(sess.deleted, snap["deleted"]):
+                if (sess.geometry_gen != snap["geometry_gen"]
+                        or not np.array_equal(sess.deleted, snap["deleted"])):
                     raise ValueError(_SESSION_EDITED_DURING_DEM)
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG,
                                           HEIGHT_ABOVE_GROUND_LABEL, hag)
@@ -42395,6 +42713,7 @@ def _do_session_dem_inner(sess: "CloudSession", request: "SessionDemRequest", pr
                     "num_vertices": 0, "error": f"Unknown surface type {request.surface_type!r}."}
         with _cloud_session_lock:
             surv = ~sess.deleted
+            geometry_gen0 = sess.geometry_gen
             keep = surv.copy()
             # ALWAYS exclude sky/miss points (is_miss != 0): a miss is a ray that
             # hit nothing, projected ~1 km out, so it has no place in a ground
@@ -42523,7 +42842,7 @@ def _do_session_dem_inner(sess: "CloudSession", request: "SessionDemRequest", pr
             hag[hit_in_surv] = hag_hits
             with _cloud_session_lock:
                 # `surv` is the snapshot's survivor mask (a fresh array, not a view).
-                if not np.array_equal(sess.deleted, ~surv):
+                if sess.geometry_gen != geometry_gen0 or not np.array_equal(sess.deleted, ~surv):
                     raise ValueError(_SESSION_EDITED_DURING_DEM)
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG, HEIGHT_ABOVE_GROUND_LABEL, hag)
             cache_key, cache_dir, meta = _show_new_columns(sess, [HEIGHT_ABOVE_GROUND_SLUG])
@@ -42603,16 +42922,29 @@ def _session_reflectance_scalar(sess, scalar_slug, keep):
     return None
 
 
-def _raise_if_session_edited_locked(sess: "CloudSession", deleted0: np.ndarray, tool: str) -> None:
-    """409 when the session's points changed since `deleted0` was taken.
+class _SessionEditMark(NamedTuple):
+    """What `_raise_if_session_edited_locked` compares: which rows, and which frame."""
+    deleted: np.ndarray
+    geometry_gen: int
+
+
+def _session_edit_mark_locked(sess: "CloudSession") -> _SessionEditMark:
+    return _SessionEditMark(sess.deleted.copy(), sess.geometry_gen)
+
+
+def _raise_if_session_edited_locked(sess: "CloudSession", edit_mark: _SessionEditMark, tool: str) -> None:
+    """409 when the session's points changed since `edit_mark` was taken.
 
     The ML/geometry tools snapshot the hit survivors, release the lock for the
     seconds-to-minutes the worker runs, then scatter the result back over the
     survivors. An erase, filter or undo in between changes that set: the result
     then no longer lines up (a shape error, or, when the count happens to
-    match, labels silently written onto the wrong points). Caller holds the
+    match, labels silently written onto the wrong points). A transform leaves
+    the set alone and is worse: rotate a plane into a wall during Compute Normals
+    and the old normals land on the right rows, marked fresh. Caller holds the
     lock."""
-    if not np.array_equal(sess.deleted, deleted0):
+    if (sess.geometry_gen != edit_mark.geometry_gen
+            or not np.array_equal(sess.deleted, edit_mark.deleted)):
         raise HTTPException(
             status_code=409,
             detail=f"The cloud was edited while {tool} ran; run it again.")
@@ -42661,9 +42993,9 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
             if request.reflectance_weight_max and request.reflectance_weight_max > 0:
                 refl_surv = _session_reflectance_scalar(sess, request.scalar_slug, surv)
                 reflectance = refl_surv[hit] if refl_surv is not None else None
-            return pts, hit, reflectance, sess.deleted.copy(), ground_col is None
+            return pts, hit, reflectance, _session_edit_mark_locked(sess), ground_col is None
 
-    pts, hit, reflectance, deleted0, no_ground_labels = await run_in_threadpool(_snapshot)
+    pts, hit, reflectance, edit_mark, no_ground_labels = await run_in_threadpool(_snapshot)
     if len(pts) < 3:
         raise HTTPException(
             status_code=400,
@@ -42683,7 +43015,7 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
         labels = np.zeros(len(hit), dtype=np.int64)
         labels[hit] = np.asarray(hit_labels)
         with _cloud_session_lock:
-            _raise_if_session_edited_locked(sess, deleted0, "wood/leaf segmentation")
+            _raise_if_session_edited_locked(sess, edit_mark, "wood/leaf segmentation")
             _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
             # As the ground handler: shown by row lookup, no rebuild.
             overlaid = _overlay_column_locked(sess, WOOD_CLASS_SLUG)
@@ -42779,10 +43111,10 @@ def _organ_snapshot(sess: "CloudSession"):
     result will be scattered against."""
     with _cloud_session_lock:
         hit = _session_survivor_hit_mask(sess)
-        return _session_hit_positions_locked(sess, hit), hit, sess.deleted.copy()
+        return _session_hit_positions_locked(sess, hit), hit, _session_edit_mark_locked(sess)
 
 
-def _organ_write_columns(sess: "CloudSession", deleted0: np.ndarray, hit: np.ndarray,
+def _organ_write_columns(sess: "CloudSession", edit_mark: "_SessionEditMark", hit: np.ndarray,
                          out: np.ndarray) -> None:
     """Scatter the hit-subset result over the survivors and append both columns.
     Refuses (409, `_raise_if_session_edited_locked`) if the cloud's points were
@@ -42792,7 +43124,7 @@ def _organ_write_columns(sess: "CloudSession", deleted0: np.ndarray, hit: np.nda
     organ[hit] = out[:, 0]
     leaflet[hit] = out[:, 1]
     with _cloud_session_lock:
-        _raise_if_session_edited_locked(sess, deleted0, "organ segmentation")
+        _raise_if_session_edited_locked(sess, edit_mark, "organ segmentation")
         _session_add_extra_column(sess, PLANT_ORGAN_SLUG, PLANT_ORGAN_LABEL, organ)
         _session_add_extra_column(sess, LEAFLET_ID_SLUG, LEAFLET_ID_LABEL, leaflet)
 
@@ -42810,7 +43142,7 @@ async def session_segment_organs(session_id: str, request: SessionOrganSegmentRe
     as it was. The snapshot and the write run off the event loop (each is a
     full-length gather)."""
     sess = await run_in_threadpool(_get_cloud_session, session_id)  # see segment_ground
-    pts, hit, deleted0 = await run_in_threadpool(_organ_snapshot, sess)
+    pts, hit, edit_mark = await run_in_threadpool(_organ_snapshot, sess)
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for organ segmentation.")
     _require_organ_model(request.model_id)
@@ -42820,7 +43152,7 @@ async def session_segment_organs(session_id: str, request: SessionOrganSegmentRe
             http_request=http_request)
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Organ segmentation was canceled.")
-    await run_in_threadpool(_organ_write_columns, sess, deleted0, hit, out)
+    await run_in_threadpool(_organ_write_columns, sess, edit_mark, hit, out)
     cache_key, cache_dir, octree_meta = await run_in_threadpool(
         _show_new_columns, sess, [PLANT_ORGAN_SLUG, LEAFLET_ID_SLUG])
     return {"session_id": session_id, "point_count": int(len(pts)),
@@ -42877,7 +43209,7 @@ def _chm_grid_cost(points: np.ndarray, request) -> "tuple[int, Optional[str], Op
 
 async def _session_segment_trees_chm(session_id: str, sess, request, http_request,
                                      *, n_survivors, plant_pts, plant_mask,
-                                     ground_pts, seeds, no_ground_labels, deleted0):
+                                     ground_pts, seeds, no_ground_labels, edit_mark):
     """The method='chm' branch of `session_segment_trees`: the same inputs
     (ground and misses excluded, labels scattered back onto every survivor),
     minus what only TreeIso needs. No tiling, and a cost prompt keyed on grid
@@ -42903,7 +43235,7 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Tree segmentation was canceled.")
     labels = await run_in_threadpool(
-        _session_write_tree_labels, sess, n_survivors, plant_mask, plant_labels, deleted0)
+        _session_write_tree_labels, sess, n_survivors, plant_mask, plant_labels, edit_mark)
     cache_key, cache_dir, rebuild_meta = await run_in_threadpool(
         _show_new_columns, sess, [TREE_INSTANCE_SLUG])
     num_trees = int(labels.max()) if labels.size else 0
@@ -42915,16 +43247,16 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
 
 def _session_write_tree_labels(sess: "CloudSession", n_survivors: int,
                                plant_mask: np.ndarray, plant_labels,
-                               deleted0: np.ndarray) -> np.ndarray:
+                               edit_mark: "_SessionEditMark") -> np.ndarray:
     """Scatter the plant tree ids back onto every survivor (ground and misses
     stay 0) and write the `tree_instance` column. Returns the survivor-aligned
-    labels. Refuses (409) if the cloud's points were edited since `deleted0`.
+    labels. Refuses (409) if the cloud's points were edited since `edit_mark`.
     Blocking - a full-length scatter plus a write under `_cloud_session_lock` -
     so the async handlers call it in the threadpool."""
     labels = np.zeros(n_survivors, dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)
     with _cloud_session_lock:
-        _raise_if_session_edited_locked(sess, deleted0, "tree segmentation")
+        _raise_if_session_edited_locked(sess, edit_mark, "tree segmentation")
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
     return labels
 
@@ -42966,6 +43298,11 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
             # Folded into plant_mask so misses stay tree id 0 (and are dropped at
             # rebuild). See _session_survivor_hit_mask.
             is_hit = _session_survivor_hit_mask(sess)
+            # Deletions AND geometry_gen, taken under the same lock as the
+            # snapshot: `_raise_if_session_edited_locked` compares both before the
+            # labels are written back (a bare `deleted.copy()` here raised
+            # AttributeError on every run).
+            edit_mark = _session_edit_mark_locked(sess)
         # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
         plant_mask = (~is_ground) & is_hit
         n_plant = int(plant_mask.sum())
@@ -42976,9 +43313,9 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         ground_pts = (pts[is_ground & is_hit]
                       if n_plant >= 10 and request.method == "chm" else None)
         return (pts, ground_col is None, plant_mask, n_plant, plant_pts, ground_pts,
-                sess.deleted.copy())
+                edit_mark)
 
-    pts, no_ground_labels, plant_mask, n_plant, plant_pts, ground_pts, deleted0 = (
+    pts, no_ground_labels, plant_mask, n_plant, plant_pts, ground_pts, edit_mark = (
         await run_in_threadpool(_snapshot))
     # The ground reminder: set when Ground Segmentation has never run on this
     # cloud. Deliberately a FACT, not a guess from the geometry — the old
@@ -43002,7 +43339,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         return await _session_segment_trees_chm(
             session_id, sess, request, http_request, n_survivors=len(pts),
             plant_pts=plant_pts, plant_mask=plant_mask, ground_pts=ground_pts,
-            seeds=seeds, no_ground_labels=no_ground_labels, deleted0=deleted0,
+            seeds=seeds, no_ground_labels=no_ground_labels, edit_mark=edit_mark,
         )
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
@@ -43050,7 +43387,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     )
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = await run_in_threadpool(
-        _session_write_tree_labels, sess, len(pts), plant_mask, plant_labels, deleted0)
+        _session_write_tree_labels, sess, len(pts), plant_mask, plant_labels, edit_mark)
     cache_key, cache_dir, meta = await run_in_threadpool(
         _show_new_columns, sess, [TREE_INSTANCE_SLUG])
     # Number of distinct trees (max tree id; ground/misses are 0). The renderer
@@ -43938,6 +44275,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         # Hits + interleaved misses: real coordinates, all move with the cloud.
         # (The hits octree rebuild still excludes is_miss rows via exclude_misses.)
         sess.positions = _apply(sess.positions, shift)
+        sess.geometry_gen += 1
 
         # Session-level per-pulse emission points (moving-platform scans), stored
         # in the session frame — same conjugation as positions.
@@ -44198,13 +44536,13 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
     if progress is not None:
         progress(0.0, "Selecting points…")
 
+    selection = _selection_outside_lock(sess, region_dict)
     with _cloud_session_lock:
         # keep-mask over the SURVIVING points: region (defaults all-True) AND
         # every scalar filter. Computed on survivors so a second filter composes
         # on the current point set, not the original.
         surv = ~sess.deleted
-        pos = sess.positions[surv]
-        keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
+        keep = _selection_current_locked(sess, region_dict, selection, surv)
         for f in (request.scalar_filters or []):
             slug = f.slug
             col = _session_scalar_column(sess, slug)

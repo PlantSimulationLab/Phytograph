@@ -688,7 +688,9 @@ mode is still checked when you switch back to **Data only**.
 
 **Columns** — for the text formats (XYZ / CSV / TXT, and the XML bundle's
 `.xyz` data) plus PLY and LAS / LAZ, a column picker lets you check which fields
-to write. `x`, `y`, `z` are required and locked on. Only the text formats and PLY
+to write. `x`, `y`, `z` are required and locked on. A cloud with miss points
+always gets its `is_miss` column too, even if it isn't listed or checked, so those
+points don't re-import as real returns. Only the text formats and PLY
 let you **drag to reorder**: LAS / LAZ identify their dimensions by name rather
 than position, so order doesn't apply. **E57** and **PTX** use their own fixed
 schema, so the column picker is hidden for them.
@@ -813,6 +815,12 @@ replaces the scene.
 While a project saves or opens, the window is locked behind a progress bar
 you can cancel, so no edit can slip in half-way through. A canceled or failed
 save leaves any existing project file untouched.
+
+If the compute backend restarted after a crash, its clouds are gone from memory
+even though the scene still lists them. Saving then will not overwrite the
+existing project file, which may be the only copy of those clouds. Phytograph
+names the affected clouds and offers **Save As…**, so you keep both files.
+Reopen the original project to get those clouds back.
 
 Closing Phytograph with unsaved changes asks first. **Save Project…** in that
 prompt cancels the close and saves; once the save finishes, closing no
