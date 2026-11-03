@@ -197,7 +197,17 @@ test('window resize: canvas shrinks with the window, min height fits the toolbar
       BrowserWindow.getAllWindows()[0].getBounds());
     const [, minHeight] = await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].getMinimumSize());
-    expect(minHeight).toBeGreaterThanOrEqual(720); // 800 unless a tiny display capped it
+    // main.ts asks for the toolbar column's content (MIN_CONTENT_HEIGHT, 904px)
+    // plus the window frame, CAPPED at the display's work area: a window can't
+    // be taller than the screen. The cap is real on CI — the macos-15 runner's
+    // virtual display has a 681px work area (macos-14's fit the full height) —
+    // so derive the expectation from the display instead of assuming one.
+    const MIN_CONTENT_HEIGHT = 904;
+    const workAreaHeight = await app.evaluate(({ screen }) =>
+      screen.getPrimaryDisplay().workAreaSize.height);
+    expect(minHeight).toBeGreaterThanOrEqual(Math.min(MIN_CONTENT_HEIGHT, workAreaHeight));
+    expect(minHeight).toBeLessThanOrEqual(workAreaHeight);
+    const displayFitsToolbar = minHeight >= MIN_CONTENT_HEIGHT;
     expect(bounds.height).toBe(Math.max(620, minHeight));
 
     const shrunk = await layout(launched);
@@ -217,8 +227,17 @@ test('window resize: canvas shrinks with the window, min height fits the toolbar
       `bounds=${bounds.width}x${bounds.height} minHeight=${minHeight}`,
     ).toBe(950);
 
-    // --- Min height fits the full toolbar column: no scroll-cropping. ---
-    expect(shrunk.column.scrollHeight).toBeLessThanOrEqual(shrunk.column.clientHeight + 1);
+    if (displayFitsToolbar) {
+      // --- Min height fits the full toolbar column: no scroll-cropping. ---
+      expect(shrunk.column.scrollHeight).toBeLessThanOrEqual(shrunk.column.clientHeight + 1);
+    } else {
+      // --- A display shorter than the column: it must SCROLL, so every card
+      // is still reachable, rather than run off the bottom of the window. ---
+      expect(shrunk.column.scrollHeight).toBeGreaterThan(shrunk.column.clientHeight);
+      const overflowY = await page.evaluate(() => getComputedStyle(
+        document.querySelector('[data-testid="left-toolbar-column"]')!).overflowY);
+      expect(['auto', 'scroll']).toContain(overflowY);
+    }
     expect(shrunk.column.rect.bottom).toBeLessThanOrEqual(shrunk.viewport.h);
 
     // --- Gizmo placement: at min height the lane is too short, so the gizmo
