@@ -40,6 +40,31 @@ export function parseMinimumVersions(otoolOutput) {
   return found;
 }
 
+/** Install names in `otool -L` output (the first line is the file itself). */
+export function parseLinkedLibraries(otoolOutput) {
+  return otoolOutput.split('\n').slice(1)
+    .map((l) => /^\s+(\S.*?) \(compatibility version/.exec(l)?.[1])
+    .filter(Boolean);
+}
+
+/**
+ * For each violating library, the bundled binaries that link it directly —
+ * i.e. what to fix. A floor violation in a bottle the bundle merely carries
+ * (libusb, libX11) is unactionable without knowing who pulled it in, and
+ * PyInstaller's log doesn't say. `links` maps path -> install names.
+ */
+export function findImporters(violations, links) {
+  const out = new Map();
+  for (const v of violations) {
+    const base = v.path.split('/').pop();
+    const importers = [...links.entries()]
+      .filter(([p, libs]) => p !== v.path && libs.some((l) => l.split('/').pop() === base))
+      .map(([p]) => p);
+    out.set(v.path, importers);
+  }
+  return out;
+}
+
 export function findViolations(entries, target) {
   return entries.filter((e) => compareVersions(e.minimum, target) > 0);
 }
@@ -72,9 +97,12 @@ function main() {
   }
   const roots = process.argv.length > 2 ? process.argv.slice(2) : DEFAULT_ROOTS;
   const entries = [];
+  const links = new Map();
   for (const root of roots) {
     for (const path of walk(root)) {
       if (!isMachO(path)) continue;
+      links.set(path, parseLinkedLibraries(
+        execFileSync('otool', ['-L', path], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })));
       const out = execFileSync('otool', ['-l', path], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
       const versions = parseMinimumVersions(out);
       if (versions.length === 0) continue;
@@ -90,6 +118,10 @@ function main() {
   if (violations.length > 0) {
     console.error(`FAIL: ${violations.length} of ${entries.length} binaries need newer than macOS ${target}:`);
     for (const v of violations) console.error(`  ${v.minimum}  ${v.path}`);
+    console.error('Linked by (fix these, not the library — a prebuilt bottle ignores MACOSX_DEPLOYMENT_TARGET):');
+    for (const [lib, importers] of findImporters(violations, links)) {
+      console.error(`  ${lib.split('/').pop()}  <-  ${importers.length ? importers.join(', ') : '(nothing in the bundle links it directly)'}`);
+    }
     process.exit(1);
   }
   const highest = entries.map((e) => e.minimum).sort(compareVersions).at(-1);

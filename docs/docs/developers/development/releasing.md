@@ -20,7 +20,19 @@ manifests so in-app updates work on both. The Intel job runs on
 2027, at which point Intel macOS builds end. The arm64 job runs on
 `macos-15` and pins `MACOSX_DEPLOYMENT_TARGET=14.0`, because compiled code
 otherwise targets the runner's own OS. `scripts/check-macos-floor.mjs`
-fails the job if any bundled binary needs newer than that.
+fails the job if any bundled binary needs newer than that, and lists which
+bundled binaries link each offending library.
+
+The deployment target only applies to code compiled in the job. A prebuilt
+Homebrew library is built for the runner's own macOS, so the bundle must not
+depend on one by accident. The first macos-15 run caught exactly that.
+helios-core's visualizer did `find_package(X11 REQUIRED)` on every platform,
+although macOS draws through Cocoa, so `libhelios` linked Homebrew's
+libX11/libXext and PyInstaller bundled macOS-15-only copies.
+`scripts/build-pyhelios.mjs` now guards that lookup on Apple before compiling,
+using `scripts/helios-patches.mjs`, which becomes a no-op once the same change is
+in Helios. Both scripts are part of the backend cache key, so a cached bundle
+can't bring the old link back.
 
 ## Publishing and download links
 
