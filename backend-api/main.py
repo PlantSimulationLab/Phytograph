@@ -40113,59 +40113,62 @@ def session_split(session_id: str, request: SessionSplitRequest):
     # the survivor snapshot used for the index scatter can't go stale against a
     # concurrent edit on the same session (the leftover subset is built from the
     # same snapshot before the lock is released for the slow rebuilds).
-    selection = _selection_outside_lock(sess, region_dict)
     with _ADMISSION.admit(
             _session_mutation_bytes([sess], copies=2.0),
-            f"split {session_id}"), _cloud_session_lock:
-        surv = ~sess.deleted
-        keep = _selection_current_locked(sess, region_dict, selection, surv)
-        for f in (request.scalar_filters or []):
-            col = _session_scalar_column(sess, f.slug)
-            if col is None:
-                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
-            lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
-            keep &= _scalar_filter_mask(col[surv], lo, hi, value_set)
+            f"split {session_id}"):
+        # Selection runs ADMITTED (it walks every row) but outside the
+        # session lock, which is never held across that walk.
+        selection = _selection_outside_lock(sess, region_dict)
+        with _cloud_session_lock:
+            surv = ~sess.deleted
+            keep = _selection_current_locked(sess, region_dict, selection, surv)
+            for f in (request.scalar_filters or []):
+                col = _session_scalar_column(sess, f.slug)
+                if col is None:
+                    raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
+                lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
+                keep &= _scalar_filter_mask(col[surv], lo, hi, value_set)
 
-        # NEVER move sky/miss points to the leftover side. A split region is drawn
-        # around hits, but a miss sits ~1 km out along its beam, so it falls
-        # outside any hit-shaped box and would be swept wholesale into the
-        # leftover cloud; a scalar filter fares no better (misses default to 0 on
-        # class columns and so match nothing). Either way the parent loses its
-        # Beer's-law transmission denominator and LAD silently under-reads.
-        # Force misses onto the kept side, exactly as `_do_session_filter` does.
-        miss_arr = sess.extras.get(_MISS_SLUG)
-        hits_kept = int(keep.sum())
-        if miss_arr is not None:
-            # Measure emptiness on HITS ONLY, before the force-keep: otherwise a
-            # split that keeps nothing the user can see would report a non-zero
-            # `kept` (the sky) and skip the renderer's delete-confirmation.
-            hits_kept = int((keep & (miss_arr[surv] == 0)).sum())
-            keep = keep | (miss_arr[surv] != 0)
+            # NEVER move sky/miss points to the leftover side. A split region is drawn
+            # around hits, but a miss sits ~1 km out along its beam, so it falls
+            # outside any hit-shaped box and would be swept wholesale into the
+            # leftover cloud; a scalar filter fares no better (misses default to 0 on
+            # class columns and so match nothing). Either way the parent loses its
+            # Beer's-law transmission denominator and LAD silently under-reads.
+            # Force misses onto the kept side, exactly as `_do_session_filter` does.
+            miss_arr = sess.extras.get(_MISS_SLUG)
+            hits_kept = int(keep.sum())
+            if miss_arr is not None:
+                # Measure emptiness on HITS ONLY, before the force-keep: otherwise a
+                # split that keeps nothing the user can see would report a non-zero
+                # `kept` (the sky) and skip the renderer's delete-confirmation.
+                hits_kept = int((keep & (miss_arr[surv] == 0)).sum())
+                keep = keep | (miss_arr[surv] != 0)
 
-        kept_count = int(keep.sum())
-        # Kept side empty → the filter would leave nothing on the parent. Don't
-        # commit or rebuild (0-point PotreeConverter would 500); report empty so
-        # the renderer raises a delete-confirmation. The session is untouched.
-        if hits_kept == 0:
-            return {
-                "session_id": session_id,
-                "kept": {"point_count": 0, "cache_id": None, "cache_dir": None},
-                "leftover": None,
-            }
+            kept_count = int(keep.sum())
+            # Kept side empty → the filter would leave nothing on the parent. Don't
+            # commit or rebuild (0-point PotreeConverter would 500); report empty so
+            # the renderer raises a delete-confirmation. The session is untouched.
+            if hits_kept == 0:
+                return {
+                    "session_id": session_id,
+                    "kept": {"point_count": 0, "cache_id": None, "cache_dir": None},
+                    "leftover": None,
+                }
 
-        leftover_mask = ~keep
-        leftover = _session_subset_locked(sess, leftover_mask) if bool(leftover_mask.any()) else None
-        # Commit the leftover deletion on the parent using the SAME snapshot.
-        # Split is a non-undoable commit (renderer clears its erase undo stack),
-        # so reset the undo history to keep both sides in lock-step.
-        idx_surv = np.where(surv)[0]
-        sess.deleted[idx_surv[leftover_mask]] = True
-        if leftover_mask.any():
-            _mark_normals_stale_locked(sess)
-        _commit_delete_history_locked(sess)
-        sess.label_history = {}   # label undo must not reach across this commit either
-        _mark_octree_stale_locked(sess)
-        sess.octree_pose = None    # see the invariant note in delete_cloud_region
+            leftover_mask = ~keep
+            leftover = _session_subset_locked(sess, leftover_mask) if bool(leftover_mask.any()) else None
+            # Commit the leftover deletion on the parent using the SAME snapshot.
+            # Split is a non-undoable commit (renderer clears its erase undo stack),
+            # so reset the undo history to keep both sides in lock-step.
+            idx_surv = np.where(surv)[0]
+            sess.deleted[idx_surv[leftover_mask]] = True
+            if leftover_mask.any():
+                _mark_normals_stale_locked(sess)
+            _commit_delete_history_locked(sess)
+            sess.label_history = {}   # label undo must not reach across this commit either
+            _mark_octree_stale_locked(sess)
+            sess.octree_pose = None    # see the invariant note in delete_cloud_region
 
     leftover_meta = None
     if leftover is not None:
@@ -40204,32 +40207,35 @@ def session_extract(session_id: str, request: SessionExtractRequest):
 
     # Survivor slice plus the extracted child's own columns; see `split` above
     # for why this is admitted outside the session lock.
-    selection = _selection_outside_lock(sess, region_dict)
     with _ADMISSION.admit(
             _session_mutation_bytes([sess], copies=2.0),
-            f"extract from {session_id}"), _cloud_session_lock:
-        surv = ~sess.deleted
-        sel = _selection_current_locked(sess, region_dict, selection, surv)
-        for f in (request.scalar_filters or []):
-            col = _session_scalar_column(sess, f.slug)
-            if col is None:
-                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
-            lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
-            sel &= _scalar_filter_mask(col[surv], lo, hi, value_set)
+            f"extract from {session_id}"):
+        # Selection runs ADMITTED (it walks every row) but outside the
+        # session lock, which is never held across that walk.
+        selection = _selection_outside_lock(sess, region_dict)
+        with _cloud_session_lock:
+            surv = ~sess.deleted
+            sel = _selection_current_locked(sess, region_dict, selection, surv)
+            for f in (request.scalar_filters or []):
+                col = _session_scalar_column(sess, f.slug)
+                if col is None:
+                    raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
+                lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
+                sel &= _scalar_filter_mask(col[surv], lo, hi, value_set)
 
-        # Carry sky/miss points into the child. They sit ~1 km out along their
-        # beams, so a hit-shaped region never selects them (and misses default to
-        # 0 on class columns, so scalar filters miss them too) — the child would
-        # be hits-only and LAD on it would have no transmission denominator. The
-        # parent is untouched by extract, so this duplicates the miss set onto the
-        # child rather than moving it, which is what both clouds need for LAD.
-        # `hits_selected` below keeps a miss-only selection from counting as a
-        # real extraction.
-        miss_arr = sess.extras.get(_MISS_SLUG)
-        hits_selected = bool(sel.any())
-        if miss_arr is not None:
-            hits_selected = bool((sel & (miss_arr[surv] == 0)).any())
-            sel = sel | (miss_arr[surv] != 0)
+            # Carry sky/miss points into the child. They sit ~1 km out along their
+            # beams, so a hit-shaped region never selects them (and misses default to
+            # 0 on class columns, so scalar filters miss them too) — the child would
+            # be hits-only and LAD on it would have no transmission denominator. The
+            # parent is untouched by extract, so this duplicates the miss set onto the
+            # child rather than moving it, which is what both clouds need for LAD.
+            # `hits_selected` below keeps a miss-only selection from counting as a
+            # real extraction.
+            miss_arr = sess.extras.get(_MISS_SLUG)
+            hits_selected = bool(sel.any())
+            if miss_arr is not None:
+                hits_selected = bool((sel & (miss_arr[surv] == 0)).any())
+                sel = sel | (miss_arr[surv] != 0)
 
     if not hits_selected:
         return {"session_id": session_id, "extracted": None}

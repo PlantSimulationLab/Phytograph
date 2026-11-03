@@ -481,6 +481,11 @@ def test_session_reads_go_through_the_lookup_chokepoint():
         # A progress-bar weight: paging a spilled session in off disk to size a
         # slice would read hundreds of MB; a miss falls back to equal weights.
         "_scan_entry_points_estimate",
+        # An IDENTITY test, not a lookup: "is this object still the registered
+        # session?" before a compaction installs into it. A spilled session is
+        # correctly "no" (installing would delete the store its spilled copy
+        # still needs), and the chokepoint would page it back in just to say so.
+        "_session_columns_unchanged_locked",
     }
     unexpected = sorted(set(enclosing) - allowed)
     assert not unexpected, (

@@ -357,10 +357,16 @@ def test_derived_field_is_exportable(client, sess, tmp_path):
     })
     assert res.status_code == 200, res.text
     text = dest.read_text()
-    assert "doubled" in text.splitlines()[0]
-    # Spot-check one value survived the round trip.
-    rows = [r for r in text.splitlines()[1:] if r.strip()]
-    assert float(rows[0].split(",")[-1]) == pytest.approx(2.0)
+    header = text.splitlines()[0].split(",")
+    assert "doubled" in header
+    # The cloud has a miss row, so the export appends `is_miss` after the
+    # columns asked for (`_columns_keeping_miss_flag`): without it the miss
+    # re-imports as a real return ~1 km out. Read columns by name, not position.
+    assert header[-1] == main._MISS_SLUG
+    rows = [r.split(",") for r in text.splitlines()[1:] if r.strip()]
+    col = header.index("doubled")
+    # Spot-check one value survived the round trip: row 0's intensity_col is 1.
+    assert float(rows[0][col]) == pytest.approx(2.0)
 
 
 # ── Aggregate statistics across sessions ────────────────────────────────────
