@@ -13,6 +13,8 @@
 //   npm run test:backend                    # whole suite
 //   npm run test:backend -- -k lad -x       # extra args pass through to pytest
 //   PYTHON=/path/to/python npm run test:backend   # bypass venv discovery
+//   npm run test:python                     # the scripting client's suite
+//                                           # (python/tests; = this script --client)
 //
 // The whole suite runs as TWO pytest processes: every `tests/test_ml_*.py`
 // (the files that load torch) in one, everything else in the other. On macOS,
@@ -54,12 +56,13 @@ function resolvePython() {
 }
 
 const python = resolvePython();
-const args = process.argv.slice(2);
+const client = process.argv[2] === '--client';
+const args = process.argv.slice(client ? 3 : 2);
 
-function pytest(runArgs) {
+function pytest(runArgs, cwd = backendDir) {
   console.log(`[run-pytest] ${python} -m pytest ${runArgs.join(' ')}`.trimEnd());
   const r = spawnSync(python, ['-m', 'pytest', ...runArgs], {
-    cwd: backendDir,
+    cwd,
     stdio: 'inherit',
   });
   if (r.error) {
@@ -68,6 +71,11 @@ function pytest(runArgs) {
   }
   return r.status ?? 1;
 }
+
+// The scripting client (python/phytograph) is tested against a live backend it
+// launches itself, from this same venv; it never imports `main`, so none of the
+// torch/libhelios split below applies.
+if (client) process.exit(pytest(args, join(repoRoot, 'python')));
 
 // A bare word after an option (`-k lad`) is not a path; only something that
 // looks like a test file or node id counts as naming tests.

@@ -1,0 +1,285 @@
+{
+  "_comment": [
+    "CROSS-PROCESS CONTRACT: the extent-seeded tool defaults.",
+    "The app's panels seed CSF ground, DEM and TreeIso parameters from the cloud's",
+    "hits-only extent in TypeScript (src/renderer/lib/groundSegmentDefaults.ts,",
+    "demDefaults.ts, treeSegmentDefaults.ts); the Python scripting client gets the",
+    "same numbers from the backend (backend-api/param_defaults.py, served by",
+    "GET /api/cloud/session/{id}/defaults). This file is the written-down truth both",
+    "are tested against:",
+    "  - src/renderer/lib/parameterDefaults.contract.test.ts  (vitest)",
+    "  - backend-api/tests/test_param_defaults.py            (pytest)",
+    "args: ground = [horizontalExtentM, verticalReliefM, pointSpacingM|null];",
+    "dem/tree = [horizontalExtentM]. expected uses the backend's snake_case request",
+    "field names; the vitest side maps them from the TS camelCase results.",
+    "Test-only data: neither implementation reads it at runtime."
+  ],
+  "ground": [
+    {
+      "args": [
+        1.5,
+        0,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.05,
+        "class_threshold": 0.02,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        0.4,
+        0.1,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.05,
+        "class_threshold": 0.02,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        20,
+        5,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.2,
+        "class_threshold": 0.2,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        120,
+        40,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.6,
+        "class_threshold": 0.5,
+        "rigidness": 1,
+        "slope_smooth": true
+      }
+    },
+    {
+      "args": [
+        120,
+        100,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 1.2,
+        "class_threshold": 1.0,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        60,
+        15,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.3,
+        "class_threshold": 0.5,
+        "rigidness": 1,
+        "slope_smooth": true
+      }
+    },
+    {
+      "args": [
+        300,
+        10,
+        0.2
+      ],
+      "expected": {
+        "cloth_resolution": 0.75,
+        "class_threshold": 0.5,
+        "rigidness": 2,
+        "slope_smooth": true
+      }
+    },
+    {
+      "args": [
+        80,
+        0,
+        0.05
+      ],
+      "expected": {
+        "cloth_resolution": 0.8,
+        "class_threshold": 0.8,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        49,
+        20,
+        0.5
+      ],
+      "expected": {
+        "cloth_resolution": 0.49,
+        "class_threshold": 0.49,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        0,
+        0,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.05,
+        "class_threshold": 0.02,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        -3,
+        0,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 0.05,
+        "class_threshold": 0.02,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    },
+    {
+      "args": [
+        1000,
+        0,
+        null
+      ],
+      "expected": {
+        "cloth_resolution": 2.0,
+        "class_threshold": 1.0,
+        "rigidness": 3,
+        "slope_smooth": false
+      }
+    }
+  ],
+  "dem": [
+    {
+      "args": [
+        0
+      ],
+      "expected": {
+        "cell_size": 0.02
+      }
+    },
+    {
+      "args": [
+        1.5
+      ],
+      "expected": {
+        "cell_size": 0.02
+      }
+    },
+    {
+      "args": [
+        37
+      ],
+      "expected": {
+        "cell_size": 0.37
+      }
+    },
+    {
+      "args": [
+        500
+      ],
+      "expected": {
+        "cell_size": 2.0
+      }
+    },
+    {
+      "args": [
+        -1
+      ],
+      "expected": {
+        "cell_size": 0.02
+      }
+    }
+  ],
+  "tree": [
+    {
+      "args": [
+        0
+      ],
+      "expected": {
+        "decimate_res1": 0.05,
+        "decimate_res2": 0.1,
+        "max_gap": 2.0,
+        "max_outlier_gap": 0.65
+      }
+    },
+    {
+      "args": [
+        1.5
+      ],
+      "expected": {
+        "decimate_res1": 0.05,
+        "decimate_res2": 0.1,
+        "max_gap": 2.0,
+        "max_outlier_gap": 0.65
+      }
+    },
+    {
+      "args": [
+        50
+      ],
+      "expected": {
+        "decimate_res1": 0.134,
+        "decimate_res2": 0.268,
+        "max_gap": 2.0,
+        "max_outlier_gap": 0.65
+      }
+    },
+    {
+      "args": [
+        186
+      ],
+      "expected": {
+        "decimate_res1": 0.5,
+        "decimate_res2": 1.0,
+        "max_gap": 2.0,
+        "max_outlier_gap": 0.65
+      }
+    },
+    {
+      "args": [
+        400
+      ],
+      "expected": {
+        "decimate_res1": 1.0,
+        "decimate_res2": 2.0,
+        "max_gap": 4.301,
+        "max_outlier_gap": 0.65
+      }
+    },
+    {
+      "args": [
+        1000
+      ],
+      "expected": {
+        "decimate_res1": 1.0,
+        "decimate_res2": 2.0,
+        "max_gap": 6.0,
+        "max_outlier_gap": 0.65
+      }
+    }
+  ]
+}

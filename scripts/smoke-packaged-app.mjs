@@ -89,6 +89,21 @@ async function main() {
   console.log(`Smoke-testing packaged app: ${bin}`);
   console.log(`Expected backend/app version: ${EXPECTED_VERSION}`);
 
+  // The Python scripting client's wheel rides extraResources, whose glob packages
+  // nothing — silently — when the file is missing. Check the SHIPPED bundle, at
+  // the version the backend will report, since a script refuses any other.
+  const resourcesDir = process.platform === 'darwin'
+    ? join(dirname(dirname(bin)), 'Resources', 'resources')
+    : join(dirname(bin), 'resources', 'resources');
+  const wheel = join(resourcesDir, 'python', `phytograph-${EXPECTED_VERSION}-py3-none-any.whl`);
+  if (!existsSync(wheel)) {
+    const dir = join(resourcesDir, 'python');
+    fail(`the packaged app carries no Python client wheel at ${wheel} ` +
+      `(found: ${existsSync(dir) ? readdirSync(dir).join(', ') || 'nothing' : 'no python/ dir'}). ` +
+      `It is built by \`npm run build:python\` as part of \`npm run build\`.`);
+  }
+  console.log(`Python client wheel present: ${wheel}`);
+
   const backendPort = await findFreePort();
 
   const app = await _electron.launch({

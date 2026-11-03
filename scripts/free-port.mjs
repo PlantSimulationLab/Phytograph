@@ -18,6 +18,8 @@
 // owner draws from its own band so a desktop app, a dev session and E2E workers
 // never even consider the same number:
 //
+//   script 5000-9999   a backend launched by the Python scripting client
+//                      (python/phytograph/_ports.py, which mirrors this entry)
 //   app  10000-14999   packaged backend
 //   dev  15000-19999   dev backend + Vite renderer
 //   e2e  20000-31999   one 1000-port slice per Playwright worker (12 slices)
@@ -28,6 +30,7 @@
 import { createServer } from 'node:net';
 
 export const PORT_BANDS = Object.freeze({
+  script: Object.freeze({ min: 5_000, max: 10_000 }),
   app: Object.freeze({ min: 10_000, max: 15_000 }),
   dev: Object.freeze({ min: 15_000, max: 20_000 }),
   e2e: Object.freeze({ min: 20_000, max: 32_000 }),

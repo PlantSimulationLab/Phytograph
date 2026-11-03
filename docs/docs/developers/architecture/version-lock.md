@@ -14,6 +14,12 @@ When a backend change requires a new build, **all three must move together**:
 | 2 | `src/shared/constants.ts` | `EXPECTED_BACKEND_VERSION` |
 | 3 | `package.json` | `version` |
 
+The Python scripting client carries two more copies, because it also refuses a
+backend whose version differs from its own: `version` in `python/pyproject.toml`
+and `EXPECTED_BACKEND_VERSION` in `python/phytograph/_version.py`.
+`test_version_lock_quintet` (`npm run test:python`) fails if any of the five
+disagree. See [Python scripting client](scripting-client.md).
+
 `backend.ts` hits `/version` on startup; if the running backend's version
 doesn't match `EXPECTED_BACKEND_VERSION`, it kills the port and respawns
 its own bundled binary.

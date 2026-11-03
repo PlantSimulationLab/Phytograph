@@ -237,6 +237,15 @@ jobs:
         working-directory: backend-api
         run: xvfb-run -a python -m pytest -v
 
+      # The Python scripting client (python/phytograph) against a live backend
+      # it launches itself. There is no backend-api/venv on the runner, so point
+      # the client at backend_wrapper.py; it then runs under this same Python.
+      - name: Scripting client tests (pytest)
+        working-directory: python
+        env:
+          PHYTOGRAPH_BACKEND_EXE: ${{ github.workspace }}/backend-api/backend_wrapper.py
+        run: xvfb-run -a python -m pytest -v
+
   # --------------------------------------------------------------------------
   # Build the native prerequisites ONCE and publish them to the Actions cache
   # for the E2E jobs to restore. Nothing is tested here.

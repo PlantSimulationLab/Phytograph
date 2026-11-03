@@ -94,6 +94,7 @@ nav:
       - Install Phytograph: guide/install.md
       - Your first import: guide/first-import.md
       - Tour of the interface: guide/interface-tour.md
+      - Scripting with Python: guide/scripting.md
       - Reporting bugs & requesting features: guide/feedback.md
   - Concepts:
       - concepts/index.md
@@ -161,6 +162,7 @@ nav:
           - Large clouds: developers/architecture/large-clouds.md
           - Project file: developers/architecture/project-file.md
           - ML point classification: developers/architecture/ml.md
+          - Python scripting client: developers/architecture/scripting-client.md
       - Development:
           - developers/development/index.md
           - Dev loop: developers/development/dev-loop.md

@@ -31,6 +31,7 @@ import denoise
 import memory_budget
 import normals as normals_mod
 import scalar_fields
+import param_defaults
 import session_store
 import tiled
 import label_segments
@@ -33180,7 +33181,16 @@ def _session_scalar_column(sess, slug: str) -> "Optional[np.ndarray]":
         ts = getattr(sess, "timestamps", None)
         if ts is not None:
             return ts
+    # Intensity lives on its own field (LAS uint16 scale, 0-65535), not in
+    # `extras`, so a filter on it answered "Unknown scalar attribute" although
+    # every other reader (export, expressions, the octree's `intensity`
+    # attribute) has it. Values are in that raw uint16 scale.
+    if slug == "intensity":
+        inten = getattr(sess, "intensity", None)
+        if inten is not None:
+            return inten
     return None
+
 
 
 def _session_scalar_slugs(sess) -> "List[str]":
@@ -33188,6 +33198,8 @@ def _session_scalar_slugs(sess) -> "List[str]":
     slugs = list(sess.extras)
     if getattr(sess, "timestamps", None) is not None:
         slugs.append(_OCTREE_GPS_TIME_ATTRIBUTE)
+    if getattr(sess, "intensity", None) is not None:
+        slugs.append("intensity")
     return slugs
 
 
@@ -40310,6 +40322,235 @@ def session_column(session_id: str, slug: str, token: Optional[str] = None):
                              "X-Column-Token": current})
 
 
+@app.get("/api/cloud/session/{session_id}/info")
+def session_info(session_id: str):
+    """Counts and frame of a session, for a client that holds only its id (the
+    Python scripting client; the renderer keeps this from the create response).
+
+    `world_shift` matters to any caller that sends a spatial REGION: regions act
+    on the stored positions, which have the shift subtracted, while positions
+    read back (`/arrays`, export, compute) and transform matrices are in true
+    world coordinates. `live_count` excludes deleted rows; `hit_count` also
+    excludes sky/miss rows — the count every compute tool sees."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        n = int(len(sess.positions))
+        live = ~sess.deleted
+        live_count = int(np.count_nonzero(live))
+        miss = sess.extras.get(_MISS_SLUG)
+        hit_count = (int(np.count_nonzero(live & (np.asarray(miss) == 0)))
+                     if miss is not None else live_count)
+        shift = sess.world_shift
+        meta = list(sess.extra_dims_meta or [])
+        extra_slugs = list(sess.extras)
+        has_colors = sess.colors is not None
+        has_intensity = sess.intensity is not None
+        has_timestamps = (sess.timestamps is not None
+                          and sess.timestamps.shape[0] == sess.positions.shape[0])
+        crs = sess.crs_epsg
+    # Every per-point column readable by name from `/arrays?fields=` and usable
+    # in a filter: the extras, plus intensity and timestamp, which the session
+    # keeps on their own fields rather than in `extras`.
+    columns = ((["intensity"] if has_intensity else [])
+               + (["timestamp"] if has_timestamps and "timestamp" not in extra_slugs else [])
+               + extra_slugs)
+    return {"session_id": session_id, "row_count": n, "live_count": live_count,
+            "hit_count": hit_count,
+            "world_shift": None if shift is None else [float(v) for v in shift],
+            "columns": columns, "extra_dims": meta, "has_colors": has_colors,
+            "has_intensity": has_intensity, "has_timestamps": has_timestamps,
+            "crs_epsg": crs}
+
+
+_ARRAY_COLUMN_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# Members of a from-arrays body that are not scalar columns.
+_ARRAY_RESERVED = {"positions", "colors", "intensity", "timestamp"}
+
+
+def _session_from_arrays(members: "Dict[str, np.ndarray]",
+                         world_shift: "Optional[List[float]]") -> dict:
+    """Build a CloudSession from arrays (no source file) and register it.
+
+    Same shape as `_create_lidar_scan_session`, the other file-less session:
+    colors and intensity arrive 0-1 and are stored at LAS uint16 scale, the
+    timestamp keeps float64 on its own field, and every other member becomes a
+    per-point column (`is_miss` included, which is what marks sky/miss rows).
+    No octree is built: the only caller is the scripting client, which never
+    displays one, and a tool that needs one builds it from the arrays."""
+    import time
+    pos = members.get("positions")
+    if pos is None:
+        raise HTTPException(status_code=400, detail="`positions` is required.")
+    pos = np.asarray(pos, dtype=np.float64)
+    if pos.ndim != 2 or pos.shape[1] != 3 or pos.shape[0] == 0:
+        raise HTTPException(status_code=400, detail=f"`positions` must be (N, 3) with N > 0; got {pos.shape}.")
+    if not np.all(np.isfinite(pos)):
+        raise HTTPException(status_code=400, detail="`positions` contains NaN or infinite values.")
+    n = int(pos.shape[0])
+
+    def _column(name: str, arr: np.ndarray, shape) -> np.ndarray:
+        a = np.asarray(arr)
+        if a.shape != shape:
+            raise HTTPException(status_code=400, detail=f"`{name}` must have shape {shape}; got {a.shape}.")
+        if a.dtype.kind not in "biuf":
+            raise HTTPException(status_code=400, detail=f"`{name}` must be numeric; got {a.dtype}.")
+        return a
+
+    colors = intensity = timestamps = None
+    if "colors" in members:
+        c = _column("colors", members["colors"], (n, 3)).astype(np.float64)
+        colors = np.clip(np.round(c * 65535.0), 0, 65535).astype(np.uint16)
+    if "intensity" in members:
+        i = _column("intensity", members["intensity"], (n,)).astype(np.float64)
+        intensity = np.clip(np.round(i * 65535.0), 0, 65535).astype(np.uint16)
+    if "timestamp" in members:
+        timestamps = _column("timestamp", members["timestamp"], (n,)).astype(np.float64)
+
+    extras: Dict[str, np.ndarray] = {}
+    meta: List[dict] = []
+    for name, arr in members.items():
+        if name in _ARRAY_RESERVED:
+            continue
+        if not _ARRAY_COLUMN_NAME.match(name):
+            raise HTTPException(status_code=400, detail=(
+                f"Column name {name!r} is not allowed: use letters, digits and '_', "
+                "starting with a letter or '_'."))
+        a = _column(name, arr, (n,))
+        extras[name] = a.astype(np.float32) if a.dtype.kind == "f" or a.dtype == np.bool_ else a
+        meta.append({"slug": name, "label": _MISS_LABEL if name == _MISS_SLUG else name})
+
+    shift = None
+    if world_shift is not None:
+        shift = np.asarray(world_shift, dtype=np.float64)
+        if shift.shape != (3,) or not np.all(np.isfinite(shift)):
+            raise HTTPException(status_code=400, detail="`world_shift` must be three finite numbers.")
+        pos = pos - shift
+
+    session_id = uuid.uuid4().hex[:8]
+    sess = CloudSession(
+        session_id=session_id, source_path="<arrays>", ascii_format=None, column_plan=None,
+        positions=pos, colors=colors, intensity=intensity, extras=extras,
+        extra_dims_meta=meta, timestamps=timestamps, world_shift=shift,
+        source_units="m", source_unit_scale=1.0,
+        deleted=np.zeros(n, dtype=bool), deleted_history=[], octree_cache_id=None,
+        created_at=time.time(), last_accessed=time.time())
+    _session_compact_extras_locked(sess)
+    _sweep_cloud_sessions()
+    with _cloud_session_lock:
+        _cloud_sessions[session_id] = sess
+    miss = extras.get(_MISS_SLUG)
+    miss_count = int(np.count_nonzero(np.asarray(miss) != 0)) if miss is not None else 0
+    return {"session_id": session_id, "point_count": n,
+            "world_shift": None if shift is None else shift.tolist(),
+            "has_misses": miss_count > 0, "miss_count": miss_count,
+            "columns": list(extras)}
+
+
+@app.post("/api/cloud/session/create-from-arrays")
+async def create_cloud_session_from_arrays(http_request: Request, world_shift: Optional[str] = None):
+    """A cloud session from in-memory arrays, for the Python scripting client's
+    `Backend.from_numpy`. The body is an `.npz` archive: `positions` (N,3) in
+    world coordinates, optional `colors` (N,3) and `intensity` (N,) in 0-1,
+    `timestamp` (N,), and any other (N,) member as a scalar column (`is_miss`
+    marks sky/miss rows, exactly as on an imported scan). `world_shift` is
+    "x,y,z", subtracted for precision as at import.
+
+    `async` only to read the body; decoding and the session build run in the
+    threadpool (see CLAUDE.md on blocking the event loop)."""
+    import io
+    body = await http_request.body()
+    shift = None
+    if world_shift:
+        try:
+            shift = [float(v) for v in world_shift.split(",")]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="`world_shift` must be 'x,y,z'.")
+
+    def _build() -> dict:
+        try:
+            with np.load(io.BytesIO(body), allow_pickle=False) as z:
+                members = {k: z[k] for k in z.files}
+        except Exception as exc:  # noqa: BLE001 — not an npz, or a pickled member
+            raise HTTPException(status_code=400, detail=f"Body is not a readable .npz archive: {exc}")
+        return _session_from_arrays(members, shift)
+
+    return await run_in_threadpool(_build)
+
+
+@app.get("/api/cloud/session/{session_id}/defaults")
+def session_defaults(session_id: str):
+    """Extent-seeded ground / DEM / tree-segmentation parameters for this cloud,
+    as its panels in the app would seed them — for the Python scripting client,
+    which has no panel. The arithmetic is `param_defaults` (pinned to the
+    renderer's TypeScript by `src/shared/parameterDefaults.contract.json`); the
+    inputs are measured here on the session's CURRENT live hits, so they follow
+    a crop. Hits only for the reason `extentForParameterSeeding` gives: one miss
+    ~1 km out would set the extent on its own."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        keep = ~sess.deleted
+        miss = sess.extras.get(_MISS_SLUG)
+        if miss is not None:
+            keep = keep & (np.asarray(miss) == 0)
+        pts = sess.positions[keep]
+    extent = _robust_extent(pts) if len(pts) else None
+    spacing = _regime_point_spacing(pts) if len(pts) >= 2 else 0.0
+    horiz = max(extent[0], extent[1]) if extent else float("nan")
+    relief = extent[2] if extent else 0.0
+    return {"session_id": session_id, "robust_extent": extent,
+            "point_spacing": spacing or None,
+            "ground": param_defaults.ground_defaults(horiz, relief, spacing or None),
+            "dem": param_defaults.dem_defaults(horiz),
+            "trees": param_defaults.tree_defaults(horiz)}
+
+
+@app.get("/api/cloud/session/{session_id}/arrays")
+def session_arrays(session_id: str, include_misses: bool = False,
+                   colors: bool = True, extras: bool = True,
+                   fields: Optional[str] = None):
+    """The session's live points as an `.npz` archive, for the Python scripting
+    client (`python/phytograph`), which has no octree and no renderer.
+
+    Read through `_read_points_and_extras`, the chokepoint every compute and
+    export path already uses, so the rules it enforces hold here too: deleted
+    rows are gone, misses are dropped unless `include_misses`, every extra column
+    is filtered in lockstep with positions, and positions are TRUE WORLD
+    coordinates (the import-time `world_shift` added back), in float64.
+
+    Members: `positions` (N,3) float64; `colors` (N,3) float32 in 0-1 and
+    `intensity` (N,) float32 in 0-1 when the cloud has them and `colors` is set
+    (or they are named in `fields`); `timestamp` float64; one member per extra
+    column under its slug, in its stored dtype. `.npz` rather than a PHB1 frame
+    because PHB1 carries only f32/u32, and world coordinates need float64.
+    `fields` (comma-separated slugs) limits the extra columns returned; the
+    filtering still happens in lockstep, since it only drops whole members."""
+    import io
+    wanted = None if fields is None else {s for s in fields.split(",") if s}
+    # `colors` and `intensity` ride the PointSource's want_colors switch; naming
+    # either in `fields` asks for it even with colors=false.
+    named_color = bool(wanted and wanted & {"colors", "intensity"})
+    src = PointSource(session_id=session_id, want_colors=colors or named_color,
+                      want_extras=extras or bool(wanted), include_misses=include_misses)
+    positions, cols, intensity, extra_cols = _read_points_and_extras(src)
+    members: Dict[str, np.ndarray] = {"positions": np.asarray(positions, dtype=np.float64)}
+    if cols is not None and (colors or (wanted and "colors" in wanted)):
+        members["colors"] = np.asarray(cols, dtype=np.float32)
+    if intensity is not None and (colors or (wanted and "intensity" in wanted)):
+        members["intensity"] = np.asarray(intensity, dtype=np.float32)
+    for slug, col in extra_cols.items():
+        if slug in members or (wanted is not None and slug not in wanted):
+            continue
+        members[slug] = np.asarray(col)
+    if wanted is not None:
+        missing = wanted - set(members)
+        if missing:
+            raise HTTPException(status_code=404,
+                                detail=f"No column(s) {sorted(missing)} in this cloud.")
+    buf = io.BytesIO()
+    np.savez(buf, **members)
+    return Response(content=buf.getvalue(), media_type="application/octet-stream")
+
+
 @app.post("/api/cloud/session/{session_id}/column_rows")
 async def session_column_rows(session_id: str, request: Request, slugs: str, tokens: str):
     """The values of some columns at some ROWS: the per-tile form of
@@ -43628,7 +43869,15 @@ class SessionTransformRequest(BaseModel):
     # is far cheaper than a reconvert but still O(file) (~2.8 s on a 13 M-point
     # scan, plus re-streaming the whole octree), which made a TRANSLATION
     # visibly slower than a ROTATION — the opposite of what users expect.
-    octree_mode: Literal["rebuild", "pose"] = "rebuild"
+    #
+    #   "none"    — leave the octree STALE and build nothing. For a caller with no
+    #               display at all (the Python scripting client): every compute
+    #               and export reads `positions`, never the octree, and a stale
+    #               octree is rebuilt by whatever next needs one (bake,
+    #               rebuild_octree). Unlike "pose" it needs no current octree, so
+    #               it stays cheap after a `filter(rebuild=False)`, which "pose"
+    #               cannot (it falls through to a full reconvert there).
+    octree_mode: Literal["rebuild", "pose", "none"] = "rebuild"
 
 
 @app.post("/api/cloud/session/{session_id}/transform")
@@ -43804,6 +44053,17 @@ def session_transform(session_id: str, request: SessionTransformRequest):
     #
     # The rewrite still earns its place under "rebuild", where a current octree
     # is required and the alternative is a full reconvert.
+    if request.octree_mode == "none":
+        # The locked block above already marked the octree stale; that is the
+        # whole of this mode. The miss shell is a derived octree too — drop it
+        # so nothing serves the pre-transform shell as current.
+        with _cloud_session_lock:
+            sess.octree_pose = None
+            sess.miss_octree_cache_id = None
+        return {"session_id": session_id, "point_count": remaining, "total_count": total,
+                "cache_id": None, "cache_dir": None, "miss_octree_cache_id": None,
+                "octree_posed": False, "octree_stale": True}
+
     fast = None
     if request.octree_mode != "pose" and is_pure_translation:
         fast = _translate_octree_in_place(prev_octree_id, delta)

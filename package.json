@@ -14,7 +14,8 @@
     "build:main": "vite build --config vite.main.config.ts",
     "build:preload": "vite build --config vite.preload.config.ts",
     "gen:version": "node scripts/gen-version-info.mjs",
-    "build": "npm run gen:version && npm run build:renderer && npm run build:main && npm run build:preload && npm run dropbox:ignore",
+    "build": "npm run gen:version && npm run build:renderer && npm run build:main && npm run build:preload && npm run build:python && npm run dropbox:ignore",
+    "build:python": "node scripts/build-python-wheel.mjs",
     "build:backend": "node scripts/build-backend.mjs",
     "dropbox:ignore": "node scripts/dropbox-ignore.mjs",
     "prune:releases": "node scripts/prune-release-assets.mjs",
@@ -32,13 +33,14 @@
     "test:unit:watch": "vitest",
     "test:unit:coverage": "vitest run --coverage",
     "test:backend": "node scripts/run-pytest.mjs",
+    "test:python": "node scripts/run-pytest.mjs --client",
     "check:backend": "node scripts/check-backend-bundle.mjs",
     "check:toolchain": "node scripts/toolchain-check.mjs",
     "check:glibc": "node scripts/check-glibc-floor.mjs",
     "test:e2e": "npm run check:backend && playwright test",
     "test:e2e:profile": "npm run check:backend && node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",
     "test:smoke-packaged": "node scripts/smoke-packaged-app.mjs",
-    "test": "npm run typecheck && npm run test:unit && npm run test:backend && npm run test:e2e"
+    "test": "npm run typecheck && npm run test:unit && npm run test:backend && npm run test:python && npm run test:e2e"
   },
   "dependencies": {
     "@react-three/drei": "^10.6.1",
@@ -228,6 +230,13 @@
         "to": "resources",
         "filter": [
           "ml_models/**/*"
+        ]
+      },
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "python/*.whl"
         ]
       },
       {

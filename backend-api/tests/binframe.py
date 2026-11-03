@@ -4,8 +4,17 @@ decodeBinaryFrame."""
 
 import json
 import struct
+import sys
+from pathlib import Path
 
 import numpy as np
+
+# The scripting client (python/phytograph) owns the Python decoder for the
+# PHP1/PHB1 wire format; the tests decode through it rather than keep a twin.
+_CLIENT_DIR = Path(__file__).resolve().parents[2] / "python"
+if str(_CLIENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CLIENT_DIR))
+from phytograph import _frames  # noqa: E402
 
 
 async def _create_session_direct(request):
@@ -30,26 +39,10 @@ def decode_bin_frame(content: bytes):
     """Decode a PHB1 frame body into (meta: dict, buffers: dict[str, np.ndarray]).
 
     Skips leading whitespace keepalives and PHP1 progress markers (see
-    main._pack_progress_marker) that precede the frame on streaming endpoints."""
-    i = 0
-    while True:
-        while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
-            i += 1
-        if content[i:i + 4] != b"PHP1":
-            break
-        marker_len = struct.unpack_from("<I", content, i + 4)[0]
-        i += 8 + marker_len
-    assert content[i:i + 4] == b"PHB1", "not a PHB1 frame"
-    header_len = struct.unpack_from("<I", content, i + 4)[0]
-    header = json.loads(content[i + 8:i + 8 + header_len].decode("utf-8"))
-    off = i + 8 + header_len
-    buffers = {}
-    for d in header["buffers"]:
-        dtype = np.float32 if d["dtype"] == "f32" else np.uint32
-        n = d["length"]
-        buffers[d["name"]] = np.frombuffer(content, dtype=dtype, count=n, offset=off).copy()
-        off += n * 4
-    return header["meta"], buffers
+    main._pack_progress_marker) that precede the frame on streaming endpoints.
+    Delegates to the scripting client's decoder so there is ONE Python decoder
+    for the wire format, exercised by every binary-frame test here."""
+    return _frames.decode_frame(content)
 
 
 def decode_streamed_json(content: bytes):
@@ -91,17 +84,7 @@ def decode_streamed_json(content: bytes):
 def decode_progress_markers(content: bytes):
     """Return the list of PHP1 progress markers ({"progress","message"}) that
     precede the PHB1 frame in a streaming response body."""
-    markers = []
-    i = 0
-    while True:
-        while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
-            i += 1
-        if content[i:i + 4] != b"PHP1":
-            break
-        marker_len = struct.unpack_from("<I", content, i + 4)[0]
-        markers.append(json.loads(content[i + 8:i + 8 + marker_len].decode("utf-8")))
-        i += 8 + marker_len
-    return markers
+    return list(_frames.iter_markers(content))
 
 
 async def decode_misses(response) -> dict:

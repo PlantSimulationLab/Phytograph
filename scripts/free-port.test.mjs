@@ -36,6 +36,16 @@ describe('port bands', () => {
     for (let i = 1; i < bands.length; i++) expect(bands[i].min).toBeGreaterThanOrEqual(bands[i - 1].max);
   });
 
+  it("matches the Python scripting client's own copy of its band", () => {
+    // python/phytograph/_ports.py can't import this module, so it carries the
+    // numbers itself; this is what keeps the two from drifting.
+    const src = readFileSync(join(root, 'python', 'phytograph', '_ports.py'), 'utf8');
+    const m = src.match(/SCRIPT_BAND[^=]*=\s*\(\s*([\d_]+)\s*,\s*([\d_]+)\s*\)/);
+    expect(m).not.toBeNull();
+    const [lo, hi] = [m[1], m[2]].map((v) => Number(v.replace(/_/g, '')));
+    expect({ min: lo, max: hi }).toEqual({ ...PORT_BANDS.script });
+  });
+
   it('gives each of 12 Playwright workers a disjoint slice of the e2e band', () => {
     const slices = Array.from({ length: 12 }, (_, i) => e2eWorkerBand(i));
     for (const s of slices) {

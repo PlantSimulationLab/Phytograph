@@ -982,6 +982,31 @@ jobs:
           }
           Write-Host "PASS: packaged backend launched and reported version $got"
 
+      # ---------------- Headless backend for `pip install phytograph` ----------------
+      # The Python scripting client downloads this archive on first use when no
+      # app is installed (python/phytograph/_download.py owns its name and
+      # layout; python/pack_backend.py imports both). Packed HERE — after the
+      # backend and PotreeConverter are signed (macOS) and every native library
+      # is signed (Windows) — so it holds exactly the signed bytes the app
+      # ships. The packer refuses a bundle whose version stamp is not this
+      # release's. Archives are pruned with the installers (newest two
+      # releases); see scripts/prune-release-assets.mjs.
+      - name: Package headless backend
+        if: ${{ !inputs.signing_test }}
+        shell: bash
+        run: python python/pack_backend.py --out backend-dist
+
+      # The digests go to the build-python-wheel job, which embeds all four in
+      # the PyPI wheel so a pip install pins the exact archive bytes. Uploaded in
+      # a dry_run too, so the rehearsal builds the real wheel.
+      - name: Stash headless backend digest
+        if: ${{ !inputs.signing_test }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-sha256-${{ runner.os }}-${{ matrix.arch }}
+          path: backend-dist/*.sha256
+          if-no-files-found: error
+
       - name: Build & publish app
         timeout-minutes: 45
         env:
@@ -1046,6 +1071,18 @@ jobs:
       # the union. (Placed before the smoke tests on purpose: the release
       # assets are already uploaded by this point, so the merge must happen
       # even if a later step in this job fails.)
+      # After "Build & publish app", which creates the release on the first job
+      # to get there. Before the packaged-app smoke tests for the same reason as
+      # the manifest stash below: the installers are already published.
+      - name: Upload headless backend to the release
+        if: ${{ !inputs.signing_test && !inputs.dry_run }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          gh release upload "$tag" backend-dist/* --clobber
+
       - name: Stash latest-mac.yml for merge (macOS)
         # Not in a dry_run: there is no release to merge a manifest into.
         if: startsWith(matrix.platform, 'macos') && !inputs.dry_run
@@ -1385,6 +1422,89 @@ jobs:
   # anything. `continue-on-error` because reclaiming storage must never fail a
   # release that already built and published successfully — a missed prune is
   # picked up by the next one.
+  # ---------------- The `phytograph` Python package ----------------
+  # Built only when EVERY platform's build succeeded: the wheel embeds all four
+  # backend-archive digests (--require-all-platforms), so a PyPI version can
+  # never point at a backend some platform cannot download.
+  build-python-wheel:
+    needs: build
+    if: ${{ !inputs.signing_test && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Collect backend digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-sha256-*
+          merge-multiple: true
+          path: backend-digests
+
+      - name: Build wheel
+        run: python python/build_wheel.py --out dist --backend-digests backend-digests --require-all-platforms
+
+      # Install the built wheel into a clean venv and read the pins back, so
+      # what gets published is proven importable at the release version.
+      - name: Verify wheel
+        run: |
+          python -m venv /tmp/whl
+          /tmp/whl/bin/pip install --quiet dist/*.whl
+          /tmp/whl/bin/python - <<'EOF'
+          import json, pathlib, phytograph
+          from phytograph import _download
+          want = {_download.asset_name(phytograph.__version__, o, a) for o, a in _download.SUPPORTED}
+          got = set(_download.embedded_digests())
+          assert got == want, (got, want)
+          print("phytograph", phytograph.__version__, "pins", sorted(got))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Attach wheel to the release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          gh release upload "$tag" dist/*.whl --clobber
+
+  # PyPI Trusted Publishing: no token is stored. The publisher is registered
+  # on pypi.org (see docs/docs/developers/architecture/scripting-client.md)
+  # for THIS file name and environment `pypi`: renaming either breaks
+  # publishing until it is updated there. PyPI never
+  # accepts the same version twice, so a re-run after success fails here
+  # harmlessly; `skip-existing` makes that a no-op instead.
+  publish-pypi:
+    needs: build-python-wheel
+    if: ${{ !inputs.signing_test && !inputs.dry_run && needs.build-python-wheel.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/phytograph
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-wheel
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
   prune-old-releases:
     needs: merge-latest-mac
     if: always() && !inputs.signing_test && !inputs.dry_run
