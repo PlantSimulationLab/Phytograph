@@ -399,10 +399,10 @@ function createWindow(): void {
   // where a native modal would hang the Playwright driver. See crashDialog.ts.
   if (!isE2E) installCrashHandlers(mainWindow, reloadRenderer);
 
-  // Drop the reference when the window goes away. On macOS the app deliberately
-  // stays alive with no window (see 'window-all-closed'), so "closed but
-  // running" is a routine state — and a destroyed BrowserWindow is still
-  // TRUTHY. Without this, `rendererReady && mainWindow` passed and the next
+  // Drop the reference when the window goes away. The app quits once its last
+  // window closes (see 'window-all-closed'), but that teardown is async, so
+  // "closed but still running" is a real if brief state — and a destroyed
+  // BrowserWindow is still TRUTHY. Without this, `rendererReady && mainWindow` passed and the next
   // `mainWindow.isMinimized()` threw "Object has been destroyed", which the
   // fatal handler turned into a crash dialog + process.exit(1) — triggered by
   // something as ordinary as double-clicking a .las in Finder. Clearing
@@ -411,9 +411,9 @@ function createWindow(): void {
   // Closing the window destroys the whole session (nothing is auto-persisted),
   // so confirm first when the scene holds anything. This covers the window's
   // own close affordances — the X button, Cmd+W — while 'before-quit' below
-  // covers Cmd+Q / the app menu / the Dock. Both are needed: a window 'close'
-  // on macOS does not quit the app, so it never reaches 'before-quit'; and
-  // Cmd+Q on Windows/Linux runs 'before-quit' before any window 'close'.
+  // covers Cmd+Q / the app menu / the Dock. Both are needed: Cmd+Q runs
+  // 'before-quit' before any window 'close', while closing the window reaches
+  // 'before-quit' only afterwards, via 'window-all-closed' -> app.quit().
   //
   // Suppressed under E2E, where a native modal has no driver to dismiss it and
   // would hang every spec's teardown at app.close(). Same reasoning as the
@@ -424,9 +424,8 @@ function createWindow(): void {
       // for one user gesture.
       if (quitConfirmed) return;
       if (shouldAllowClose(showQuitConfirm, saveProjectFromQuit)) {
-        // Off-darwin, closing the last window calls app.quit(), which fires
-        // 'before-quit' — latch so that doesn't ask a second time for this one
-        // gesture.
+        // Closing the last window calls app.quit(), which fires 'before-quit'
+        // — latch so that doesn't ask a second time for this one gesture.
         quitConfirmed = true;
         return;
       }
@@ -601,55 +600,21 @@ app.whenReady().then(async () => {
     quitConfirmed = true;
     return true;
   });
-
-  // macOS: closing the window doesn't quit the app (window-all-closed only
-  // quits off-darwin), and window-all-closed calls stopBackend() — so the
-  // sidecar is gone by the time the user reopens via the Dock. Reopening fires
-  // 'activate'; if we only recreated the window the renderer would poll a dead
-  // backend for the full splash timeout and fail. So restart the backend too.
-  // startBackend() is idempotent (it reuses a healthy backend on its port and
-  // only spawns when none answers), so calling it again is safe and cheap.
-  app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      // Reopening after the window was closed starts a fresh live session;
-      // window-all-closed cleared the marker, so re-arm it to catch a crash in
-      // this new session.
-      markSessionStarted();
-      // macOS keeps the app alive after a window closes, so an approved close
-      // must not license the NEXT session's quit. Reopening starts fresh work
-      // that deserves its own confirmation.
-      quitConfirmed = false;
-      // Same guard as the cold-start path: never let a backend startup
-      // failure prevent the window from opening.
-      try {
-        await startBackend();
-      } catch (e) {
-        console.error('[main] backend restart on activate threw; opening the window anyway:', e);
-      }
-      createWindow();
-    }
-  });
 });
 
+// Closing the last window quits the app on EVERY platform, macOS included.
+// The usual macOS convention (stay alive in the Dock with no window) buys
+// nothing here: the whole session — every cloud, mesh and plant — lives in the
+// window and the backend's RAM, and nothing is auto-persisted, so a Dock
+// reopen could only ever start a brand-new session with a freshly spawned
+// backend. That is a cold launch wearing a "still running" Dock dot, which
+// misled users into expecting their work back. The window's 'close' handler
+// has already asked about unsaved work and latched `quitConfirmed`, so the
+// 'before-quit' this triggers tears down without asking a second time.
+// (Quitting here also makes Playwright's app.close() exit the process under
+// E2E, which it needs — refs playwright#20016, playwright#12189.)
 app.on('window-all-closed', () => {
-  stopBackend();
-  // Closing the last window is a clean, deliberate end of the session — clear
-  // the marker NOW. On macOS the app stays alive after the window closes (we
-  // don't quit on darwin), so 'before-quit' won't run until the process is
-  // later terminated, and that termination often comes as a SIGINT/SIGTERM from
-  // the dev terminal whose JS handler doesn't reliably run before Electron's
-  // native signal teardown — leaving the marker behind and making the NEXT
-  // launch falsely report a crash. Clearing here means the marker is already
-  // gone by the time the user Ctrl+C's `npm run dev`, regardless of how the
-  // process ultimately dies. markSessionStarted() rewrites it if the user
-  // reopens a window via the Dock ('activate'), so a genuine later crash is
-  // still caught.
-  clearCleanShutdownMarker();
-  // Under E2E, always quit — even on darwin — so Playwright's app.close()
-  // actually causes process exit and the next spec doesn't race the
-  // previous Electron's teardown (which on macOS can briefly flash a
-  // window). Refs: playwright#20016, playwright#12189.
-  if (process.platform !== 'darwin' || isE2E) app.quit();
+  app.quit();
 });
 
 app.on('before-quit', (event) => {
