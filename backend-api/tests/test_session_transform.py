@@ -564,6 +564,60 @@ def test_pose_mode_keeps_the_octree_but_still_moves_the_geometry(tmp_path, monke
     assert sess.octree_pose is not None
 
 
+# ---------------------------------------------------------------------------
+# `ground_z` on the response: the ground level of the MOVED points.
+#
+# The renderer used to carry the import-time ground through the matrix as a
+# point. Fine for a tilt; wrong for a flip. Fixing an upside-down import with a
+# 180 deg turn about X, about a pivot at ground level, leaves the old ground point
+# where it was — now at the TOP of the cloud — and the ground grid was drawn
+# across the top of the scan. The response now carries the recomputed percentile.
+# ---------------------------------------------------------------------------
+
+def _flip_x_about_origin() -> list:
+    # Pivot (0,0,0) is the grid's floor, which is where the renderer's default
+    # scene origin puts it, so this is exactly the user's operation.
+    return _pivot_matrix(_rot_x(180.0), np.zeros(3), np.zeros(3))
+
+
+@pytest.mark.parametrize("mode", ["pose", "rebuild", "none"])
+def test_transform_reports_the_ground_of_the_moved_points(tmp_path, monkeypatch, mode):
+    sid = _grid_session(tmp_path, monkeypatch)
+    sess = main._cloud_sessions[sid]
+    # The grid spans z in [0, 0.9]; the flip maps it to [-0.9, 0].
+    assert float(sess.positions[:, 2].min()) == pytest.approx(0.0)
+
+    res = main.session_transform(
+        sid, main.SessionTransformRequest(matrix=_flip_x_about_origin(), octree_mode=mode))
+
+    # Independent of the endpoint's arithmetic: the moved cloud's own floor. The
+    # bottom layer holds 10% of the points, well above the 0.5% percentile, so the
+    # robust estimate is exactly that layer.
+    assert float(sess.positions[:, 2].min()) == pytest.approx(-0.9)
+    assert res["ground_z"] == pytest.approx(-0.9, abs=1e-9)
+    # Not the carried value, which would still read the old floor (now the top).
+    assert res["ground_z"] < -0.5
+
+
+def test_moved_ground_ignores_deleted_rows_and_misses(tmp_path, monkeypatch):
+    sid = _grid_session(tmp_path, monkeypatch)
+    sess = main._cloud_sessions[sid]
+    z = sess.positions[:, 2]
+    # After the flip the z=0.9 layer becomes the floor and z=0.8 the next one up.
+    # Delete the first and mark the second as sky/miss: neither is ground.
+    top = np.isclose(z, 0.9)
+    second = np.isclose(z, 0.8)
+    assert top.sum() == 100 and second.sum() == 100
+    sess.deleted[top] = True
+    sess.extras[main._MISS_SLUG] = second.astype(np.float32)
+
+    res = main.session_transform(
+        sid, main.SessionTransformRequest(matrix=_flip_x_about_origin(), octree_mode="none"))
+
+    # The lowest surviving hits are the z=0.7 layer, flipped.
+    assert res["ground_z"] == pytest.approx(-0.7, abs=1e-9)
+
+
 def test_pose_mode_skips_the_rewrite_for_a_translation_too(tmp_path, monkeypatch):
     """"pose" skips the in-place rewrite for a TRANSLATION as well as a rotation.
 

@@ -9,7 +9,7 @@ import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner 
 import { classViewFilters } from '../lib/octreeFilterSpec';
 import { octreeMaskStatsKey } from './viewer/renderers/octreeCropMask';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
-import { commitStoredPose, composeCloudPose, hasStoredPose, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
+import { commitStoredPose, composeCloudPose, hasStoredPose, movedGroundZ, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields, transformScanParamsToWorld } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
 import { bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
@@ -9951,31 +9951,11 @@ export default function PointCloudViewer({
     groundZ: -5,
   });
 
-  const staticBounds = useMemo(() => {
-    const allIds = new Set([
-      ...clouds.map(c => c.id),
-      ...meshes.map(m => m.id),
-      ...skeletons.map(s => s.id),
-      // Scanner markers carry no geometry but still occupy the scene; include
-      // their ids so adding a scan re-grounds the grid (and so a scans-only
-      // scene isn't treated as empty).
-      ...scansWithParams.map(s => s.id),
-    ]);
-    const prevIds = prevStaticBoundsIdsRef.current;
-    const hasNewIds = [...allIds].some(id => !prevIds.has(id));
-    prevStaticBoundsIdsRef.current = allIds;
-
-    // Recompute bounds ONLY when a new object enters the scene. Pure removals,
-    // and pure transform edits (a Translate/Rotate/Scale drag or Fit-to-scans,
-    // which mutate meshPositions/Rotations/Scales without changing the id set),
-    // keep the latched bounds so the ground grid and axes never jump mid-edit.
-    // meshPositions/Rotations/Scales are in the dep array only so a freshly
-    // imported object's transform is available on the same render it appears.
-    if (!hasNewIds) {
-      return stableStaticBoundsRef.current;
-    }
-
-    // New objects added: recompute bounds from all current objects
+  // The scene's bounds and ground level, computed from the CURRENT committed
+  // state: clouds' stored bounds (which a committed transform rewrites — see
+  // bakeCloudTransform), meshes in world space, scanner markers. Pure read; the
+  // two latches below decide WHEN it runs.
+  const computeSceneBounds = (): typeof stableStaticBoundsRef.current => {
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
     const corner = new THREE.Vector3();
@@ -10117,7 +10097,6 @@ export default function PointCloudViewer({
         groundZ: -1,
         contentCenter: new THREE.Vector3(0, 0, 0),
       };
-      stableStaticBoundsRef.current = fallback;
       return fallback;
     }
 
@@ -10165,9 +10144,41 @@ export default function PointCloudViewer({
         ? new THREE.Vector3().addVectors(contentMin, contentMax).multiplyScalar(0.5)
         : center.clone();
 
-    const result = { min, max, center, size, groundZ, contentCenter };
+    return { min, max, center, size, groundZ, contentCenter };
+  };
+
+  const staticBounds = useMemo(() => {
+    const allIds = new Set([
+      ...clouds.map(c => c.id),
+      ...meshes.map(m => m.id),
+      ...skeletons.map(s => s.id),
+      // Scanner markers carry no geometry but still occupy the scene; include
+      // their ids so adding a scan re-grounds the grid (and so a scans-only
+      // scene isn't treated as empty).
+      ...scansWithParams.map(s => s.id),
+    ]);
+    const prevIds = prevStaticBoundsIdsRef.current;
+    const hasNewIds = [...allIds].some(id => !prevIds.has(id));
+    prevStaticBoundsIdsRef.current = allIds;
+
+    // Recompute bounds ONLY when a new object enters the scene. Pure removals,
+    // and pure transform edits (a Translate/Rotate/Scale drag or Fit-to-scans,
+    // which mutate meshPositions/Rotations/Scales without changing the id set),
+    // keep the latched bounds so the ground grid and axes never jump mid-edit.
+    // meshPositions/Rotations/Scales are in the dep array only so a freshly
+    // imported object's transform is available on the same render it appears.
+    // (The ground grid's FLOOR has a second latch that also refreshes when a
+    // transform is COMMITTED — see `gridGroundBounds`. This one, which the scene
+    // origin and displayOffset hang off, deliberately does not.)
+    if (!hasNewIds) {
+      return stableStaticBoundsRef.current;
+    }
+
+    // New objects added: recompute bounds from all current objects
+    const result = computeSceneBounds();
     stableStaticBoundsRef.current = result;
     return result;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- computeSceneBounds reads exactly these
   }, [clouds, meshes, skeletons, scansWithParams, meshPositions, meshRotations, meshScales]);
 
   // Render-only display offset (Layer 2 precision safety net). Derived from the
@@ -10806,6 +10817,44 @@ export default function PointCloudViewer({
   // scene lives far from the origin — a UTM-style coordinate system where 0 is
   // hundreds/thousands of meters below everything — do we fall back to the
   // computed extent floor, since 0 there is meaningless (and invisible).
+  // ── Ground-grid floor: re-grounds on a COMMITTED transform ──────────────
+  //
+  // `staticBounds` only moves when an object is added, which kept the grid from
+  // jumping mid-drag but also left it behind every committed transform. The
+  // common case that exposed it: a PLY that imports upside down, flipped 180°
+  // about X to fix its up-axis. The default pivot sits at ground level, so the
+  // flip swings the plant DOWN through the floor and the grid ends up at its
+  // base — drawn across the top of the now-upright scan.
+  //
+  // So the grid's floor has its own latch: everything `staticBounds` responds
+  // to, plus `requestGridReground()`, which the transform COMMIT sites call
+  // (bakeCloudTransform, ICP apply, transform reset) in the same synchronous
+  // block as their `onUpdateCloud`, so the next render sees both the moved
+  // bounds and the request. Drafts never trigger it — they live in editStates
+  // and never touch `cloud.data` — so the grid still holds still during a drag.
+  //
+  // The scene ORIGIN is deliberately NOT re-grounded: it is the rotation pivot,
+  // and moving it after each commit would make a second rotation turn about a
+  // different point (and yank the camera target).
+  const [gridRegroundGen, setGridRegroundGen] = useState(0);
+  const requestGridReground = useCallback(() => setGridRegroundGen(g => g + 1), []);
+  const gridGroundLatchRef = useRef<{
+    gen: number;
+    anchor: typeof staticBounds;
+    bounds: typeof staticBounds;
+  } | null>(null);
+  const gridGroundBounds = useMemo(() => {
+    const prev = gridGroundLatchRef.current;
+    if (prev && prev.gen === gridRegroundGen && prev.anchor === staticBounds) return prev.bounds;
+    // A new object re-latched staticBounds from current state already; reuse it.
+    // Otherwise this is a commit: recompute from the moved geometry.
+    const bounds = prev && prev.anchor !== staticBounds ? staticBounds
+      : prev ? computeSceneBounds() : staticBounds;
+    gridGroundLatchRef.current = { gen: gridRegroundGen, anchor: staticBounds, bounds };
+    return bounds;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- latched on these two by design
+  }, [staticBounds, gridRegroundGen]);
+
   const gridFloor = useMemo(() => {
     const upAxis = gridPlane === 'z-up' ? 'z' : 'y';
     // For the z-up (real) case use the outlier-resistant ground rather than the
@@ -10814,14 +10863,14 @@ export default function PointCloudViewer({
     // wrong". The y-up display mode has no equivalent estimate, so it keeps the
     // extent floor. Note this also feeds `distFromZero` below, so a scene whose
     // only sub-zero content is noise can still snap the grid to 0.
-    const floor = upAxis === 'z' ? staticBounds.groundZ : staticBounds.min[upAxis];
-    const ceil = staticBounds.max[upAxis];
+    const floor = upAxis === 'z' ? gridGroundBounds.groundZ : gridGroundBounds.min[upAxis];
+    const ceil = gridGroundBounds.max[upAxis];
     // See lib/gridFloor: snap to 0 only when the GROUND is near zero, measured
     // against the scene's vertical extent. The rule this replaced asked whether
     // the span straddled zero and compared against half the 3D DIAGONAL, which
     // drew a georeferenced survey's ground plane through its own canopy.
     return computeGridFloor(floor, ceil);
-  }, [staticBounds, gridPlane]);
+  }, [gridGroundBounds, gridPlane]);
 
   // Determine what's currently selected. A cloud tool needs an actual
   // data-bearing cloud, not a param-only scanner marker: loading a Helios scan
@@ -11939,11 +11988,10 @@ export default function PointCloudViewer({
                   ] as [number, number, number],
                 }
               : {}),
-            // A rotation turns an outlier-resistant percentile into a raw box
-            // minimum; a pure translation keeps it exact. Restored on refresh.
-            ...(cloud.data.groundZ !== undefined
-              ? { groundZ: transformGroundZ(cloud.data.groundZ, cloud.data.bounds.center, t, rot, P, scl) }
-              : {}),
+            // Recomputed by the backend from the moved points (see movedGroundZ:
+            // a carried value lands on TOP of a flipped cloud).
+            ...movedGroundZ(result.ground_z, cloud.data.groundZ,
+              (g) => transformGroundZ(g, cloud.data.bounds.center, t, rot, P, scl)),
             octree: {
               ...movedOctreeInfo,
               // The source file still holds the ORIGINAL pose, so it can no
@@ -11986,6 +12034,7 @@ export default function PointCloudViewer({
           clearDraft();
         }
         transformScanParams();
+        requestGridReground();
         // Destructive boundary: the session geometry moved permanently, so an
         // erase-undo must not reach back across it (the backend cleared its own
         // deleted_history for the same reason).
@@ -12024,15 +12073,20 @@ export default function PointCloudViewer({
         octree: src.octree
           ? { ...src.octree, scanOrigin: transformedScanOrigin(src.octree.scanOrigin) }
           : src.octree,
+        // Drop any carried ground level: it would be left at the pre-move floor
+        // (or, after a flip, on TOP of the cloud — see movedGroundZ). Without it
+        // the ground falls back to the exact minimum recomputed just above.
+        groundZ: undefined,
       });
       transformScanParams();
+      requestGridReground();
       clearDraft();
       scene.boundary([cloudId]);
       return { ok: true };
     } finally {
       bakingTranslationRef.current.delete(cloudId);
     }
-  }, [clouds, getEditState, onUpdateCloud, onUpdateScanParams, buildSessionOctreeData, scene]);
+  }, [clouds, getEditState, onUpdateCloud, onUpdateScanParams, buildSessionOctreeData, scene, requestGridReground]);
 
   // Bake every selected cloud's pending transform (see bakeCloudTransform).
   // Called at the Transformation-tool commit boundaries: T-modal confirm, gizmo
@@ -17879,11 +17933,9 @@ export default function PointCloudViewer({
                     ] as [number, number, number],
                   }
                 : {}),
-              ...(sourceCloud.data.groundZ !== undefined
-                ? { groundZ: transformGroundZ(
-                    sourceCloud.data.groundZ, sourceCloud.data.bounds.center,
-                    posed.translation, posed.rotation, pivot) }
-                : {}),
+              ...movedGroundZ(result.ground_z, sourceCloud.data.groundZ,
+                (g) => transformGroundZ(g, sourceCloud.data.bounds.center,
+                  posed.translation, posed.rotation, pivot)),
               octree: { ...movedOctree, divergedFromSource: true },
             });
             setEditStates(prev => {
@@ -17983,6 +18035,9 @@ export default function PointCloudViewer({
             ...sourceCloud.data,
             positions: newPositions,
             bounds: newBounds,
+            // A carried ground level would sit at the pre-move floor; without it
+            // the ground falls back to the moved bounds' exact minimum.
+            groundZ: undefined,
             // Move a flat cloud's embedded octree.scanOrigin fallback too.
             octree: sourceCloud.data.octree
               ? { ...sourceCloud.data.octree, scanOrigin: moveScanOrigin(sourceCloud.data.octree.scanOrigin) }
@@ -17997,6 +18052,11 @@ export default function PointCloudViewer({
             return next;
           });
         }
+
+        // The cloud moved for good: re-ground the floor grid on it (see
+        // gridGroundBounds). Both branches above have already handed
+        // onUpdateCloud the moved bounds, so the re-latch reads them.
+        if (appliedMatrix) requestGridReground();
 
         if (options?.recordRegistration && appliedMatrix) {
           // Read the previous record through `scansRef`, not the closed-over
@@ -18048,7 +18108,7 @@ export default function PointCloudViewer({
       icpAbortRef.current = null;
       icpRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, onUpdateCloud, onUpdateScanParams, onUpdateScanRegistration, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
+  }, [selectedIds, clouds, onUpdateCloud, onUpdateScanParams, onUpdateScanRegistration, buildPointSource, getEditState, setEditStates, buildSessionOctreeData, requestGridReground]);
 
   // Auto-Register: coarse global registration, then ICP refinement.
   //
@@ -18423,6 +18483,7 @@ export default function PointCloudViewer({
               // before this loop, so there is nothing to compose onto.
               const pivot = renderPivot(sceneOriginRef.current, live.data.bounds.center);
               const posed = poseFromMatrix(inv, pivot);
+              const liveCenter = live.data.bounds.center;
               const moved = transformBoundsAabb(
                 live.data.bounds, posed.translation, posed.rotation, pivot);
               const size = new THREE.Vector3().subVectors(moved.max, moved.min);
@@ -18460,11 +18521,9 @@ export default function PointCloudViewer({
                       ] as [number, number, number],
                     }
                   : {}),
-                ...(live.data.groundZ !== undefined
-                  ? { groundZ: transformGroundZ(
-                      live.data.groundZ, live.data.bounds.center,
-                      posed.translation, posed.rotation, pivot) }
-                  : {}),
+                ...movedGroundZ(result.ground_z, live.data.groundZ,
+                  (g) => transformGroundZ(g, liveCenter,
+                    posed.translation, posed.rotation, pivot)),
                 octree: { ...movedOctree, divergedFromSource: true },
               });
               setEditStates(prev => {
@@ -18536,6 +18595,8 @@ export default function PointCloudViewer({
                 center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
                 size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
               },
+              // See the flat ICP path: a carried ground level would be stale.
+              groundZ: undefined,
               octree: src.octree
                 ? { ...src.octree, scanOrigin: moveOrigin(src.octree.scanOrigin) }
                 : src.octree,
@@ -18554,6 +18615,9 @@ export default function PointCloudViewer({
           failures.push(`${scanDisplayName(live)}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+
+      // Scans went back to their pre-registration pose: re-ground the floor grid.
+      if (reset > 0) requestGridReground();
 
       if (failures.length > 0) {
         showToast({
@@ -18575,7 +18639,7 @@ export default function PointCloudViewer({
       setIsResettingRegistration(false);
       setResetRegistrationConfirm(null);
     }
-  }, [onUpdateCloud, onUpdateScanParams, onUpdateScanRegistration, buildSessionOctreeData, scene, showToast]);
+  }, [onUpdateCloud, onUpdateScanParams, onUpdateScanRegistration, buildSessionOctreeData, scene, showToast, requestGridReground]);
 
   // Mesh-to-mesh ICP alignment
   // Mesh-to-mesh ICP. Inputs are picked in the MeshAlignDialog and passed in
@@ -24378,6 +24442,10 @@ export default function PointCloudViewer({
       // — data-scene-center alone cannot distinguish the floor from the
       // mid-height.
       data-scene-min-z={combinedBounds.min.z.toFixed(1)}
+      // Test hook: the ground grid's height on the up axis (WORLD, before the
+      // render-only displayOffset). The grid is a shader quad with no DOM, and
+      // re-grounding it on a committed transform is otherwise invisible to a test.
+      data-grid-floor={gridFloor.toFixed(3)}
       // Test hook: whether the scene-origin marker is click-selected (and so
       // showing its translation gizmo). The gizmo lives in the canvas and has no
       // DOM of its own, so this is the only way to assert on it.

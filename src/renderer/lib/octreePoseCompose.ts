@@ -308,7 +308,31 @@ export function transformAabbByMatrix(
 }
 
 /**
- * Where a cloud's `groundZ` ends up after a rigid transform.
+ * The `groundZ` patch for a cloud whose session geometry was just transformed.
+ *
+ * Prefers the backend's value (`ground_z` on the /transform response), which is
+ * the percentile RECOMPUTED over the moved points. Carrying the old value through
+ * the matrix (`transformGroundZ`) is only the fallback for a backend that does not
+ * send one: it is right for a translation or a tilt, but a flip about a horizontal
+ * axis carries the old ground point to the TOP of the cloud — exactly the case of
+ * fixing an upside-down import with a 180 degree turn about X, where it put the
+ * ground grid across the top of the scan.
+ *
+ * Returns a spreadable patch: `{}` when there is nothing to say, so the caller's
+ * existing value (or its absence) stands.
+ */
+export function movedGroundZ(
+  fromBackend: number | null | undefined,
+  carried: number | undefined,
+  carry: (groundZ: number) => number,
+): { groundZ?: number } {
+  if (typeof fromBackend === 'number' && isFinite(fromBackend)) return { groundZ: fromBackend };
+  return carried !== undefined ? { groundZ: carry(carried) } : {};
+}
+
+/**
+ * Where a cloud's `groundZ` ends up after a rigid transform, when the moved points
+ * are not available to recompute it (see `movedGroundZ`, which prefers that).
  *
  * `groundZ` is an outlier-RESISTANT low-Z percentile, not a minimum — its whole
  * reason for existing is that the raw minimum is set by a single stray return,

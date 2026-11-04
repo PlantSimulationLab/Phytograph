@@ -106,6 +106,12 @@ In the right-side properties panel, toggle:
 - **Grid** — a reference grid on the ground plane. Its cell size adapts as you
   zoom, stepping through round values (…10 cm, 20 cm, 50 cm, 1 m, 2 m, 5 m…)
   with a heavier line every fifth cell, so it stays readable at any scale.
+  It sits at the scene's ground level and holds still while you drag a
+  transform. When you **apply** a translation or rotation (or an alignment),
+  it moves to the new ground. For example, flipping an upside-down scan 180°
+  puts the grid under the corrected scan, not across its top. The
+  [scene origin](clean-point-cloud.md#setting-the-scene-origin) does not move
+  with it, so a second rotation turns about the same pivot.
 - **Axes** — the bottom-left orientation gizmo. On by default; turn it off
   to clear the corner.
 - **Scan markers** — the scanner position markers in the 3D view.

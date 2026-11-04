@@ -5281,6 +5281,17 @@ export async function sessionFilter(
   }
 }
 
+export type SessionTransformResult = CloudSessionBakeResult & {
+  octree_posed?: boolean;
+  // Outlier-resistant ground level of the MOVED surviving hits (see
+  // `_robust_ground_z` in main.py), in the session's stored frame — the same
+  // frame and meaning as the import-time `ground_z`. Recomputed because a flip
+  // cannot be carried through the matrix: the old ground point ends up on top.
+  // null on a degenerate cloud; absent from a backend that predates it, in which
+  // case callers fall back to `transformGroundZ`.
+  ground_z?: number | null;
+};
+
 /**
  * Apply a rigid 4x4 transform (ROW-MAJOR, world-frame — the layout an ICP
  * registration returns) to a session's geometry in place. Moves an octree-backed
@@ -5301,7 +5312,7 @@ export async function sessionTransform(
   sessionId: string,
   matrix: number[],
   octreeMode: 'rebuild' | 'pose' = 'rebuild',
-): Promise<CloudSessionBakeResult & { octree_posed?: boolean }> {
+): Promise<SessionTransformResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/transform');
@@ -5317,7 +5328,7 @@ export async function sessionTransform(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as CloudSessionBakeResult & { octree_posed?: boolean };
+    return (await response.json()) as SessionTransformResult;
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('session_transform failed:', error);

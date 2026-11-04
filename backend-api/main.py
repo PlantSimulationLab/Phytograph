@@ -25803,7 +25803,15 @@ def _robust_ground_z(positions: "np.ndarray") -> "Optional[float]":
     """
     if positions is None or len(positions) == 0 or positions.shape[1] < 3:
         return None
-    z = positions[:, 2]
+    return _robust_ground_z_of_column(positions[:, 2])
+
+
+def _robust_ground_z_of_column(z: "np.ndarray") -> "Optional[float]":
+    """`_robust_ground_z` for a bare Z column — for callers that already sliced
+    out the rows they mean (e.g. a session's surviving hits) and should not
+    materialize an (N,3) copy just to be sliced again."""
+    if z is None or len(z) == 0:
+        return None
     finite = np.isfinite(z)
     # Same copy elision as _finite_xyz, for the same reason. Not shared with it
     # because this one wants a 1-D column and the mask is per-value, not per-row.
@@ -44372,6 +44380,25 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         remaining = int((~sess.deleted).sum())
         sess.label_history = {}   # label undo must not reach across this commit either
         total = int(len(sess.positions))
+        # The ground level of the MOVED points, for the renderer's ground grid and
+        # default scene origin. Only the Z column of the surviving hits is copied
+        # here (misses sit ~1 km out along the beam and would drag the percentile);
+        # the percentile itself runs after the lock is released.
+        _gz_keep = ~sess.deleted
+        _gz_miss = sess.extras.get(_MISS_SLUG)
+        if _gz_miss is not None:
+            _gz_keep &= (np.asarray(_gz_miss) == 0)
+        _gz_column = np.asarray(sess.positions[_gz_keep, 2])
+
+    # Recomputed rather than left to the renderer to carry the import-time value
+    # through the matrix: that works for a tilt but not for a flip. Rotating a
+    # scan 180 deg about a horizontal axis (fixing an upside-down import) about a
+    # pivot at ground level leaves the old ground POINT where it was — now at the
+    # TOP of the cloud — so a carried value puts the ground grid across the top
+    # of the scan. One percentile pass over a Z column (the same one
+    # `_robust_ground_z` runs at import) is the honest answer.
+    ground_z = _robust_ground_z_of_column(_gz_column)
+    del _gz_column
 
     # A PURE TRANSLATION leaves the octree's node structure untouched, so the
     # built octree can be re-coordinated in place (~0.8 s on 5 M points) instead
@@ -44406,7 +44433,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             sess.miss_octree_cache_id = None
         return {"session_id": session_id, "point_count": remaining, "total_count": total,
                 "cache_id": None, "cache_dir": None, "miss_octree_cache_id": None,
-                "octree_posed": False, "octree_stale": True}
+                "octree_posed": False, "octree_stale": True, "ground_z": ground_z}
 
     fast = None
     if request.octree_mode != "pose" and is_pure_translation:
@@ -44445,7 +44472,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         return {"session_id": session_id, "point_count": remaining, "total_count": total,
                 "cache_id": prev_octree_id, "cache_dir": str(cache_dir),
                 "miss_octree_cache_id": prev_miss_octree_id,
-                "octree_posed": True, **meta}
+                "octree_posed": True, **meta, "ground_z": ground_z}
 
     if fast is not None:
         cache_key, cache_dir, meta = fast
@@ -44473,7 +44500,8 @@ def session_transform(session_id: str, request: SessionTransformRequest):
 
     return {"session_id": session_id, "point_count": remaining, "total_count": total,
             "cache_id": cache_key, "cache_dir": str(cache_dir),
-            "miss_octree_cache_id": miss_id, "octree_posed": False, **meta}
+            "miss_octree_cache_id": miss_id, "octree_posed": False, **meta,
+            "ground_z": ground_z}
 
 
 @app.post("/api/cloud/session/{session_id}/rebuild_octree")

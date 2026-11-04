@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 
-import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from './octreePoseCompose';
+import { composeCloudPose, hasStoredPose, movedGroundZ, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from './octreePoseCompose';
 import { applyOctreePose } from '../components/viewer/renderers/octreePose';
 import type { CloudEditState } from './pointCloudTypes';
 
@@ -281,6 +281,36 @@ describe('transformGroundZ', () => {
 
     expect(movedGround).toBeGreaterThan(movedBox.min.z + 1);
     expect(Math.abs(movedGround - ground)).toBeLessThan(3);
+  });
+});
+
+describe('movedGroundZ', () => {
+  const center = { x: 0, y: 0 };
+  // Fixing an upside-down import: 180 deg about X, about a pivot on the ground.
+  const flip = { x: 180, y: 0, z: 0 };
+  const pivot = { x: 0, y: 0, z: 0 };
+  const carry = (g: number) => transformGroundZ(g, center, { x: 0, y: 0, z: 0 }, flip, pivot);
+
+  it('a carried ground point stays on the old floor through a flip — why the backend value wins', () => {
+    // The failure this exists for: the old ground (z=0, at the pivot) maps to
+    // itself, which after the flip is the TOP of a cloud now spanning [-1.5, 0].
+    expect(carry(0)).toBeCloseTo(0, 9);
+  });
+
+  it('prefers the ground recomputed by the backend', () => {
+    expect(movedGroundZ(-1.5, 0, carry)).toEqual({ groundZ: -1.5 });
+  });
+
+  it('falls back to carrying the old value when the backend sends none', () => {
+    const translate = (g: number) =>
+      transformGroundZ(g, center, { x: 0, y: 0, z: 2 }, { x: 0, y: 0, z: 0 }, pivot);
+    expect(movedGroundZ(undefined, 0.25, translate)).toEqual({ groundZ: 2.25 });
+    expect(movedGroundZ(null, 0.25, translate)).toEqual({ groundZ: 2.25 });
+    expect(movedGroundZ(Number.NaN, 0.25, translate)).toEqual({ groundZ: 2.25 });
+  });
+
+  it('says nothing when there is no value from either side', () => {
+    expect(movedGroundZ(null, undefined, carry)).toEqual({});
   });
 });
 
