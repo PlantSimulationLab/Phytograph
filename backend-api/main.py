@@ -26302,6 +26302,11 @@ def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
     (e.g. '# x y z r255 g255 b255 row column is_miss') so pandas — which is told
     comment='#' — skips it as data while a human still sees the labels. We
     recover those labels here. `was_commented` lets callers that drive pandas's
+    # PLY only: `element face N` from the header (0 = a point cloud). PLY is
+    # both a mesh and a point-cloud container, and the in-app import browser
+    # uses this to show a face-bearing file's MESH options (up/forward axes)
+    # instead of point-cloud columns. None for every other format.
+    face_count: Optional[int] = None
     `skiprows` know the line is already dropped by `comment='#'` and must NOT be
     counted again.
     """
@@ -32529,9 +32534,14 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
 
 
 def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
+    try:
+        face_count = _ply_header_face_count(Path(file_path))
+    except OSError:
+        face_count = None
     """Summarize an E57's structure for the import wizard without decoding the
     full point data. Reports the scan count, total points, and which attributes
     the file carries (read cheaply from the first scan's declared `point_fields`,
+        face_count=face_count,
     no point decode). Columns are fixed (E57 defines its own layout), so they're
     not remappable — we surface position plus whatever of intensity / RGB the
     file actually contains, so the user can see (and color by) them.

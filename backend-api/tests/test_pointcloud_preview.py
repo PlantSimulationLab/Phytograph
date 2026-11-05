@@ -427,6 +427,30 @@ def test_preview_ascii_ply_fields(client, tmp_path: Path):
     assert "extra" in roles
 
 
+def test_preview_ply_reports_its_face_count(client, tmp_path: Path):
+    # PLY holds meshes and point clouds alike. The import browser shows mesh
+    # options (up/forward axes) for a face-bearing PLY, so the preview says
+    # which this file is: N faces, 0 for a cloud, and nothing for non-PLY.
+    mesh = tmp_path / "tri.ply"
+    mesh.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 3\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face 1\nproperty list uchar int vertex_indices\nend_header\n"
+        "0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n"
+    )
+    cloud = tmp_path / "pts.ply"
+    cloud.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 1\n"
+        "property float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n"
+    )
+    xyz = tmp_path / "pts.xyz"
+    xyz.write_text("0 0 0\n1 1 1\n")
+    count = lambda f: client.post("/api/pointcloud/preview", json={"file_path": str(f)}).json()["face_count"]
+    assert count(mesh) == 1
+    assert count(cloud) == 0
+    assert count(xyz) is None
+
+
 # --------------------------------------------------------------------------- #
 # column_plan: import honors rename + categorical + RGB scale
 # --------------------------------------------------------------------------- #

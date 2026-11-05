@@ -12,6 +12,7 @@ import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } 
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, OCTREE_PATH_EXTENSIONS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
 import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCanceledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
+import { isIdentityAxes, isMeshAxes, meshAxesRotationDeg, type MeshAxes } from "./lib/meshAxes";
 
 // OCTREE_PATH_EXTENSIONS (imported above) decides whether a dropped file routes
 // to the import wizard + backend Potree octree, or falls back to the in-renderer
@@ -380,6 +381,14 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // consumed when used and removed in a `finally`, so a later drag-drop of
   // the same file still gets the wizard.
   const presetWizardResultsRef = useRef<Map<string, WizardResult> | null>(null);
+  // The mesh up/forward axes chosen in the browser, keyed by path, with the
+  // same per-import lifetime as presetWizardResultsRef. A dropped mesh, which
+  // never passed through the browser, imports as the file has it.
+  const presetMeshAxesRef = useRef<Map<string, MeshAxes>>(new Map());
+  const meshImportTransform = (path: string | undefined) => {
+    const axes = path ? presetMeshAxesRef.current.get(path) : undefined;
+    return axes && !isIdentityAxes(axes) ? { rotation: meshAxesRotationDeg(axes) } : undefined;
+  };
   const openImportWizard = useCallback((inputs: WizardScanInput[]): Promise<WizardResult[] | null> => {
     const preset = presetWizardResultsRef.current;
     if (preset && inputs.length > 0 && inputs.every((i) => preset.has(i.path))) {
@@ -406,7 +415,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // the wizard. Remembers the last folder per import type and the ten most
   // recent import folders.
   const [browserRequest, setBrowserRequest] = useState<
-    { type: ImportType; initialDir: string | null; recentDirs: string[] } | null
+    { type: ImportType; initialDir: string | null; recentDirs: string[]; meshAxes?: MeshAxes } | null
   >(null);
   const browserResolveRef = useRef<((r: FileBrowserResult | null) => void) | null>(null);
   // While the browser is open, native-menu commands go to it (see
@@ -417,15 +426,16 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   browserOpenRef.current = browserRequest !== null;
   const openFileBrowser = useCallback(async (type: ImportType): Promise<FileBrowserResult | null> => {
     const store = window.electronAPI?.store;
-    const [byType, recent] = await Promise.all([
+    const [byType, recent, lastAxes] = await Promise.all([
       store?.get<Record<string, string>>('fileBrowser.lastDirByType').catch(() => undefined),
       store?.get<string[]>('fileBrowser.recentDirs').catch(() => undefined),
+      store?.get<unknown>('fileBrowser.meshAxes').catch(() => undefined),
     ]);
     const recentDirs = Array.isArray(recent) ? recent.filter((d) => typeof d === 'string') : [];
     const initialDir = byType?.[type] ?? recentDirs[0] ?? null;
     return new Promise((resolve) => {
       browserResolveRef.current = resolve;
-      setBrowserRequest({ type, initialDir, recentDirs });
+      setBrowserRequest({ type, initialDir, recentDirs, meshAxes: isMeshAxes(lastAxes) ? lastAxes : undefined });
     });
   }, []);
   const settleBrowser = useCallback((result: FileBrowserResult | null) => {
@@ -441,6 +451,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           await store?.set('fileBrowser.lastDirByType', { ...byType, [req.type]: result.dir });
           const recent = [result.dir, ...req.recentDirs.filter((d) => d !== result.dir)].slice(0, 10);
           await store?.set('fileBrowser.recentDirs', recent);
+          // Remember the mesh axes only when a mesh was actually imported, so
+          // a point-cloud import doesn't reset a Y-up habit to the default.
+          if (result.meshPaths.length > 0) await store?.set('fileBrowser.meshAxes', result.meshAxes);
         } catch { /* remembering folders is a convenience */ }
       })();
     }
@@ -778,7 +791,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               color: getNextColor(),
               method: 'delaunay',
               name: baseNameForLabel(file.name),
-            });
+            }, meshImportTransform(objPath));
             setSettingsOpen(false);
             const texturedLabel = backendMesh.hasTextures ? 'textured mesh' : 'mesh';
             showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.data.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
@@ -800,7 +813,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               color: getNextColor(),
               method: 'delaunay', // Default for imported meshes
               name: baseNameForLabel(file.name),
-            });
+            }, meshImportTransform(objPath));
             setSettingsOpen(false);
             if (materialsDropped) {
               showToast({
@@ -1088,7 +1101,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               color: getColorForFile(),
               method: 'delaunay',
               name: baseNameForLabel(file.name),
-            });
+            }, meshImportTransform(meshPath));
             meshCount++;
           } else {
             const meshData = await parseMesh(file);
@@ -1109,7 +1122,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
                 color: getColorForFile(),
                 method: 'delaunay',
                 name: baseNameForLabel(file.name),
-              });
+              }, meshImportTransform(meshPath));
               meshCount++;
             }
           }
@@ -2023,11 +2036,16 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const presets = presetWizardResultsRef.current ?? new Map<string, WizardResult>();
     presetWizardResultsRef.current = presets;
     for (const [path, r] of picked.wizardResults) presets.set(path, r);
+    const axes = presetMeshAxesRef.current;
+    for (const path of picked.meshPaths) axes.set(path, picked.meshAxes);
     try {
       await importPathsByType(picked.paths, importType);
     } finally {
       for (const [path, r] of picked.wizardResults) {
         if (presets.get(path) === r) presets.delete(path);
+      }
+      for (const path of picked.meshPaths) {
+        if (axes.get(path) === picked.meshAxes) axes.delete(path);
       }
       if (presets.size === 0 && presetWizardResultsRef.current === presets) presetWizardResultsRef.current = null;
     }
@@ -2587,6 +2605,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           importType={browserRequest.type}
           initialDir={browserRequest.initialDir}
           recentDirs={browserRequest.recentDirs}
+          initialMeshAxes={browserRequest.meshAxes}
           menuHandlerRef={browserMenuRef}
           onCancel={() => settleBrowser(null)}
           onImport={(r) => settleBrowser(r)}

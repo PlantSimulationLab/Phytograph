@@ -68,6 +68,19 @@ export function takesPointCloudOptions(ext: string, type: BrowserImportType): bo
   return (type === 'pointcloud' || type === 'auto') && POINT_CLOUD_EXTS.includes(ext.toLowerCase());
 }
 
+/**
+ * Does this file get the MESH import options (up/forward axes)? OBJ and STL
+ * are always meshes; a PLY is one under Import → Mesh, or under Auto once its
+ * preview reports faces (`plyFaceCount`, undefined until it is known).
+ */
+export function takesMeshOptions(ext: string, type: BrowserImportType, plyFaceCount?: number | null): boolean {
+  const e = ext.toLowerCase();
+  if (type === 'mesh') return MESH_EXTS.includes(e);
+  if (type !== 'auto') return false;
+  if (e === 'obj' || e === 'stl') return true;
+  return e === 'ply' && typeof plyFaceCount === 'number' && plyFaceCount > 0;
+}
+
 /** What a file will import as, for the info panel. */
 export function describeKind(ext: string, type: BrowserImportType): string {
   const e = ext.toLowerCase();

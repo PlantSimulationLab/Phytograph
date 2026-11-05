@@ -378,3 +378,48 @@ test('type-ahead with nothing focused starts at the first row', async () => {
   await expect(entry(page, 'alpha.xyz')).toHaveAttribute('aria-selected', 'true');
   await page.getByTestId('file-browser-cancel').click();
 });
+
+test('a mesh gets up/forward axis options, applied as its rotation and remembered', async () => {
+  const { page } = session;
+  const meshDir = realpathSync(mkdtempSync(join(tmpdir(), 'phyto-browse-mesh-')));
+  try {
+    // A Y-up OBJ (the OBJ convention): a 2 m tall sliver standing along +Y.
+    writeFileSync(join(meshDir, 'yup.obj'), 'v 0 0 0\nv 0.1 0 0\nv 0 2 0\nf 1 2 3\n');
+    // A face-bearing PLY, which under Auto must read as a mesh, not a cloud.
+    writeFileSync(join(meshDir, 'tri.ply'),
+      'ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n'
+      + 'element face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n');
+
+    await openBrowser(page, 'import-auto');
+    await goTo(page, meshDir);
+
+    // The PLY's preview reports faces, so it gets mesh options, not columns.
+    await entry(page, 'tri.ply').click();
+    await expect(page.getByTestId('mesh-import-options')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('[data-testid="import-wizard-column"]')).toHaveCount(0);
+
+    // The default changes nothing; Up = Y picks the conventional -Z forward.
+    await entry(page, 'yup.obj').click();
+    await expect(page.getByTestId('mesh-import-up')).toHaveValue('Z');
+    await expect(page.getByTestId('mesh-import-forward')).toHaveValue('Y');
+    await page.getByTestId('mesh-import-up').selectOption('Y');
+    await expect(page.getByTestId('mesh-import-forward')).toHaveValue('-Z');
+    await expect(page.getByTestId('mesh-import-axes-note')).toContainText('90° about X');
+
+    await page.getByTestId('file-browser-import').click();
+    await expect(page.getByTestId('file-browser')).toBeHidden({ timeout: 30_000 });
+    const row = page.locator('[data-testid="mesh-row"][data-mesh-name="yup"]');
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    // File +Y (up) now points along Phytograph's +Z.
+    await expect(row).toHaveAttribute('data-mesh-rotation', '90.0,0.0,0.0');
+
+    // Reopening for another mesh starts from the last choice.
+    await openBrowser(page, 'import-mesh');
+    await goTo(page, meshDir);
+    await entry(page, 'tri.ply').click();
+    await expect(page.getByTestId('mesh-import-up')).toHaveValue('Y');
+    await page.getByTestId('file-browser-cancel').click();
+  } finally {
+    rmSync(meshDir, { recursive: true, force: true });
+  }
+});

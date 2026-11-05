@@ -3282,6 +3282,10 @@ export interface PointCloudPreviewResponse {
   // _detect_source_units (backend).
   detected_units?: string | null;
   units_certain?: boolean;
+  // PLY only: `element face N` from the header (0 = a point cloud). The import
+  // browser shows mesh options for a face-bearing PLY. Absent for other
+  // formats, and from a backend that predates it (treated as unknown).
+  face_count?: number | null;
 }
 
 // Cheaply inspect a point-cloud file for the import wizard. The backend reads

@@ -91,7 +91,8 @@ operating system's file dialog. It has three parts:
 - **Right:** the import options for the selected file. For a point cloud
   these are the [column, units, shift and trajectory options](#the-import-wizard)
   described below, previewed from the file as soon as you select it. For a
-  mesh, skeleton, scan XML or QSM it shows what the file will import as.
+  mesh it shows the [mesh axes](#mesh-axes). For a skeleton, scan XML or QSM
+  it shows what the file will import as.
 
 Select files with a click; <kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click adds and
 removes files, and <kbd>Shift</kbd>-click selects a range. The keyboard
@@ -440,6 +441,28 @@ data itself (see
 [Return type is detected, not declared](../concepts/scans.md#return-type-is-detected-not-declared)),
 so an XML without them costs you nothing on a real scan — it only means a
 later simulated re-run starts from the defaults.
+### Mesh axes
+
+Phytograph's scene is **Z up**, and a mesh is imported in the file's own
+coordinates. Many tools write **Y up** instead (OBJ files by convention, and
+most game and modeling exports), so such a mesh would land lying on its side.
+When you select a mesh in the import browser, set which of the **file's** axes
+is **Up** and which is **Forward**, as in Blender's importers:
+
+- **Up Z, Forward Y** (the default) imports the mesh exactly as the file has it.
+- **Up Y** picks **Forward −Z**, the OBJ/Blender convention, and stands a Y-up
+  mesh upright.
+
+The choice becomes the mesh's starting **rotation**, so the file's coordinates
+are untouched and you can adjust or undo it with the transform tools like any
+other rotation. One choice applies to every mesh you select, and the browser
+remembers it for your next mesh import.
+
+Under **Auto-detect**, a `.ply` gets the mesh axes once Phytograph has read its
+header and found faces; a `.ply` without faces is a point cloud and gets the
+point-cloud options instead. Meshes dropped onto the window import as the file
+has them.
+
 
 ### Importing textured meshes
 

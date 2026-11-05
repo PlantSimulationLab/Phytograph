@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import type { BrowserEntry, BrowserPlace, BrowserPlaces, ListDirResult } from '../../../shared/ipc';
 import { PointCloudImportOptions } from '../PointCloudImportOptions';
+import { MeshImportOptions } from './MeshImportOptions';
+import { DEFAULT_MESH_AXES, type MeshAxes } from '../../lib/meshAxes';
 import { showToast } from '../Toast';
 import { pickAndParseTrajectory } from '../../lib/trajectoryImport';
 import { PoseStreamParseError } from '../../lib/poseStream';
@@ -29,6 +31,7 @@ import {
   sortEntries,
   splitParent,
   splitPath,
+  takesMeshOptions,
   takesPointCloudOptions,
   typeAheadIndex,
   type BrowserEdit,
@@ -53,6 +56,10 @@ export interface FileBrowserResult {
   dir: string;
   // Options chosen here, per point-cloud path, so the import skips the wizard.
   wizardResults: Map<string, WizardResult>;
+  // The selected files that import as meshes, and the axes chosen for them
+  // (one choice for all, like the point-cloud options).
+  meshPaths: string[];
+  meshAxes: MeshAxes;
 }
 
 // A native-menu command (src/main/menu.ts) arriving while the browser is open.
@@ -67,6 +74,8 @@ interface FileBrowserDialogProps {
   menuHandlerRef?: React.MutableRefObject<BrowserMenuHandler | null>;
   initialDir: string | null;
   recentDirs: string[];
+  // The mesh axes last used, so a run of Y-up imports doesn't need re-picking.
+  initialMeshAxes?: MeshAxes;
   onCancel: () => void;
   onImport: (result: FileBrowserResult) => void;
 }
@@ -93,7 +102,7 @@ function formatDate(ms: number): string {
 }
 
 export function FileBrowserDialog({
-  importType, initialDir, recentDirs, onCancel, onImport, menuHandlerRef,
+  importType, initialDir, recentDirs, initialMeshAxes, onCancel, onImport, menuHandlerRef,
 }: FileBrowserDialogProps) {
   const api = window.electronAPI;
   const [places, setPlaces] = useState<BrowserPlaces | null>(null);
@@ -110,6 +119,7 @@ export function FileBrowserDialog({
   // it is primary again, and never leak onto another file.
   const [edits, setEdits] = useState<Edit[]>([]);
   const [importing, setImporting] = useState(false);
+  const [meshAxes, setMeshAxes] = useState<MeshAxes>(initialMeshAxes ?? DEFAULT_MESH_AXES);
   // Enter / double-click asks to import THIS selection once its previews
   // land. Holding the selection's key (not a flag) means changing the
   // selection or the folder in the meantime cancels the request.
@@ -131,6 +141,8 @@ export function FileBrowserDialog({
     setHistory(h);
   };
   const pathInputRef = useRef<HTMLInputElement>(null);
+  // navSeq at the moment the path bar last gained focus (see navigate).
+  const pathFocusSeq = useRef(-1);
 
   const sep = listing?.sep ?? places?.sep ?? '/';
   const dir = listing?.dir ?? '';
@@ -175,9 +187,13 @@ export function FileBrowserDialog({
     setBusy(false);
     locRef.current = res.dir; // the resolved spelling (a typed file -> its folder)
     setListing(res);
-    // Don't overwrite what the user is typing in the path bar: a listing that
-    // lands mid-edit (the start-up one, most often) would clobber it.
-    if (opts.fromPathBar || document.activeElement !== pathInputRef.current) setPathDraft(res.dir);
+    // Don't overwrite what the user is typing in the path bar. Checking focus
+    // HERE is not enough: the update commits a moment later, and if the user
+    // focused the bar and selected its text in between, the commit puts the
+    // caret at the end and their typing is appended to the old path (seen as
+    // '<start folder>/Users/...'). So a listing may rewrite the bar only if
+    // the bar has not been focused since this navigation began.
+    if (opts.fromPathBar || pathFocusSeq.current < seq) setPathDraft(res.dir);
     setQuery('');
     const hit = select && res.ok ? res.entries.find((e) => e.name === select) : undefined;
     setSel(hit ? { selected: [hit.path], anchor: hit.path, focus: hit.path } : EMPTY_SELECTION);
@@ -232,14 +248,28 @@ export function FileBrowserDialog({
     () => sel.selected.map((p) => byPath.get(p)).filter((e): e is BrowserEntry => !!e && e.kind === 'file'),
     [sel.selected, byPath],
   );
-  const pcPaths = useMemo(
+  // Files that MAY be point clouds get a header preview. Under Auto that
+  // includes a .ply, which may turn out to be a mesh: the preview says so
+  // (face_count), and it then gets the mesh options instead.
+  const previewPaths = useMemo(
     () => selectedFiles.filter((e) => takesPointCloudOptions(e.ext, importType)).map((e) => e.path),
     [selectedFiles, importType],
   );
-  const primary = pcPaths[0] ?? null;
-
   const skip = useCallback((p: string) => (byPath.get(p)?.placeholder ? PLACEHOLDER_REASON : null), [byPath]);
-  const { previews, version } = useScanPreviews(pcPaths, skip);
+  const { previews, version } = useScanPreviews(previewPaths, skip);
+  const meshPaths = useMemo(() => selectedFiles.filter((e) => {
+    const st = previews.get(e.path);
+    const faces = e.ext === 'ply' && st?.status === 'ok' ? st.preview.face_count : undefined;
+    return takesMeshOptions(e.ext, importType, faces);
+  }).map((e) => e.path),
+  // `version` stands for the contents of the long-lived `previews` map.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [selectedFiles, importType, version]);
+  const pcPaths = useMemo(() => {
+    const meshes = new Set(meshPaths);
+    return previewPaths.filter((p) => !meshes.has(p));
+  }, [previewPaths, meshPaths]);
+  const primary = pcPaths[0] ?? null;
   // Memoized: the dialog re-renders on every scroll frame, and a selection
   // can be a whole folder of scans.
   const batch = useMemo(() => {
@@ -282,8 +312,8 @@ export function FileBrowserDialog({
       showToast({ title: `Couldn't open ${refused.length} file(s); browse to the folder again and retry.`, type: 'error' });
       return;
     }
-    onImport({ paths, dir, wizardResults: batchResults(pcPaths, batch.configs) });
-  }, [canImport, api, selectedFiles, onImport, dir, pcPaths, batch.configs]);
+    onImport({ paths, dir, wizardResults: batchResults(pcPaths, batch.configs), meshPaths, meshAxes });
+  }, [canImport, api, selectedFiles, onImport, dir, pcPaths, batch.configs, meshPaths, meshAxes]);
 
   // Enter / double-click on a file asks to import; it happens as soon as the
   // previews it needs have landed.
@@ -402,7 +432,18 @@ export function FileBrowserDialog({
   const toggleSort = (key: SortKey) => setSort((s) => ({ key, desc: s.key === key ? !s.desc : false }));
   const sortMark = (key: SortKey) => (sort.key === key ? (sort.desc ? ' ↓' : ' ↑') : '');
 
-  const otherFiles = selectedFiles.filter((e) => !takesPointCloudOptions(e.ext, importType));
+  const meshSet = new Set(meshPaths);
+  const pcSet = new Set(pcPaths);
+  const meshFiles = selectedFiles.filter((e) => meshSet.has(e.path));
+  const otherFiles = selectedFiles.filter((e) => !meshSet.has(e.path) && !pcSet.has(e.path));
+  const infoCard = (e: BrowserEntry) => (
+    <div key={e.path} data-testid="file-browser-info" className="border border-neutral-700 rounded-lg px-3 py-2 text-[11px] text-neutral-300 space-y-0.5">
+      <div className="text-xs text-white truncate">{e.name}</div>
+      <div>{meshSet.has(e.path) ? 'Mesh' : describeKind(e.ext, importType)}</div>
+      <div className="text-neutral-500">{formatSize(e.size)} · modified {formatDate(e.mtimeMs)}</div>
+      {e.placeholder && <div className="text-amber-300/90">Stored online only; it downloads when imported.</div>}
+    </div>
+  );
   const primaryEntry = primary ? byPath.get(primary) : undefined;
 
   const navBtn = 'p-1.5 rounded text-neutral-300 hover:bg-neutral-700 disabled:opacity-30 disabled:hover:bg-transparent';
@@ -440,6 +481,8 @@ export function FileBrowserDialog({
           <input
             data-testid="file-browser-path"
             ref={pathInputRef}
+            onFocus={() => { pathFocusSeq.current = navSeq.current; }}
+            onBlur={() => { if (!pathDraft.trim() && dir) setPathDraft(dir); }}
             value={pathDraft}
             onChange={(e) => setPathDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -630,21 +673,28 @@ export function FileBrowserDialog({
               />
             )}
 
+            {meshFiles.length > 0 && (
+              <div className="space-y-2">
+                {!primary && (
+                  <div className="text-xs text-neutral-200">
+                    Options for <span className="font-medium text-white" data-testid="file-browser-primary">
+                      {meshFiles.length === 1 ? meshFiles[0].name : `${meshFiles.length} meshes`}
+                    </span>
+                  </div>
+                )}
+                <MeshImportOptions axes={meshAxes} onChange={setMeshAxes} count={meshFiles.length} />
+                {meshFiles.slice(0, 50).map(infoCard)}
+              </div>
+            )}
+
             {otherFiles.length > 0 && (
               <div className="space-y-2">
-                {primary && (
+                {(primary || meshFiles.length > 0) && (
                   <p className="text-[11px] text-neutral-400">
                     {otherFiles.length} other selected file{otherFiles.length > 1 ? 's' : ''} import{otherFiles.length > 1 ? '' : 's'} with no options:
                   </p>
                 )}
-                {otherFiles.slice(0, 50).map((e) => (
-                  <div key={e.path} data-testid="file-browser-info" className="border border-neutral-700 rounded-lg px-3 py-2 text-[11px] text-neutral-300 space-y-0.5">
-                    <div className="text-xs text-white truncate">{e.name}</div>
-                    <div>{describeKind(e.ext, importType)}</div>
-                    <div className="text-neutral-500">{formatSize(e.size)} · modified {formatDate(e.mtimeMs)}</div>
-                    {e.placeholder && <div className="text-amber-300/90">Stored online only; it downloads when imported.</div>}
-                  </div>
-                ))}
+                {otherFiles.slice(0, 50).map(infoCard)}
               </div>
             )}
           </aside>

@@ -511,7 +511,12 @@ const isDescendantOfGridGroup = (
 
 // Import function refs for mesh/skeleton
 export interface ImportRefs {
-  importMesh: (mesh: Omit<MeshEntry, 'id'>) => void;
+  // `transform` seeds the mesh's initial pose (the File -> Import browser's
+  // up/forward axes arrive as `rotation`), recorded in the same undoable add.
+  importMesh: (
+    mesh: Omit<MeshEntry, 'id'>,
+    transform?: { rotation?: { x: number; y: number; z: number } },
+  ) => void;
   importSkeleton: (skeleton: Omit<SkeletonEntry, 'id'>) => void;
   // Import a QSM parsed from a cylinder CSV by the backend. The entry is already
   // in /api/qsm/build's response shape, so it renders exactly like a built one.
