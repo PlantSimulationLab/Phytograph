@@ -24,8 +24,8 @@ test('attaches a trajectory file to an imported cloud through the wizard', async
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 60_000 });
 
     // Import the point cloud — the wizard intercepts every path-backed import.
-    await importFiles(app, page, 'import-point-cloud', cloud);
-    const wizard = page.getByTestId('import-wizard');
+    await importFiles(app, page, 'import-point-cloud', cloud, { keepOpen: true });
+    const wizard = page.getByTestId('file-browser');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
 
     // The optional trajectory section offers an import button for static-by-default

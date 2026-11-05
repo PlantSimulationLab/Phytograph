@@ -232,10 +232,10 @@ test.describe('QSM CSV import', () => {
 
     await resetToFreshScene(app, page);
 
-    // The inverse: an ordinary point-cloud CSV still opens the wizard and
-    // imports as a scan, with no QSM created.
-    await importFiles(app, page, 'import-auto', [CLOUD_CSV]);
-    await expect(page.getByTestId('import-wizard')).toBeVisible({ timeout: 60_000 });
+    // The inverse: an ordinary point-cloud CSV still gets point-cloud import
+    // options (in the File → Import browser) and imports as a scan, with no QSM created.
+    await importFiles(app, page, 'import-auto', [CLOUD_CSV], { keepOpen: true });
+    await expect(page.getByTestId('file-browser')).toBeVisible({ timeout: 60_000 });
     await completeImportWizard(page);
     await expect(page.getByTestId('scan-row')).toHaveCount(1, { timeout: 60_000 });
     await expect(page.getByTestId('qsm-row')).toHaveCount(0);

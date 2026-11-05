@@ -22,6 +22,13 @@ export const IPC = {
   // renderer -> main (one-way): allowlist a drag-drop / file-input path so the
   // fs handlers will read it (it's a genuine user selection).
   FsAllowPath: 'fs:allowPath',
+  // In-app file browser (File -> Import). Listing returns names and metadata,
+  // never contents; a file becomes readable only through FsBrowserGrant, and
+  // only if a listing returned it and it is an importable format outside
+  // hidden folders (src/main/fileBrowser.ts).
+  FsListDir: 'fs:listDir',
+  FsListPlaces: 'fs:listPlaces',
+  FsBrowserGrant: 'fs:browserGrant',
   // App info
   AppGetCwd: 'app:getCwd',
   // Persistent key/value store
@@ -126,6 +133,44 @@ export interface OpenDialogOptions {
   multi?: boolean;
   // Pick a directory instead of file(s). Returns the chosen folder path string.
   directory?: boolean;
+}
+
+// ─── In-app file browser ───────────────────────────────────────────────────
+
+export interface BrowserEntry {
+  name: string;
+  path: string;
+  kind: 'file' | 'dir';
+  size: number;
+  mtimeMs: number;
+  // Lower-case extension without the dot ('' for none / directories).
+  ext: string;
+  // A cloud-storage placeholder (iCloud / Dropbox / Box "online-only"): it
+  // reports a real size but has no data on disk, so reading it either blocks
+  // on a download or fails. The browser marks it and skips the preview.
+  placeholder: boolean;
+}
+
+export type ListDirResult =
+  | { ok: true; dir: string; parent: string | null; sep: string; entries: BrowserEntry[] }
+  | { ok: false; dir: string; parent: string | null; sep: string; code: string; message: string };
+
+export interface BrowserPlace {
+  label: string;
+  path: string;
+  kind: 'home' | 'folder' | 'volume' | 'root';
+}
+
+export interface BrowserPlaces {
+  home: string;
+  sep: string;
+  places: BrowserPlace[];
+}
+
+export interface BrowserGrantResult {
+  granted: string[];
+  // Paths no listing in this session returned; not made readable.
+  refused: string[];
 }
 
 export interface SaveDialogOptions {

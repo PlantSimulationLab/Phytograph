@@ -220,7 +220,7 @@ test('renames the NAME THE USER SEES, everywhere it is shown', async () => {
   // Give `band` a display name at import that is not a legal slug, the way a
   // user naming a column "Band Level [m]" in the wizard would.
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE, { keepOpen: true });
   await page.getByTestId('import-wizard-name').first().fill('Band Level [m]');
   await completeImportWizard(page);
   const scanRow = page.locator('[data-testid="scan-row"][data-scan-name="scalar-bands"]');

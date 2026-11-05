@@ -34,6 +34,7 @@ function isImportCancel(err: unknown, signal?: AbortSignal): boolean {
 }
 import { useScene } from "./state/sceneStore";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
+import { FileBrowserDialog, type BrowserMenuHandler, type FileBrowserResult } from "./components/fileBrowser/FileBrowserDialog";
 import { registerCategoricalSlug, registerContinuousSlug } from "./lib/classification";
 import { parseHeliosScanXml, HeliosXmlParseError } from "./lib/heliosScanXml";
 import { resolveTargets } from "./lib/bulkActions";
@@ -373,7 +374,22 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // the promise. Meshes/skeletons never go through here.
   const [wizardInputs, setWizardInputs] = useState<WizardScanInput[] | null>(null);
   const wizardResolveRef = useRef<((r: WizardResult[] | null) => void) | null>(null);
+  // Options the user already chose in the File -> Import browser, keyed by
+  // path. handleMenuImport adds its entries for the duration of its import
+  // only, so the wizard is skipped for exactly those files: each entry is
+  // consumed when used and removed in a `finally`, so a later drag-drop of
+  // the same file still gets the wizard.
+  const presetWizardResultsRef = useRef<Map<string, WizardResult> | null>(null);
   const openImportWizard = useCallback((inputs: WizardScanInput[]): Promise<WizardResult[] | null> => {
+    const preset = presetWizardResultsRef.current;
+    if (preset && inputs.length > 0 && inputs.every((i) => preset.has(i.path))) {
+      const results = inputs.map((input) => {
+        const r = preset.get(input.path)!;
+        preset.delete(input.path);
+        return { ...r, input, asciiFormat: input.asciiFormatHint ?? r.asciiFormat };
+      });
+      return Promise.resolve(results);
+    }
     return new Promise((resolve) => {
       wizardResolveRef.current = resolve;
       setWizardInputs(inputs);
@@ -385,6 +401,51 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     wizardResolveRef.current = null;
     resolve?.(results);
   }, []);
+
+  // File -> Import browser (FileBrowserDialog): same promise-in-a-ref shape as
+  // the wizard. Remembers the last folder per import type and the ten most
+  // recent import folders.
+  const [browserRequest, setBrowserRequest] = useState<
+    { type: ImportType; initialDir: string | null; recentDirs: string[] } | null
+  >(null);
+  const browserResolveRef = useRef<((r: FileBrowserResult | null) => void) | null>(null);
+  // While the browser is open, native-menu commands go to it (see
+  // BrowserMenuHandler): ⌘A must select files, not every scan behind it, and
+  // a second File -> Import must not replace this one's pending promise.
+  const browserMenuRef = useRef<BrowserMenuHandler | null>(null);
+  const browserOpenRef = useRef(false);
+  browserOpenRef.current = browserRequest !== null;
+  const openFileBrowser = useCallback(async (type: ImportType): Promise<FileBrowserResult | null> => {
+    const store = window.electronAPI?.store;
+    const [byType, recent] = await Promise.all([
+      store?.get<Record<string, string>>('fileBrowser.lastDirByType').catch(() => undefined),
+      store?.get<string[]>('fileBrowser.recentDirs').catch(() => undefined),
+    ]);
+    const recentDirs = Array.isArray(recent) ? recent.filter((d) => typeof d === 'string') : [];
+    const initialDir = byType?.[type] ?? recentDirs[0] ?? null;
+    return new Promise((resolve) => {
+      browserResolveRef.current = resolve;
+      setBrowserRequest({ type, initialDir, recentDirs });
+    });
+  }, []);
+  const settleBrowser = useCallback((result: FileBrowserResult | null) => {
+    const req = browserRequest;
+    setBrowserRequest(null);
+    const resolve = browserResolveRef.current;
+    browserResolveRef.current = null;
+    if (result && req) {
+      const store = window.electronAPI?.store;
+      void (async () => {
+        try {
+          const byType = (await store?.get<Record<string, string>>('fileBrowser.lastDirByType')) ?? {};
+          await store?.set('fileBrowser.lastDirByType', { ...byType, [req.type]: result.dir });
+          const recent = [result.dir, ...req.recentDirs.filter((d) => d !== result.dir)].slice(0, 10);
+          await store?.set('fileBrowser.recentDirs', recent);
+        } catch { /* remembering folders is a convenience */ }
+      })();
+    }
+    resolve?.(result);
+  }, [browserRequest]);
 
   // Build the Scans from a finished wizard result: run the real import with the
   // chosen column plan, register any categorical slugs, and return one Scan PER
@@ -1952,42 +2013,28 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   }, [handleFileUpload, handleMultipleFiles]);
 
   const handleMenuImport = useCallback(async (importType: ImportType) => {
-    const filtersFor = (t: ImportType): { name: string; extensions: string[] }[] => {
-      const strip = (fmts: { ext: string }[]) => fmts.map(f => f.ext.replace(/^\./, ''));
-      const pc = strip(POINT_CLOUD_FORMATS);
-      const mesh = strip(MESH_FORMATS);
-      const skel = strip(SKELETON_FORMATS);
-      switch (t) {
-        case 'pointcloud':
-          return [{ name: 'Point Clouds', extensions: pc }];
-        case 'mesh':
-          return [{ name: 'Meshes', extensions: mesh }];
-        case 'skeleton':
-          return [{ name: 'Skeletons', extensions: skel }];
-        case 'scanxml':
-          return [{ name: 'Helios Scan XML', extensions: ['xml'] }];
-        case 'qsm':
-          return [{ name: 'QSM CSV', extensions: ['csv'] }];
-        default:
-          return [{ name: 'Supported Files', extensions: [...new Set([...pc, ...mesh, ...skel, 'xml'])] }];
-      }
-    };
-
     setSettingsOpen(false);
-    let selected: string | string[] | null;
+    const picked = await openFileBrowser(importType);
+    if (!picked || picked.paths.length === 0) return; // user canceled
+    // Merged into the shared map, and only OUR entries removed afterwards: a
+    // second File -> Import can start while this one is still reading files,
+    // and neither may wipe the other's options (sending already-configured
+    // files to the wizard) or outlive its own import.
+    const presets = presetWizardResultsRef.current ?? new Map<string, WizardResult>();
+    presetWizardResultsRef.current = presets;
+    for (const [path, r] of picked.wizardResults) presets.set(path, r);
     try {
-      selected = await window.electronAPI.dialog.open({ multi: true, filters: filtersFor(importType) });
-    } catch (err) {
-      showToast({ title: err instanceof Error ? err.message : 'Failed to open file dialog', type: 'error' });
-      return;
+      await importPathsByType(picked.paths, importType);
+    } finally {
+      for (const [path, r] of picked.wizardResults) {
+        if (presets.get(path) === r) presets.delete(path);
+      }
+      if (presets.size === 0 && presetWizardResultsRef.current === presets) presetWizardResultsRef.current = null;
     }
-    if (!selected) return; // user canceled
-    const paths = Array.isArray(selected) ? selected : [selected];
-    await importPathsByType(paths, importType);
-  }, [importPathsByType]);
+  }, [importPathsByType, openFileBrowser]);
 
   // Expose mesh import to the viewer's Tools toolbar / Tools menu "Import Model"
-  // command. App owns the native import dialog (handleMenuImport), so the viewer
+  // command. App owns the import browser (handleMenuImport), so the viewer
   // reaches it through this global — same bridge pattern as __handleUndo.
   useEffect(() => {
     (window as any).__importMesh = () => { void handleMenuImport('mesh'); };
@@ -2078,13 +2125,17 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   }, [sceneObjectCount, unexportedLabelClouds, unchangedSinceProjectSave]);
 
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
-  // Most menu items map to existing handlers; File → Import routes through the
-  // native file dialog (handleMenuImport) rather than the renderer dropzone.
+  // Most menu items map to existing handlers; File → Import opens the in-app
+  // file browser (handleMenuImport) rather than the renderer dropzone.
   useEffect(() => {
     const unsubscribe = window.electronAPI.onMenuCommand((payload) => {
       // A project save/open is modal (see projectBusyRef in the viewer): a
       // menu edit landing mid-save would make the file disagree with itself.
       if ((window as any).__projectBusy) return;
+      if (browserOpenRef.current) {
+        browserMenuRef.current?.(payload.kind);
+        return;
+      }
       switch (payload.kind) {
         case 'new':
           setNewConfirmOpen(true);
@@ -2527,8 +2578,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       )}
 
       {/* Import wizard — shown for every path-backed point-cloud import
-          (drag-drop, file picker, and Helios XML). Settles the pending
+          whose options weren't already chosen in the File -> Import browser
+          (drag-drop, Open-With, Helios XML, RIEGL). Settles the pending
           openImportWizard promise on Import (results) or Cancel (null). */}
+      {/* File -> Import browser. Settles openFileBrowser's promise. */}
+      {browserRequest && (
+        <FileBrowserDialog
+          importType={browserRequest.type}
+          initialDir={browserRequest.initialDir}
+          recentDirs={browserRequest.recentDirs}
+          menuHandlerRef={browserMenuRef}
+          onCancel={() => settleBrowser(null)}
+          onImport={(r) => settleBrowser(r)}
+        />
+      )}
+
       {wizardInputs && (
         <PointCloudImportWizard
           inputs={wizardInputs}

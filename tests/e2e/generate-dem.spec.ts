@@ -259,7 +259,7 @@ test('a DTM carries color-by layers and exports the selected one as a raster', a
   const ascPath = join(tmpdir(), `phytograph_pd_e2e_${Date.now()}.asc`);
   if (existsSync(ascPath)) rmSync(ascPath);
   try {
-    await importFiles(app, page, 'import-point-cloud', FIXTURE);
+    await importFiles(app, page, 'import-point-cloud', FIXTURE, { keepOpen: true });
     // The fixture's 4th column is a small-integer class id, so the wizard no
     // longer guesses it is intensity — it arrives as an unnamed Scalar. The
     // intensity layer asserted below needs an intensity channel, so assign the

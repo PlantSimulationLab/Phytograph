@@ -118,39 +118,31 @@ async function main() {
     await page.screenshot({ path: join(outDir, '01-empty-viewer.png') });
     console.log('Saved 01-empty-viewer.png');
 
-    // ── 03: Viewer with the fixture cloud loaded ───────────────────────
-    // Import through the File → Import menu pathway, the same one
-    // tests/e2e/helpers/importFiles.ts drives. Setting the dropzone's hidden
-    // file input directly does NOT work: the renderer reads the chosen file's
-    // bytes over `fs:readBinary`, which is gated by the main process's fs
-    // allowlist (src/main/fsAllowlist.ts), and only the real `dialog:open`
-    // handler seeds that allowlist. A setInputFiles() import is therefore
-    // denied downstream and never produces a scan row — it fails silently,
-    // which is exactly how this script broke.
+    // ── 02: The File → Import browser ──────────────────────────────────
+    // File → Import opens the in-app browser (FileBrowserDialog), the same
+    // pathway tests/e2e/helpers/importFiles.ts drives. Typing the fixture's
+    // full path into the path bar opens its folder with it selected, and the
+    // options panel previews it. (Setting the dropzone's hidden file input
+    // would not import: the fs allowlist only admits paths main granted.)
     const fixtureAbs = resolve(repoRoot, FIXTURE);
     await page.getByTestId('app-dropzone-input').waitFor({ state: 'attached', timeout: 60_000 });
-    await app.evaluate(async ({ ipcMain }, fixturePath) => {
-      ipcMain.removeHandler('dialog:open');
-      const allow = globalThis.__phytographAllowPath;
-      allow?.(fixturePath);
-      ipcMain.handle('dialog:open', async () => [fixturePath]);
-    }, fixtureAbs);
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'import-point-cloud' });
     });
-    // Every path-backed point-cloud import now goes through the import wizard
-    // (column mapping / preview), so it must be confirmed before anything lands
-    // in the scene. Mirrors tests/e2e/helpers/importWizard.ts.
-    const wizard = page.getByTestId('import-wizard');
-    await wizard.waitFor({ state: 'visible', timeout: 120_000 });
-    const next = page.getByTestId('import-wizard-next');
-    while ((await next.isVisible()) && (await next.isEnabled())) await next.click();
-    const importBtn = page.getByTestId('import-wizard-import');
-    await importBtn.waitFor({ state: 'visible', timeout: 120_000 });
+    const browser = page.getByTestId('file-browser');
+    await browser.waitFor({ state: 'visible', timeout: 120_000 });
+    const pathBar = page.getByTestId('file-browser-path');
+    await pathBar.fill(fixtureAbs);
+    await pathBar.press('Enter');
+    const importBtn = page.getByTestId('file-browser-import');
     for (let i = 0; i < 600 && (await importBtn.isDisabled()); i++) await page.waitForTimeout(200);
-    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: join(outDir, '02-import-browser.png') });
+    console.log('Saved 02-import-browser.png');
+
+    // ── 03: Viewer with the fixture cloud loaded ───────────────────────
     await importBtn.click();
-    await wizard.waitFor({ state: 'hidden', timeout: 120_000 });
+    await browser.waitFor({ state: 'hidden', timeout: 120_000 });
 
     // Wait for the cloud to appear in the scene panel. The row testid is
     // "scan-row" (matches tests/e2e). Allow a generous timeout — a real TLS

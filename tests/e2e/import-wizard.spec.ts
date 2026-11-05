@@ -30,11 +30,11 @@ test.beforeEach(async () => {
 
 test('wizard previews columns and imports with auto-detect', async () => {
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'), { keepOpen: true });
 
   // The wizard appears with a column-mapping table. scalars.xyz has 6
   // columns (X, Y, Z, Timestamp, Deviation, Target Index).
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
   const cols = page.getByTestId('import-wizard-column');
   await expect(cols).toHaveCount(6, { timeout: 30_000 });
@@ -45,7 +45,7 @@ test('wizard previews columns and imports with auto-detect', async () => {
   await expect(page.getByTestId('import-wizard-preview-row')).toHaveCount(10);
 
   // X/Y/Z auto-detected → Import enables.
-  const importBtn = page.getByTestId('import-wizard-import');
+  const importBtn = page.getByTestId('file-browser-import');
   await expect(importBtn).toBeEnabled();
   await importBtn.click();
   await expect(wizard).toBeHidden();
@@ -57,9 +57,9 @@ test('wizard previews columns and imports with auto-detect', async () => {
 
 test('marking a column as a Label in the wizard yields a class legend', async () => {
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   // Column index 5 is "Target Index[]" — a small-integer class column. It
@@ -71,7 +71,7 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   await role.selectOption('label');
   await expect(role).toHaveValue('label');
 
-  await page.getByTestId('import-wizard-import').click();
+  await page.getByTestId('file-browser-import').click();
   await expect(wizard).toBeHidden();
 
   const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
@@ -107,9 +107,9 @@ test('a column of text imports as named classes', async () => {
   // convert string to float". It must instead arrive as class columns whose
   // legend shows the file's own names.
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'text-labels.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'text-labels.xyz'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId('import-wizard-column')).toHaveCount(5, { timeout: 30_000 });
 
@@ -119,7 +119,7 @@ test('a column of text imports as named classes', async () => {
   await roleAt(3).selectOption('label');
   await roleAt(4).selectOption('label');
 
-  await page.getByTestId('import-wizard-import').click();
+  await page.getByTestId('file-browser-import').click();
   await expect(wizard).toBeHidden();
 
   const row = page.locator('[data-testid="scan-row"][data-scan-name="text-labels"]');
@@ -158,9 +158,9 @@ test('mapping columns to Scan Row/Column Index carries the raster grid', async (
   // gap-filling miss-recovery path finds the raster by name — we assert that by
   // coloring the scan by each slug.
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'raster-grid.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'raster-grid.xyz'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   const roleAt = (colIndex: number) =>
@@ -173,7 +173,7 @@ test('mapping columns to Scan Row/Column Index carries the raster grid', async (
   await roleAt(4).selectOption('column_index');
   await expect(roleAt(4)).toHaveValue('column_index');
 
-  await page.getByTestId('import-wizard-import').click();
+  await page.getByTestId('file-browser-import').click();
   await expect(wizard).toBeHidden();
 
   const row = page.locator('[data-testid="scan-row"][data-scan-name="raster-grid"]');
@@ -197,9 +197,9 @@ test('unticking Import drops an ASCII column from the imported cloud', async () 
   // must be GONE from the Color-by menu — the ASCII skip travels as role 'skip'
   // inside the column plan, and the backend never materializes the column.
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   const colAt = (i: number) =>
@@ -215,7 +215,7 @@ test('unticking Import drops an ASCII column from the imported cloud', async () 
   // The role select follows the checkbox, so the two controls never disagree.
   await expect(colAt(4).getByTestId('import-wizard-role')).toHaveValue('skip');
 
-  await page.getByTestId('import-wizard-import').click();
+  await page.getByTestId('file-browser-import').click();
   await expect(wizard).toBeHidden();
 
   const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
@@ -263,8 +263,8 @@ test('unticking Import drops a field from an in-file format (PLY)', async () => 
 
   // Control run: import untouched, and confirm reflectance IS offered. Without
   // this half, a bug that dropped every scalar would pass the assertion below.
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'tiny-scalars.ply'));
-  await expect(page.getByTestId('import-wizard')).toBeVisible({ timeout: 30_000 });
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'tiny-scalars.ply'), { keepOpen: true });
+  await expect(page.getByTestId('file-browser')).toBeVisible({ timeout: 30_000 });
   await completeImportWizard(page);
   await expect(page.locator('[data-testid="scan-row"]').first())
     .toBeVisible({ timeout: 20_000 });
@@ -274,8 +274,8 @@ test('unticking Import drops a field from an in-file format (PLY)', async () => 
 
   // Same file again, this time unticking reflectance.
   await resetToFreshScene(session.app, session.page);
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'tiny-scalars.ply'));
-  const wizard = page.getByTestId('import-wizard');
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'tiny-scalars.ply'), { keepOpen: true });
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   const reflCol = page.locator('[data-testid="import-wizard-column"]')
@@ -309,9 +309,9 @@ test('E57 fixed columns display their real roles, not a Scalar fallback', async 
   // Scalar/Label options, so x/y/z fell back to displaying the first option
   // ("Scalar"). structured-scan.e57 carries x/y/z + intensity.
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'structured-scan.e57'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'structured-scan.e57'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   // Columns are x, y, z, intensity (in order). Each column's role select shows
@@ -344,9 +344,9 @@ test('E57 with color shows RGB columns but hides the 0-255/0-1 toggle', async ()
   // (buildColumnPlan returns null for non-remappable scans, so it has no effect).
   // structured-scan-color.e57 carries x/y/z + intensity + RGB.
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'structured-scan-color.e57'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'structured-scan-color.e57'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   // The color columns are present (red/green/blue), proving the toggle's
@@ -370,7 +370,9 @@ test('E57 with color shows RGB columns but hides the 0-255/0-1 toggle', async ()
 test('wizard steps through a multi-file import', async () => {
   const { app, page } = session;
   // Two distinct point clouds at once → one wizard stepping through both.
-  await importFiles(app, page, 'import-point-cloud', [join(FIXTURES, 'tiny.xyz'), join(FIXTURES, 'scalars.xyz')]);
+  // A drop: files that arrive with nothing chosen yet get the modal wizard,
+  // which steps through them. (File → Import uses the browser instead.)
+  await page.getByTestId('app-dropzone-input').setInputFiles([join(FIXTURES, 'tiny.xyz'), join(FIXTURES, 'scalars.xyz')]);
 
   const wizard = page.getByTestId('import-wizard');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -431,7 +433,9 @@ test('apply-to-all carries edits made AFTER ticking it to every scan', async () 
   // file's original name.
   const { app, page } = session;
   const files = await fixtureCopies('scalars.xyz', ['applyall-a', 'applyall-b']);
-  await importFiles(app, page, 'import-point-cloud', files);
+  // A drop: files that arrive with nothing chosen yet get the modal wizard,
+  // which steps through them. (File → Import uses the browser instead.)
+  await page.getByTestId('app-dropzone-input').setInputFiles(files);
 
   const wizard = page.getByTestId('import-wizard');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -465,7 +469,9 @@ test('apply-to-all renames an in-file (PLY) field on every scan', async () => {
   // second import reused the first's octree and its labels).
   const { app, page } = session;
   const files = await fixtureCopies('tiny-scalars.ply', ['plyall-a', 'plyall-b']);
-  await importFiles(app, page, 'import-point-cloud', files);
+  // A drop: files that arrive with nothing chosen yet get the modal wizard,
+  // which steps through them. (File → Import uses the browser instead.)
+  await page.getByTestId('app-dropzone-input').setInputFiles(files);
 
   const wizard = page.getByTestId('import-wizard');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -498,11 +504,11 @@ test('a params-less import still expands to show its fields and extent', async (
   // most pressing — because the Color-by dropdown hides constant and builtin
   // columns and so cannot distinguish "dropped" from "kept but flat".
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId('import-wizard-import').click();
+  await page.getByTestId('file-browser-import').click();
   await expect(wizard).toBeHidden();
 
   const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
@@ -569,9 +575,9 @@ test('a params-less import still expands to show its fields and extent', async (
 // matched.
 test('wizard warning text is selectable so it can be copied', async () => {
   const { app, page } = session;
-  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'), { keepOpen: true });
 
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
 
   // Untick Target Index (col 5) — a PROTECTED slug, so the wizard raises its

@@ -257,6 +257,13 @@
       }
     ],
     "mac": {
+      "extendInfo": {
+        "NSDesktopFolderUsageDescription": "Phytograph lists this folder so you can choose point clouds, meshes and other files to import.",
+        "NSDocumentsFolderUsageDescription": "Phytograph lists this folder so you can choose point clouds, meshes and other files to import.",
+        "NSDownloadsFolderUsageDescription": "Phytograph lists this folder so you can choose point clouds, meshes and other files to import.",
+        "NSRemovableVolumesUsageDescription": "Phytograph lists files on this drive so you can choose scans to import.",
+        "NSNetworkVolumesUsageDescription": "Phytograph lists files on this network volume so you can choose scans to import."
+      },
       "category": "public.app-category.education",
       "icon": "build/icon.icns",
       "hardenedRuntime": true,

@@ -30,8 +30,8 @@ test('a georeferenced moving-platform scan draws its trajectory in the viewport'
   try {
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 90_000 });
 
-    await importFiles(app, page, 'import-point-cloud', join(FIX, 'canopy_utm.xyz'));
-    await expect(page.getByTestId('import-wizard')).toBeVisible({ timeout: 60_000 });
+    await importFiles(app, page, 'import-point-cloud', join(FIX, 'canopy_utm.xyz'), { keepOpen: true });
+    await expect(page.getByTestId('file-browser')).toBeVisible({ timeout: 60_000 });
 
     await stubOpenDialog(app, join(FIX, 'flight.out'));
     await page.getByTestId('import-wizard-trajectory-import').click();

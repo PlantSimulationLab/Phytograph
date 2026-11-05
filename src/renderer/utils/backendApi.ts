@@ -3292,10 +3292,17 @@ export async function previewPointCloud(
   filePath: string,
   asciiFormat?: string | null,
   maxRows = 20,
+  // Caller-side cancel (the file browser drops a preview the moment the user
+  // clicks on to another file). An abort through it rejects with the raw
+  // AbortError, not a "backend unreachable" message, so callers can ignore it.
+  signal?: AbortSignal,
 ): Promise<PointCloudPreviewResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 60000, '/api/pointcloud/preview');
+  const forwardAbort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) forwardAbort();
+  else signal?.addEventListener('abort', forwardAbort, { once: true });
   try {
     const response = await fetch(`${baseUrl}/api/pointcloud/preview`, {
       method: 'POST',
@@ -3315,8 +3322,17 @@ export async function previewPointCloud(
     return (await response.json()) as PointCloudPreviewResponse;
   } catch (error) {
     clearTimeout(timeoutId);
+    if (signal?.aborted) throw error;
     console.error('pointcloud preview failed:', error);
-    throw describeBackendError(error, 'Preview');
+    const described = describeBackendError(error, 'Preview');
+    // Says nothing about the FILE: the backend was unreachable or slow. The
+    // file browser retries these instead of keeping the failure.
+    if (error instanceof Error && (isBackendUnreachable(error) || error instanceof BackendTimeoutError)) {
+      (described as Error & { transient?: boolean }).transient = true;
+    }
+    throw described;
+  } finally {
+    signal?.removeEventListener('abort', forwardAbort);
   }
 }
 

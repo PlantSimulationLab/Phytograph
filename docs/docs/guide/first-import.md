@@ -29,7 +29,9 @@ You have four ways to import:
     Open **File → Import** and pick **Auto-detect** to let Phytograph
     choose the format, or force a specific one (**Point Cloud**, **Mesh**,
     **Skeleton**) when auto-detection picks the wrong type for an
-    ambiguous format like `.ply`.
+    ambiguous format like `.ply`. Phytograph's import browser opens. Find
+    your file, check its options on the right, and click **Import**. See
+    [The import browser](../workflows/import-export.md#the-import-browser).
 
 === "Command palette"
 

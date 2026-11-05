@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
+import { importedViaBrowser } from './importFiles';
 
 // The import wizard now intercepts every path-backed point-cloud import. For
 // tests that just want the file imported with auto-detected columns, this
@@ -9,8 +10,27 @@ import { expect } from '@playwright/test';
 // every scan: either by stepping Next to the last one, or by checking "apply to
 // all". This helper steps through any remaining scans first, so it works for
 // both single- and multi-file imports without the caller needing to know which.
+//
+// File→Import goes through the in-app file browser, which shows the same
+// options beside the file list. So this also finishes that:
+//  - browser still open (importFiles with keepOpen) → click its Import;
+//  - importFiles already clicked Import → nothing left to do;
+//  - otherwise (drag-drop, Helios XML, RIEGL) → the modal wizard, as above.
 export async function completeImportWizard(page: Page, opts: { timeout?: number } = {}): Promise<void> {
   const timeout = opts.timeout ?? 30_000;
+  const browser = page.getByTestId('file-browser');
+  if (await browser.isVisible()) {
+    const btn = page.getByTestId('file-browser-import');
+    await expect(btn).toBeEnabled({ timeout });
+    await btn.click();
+    await expect(browser).toBeHidden({ timeout });
+    importedViaBrowser.delete(page);
+    return;
+  }
+  if (importedViaBrowser.has(page)) {
+    importedViaBrowser.delete(page);
+    return;
+  }
   const wizard = page.getByTestId('import-wizard');
   await expect(wizard).toBeVisible({ timeout });
 

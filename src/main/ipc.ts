@@ -20,6 +20,7 @@ import { EXPECTED_BACKEND_VERSION } from '../shared/constants.js';
 import { getBackendPort } from './backend.js';
 import { getBackendToken } from './backendToken.js';
 import { allowPath, isPathAllowed, isWriteAllowed } from './fsAllowlist.js';
+import { grant as browserGrant, listDir, listPlaces } from './fileBrowser.js';
 import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
 // Generated at build time by scripts/gen-version-info.mjs (gitignored).
 import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
@@ -158,6 +159,14 @@ export function registerIpc(): void {
   ipcMain.on(IPC.FsAllowPath, (_e, path: string) => {
     if (typeof path === 'string') allowPath(path);
   });
+
+  // In-app file browser (File -> Import). Listing exposes names and metadata
+  // only; FsBrowserGrant makes a file readable only if a listing returned it
+  // and it is an importable format outside hidden folders. The header of
+  // src/main/fileBrowser.ts says what that does and does not guarantee.
+  ipcMain.handle(IPC.FsListDir, (_e, dir: unknown) => listDir(dir));
+  ipcMain.handle(IPC.FsListPlaces, () => listPlaces());
+  ipcMain.handle(IPC.FsBrowserGrant, (_e, paths: unknown) => browserGrant(paths));
 
   // The fs handlers enforce the "user-selected paths only" contract: a path is
   // readable/writable only if it was returned by a dialog or reported via

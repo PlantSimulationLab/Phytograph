@@ -11,7 +11,8 @@
 // target a not-yet-existing path, so those are stored normalized-only.
 
 import { realpathSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, extname, resolve, sep } from 'node:path';
+import { IMPORTABLE_EXTENSIONS } from '../shared/constants.js';
 
 // Exact paths the user selected (dialog results, drag-drop, file inputs).
 const allowed = new Set<string>();
@@ -24,6 +25,33 @@ const allowedWriteDirs = new Set<string>();
 // scan-import resolver probes siblings this way. Direct children only (no
 // recursion), so this can't be used to walk a whole subtree.
 const allowedReadDirs = new Set<string>();
+// Directories whose direct children may be read ONLY if they are importable,
+// non-hidden files (see importableReadOnly). Seeded by the in-app file
+// browser's grants, which come from the renderer and so must not open a
+// whole folder the way a native-dialog pick does.
+const allowedImportDirs = new Set<string>();
+// Files the in-app browser granted. Read-only: kept apart from `allowed`,
+// which isWriteAllowed also honors.
+const allowedImportFiles = new Set<string>();
+
+const IMPORTABLE = new Set<string>(IMPORTABLE_EXTENSIONS);
+
+/**
+ * May a path the RENDERER chose (in-app browser) be read? Only an importable
+ * format, and nothing under a hidden (dot) component — that is where
+ * credentials live (~/.ssh, ~/.aws, ~/.config/gcloud/*.json), and several of
+ * them carry extensions we import (.json, .txt, .csv).
+ */
+/** isImportablePath for the path AND what it resolves to (symlinks). */
+export function isImportableTarget(p: string): boolean {
+  return isImportablePath(p) && isImportablePath(realOrNorm(p));
+}
+
+export function isImportablePath(p: string): boolean {
+  const n = norm(p);
+  if (!IMPORTABLE.has(extname(n).slice(1).toLowerCase())) return false;
+  return !n.split(sep).some((part) => part.startsWith('.') && part !== '.' && part !== '..');
+}
 
 function norm(p: string): string {
   return resolve(p);
@@ -48,10 +76,21 @@ function realOrNorm(p: string): string {
  */
 export function allowPath(
   p: string | null | undefined,
-  kind: 'file' | 'saveFile' | 'directory' = 'file',
+  kind: 'file' | 'saveFile' | 'directory' | 'importFile' = 'file',
 ): void {
   if (!p) return;
   const n = norm(p);
+  if (kind === 'importFile') {
+    // The in-app browser's grant: the renderer named this path, so it gets
+    // only what an import needs — the file, and its importable siblings (a
+    // Helios XML locates its scan files next to it) — never the folder.
+    const real = realOrNorm(p);
+    if (!isImportablePath(n) || !isImportablePath(real)) return;
+    allowedImportFiles.add(n);
+    if (real !== n) allowedImportFiles.add(real);
+    allowedImportDirs.add(dirname(n));
+    return;
+  }
   allowed.add(n);
   const real = realOrNorm(p);
   if (real !== n) allowed.add(real);
@@ -73,6 +112,19 @@ export function allowPath(
  * user-chosen directory. Direct-child only — no recursive descent.
  */
 export function isPathAllowed(p: string): boolean {
+  if (isSelectedPath(p)) return true;
+  const n = norm(p);
+  const real = realOrNorm(p);
+  // Browser grants hold for what is actually READ: a symlink named scan.json
+  // that resolves to ~/.ssh/id_rsa must not pass on the strength of its name.
+  if (!isImportablePath(n) || !isImportablePath(real)) return false;
+  if (allowedImportFiles.has(n) || allowedImportFiles.has(real)) return true;
+  return allowedImportDirs.has(dirname(n));
+}
+
+// The native-dialog / drag-drop allowance (readable AND writable). Browser
+// grants are deliberately not part of it.
+function isSelectedPath(p: string): boolean {
   const n = norm(p);
   if (allowed.has(n)) return true;
   // A read may arrive for a symlink whose normalized form wasn't stored but
@@ -88,7 +140,7 @@ export function isPathAllowed(p: string): boolean {
  * folder can't be used to write into arbitrary nested paths.
  */
 export function isWriteAllowed(p: string): boolean {
-  if (isPathAllowed(p)) return true;
+  if (isSelectedPath(p)) return true;
   return allowedWriteDirs.has(dirname(norm(p)));
 }
 
@@ -97,6 +149,8 @@ export function _resetAllowlist(): void {
   allowed.clear();
   allowedWriteDirs.clear();
   allowedReadDirs.clear();
+  allowedImportDirs.clear();
+  allowedImportFiles.clear();
 }
 
 // E2E seam: Playwright helpers stub `dialog:open`/`dialog:save` (replacing the

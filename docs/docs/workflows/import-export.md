@@ -31,9 +31,10 @@ Three entry points. All accept the same set of formats — see
 
 === "File menu"
 
-    **File → Import** has an entry per format; each opens a file picker
-    filtered to that type. Pick one or more files and Phytograph imports
-    them as that format:
+    **File → Import** has an entry per format. Each one opens Phytograph's
+    **import browser**: a file list on the left and the import options on the
+    right, so you can browse and set options in the same window. See
+    [The import browser](#the-import-browser) below.
 
     - **Auto-detect** (default) — type chosen from extension + contents
       (recognizes `.xml` scan files too)
@@ -44,9 +45,7 @@ Three entry points. All accept the same set of formats — see
     - **QSM CSV** — for `.csv` cylinder tables (see
       [Importing a QSM](#importing-a-qsm))
 
-    Use a specific format when auto-detection picks the wrong type. As with
-    drag-and-drop, point clouds open the [import wizard](#the-import-wizard)
-    before loading.
+    Use a specific format when auto-detection picks the wrong type.
 
 === "Open with Phytograph"
 
@@ -71,10 +70,78 @@ Three entry points. All accept the same set of formats — see
     file is imported as soon as the app and its compute backend finish starting
     up.
 
+### The import browser
+
+**File → Import** opens a browser built into Phytograph rather than your
+operating system's file dialog. It has three parts:
+
+- **Left:** places (Home, Desktop, Documents, Downloads, your drives and
+  mounted volumes) and the folders you have recently imported from.
+- **Middle:** the current folder's contents, with:
+    - a **path bar** you can type or paste into (a folder, a file, or `~`
+      for your home folder);
+    - breadcrumbs and **Back / Forward / Up** buttons;
+    - a name filter;
+    - a type filter (the selected format's files, or **All files**).
+
+    Hidden files and folders (names starting with `.`) aren't shown and
+    can't be opened for import. Move the files to a regular folder first.
+
+    Click a column header to sort by name, size or date.
+- **Right:** the import options for the selected file. For a point cloud
+  these are the [column, units, shift and trajectory options](#the-import-wizard)
+  described below, previewed from the file as soon as you select it. For a
+  mesh, skeleton, scan XML or QSM it shows what the file will import as.
+
+Select files with a click; <kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click adds and
+removes files, and <kbd>Shift</kbd>-click selects a range. The keyboard
+works in the list:
+
+- <kbd>↑</kbd> / <kbd>↓</kbd> move the selection.
+- Typing a name jumps to it.
+- <kbd>Enter</kbd> opens a folder, or imports the selected files.
+- <kbd>Backspace</kbd> or <kbd>⌘</kbd>+<kbd>↑</kbd> goes up a folder.
+- <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>A</kbd> selects every file.
+- <kbd>Esc</kbd> closes the browser.
+
+The browser reopens in the folder you last imported from.
+
+**Several point clouds at once share one set of options.** The options panel
+shows the first file you selected, and whatever you set there is applied to
+all of them:
+
+- **Files with the same column layout** (the same format, columns and header
+  names) take everything: column roles, names, **Import** ticks and RGB
+  range.
+- **Files with a different layout** keep their own columns: the
+  auto-detected ones, plus any changes you made while that file was the one
+  shown. They still take the units (unless the file declares its own), the
+  global shift and the trajectory, so everything you import together lands in
+  one frame.
+
+Options belong to the file you set them on. Clicking a different file shows
+that file's own options, and clicking back brings yours back. If a selected
+file still has no X, Y and Z, the footer names it; click it to fix its columns.
+
+A note above the options says how many files fall into each group.
+
+Files stored online only by iCloud, Dropbox or Box (placeholders that
+haven't been downloaded) show a cloud icon. Phytograph doesn't preview them,
+because reading one triggers the download, but they import normally and
+download when imported.
+
+!!! note "macOS folder access"
+    The first time you browse your Desktop, Documents or Downloads folder,
+    or an external or network drive, macOS asks whether Phytograph may access
+    it. Allow it to see those files. You can change this later in **System
+    Settings → Privacy & Security → Files and Folders**.
+
 ### The import wizard
 
-Every point-cloud import opens an **import wizard** before the cloud is
-loaded. It lays the file out like a spreadsheet — one column per column in
+Files that arrive with nothing chosen yet — dragged onto the window, opened
+with **Open With → Phytograph**, or referenced by a Helios scan XML — open an
+**import wizard** before the cloud is loaded. It has the same options as the
+import browser's options panel. It lays the file out like a spreadsheet — one column per column in
 the file, with the first rows of real data shown underneath — and a
 dropdown at the top of each column for its role. Auto-detection fills the
 dropdowns in; you correct anything that's wrong before importing:
@@ -302,8 +369,12 @@ file that declared its unit is never overwritten by a neighbor's.
 
 ### Importing several files at once
 
-Drop multiple files together, or select several at once from the
-**Import** menu. The wizard **steps through each scan** — use **Back** /
+From **File → Import**, select several files in the import browser; they
+share one set of options, as described in
+[The import browser](#the-import-browser).
+
+When you drop several files together, or open them from your file manager,
+the wizard **steps through each scan** — use **Back** /
 **Next** to move between them, and tick **Apply these settings to all
 scans with the same column layout** to copy one scan's settings onto the
 others: column roles, names, **Import** ticks, RGB range, global shift, units

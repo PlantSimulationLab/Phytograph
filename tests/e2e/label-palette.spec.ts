@@ -258,11 +258,11 @@ async function openLabelToolOnTreeCloud(
   fixture = TREE_FIXTURE, name = 'tiny-treeinstance', points = 60,
 ) {
   const { app, page } = session;
-  await importFiles(app, page, 'import-auto', fixture);
+  await importFiles(app, page, 'import-auto', fixture, { keepOpen: true });
 
   // Name the 4th column and mark it a Label, exactly as a user would — this is
   // what makes it `tree_instance` on the cloud rather than an anonymous scalar.
-  const wizard = page.getByTestId('import-wizard');
+  const wizard = page.getByTestId('file-browser');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
   // Role FIRST: the rename box only renders for a column that already has a
   // scalar/label role, so naming before assigning finds no input.

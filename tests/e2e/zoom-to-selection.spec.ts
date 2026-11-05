@@ -180,6 +180,20 @@ test('Snap View buttons reorient without changing target or zoom', async () => {
   await smallRow.click();
   await expect(smallRow).toHaveAttribute('data-selected', 'true');
 
+  // A newly added mesh is framed on its own bounds 50 ms after it appears
+  // (PointCloudViewer's frameMeshInViewport timer), so the camera can still
+  // be about to move when the mesh row shows. Read the baseline only once the
+  // target has held still across reads that span that timer — otherwise a
+  // late framing is misread as the Snap View button moving the target.
+  let lastTarget = '';
+  let stableReads = 0;
+  await expect.poll(async () => {
+    const t = JSON.stringify((await page.evaluate(() => (window as any).__getCameraState())).target);
+    stableReads = t === lastTarget ? stableReads + 1 : 0;
+    lastTarget = t;
+    return stableReads;
+  }, { intervals: [100], timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+
   const before = await page.evaluate(() => (window as any).__getCameraState());
   const radiusBefore = dist(before.position, before.target);
   const targetBefore = [...before.target];

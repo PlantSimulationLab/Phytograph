@@ -66,7 +66,7 @@ describe('shared global shift across a batch', () => {
 });
 
 
-// The rule above is only useful if the wizard actually applies it, and if
+// The rule above is only useful if the import options actually apply it, and if
 // "apply to all" carries the shift. Both are one-line reverts away, and neither
 // is reachable in a unit test without mounting the wizard, so pin the source.
 describe('wizard call sites', () => {
@@ -74,7 +74,7 @@ describe('wizard call sites', () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
-      join(process.cwd(), 'src/renderer/components/PointCloudImportWizard.tsx'), 'utf8');
+      join(process.cwd(), 'src/renderer/lib/pointCloudImportOptions.ts'), 'utf8');
 
     const block = src.slice(
       src.indexOf('export function propagateSettings('),
@@ -88,7 +88,7 @@ describe('wizard call sites', () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
-      join(process.cwd(), 'src/renderer/components/PointCloudImportWizard.tsx'), 'utf8');
+      join(process.cwd(), 'src/renderer/lib/pointCloudImportOptions.ts'), 'utf8');
 
     // Previews resolve one per file, so seeding must skip configs the user
     // already touched or their choice is silently reverted mid-import.

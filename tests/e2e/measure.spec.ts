@@ -648,7 +648,7 @@ test.describe('measurement tool', () => {
     // 1 US survey foot = 1200/3937 m, so 10 ft = 3.048006096 m, which formats
     // as "3.048 m". The international foot would give 3.048000 — identical at
     // this precision, so this test does NOT distinguish them; the unit tests do.
-    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'feet-mast.las'));
+    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'feet-mast.las'), { keepOpen: true });
 
     // The wizard must SHOW the detected unit rather than converting silently.
     const unitsBlock = session.page.getByTestId('import-wizard-units');
@@ -699,7 +699,7 @@ test.describe('measurement tool', () => {
     // unit metadata, so the wizard defaults to meters — exactly what every
     // import assumed implicitly before units existed. A user who ignores the
     // new control must see no difference at all.
-    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'), { keepOpen: true });
 
     const unitsBlock = session.page.getByTestId('import-wizard-units');
     await expect(unitsBlock).toBeVisible({ timeout: 20_000 });

@@ -23,7 +23,7 @@ test('imports a PTX, recovers its sky/miss points, and toggles the overlay', asy
   try {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await importFiles(app, page, 'import-auto', PTX);
+    await importFiles(app, page, 'import-auto', PTX, { keepOpen: true });
 
     // Path-backed import routes through the wizard. PTX defines its own column
     // layout, so the roles are read-only — but the rows themselves are plain

@@ -3,6 +3,9 @@ import {
   IPC,
   type BackendInfo,
   type BackendStatusPayload,
+  type BrowserGrantResult,
+  type BrowserPlaces,
+  type ListDirResult,
   type FileDropPayload,
   type LogExportResult,
   type LogLevel,
@@ -43,6 +46,14 @@ const api = {
     writeTempBinary: (fileName: string, contents: ArrayBuffer): Promise<string> =>
       ipcRenderer.invoke(IPC.FsWriteTempBinary, fileName, contents),
     exists: (path: string): Promise<boolean> => ipcRenderer.invoke(IPC.FsExists, path),
+  },
+  // In-app file browser (File -> Import). Main returns names + metadata only;
+  // grant() makes chosen files readable: only listed, importable files.
+  fileBrowser: {
+    listDir: (dir: string): Promise<ListDirResult> => ipcRenderer.invoke(IPC.FsListDir, dir),
+    listPlaces: (): Promise<BrowserPlaces> => ipcRenderer.invoke(IPC.FsListPlaces),
+    grant: (paths: string[]): Promise<BrowserGrantResult> =>
+      ipcRenderer.invoke(IPC.FsBrowserGrant, paths),
   },
   app: {
     getCwd: (): Promise<string> => ipcRenderer.invoke(IPC.AppGetCwd),

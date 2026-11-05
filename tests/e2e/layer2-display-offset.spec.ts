@@ -18,8 +18,8 @@ test('Layer2: UTM cloud frames with displayOffset and crops in world space', asy
   const { app, page, close } = await launchApp();
   try {
     // ── Import the wizard, DISABLE the global shift (keep large coords) ──────
-    await importFiles(app, page, 'import-auto', UTM);
-    const wizard = page.getByTestId('import-wizard');
+    await importFiles(app, page, 'import-auto', UTM, { keepOpen: true });
+    const wizard = page.getByTestId('file-browser');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
 
     // The shift is auto-suggested + ON for large coords; turn it OFF.
@@ -38,7 +38,7 @@ test('Layer2: UTM cloud frames with displayOffset and crops in world space', asy
     await expect(shiftToggle).toBeVisible({ timeout: 30_000 });
     if (await shiftToggle.isChecked()) await shiftToggle.uncheck();
     await expect(shiftToggle).not.toBeChecked();
-    const importBtn = page.getByTestId('import-wizard-import');
+    const importBtn = page.getByTestId('file-browser-import');
     await expect(importBtn).toBeEnabled({ timeout: 30_000 });
     await importBtn.click();
     await expect(wizard).toBeHidden({ timeout: 30_000 });

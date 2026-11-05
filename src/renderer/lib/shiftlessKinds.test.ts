@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SHIFTLESS_KINDS } from '../components/PointCloudImportWizard';
+import { SHIFTLESS_KINDS } from './pointCloudImportOptions';
 
 describe('global shift visibility by format', () => {
   it('hides the shift control for a RIEGL raw project', () => {
