@@ -253,9 +253,8 @@ dropdowns in; you correct anything that's wrong before importing:
   without needing a separate scanner trajectory. This is the ASCII equivalent of
   the `ox`/`oy`/`oz` origin columns a LAS file can carry; they auto-detect from
   headers like `ox` / `oy` / `oz`, `xorigin` / `yorigin` / `zorigin`, or
-  `beamoriginx` / `…y` / `…z`. Origins are kept at full coordinate precision (not
-  the millimeter display quantization), so projected/UTM-scale origins survive
-  exactly. Map all three for them to take effect; a partial pair is ignored.
+  `beamoriginx` / `…y` / `…z`. Origins are kept at full coordinate precision,
+  so projected/UTM-scale origins survive exactly. Map all three for them to take effect; a partial pair is ignored.
 - **RGB range** — when an RGB role is present, choose whether the values are
   **0–255 integers** or **0–1 floats**, so colors import at the right
   brightness.
@@ -441,6 +440,7 @@ data itself (see
 [Return type is detected, not declared](../concepts/scans.md#return-type-is-detected-not-declared)),
 so an XML without them costs you nothing on a real scan — it only means a
 later simulated re-run starts from the defaults.
+
 ### Mesh axes
 
 Phytograph's scene is **Z up**, and a mesh is imported in the file's own
@@ -462,7 +462,6 @@ Under **Auto-detect**, a `.ply` gets the mesh axes once Phytograph has read its
 header and found faces; a `.ply` without faces is a point cloud and gets the
 point-cloud options instead. Meshes dropped onto the window import as the file
 has them.
-
 
 ### Importing textured meshes
 
@@ -630,6 +629,27 @@ need to pick fields or keep other scalars.
     cannot go in the byte, and the export says so; it is still written as its
     own dimension. The file also records the class names and colors, and the
     [LAS flags](label-points.md#las-flags) you painted.
+
+!!! note "Coordinate precision"
+
+    No export rounds your points to a coarser grid than they already have.
+
+    - **LAS/LAZ** store each coordinate as an integer times a *scale*. Phytograph
+      uses the grid the points are already on, so a cloud imported from a 1 mm
+      LAS re-exports bit for bit. Points that are on no grid (anything from
+      PLY, XYZ, E57 or PTX, and any cloud you have rotated) are written at
+      10 µm. Only a cloud tens of kilometers across gets a coarser step, because
+      LAS integers are 32-bit. Earlier versions used a fixed 1 mm grid for
+      every LAS/LAZ export, which degraded close-range scans with
+      sub-millimeter point spacing; re-export those if it matters.
+    - **PLY** and **PCD** declare x/y/z as `double`, so projected (UTM)
+      coordinates read back exactly.
+    - **Text formats** write coordinates to 1 µm and every other number with
+      the digits needed to read it back unchanged.
+
+    Scalar columns keep their type: a class label or id written by `.las`,
+    `.laz` or `.ply` is an integer field, in the type the source file declared
+    it (a PLY `int` stays `int`), and a 64-bit float stays 64-bit.
 
 | Format | Carries |
 |---|---|

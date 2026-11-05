@@ -15,8 +15,9 @@ edge lengths and most candidate triangles then exceeded Lmax.
 The session array is the source of truth and is never re-read from the file, so it
 must hold full precision. The fix captures the source-precision xyz during the LAS
 conversion (`_xyz_to_las(..., capture_full_xyz=True)`) and uses it for the session
-positions; the 1 mm LAS is kept only as PotreeConverter's octree input (a display
-cache, where 1 mm is invisible).
+positions; the LAS is kept only as PotreeConverter's octree input (a display
+cache). That LAS is now 10 µm rather than 1 mm (`las_precision`), but it is
+still quantized, so the session must still not be read back from it.
 
 These tests pin BOTH halves at the conversion layer (no PotreeConverter needed):
   - the captured xyz is bit-for-bit the source, NOT the 1 mm LAS read-back, AND
@@ -73,13 +74,15 @@ def test_captured_xyz_is_full_precision_not_las_quantized(fine_scan, tmp_path):
     assert np.abs(full_xyz - expected).max() < 1e-7
 
     # And it is meaningfully better than the LAS read-back: the LAS path quantizes
-    # to ~1 mm, so its max error is on the order of half the 1 mm scale. This is
-    # the precision loss the fix exists to avoid — guard that it's real, so the
-    # test can't pass by accident if the two ever became the same array.
+    # (to 10 µm for this fixture, `las_precision`), so its max error is on the
+    # order of half that step, against the source's 1e-8. Guard that the gap is
+    # real, so the test can't pass by accident if the two became the same array.
     las_err = np.abs(las.positions - expected).max()
-    assert las_err > 1e-4, (
+    assert las_err > 1e-6, (
         f"LAS read-back error {las_err:.2e} m unexpectedly small — the fixture no "
-        f"longer exercises sub-mm precision, so this test proves nothing.")
+        f"longer exercises precision below the LAS step, so this test proves nothing.")
+    assert las_err <= 5e-6 + 1e-9, f"the octree LAS lost {las_err:.2e} m; it should be 10 µm"
+
 
 
 def test_capture_aligns_when_nan_xyz_rows_dropped(tmp_path):

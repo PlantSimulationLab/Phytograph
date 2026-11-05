@@ -387,11 +387,13 @@ def test_text_export_is_byte_identical_to_reference(client):
                 if has_colors:
                     cols += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
                 if has_int:
-                    cols += [f"{float(intensity[i]):.4f}"]
+                    # 6 decimals (was 4): 4 put up to 3 uint16 steps of error on re-import.
+                    cols += [f"{float(intensity[i]):.6f}"]
                 lines.append(sep.join(cols))
         elif fmt == "ply":
             lines += ["ply", "format ascii 1.0", f"element vertex {n}",
-                      "property float x", "property float y", "property float z"]
+                      # double (was float): a float32 reader lost UTM-scale coordinates.
+                      "property double x", "property double y", "property double z"]
             if has_colors:
                 lines += ["property uchar red", "property uchar green", "property uchar blue"]
             lines.append("end_header")

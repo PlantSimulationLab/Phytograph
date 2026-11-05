@@ -192,7 +192,8 @@ Derived fields appear in the export column picker like any other. See
 
 - **LAS/LAZ** — written as an extra dimension under its own name.
 - **CSV/TXT/XYZ/ASC** — written as a named column.
-- **PLY** — written as `property float <name>`.
+- **PLY** — written as a named `property`: `int` for whole numbers, `double`
+  for a 64-bit field, `float` otherwise.
 
 Field names are limited to letters, digits and underscores, and must start with
 a letter or underscore, because the name has to survive as a LAS dimension name

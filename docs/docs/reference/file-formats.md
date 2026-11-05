@@ -4,7 +4,7 @@
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes LAS 1.4 point format 7 (6 when color is unchecked) with intensity, GPS time, every selected scalar as a float32 ExtraBytes dimension, and a class column in the classification byte (the one chosen in the export window; automatically the first of `manual_class`, `las_classification`, `ground_class`, `wood_class`), with the class names in a LAS 1.4 classification-lookup record and every labeled column's class set in a Phytograph record that a re-import restores, and the `flag_withheld` / `flag_synthetic` / `flag_key_point` label columns as the point flags, while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
+| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes LAS 1.4 point format 7 (6 when color is unchecked) with intensity, GPS time, every selected scalar as an ExtraBytes dimension of its own type (integers stay integers), and a class column in the classification byte (the one chosen in the export window; automatically the first of `manual_class`, `las_classification`, `ground_class`, `wood_class`), with the class names in a LAS 1.4 classification-lookup record and every labeled column's class set in a Phytograph record that a re-import restores, and the `flag_withheld` / `flag_synthetic` / `flag_key_point` label columns as the point flags, while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and an ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
 | `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB color, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and color. Export writes a **structured** file whenever the scan has a grid to write — either the instrument's own row/column indices or a declared Ntheta × Nphi sweep to bin against — and marks misses with the format's own `cartesianInvalidState` flag, so an exported scan re-imports as scan data rather than as a cloud of far-field points. Points are written in the scanner's local frame with its pose in the scan header, as scanners themselves do. |
 | `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** offers a field picker, so any scalar column — including [normals](#normals) — can be written alongside x/y/z and RGB. Structured/organized PLYs recover sky/miss points (see below). |
@@ -160,11 +160,10 @@ empty pixels of an organized cloud) are dropped. A `binary_compressed` PCD
 cannot be streamed, so it is read through open3d and carries position and
 color only. `.las`/`.laz` clouds retain their native extra dimensions.
 
-Point positions keep the **source file's own precision** for every format.
-The intermediate LAS Phytograph builds for display is quantized to 1 mm, but
-the cloud itself never is, so sub-millimeter detail in a `.ply`, `.pcd`,
-`.xyz` or `.ptx` survives import. `.e57` is the exception for now: its
-positions are stored at 1 mm.
+Point positions keep the **source file's own precision** for every format,
+`.e57` included. Scalar fields keep their source type too: an `int` PLY
+property, a PCD `I4` field or a LAS `double` extra dimension is held exactly,
+not rounded through a 32-bit float.
 
 `.e57` clouds carry **intensity** and **RGB color** when the file records them
 (both are surfaced in the import wizard and become color-mappable in the viewer);
@@ -898,8 +897,7 @@ ASCII/CSV/XYZ clouds can carry the same per-pulse origins as three columns (the 
 `ox`/`oy`/`oz` and alias spellings). Map them in the import wizard with the **Beam
 Origin X / Y / Z** roles (or let the header auto-detect them); they auto-create the same
 moving-platform scan and feed LAD identically. Origins are captured at full coordinate
-precision — bypassing the 1 mm display quantization — so projected/UTM-scale origins
-survive exactly.
+precision, so projected/UTM-scale origins survive exactly.
 
 ## Plant parameter presets
 

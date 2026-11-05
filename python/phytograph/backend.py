@@ -176,8 +176,10 @@ class Backend:
             raise ValueError("source must be 'auto', 'app', 'dev' or 'download'")
         self._proc: Optional[subprocess.Popen] = None
         self._log_path: Optional[Path] = None
+        self._log_seen = 0
         self._work_dir: Optional[Path] = None
         progress_fn = _progress_printer() if progress is True else (progress or None)
+        self._startup_progress = progress_fn
         if _attach is not None:
             self.url, token, self.description = _attach["url"], _attach["token"], f"attached {_attach['url']}"
         else:
@@ -243,10 +245,43 @@ class Backend:
         lines = self._log_path.read_text(errors="replace").splitlines()
         return "\n".join(lines[-n:])
 
+    # Startup lines worth showing while the script waits: a dev checkout
+    # recompiles libhelios when its C++ is newer than the library (minutes), and
+    # the wait used to be silent - it read as a hang. Routine lines ("loaded",
+    # "verified") are not relayed.
+    _STARTUP_NOTICES = ("[pyhelios] native library is stale", "[pyhelios] native library not found",
+                        "[pyhelios] building", "[pyhelios] build complete", "[pyhelios] FATAL",
+                        "[pyhelios] STALE")
+
+    def _relay_startup_log(self) -> None:
+        """Show new startup notices from the backend log (see _STARTUP_NOTICES):
+        through the progress callback when there is one, else on stderr."""
+        if not self._log_path or not self._log_path.exists():
+            return
+        try:
+            with open(self._log_path, "rb") as fh:
+                fh.seek(self._log_seen)
+                chunk = fh.read()
+        except OSError:
+            return
+        # Only whole lines; a partial last line is read again next time.
+        end = chunk.rfind(b"\n") + 1
+        self._log_seen += end
+        for raw in chunk[:end].decode("utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line.startswith(self._STARTUP_NOTICES):
+                continue
+            msg = f"Phytograph engine: {line}"
+            if self._startup_progress is not None:
+                self._startup_progress(None, msg)
+            else:
+                print(msg, file=sys.stderr, flush=True)
+
     def _wait_healthy(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
         last: Optional[Exception] = None
         while time.monotonic() < deadline:
+            self._relay_startup_log()
             if self._proc is not None and self._proc.poll() is not None:
                 raise BackendStartError(
                     f"Backend exited with code {self._proc.returncode} during startup "

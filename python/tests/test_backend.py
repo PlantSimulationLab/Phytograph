@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 
 import phytograph as pg
@@ -136,3 +137,44 @@ def test_interrupt_mid_run_cancels_and_leaves_the_backend_usable(backend, forest
     assert backend.health()["status"] == "healthy"
     with backend.open(forest_plot) as c:
         assert len(c) > 0
+
+
+def test_startup_rebuild_notices_are_relayed(tmp_path, capsys):
+    """A dev checkout recompiling libhelios on start used to make the script
+    wait minutes in silence. The client relays the backend's [pyhelios]
+    rebuild lines while it waits, and nothing routine."""
+    log = tmp_path / "backend.log"
+    be = object.__new__(pg.Backend)
+    be._log_path, be._log_seen, be._startup_progress = log, 0, None
+    log.write_text("INFO: started\n[pyhelios] native library is stale (C++ sources are newer); "
+                   "rebuilding\n[pyhelios] building from")  # partial last line
+    be._relay_startup_log()
+    err = capsys.readouterr().err
+    assert "rebuilding" in err and "building from" not in err
+    with open(log, "a") as fh:
+        fh.write(" source (this may take a few minutes)...\n"
+                 "[pyhelios] build complete\n[pyhelios] native library loaded at startup\n")
+    seen = []
+    be._startup_progress = lambda frac, msg: seen.append(msg)
+    be._relay_startup_log()
+    assert [m.split("] ", 1)[1] for m in seen] == [
+        "building from source (this may take a few minutes)...", "build complete"]
+    be._relay_startup_log()  # nothing new
+    assert len(seen) == 2
+
+
+def test_export_las_scale_and_typed_columns(backend, tmp_path):
+    import laspy
+    rng = np.random.default_rng(0)
+    xyz = rng.uniform(0, 2.5, size=(2000, 3))
+    ids = (30_000_001 + rng.integers(0, 40, 2000) * 3).astype(np.int32)
+    c = backend.from_numpy(xyz, columns={"instance_id": ids})
+    assert c.to_numpy()["instance_id"].dtype == np.int32
+    c.export(tmp_path / "fine.laz")
+    fine = laspy.read(str(tmp_path / "fine.laz"))
+    assert np.abs(np.c_[fine.x, fine.y, fine.z] - xyz).max() <= 5e-6 + 1e-12
+    assert fine["instance_id"].dtype == np.int32 and np.array_equal(fine["instance_id"], ids)
+    c.export(tmp_path / "coarse.laz", las_scale=0.001)
+    assert np.allclose(laspy.read(str(tmp_path / "coarse.laz")).header.scales, 0.001)
+    with pytest.raises(ValueError):
+        c.export(tmp_path / "bad.laz", las_scale=0)

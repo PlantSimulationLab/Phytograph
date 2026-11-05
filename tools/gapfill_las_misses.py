@@ -177,10 +177,14 @@ def main(argv=None) -> int:
     ]) if n_miss else np.zeros(n_pts, dtype=np.float32)
 
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    # Offset to the data min so projected (UTM) coordinates fit LAS's 32-bit ints.
-    # Misses sit ~20 km out along the beam, so this must span BOTH populations.
-    header.offsets = np.floor(out_xyz.min(axis=0))
+    # Scale and offset from the backend's one chooser (`las_precision`): the
+    # input's own grid when the returns are on one, else 10 µm, coarsened to fit
+    # the extent - which spans BOTH populations, since misses sit ~20 km out.
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    os.pardir, "backend-api"))
+    import las_precision
+    header.scales, header.offsets = las_precision.las_scale_offset(
+        out_xyz.min(axis=0), out_xyz.max(axis=0), xyz)
     header.add_extra_dim(laspy.ExtraBytesParams(name="is_miss", type=np.float32))
 
     n_out = out_xyz.shape[0]

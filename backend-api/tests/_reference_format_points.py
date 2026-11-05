@@ -6,6 +6,10 @@ faster formatter is byte-identical. Kept as a snapshot rather than read from git
 at test time because a `git` subprocess segfaults once the native stack
 (open3d/pyhelios) is loaded in-process.
 
+Two FORMATS were since changed on purpose, in both places (the precision fix,
+see `las_precision`): intensity prints 6 decimals instead of 4, and PLY
+declares x/y/z `double` instead of `float`. The structure is unchanged.
+
 Do NOT "fix" or optimize this file — its whole value is being the old behavior.
 """
 from typing import Optional
@@ -60,14 +64,14 @@ def _format_points_as_text(
         if has_int:
             head += ["Intensity"]
             cols += [np.asarray(intensity, dtype=np.float64)]
-            fmts += ["%.4f"]
+            fmts += ["%.6f"]
         body = _savetxt(cols, fmts, sep)
         # Match the old loop exactly: header only (no trailing newline) when empty.
         return sep.join(head) + ("\n" + body if body else "")
 
     if fmt == "ply":
         header = ["ply", "format ascii 1.0", f"element vertex {n}",
-                  "property float x", "property float y", "property float z"]
+                  "property double x", "property double y", "property double z"]
         cols = [points[:, 0], points[:, 1], points[:, 2]]
         fmts = list(pos_fmt)
         if has_colors:

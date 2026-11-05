@@ -87,6 +87,10 @@ class Cloud:
         coordinates, plus ``colors`` (N,3, 0-1) and ``intensity`` (0-1) when
         present, and each scalar column under its name — all row-aligned.
 
+        A scalar column comes back in the type its source file declared (a PLY
+        ``int`` is int32, a LAS ``double`` float64), else int32 for whole
+        numbers, so the same column has the same dtype from every file.
+
         ``fields`` limits the scalar columns returned (``[]`` for none)."""
         params: Dict[str, Any] = {"include_misses": include_misses, "colors": colors}
         if fields is not None:
@@ -455,10 +459,18 @@ class Cloud:
     def export(self, path: PathLike, *, format: Optional[str] = None,
                columns: Optional[Sequence[str]] = None,
                classification_column: Optional[str] = None,
-               text_header: bool = True) -> Dict[str, Any]:
+               text_header: bool = True,
+               las_scale: Optional[float] = None) -> Dict[str, Any]:
         """Write the cloud to ``path`` (LAS/LAZ/XYZ/TXT/CSV/PLY, from the suffix
         unless ``format`` is given). Every column is written by default;
         ``columns`` picks and orders them (e.g. ``["x","y","z","ground_class"]``).
+
+        LAS/LAZ store coordinates on a grid. By default it is the grid the
+        points are already on (a cloud read from a 1 mm LAS re-exports exactly),
+        else 10 µm, so nothing is lost. ``las_scale`` (meters) chooses a coarser
+        grid for a smaller file, e.g. ``0.001``. Integer columns are written as
+        integers, in the type the source file declared.
+
         Returns the backend's summary (point count, format, …)."""
         p = Path(path).expanduser().resolve()
         fmt = (format or _EXPORT_FORMATS.get(p.suffix.lower()) or "").lower()
@@ -471,6 +483,10 @@ class Cloud:
             body["columns"] = list(columns)
         if classification_column is not None:
             body["classification_column"] = classification_column
+        if las_scale is not None:
+            if not las_scale > 0:
+                raise ValueError("las_scale must be a positive number of meters")
+            body["las_scale"] = float(las_scale)
         res = self._t.post_stream("/api/pointcloud/export", body)
         if isinstance(res, dict) and res.get("success") is False:
             raise PhytographError(f"export failed: {res.get('error')}", detail=res)

@@ -25,7 +25,7 @@ import pytest
 import main
 
 _WIZARD = (Path(__file__).resolve().parents[2]
-           / "src/renderer/components/PointCloudImportWizard.tsx")
+           / "src/renderer/lib/pointCloudImportOptions.ts")
 
 # Roles that exist only in the wizard, by design.
 #   extra/label — how the renderer COLORS a scalar (gradient vs discrete);

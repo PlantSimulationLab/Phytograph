@@ -2099,13 +2099,31 @@ def validate_against_echo(
 # _session_to_las) so an extracted file is indistinguishable from any other
 # Phytograph LAS on the import path:
 #   * point_format 3, LAS 1.4
-#   * scales 0.001 (1 mm)
+#   * scale: 10 µm, coarsened (1-2-5 steps) only when the extent would not fit
+#     the LAS int32 - the same rule as the backend's `las_precision` (this file
+#     runs inside the reader image and cannot import it; a backend test pins
+#     the two together). It was a fixed 1 mm, the constant that kept
+#     resurfacing across the backend's writers.
 #   * offsets floor(min) — NOT zero. Large absolute coordinates otherwise
 #     overflow the LAS int32 range; this bit the project once already on
 #     projected/UTM clouds. Scanner-local coords are small, but the rule is
 #     cheap and keeps every writer consistent.
 #   * extra dims float32, named with the backend's canonical slugs.
-_LAS_SCALE = 0.001
+_LAS_FINEST_SCALE = 1e-5
+_LAS_INT_LIMIT = float(2 ** 31 - 1) * 0.999
+
+
+def _las_scale_for(lo, hi) -> float:
+    """The finest 1-2-5 scale from 10 µm up at which the extent fits an int32."""
+    span = float(np.max(np.asarray(hi, float) - np.floor(np.asarray(lo, float)))) + 1.0
+    need = span / _LAS_INT_LIMIT
+    scale, k = _LAS_FINEST_SCALE, 0
+    while scale < need * (1 - 1e-12):
+        k += 1
+        scale = _LAS_FINEST_SCALE * (1, 2, 5)[k % 3] * 10 ** (k // 3)
+    return scale
+
+
 _LAS_POINT_FORMAT = 3
 _LAS_VERSION = "1.4"
 
@@ -2228,7 +2246,8 @@ def extract_scan(
         header = laspy.LasHeader(
             point_format=_LAS_POINT_FORMAT, version=_LAS_VERSION
         )
-        header.scales = np.array([_LAS_SCALE] * 3, dtype=np.float64)
+        _scale = _las_scale_for(xyz.min(axis=0), xyz.max(axis=0))
+        header.scales = np.full(3, _scale, dtype=np.float64)
         header.offsets = np.floor(xyz.min(axis=0))
         for slug, _label in _EXTRA_DIMS:
             header.add_extra_dim(

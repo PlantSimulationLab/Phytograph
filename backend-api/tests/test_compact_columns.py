@@ -24,7 +24,9 @@ class TestCompactColumn:
         ([-1, 70000], np.int32),
         ([0, 1.5], np.float32),           # not whole
         ([0, np.nan], np.float32),        # NaN has no integer
-        ([0, 2 ** 33], np.float32),       # beyond int32: left as it was
+        # Beyond int32: int64, never float32, which rounds whole numbers above
+        # 2**24 (an id of 2**33 + 1 came back as 2**33).
+        ([0, 2 ** 33 + 1], np.int64),
     ])
     def test_narrowest_exact_type(self, vals, dtype):
         a = np.array(vals, dtype=np.float32 if max(np.abs(np.nan_to_num(vals))) < 2 ** 24 else np.float64)

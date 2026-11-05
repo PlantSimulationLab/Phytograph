@@ -75,10 +75,12 @@ def test_chunked_read_matches_a_whole_file_read(tmp_path, monkeypatch, chunk):
     np.testing.assert_array_equal(got.colors[:, 1], np.asarray(ref.green))
     assert got.intensity.dtype == np.uint16
     np.testing.assert_array_equal(got.intensity, np.asarray(ref.intensity))
-    # Extra dims: canonical slug, float32, file spelling kept as the label.
+    # Extra dims: canonical slug, the type the file DECLARES (recorded as
+    # `dtype`), file spelling kept as the label.
     assert got.extras["reflectance"].dtype == np.float32
     np.testing.assert_array_equal(got.extras["reflectance"], np.asarray(ref.Reflectance))
-    assert {"slug": "reflectance", "label": "Reflectance"} in got.extra_dims_meta
+    assert {"slug": "reflectance", "label": "Reflectance", "dtype": "float32"} in got.extra_dims_meta
+    assert got.extras["is_miss"].dtype == np.uint8
     np.testing.assert_array_equal(got.extras["is_miss"], np.asarray(ref.is_miss).astype(np.float32))
     # Multi-return: BOTH columns kept, including the constant number_of_returns.
     # This test used to assert `"target_count" not in got.extras`, pinning the

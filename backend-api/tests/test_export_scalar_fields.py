@@ -243,7 +243,8 @@ def test_ply_declares_selected_scalars_as_properties(client, scalar_session, tmp
 
     text = dest.read_text()
     header = text.split("end_header")[0].splitlines()
-    assert "property float x" in header
+    # Coordinates are double, so world/UTM values re-import exactly.
+    assert "property double x" in header
     assert "property float reflectance" in header
     assert f"element vertex 5" in header
     body = text.split("end_header\n")[1].splitlines()

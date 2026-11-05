@@ -37,6 +37,11 @@ python -m phytograph download
 
 `python -m phytograph where` shows which engine your scripts will use.
 
+When scripts run from a Phytograph source checkout, the engine recompiles its
+native library the first time it starts after the C++ sources change. That can
+take a few minutes. The script prints `Phytograph engine: [pyhelios] …` lines
+while it does, rather than waiting silently.
+
 **If you already have the app,** and its version matches the package, scripts
 use the app's engine and nothing is downloaded. The app also includes the
 matching package. You can install it from there instead of PyPI, for example
@@ -87,17 +92,21 @@ press Ctrl-C.
 | `be.open(path)` | Import LAS/LAZ/E57/PLY/PCD/PTX/XYZ with the same importer the app uses. Accepts `world_shift=[x, y, z]` and `source_units="ft"`, like the import wizard. A file holding several scan positions (multi-scan E57, multi-block PTX) is not merged into one cloud: pass `scan_index=i` to get one scan. |
 | `be.from_numpy(xyz, colors=..., intensity=..., timestamp=..., columns={...})` | A cloud made from arrays you already have, such as simulation output or points edited with NumPy. `xyz` is `(N, 3)` in world coordinates; colors and intensity are 0–1 (uint8/uint16 colors are rescaled). Each entry in `columns` becomes a per-point column, and `{"is_miss": ...}` marks sky/miss points as on an imported scan. Rows keep their order, so a tool's result column lines up with your input arrays. |
 | `be.open_scans(path)` | One cloud per scan position, each with its own scanner pose, as the app does. Any other file gives a list of one. |
-| `len(cloud)`, `cloud.columns`, `cloud.info()` | Point count (sky/miss points not counted), scalar column names, and details. |
+| `len(cloud)`, `cloud.columns`, `cloud.info()` | Point count (sky/miss points not counted), scalar column names, and details, including `source_units` (the unit you imported with) and each column's source type. |
 | `cloud.positions` | An `(N, 3)` NumPy array of world coordinates, as float64. |
-| `cloud.to_numpy()` | Positions, colors, intensity, and every scalar column, all in the same row order. |
+| `cloud.to_numpy()` | Positions, colors, intensity, and every scalar column, all in the same row order. A column comes back in the type its source file declared (a PLY `int` is `int32`), else `int32` for whole numbers, so the same column has the same dtype from every file. |
 | `cloud.column("ground_class")` | One scalar column, in the same row order as `positions`. |
 | `cloud.crop(min, max, invert=False)` | Keep the points inside a box, or outside it with `invert=True`. |
 | `cloud.filter(box=..., where={...})` | Keep only the points that pass. In `where`, a tuple `(lo, hi)` is an inclusive range (use `None` for an open end), and a list such as `[1, 2]` matches those class numbers. Intensity is 0–1 here, the same as when you read it. |
 | `cloud.extract(...)` | Same arguments as `filter`, but returns the selected points as a **new** cloud and leaves this one unchanged. |
 | `cloud.split("tree_instance")` | One new cloud per class value, as `{value: Cloud}`. Value 0 is skipped by default. |
 | `cloud.transform(m)`, `cloud.translate(dx, dy, dz)` | Move the cloud with a 4×4 matrix in world coordinates. Rotation, translation and positive scaling are allowed; mirroring is not. |
-| `cloud.export(path, columns=[...])` | Write LAS/LAZ/XYZ/TXT/CSV/PLY. The format comes from the file extension. |
+| `cloud.export(path, columns=[...], las_scale=None)` | Write LAS/LAZ/XYZ/TXT/CSV/PLY. The format comes from the file extension. LAS/LAZ keep the grid the points are already on, else 10 µm; pass `las_scale=0.001` (meters) for a smaller file on a 1 mm grid. Integer columns are written as integers. |
 | `cloud.close()` | Free the cloud's memory. A `with` block does this for you. |
+
+**Units.** Clouds are in meters once imported. A file with no unit
+information is read as meters, so pass `source_units` (`"mm"`, `"cm"`, `"ft"`,
+…) for anything else; `cloud.info()["source_units"]` records what you chose.
 
 **Coordinates are always world coordinates.** If you import with a large
 `world_shift` (UTM coordinates, for example), you still crop with, read and

@@ -34,6 +34,7 @@ import normals as normals_mod
 import scalar_fields
 import param_defaults
 import session_store
+import las_precision
 import tiled
 import label_segments
 import open3d_warmup
@@ -7017,7 +7018,7 @@ def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
       - Distances are 3D, not 2D. A terrestrial scan stacks returns in a
         vertical column (canopy over ground), so 44% of tree_1's points share
         their XY with another point exactly; the 2D median is 0.000002 m, which
-        is a property of the LAS 1 mm quantization rather than of the scan.
+        is a property of the source file's LAS quantization rather than of the scan.
     """
     from scipy.spatial import cKDTree
 
@@ -15349,7 +15350,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             if colors is not None:
                 row += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
             if intensity is not None:
-                row += [f"{float(intensity[i]):.4f}"]
+                row += [f"{float(intensity[i]):.9g}"]
             for s in ordered:
                 row.append(str(scalars[s][i]))
             lines.append(delim.join(row))
@@ -15377,7 +15378,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             if colors is not None:
                 row += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
             if intensity is not None:
-                row += [f"{float(intensity[i]):.4f}"]
+                row += [f"{float(intensity[i]):.9g}"]
             for s in ordered:
                 row.append(str(scalars[s][i]))
             lines.append(" ".join(row))
@@ -15397,7 +15398,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
         for i in range(n):
             row = [f"{xyz[i,0]:.6f}", f"{xyz[i,1]:.6f}", f"{xyz[i,2]:.6f}"]
             if intensity is not None:
-                row += [f"{float(intensity[i]):.4f}"]
+                row += [f"{float(intensity[i]):.9g}"]
             if colors is not None:
                 row += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
             lines.append(" ".join(row))
@@ -15427,7 +15428,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
     # ---- PLY (ascii; preserves color + scalar fields) ----
     if fmt == "ply":
         header = ["ply", "format ascii 1.0", f"element vertex {n}",
-                  "property float x", "property float y", "property float z"]
+                  "property double x", "property double y", "property double z"]
         if colors is not None:
             header += ["property uchar red", "property uchar green", "property uchar blue"]
         if intensity is not None:
@@ -15443,9 +15444,9 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             if colors is not None:
                 row += f" {rgb[i,0]} {rgb[i,1]} {rgb[i,2]}"
             if intensity is not None:
-                row += f" {float(intensity[i]):.6f}"
+                row += f" {float(intensity[i]):.9g}"
             for s in ordered:
-                row += f" {float(scalars[s][i]):.6f}"
+                row += f" {float(scalars[s][i]):.9g}"
             lines.append(row)
             if progress is not None and (i & 0xFFFF) == 0xFFFF:
                 progress(i / n, f"formatting {i:,} / {n:,} points")
@@ -15466,13 +15467,17 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
         # the extra dim holding the data, and the canonical channel reading zeros.
         _ts_col = next((s for s in ordered
                         if _canonical_slug_for_name(s) == 'timestamp'), None)
+        _dim_types = {s: las_precision.extra_dim_dtype(np.asarray(scalars[s]))
+                      for s in ordered if s != _ts_col}
         for s in ordered:
             if s == _ts_col:
                 continue
-            header.add_extra_dim(laspy.ExtraBytesParams(name=s, type=np.float32))
+            header.add_extra_dim(laspy.ExtraBytesParams(name=s, type=_dim_types[s]))
         las = laspy.LasData(header)
-        las.header.offsets = np.floor(xyz.min(axis=0)) if n else [0, 0, 0]
-        las.header.scales = [0.001, 0.001, 0.001]
+        if n:
+            _set_las_precision(las.header, xyz.min(axis=0), xyz.max(axis=0), sample=_sample_rows(xyz))
+        else:
+            _set_las_precision(las.header, np.zeros(3), np.zeros(3))
         las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
         if intensity is not None:
             iv = np.asarray(intensity, dtype=np.float64)
@@ -15488,9 +15493,9 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
                 las.intensity = _intensity_to_las_uint16(iv)
         if colors is not None:
             c = np.clip(colors, 0, 1)
-            las.red = (c[:, 0] * 65535).astype(np.uint16)
-            las.green = (c[:, 1] * 65535).astype(np.uint16)
-            las.blue = (c[:, 2] * 65535).astype(np.uint16)
+            las.red = np.rint(c[:, 0] * 65535).astype(np.uint16)
+            las.green = np.rint(c[:, 1] * 65535).astype(np.uint16)
+            las.blue = np.rint(c[:, 2] * 65535).astype(np.uint16)
         for s in ordered:
             if s == _ts_col:
                 # float64, into the standard field — see the header note above.
@@ -15498,7 +15503,7 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
                 if resolved.get("gps_time_encoding") == 'adjusted_standard':
                     _mark_gps_time_absolute(las.header)
                 continue
-            las[s] = np.asarray(scalars[s], dtype=np.float32)
+            las[s] = np.asarray(scalars[s]).astype(_dim_types[s], copy=False)
         ext = ".laz" if fmt == "laz" else ".las"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tpath = tmp.name
@@ -17816,7 +17821,7 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
     if rc is not None and len(rc):
         c = np.asarray(rc, dtype=np.float64)
         if c.shape == (n, 3):
-            colors = np.clip(c * 65535.0, 0, 65535).astype(np.uint16)
+            colors = np.clip(np.rint(c * 65535.0), 0, 65535).astype(np.uint16)
 
     # Extra dims: every per-hit scalar field, plus the canonical is_miss flag.
     # `intensity` is a STANDARD LAS dimension (it maps onto the session's
@@ -17837,7 +17842,7 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
         if name == "intensity":
             # Session intensity is uint16 (0..65535 LAS scale); the scan surfaces
             # intensity as a 0..1 magnitude. Scale and clamp.
-            intensity = np.clip(arr * 65535.0, 0, 65535).astype(np.uint16)
+            intensity = np.clip(np.rint(arr * 65535.0), 0, 65535).astype(np.uint16)
             continue
         if (retained_set is not None and name in _LIDAR_STANDARD_HIT_FIELDS
                 and name not in retained_set):
@@ -23936,6 +23941,11 @@ class PointCloudExportRequest(BaseModel):
     # xyz/asc: write a `# X Y Z <scalar> ...` legend line when the selection goes
     # beyond x/y/z (see `_text_export_layout`). False = the bare positional file.
     text_header: bool = True
+    # LAS/LAZ: the coordinate quantum, in the cloud's units (meters). None =
+    # automatic (`las_precision.las_scale_offset`: the grid the points are
+    # already on, else 10 µm), which loses nothing; a coarser value trades
+    # precision for a smaller LAZ. Coarsened anyway if the extent cannot fit.
+    las_scale: Optional[float] = Field(default=None, gt=0)
 
 
 class PointCloudExportResponse(BaseModel):
@@ -24060,11 +24070,26 @@ _TEXT_EXPORT_SLUG_HEADERS = {
     "intensity": "Intensity",
 }
 
-# PLY property declarations for the fixed slugs. Scalars are declared `float`.
+# PLY property declarations for the fixed slugs; scalars get `_ply_scalar_type`.
+# Coordinates are `double`: a reader takes a property's declared type at its
+# word, so `float x` re-imported as float32 (about 0.5 m of error at UTM
+# northings) however many digits the rows carried.
 _PLY_PROPERTY_TYPES = {
-    "x": "float x", "y": "float y", "z": "float z",
+    "x": "double x", "y": "double y", "z": "double z",
     "r": "uchar red", "g": "uchar green", "b": "uchar blue",
 }
+
+
+def _ply_scalar_type(values: np.ndarray, fmt: str) -> str:
+    """The PLY property type for an exported scalar column: `int` for whole
+    numbers that fit it, `double` for a float64 column (printed `%.17g`) or
+    whole numbers that don't fit an int, else `float`."""
+    if fmt == "%d":
+        v = np.asarray(values)
+        if v.size == 0 or (int(v.min()) >= -2 ** 31 and int(v.max()) < 2 ** 31):
+            return "int"
+        return "double"
+    return "double" if fmt == "%.17g" else "float"
 
 
 def _resolve_export_columns(
@@ -24100,7 +24125,9 @@ def _resolve_export_columns(
         available["g"] = (rgb[:, 1], "%d")
         available["b"] = (rgb[:, 2], "%d")
     if has_int:
-        available["intensity"] = (np.asarray(intensity, dtype=np.float64), "%.4f")
+        # Six decimals, not four: intensity is k/65535 here, and four decimals
+        # (10 001 levels) put up to three uint16 steps of error on re-import.
+        available["intensity"] = (np.asarray(intensity, dtype=np.float64), "%.6f")
     for slug, col in (extras or {}).items():
         arr = np.asarray(col)
         if arr.shape != (n,):
@@ -24117,8 +24144,12 @@ def _resolve_export_columns(
         is_int = np.issubdtype(arr.dtype, np.integer) or (
             arr.size > 0 and np.all(np.isfinite(arr)) and np.all(arr == np.rint(arr))
         )
+        # Other floats print with the digits that round-trip their type
+        # (9 significant for float32, 17 for float64): a fixed "%.6f" printed a
+        # 1e-7 value as 0 and cut a float64 to six decimals.
+        float_fmt = "%.17g" if arr.dtype == np.float64 else "%.9g"
         available[slug] = (
-            (arr.astype(np.int64), "%d") if is_int else (arr.astype(np.float64), "%.6f")
+            (arr.astype(np.int64), "%d") if is_int else (arr.astype(np.float64), float_fmt)
         )
 
     requested = columns if columns else (default_slugs or ["x", "y", "z"])
@@ -24201,8 +24232,8 @@ def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=Non
         header = ["ply", "format ascii 1.0", f"element vertex {n}"]
         header += [
             f"property {_PLY_PROPERTY_TYPES[s]}" if s in _PLY_PROPERTY_TYPES
-            else f"property float {s}"
-            for s in slugs
+            else f"property {_ply_scalar_type(c, f)} {s}"
+            for s, c, f in zip(slugs, cols, fmts)
         ]
         header.append("end_header")
         return header, cols, fmts, " "
@@ -24306,7 +24337,10 @@ def _write_points_as_pcd(
     has_colors = colors is not None and len(colors) == n
 
     fields = "x y z rgb" if has_colors else "x y z"
-    size = "4 4 4 4" if has_colors else "4 4 4"
+    # x/y/z are declared DOUBLE (SIZE 8): any reader takes a field's declared
+    # type at its word, so `SIZE 4` coordinates re-imported as float32 - about
+    # 0.5 m of error at UTM northings - however many digits the rows carried.
+    size = "8 8 8 4" if has_colors else "8 8 8"
     types = "F F F F" if has_colors else "F F F"
     count = "1 1 1 1" if has_colors else "1 1 1"
     header = [
@@ -24516,6 +24550,44 @@ def _las_file_palettes(header) -> dict:
     return out
 
 
+def _set_las_precision(header, lo, hi, sample=None, scale: "Optional[float]" = None):
+    """Give a LAS header its coordinate scale and offset. EVERY writer goes
+    through here (`las_precision`): a hard-coded `scales = [0.001]*3` snapped
+    exported clouds to a 1 mm grid, and `tests/test_las_precision.py` fails the
+    build if one comes back. `sample` is some of the points as written (it lets
+    data already on a LAS grid keep that grid exactly). Returns the scales.
+
+    Pass `sample` only for a file the USER gets (an export). A LAS that feeds
+    PotreeConverter must not keep a coarse grid: the converter re-quantizes
+    from its own offset (the bounding-box minimum), so a 1 cm grid there moved
+    points by up to a whole centimeter in the octree. Those writers omit
+    `sample` and get the fine default."""
+    scales, offsets = las_precision.las_scale_offset(lo, hi, sample, scale=scale)
+    header.offsets = offsets
+    header.scales = scales
+    return scales
+
+
+def _sample_rows(arr, idx=None, n: int = 20_000) -> np.ndarray:
+    """An evenly spread sample of rows of `arr` (restricted to `idx` when
+    given), as float64, without copying a memory-mapped column whole."""
+    total = int(len(idx) if idx is not None else len(arr))
+    if total == 0:
+        return np.zeros((0, 3))
+    pick = np.linspace(0, total - 1, min(n, total)).astype(np.int64)
+    rows = idx[pick] if idx is not None else pick
+    return np.asarray(arr[rows], dtype=np.float64)
+
+
+def _declared_dtype(sess, slug: str) -> "Optional[str]":
+    """The dtype the column `slug` had in its source file, as the importer
+    recorded it (`extra_dims_meta[i]["dtype"]`), or None."""
+    for ed in (getattr(sess, "extra_dims_meta", None) or []):
+        if ed.get("slug") == slug:
+            return ed.get("dtype")
+    return None
+
+
 def _las_export_point_format(want_color: bool) -> int:
     """Point format for every LAS/LAZ export: 7 with RGB, 6 without.
 
@@ -24548,7 +24620,8 @@ def _columns_keeping_miss_flag(columns: "Optional[List[str]]", has_miss_rows: bo
 def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                            columns: "Optional[List[str]]", translation,
                            progress=None, classification_column: "Optional[str]" = None,
-                           class_palettes: "Optional[dict]" = None) -> dict:
+                           class_palettes: "Optional[dict]" = None,
+                           las_scale: "Optional[float]" = None) -> dict:
     """Stream a session to a LAS/LAZ file in row chunks - the export twin of
     `_session_to_las`, without ever materializing the survivor set.
 
@@ -24628,10 +24701,15 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
 
     _stage(0.05, "Computing bounds")
     header = laspy.LasHeader(point_format=_las_export_point_format(want_color), version="1.4")
-    header.offsets = np.floor(pos_min)
-    header.scales = [0.001, 0.001, 0.001]
+    scales = _set_las_precision(header, pos_min, pos_max,
+                                sample=_sample_rows(positions_col, idx) + shift, scale=las_scale)
+    # Each column keeps an integer type when it holds integers (the source's
+    # declared type when the importer recorded one): float32 for everything
+    # turned labels into decimals and broke integers above 2**24.
+    dim_types = {slug: las_precision.extra_dim_dtype(extras_cols[slug], _declared_dtype(sess, slug))
+                 for slug in dim_slugs}
     for slug in dim_slugs:
-        header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
+        header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=dim_types[slug]))
     # The timestamp rides the standard float64 gps_time field (formats 6 and 7
     # both carry it), not a float32 extra dim: float32 steps 0.03 s at GPS
     # week-seconds and 32 s at adjusted-standard GPS, which merges pulses.
@@ -24659,7 +24737,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                     bpos = np.asarray(positions_col[block], dtype=np.float64) + shift
                     bcol = colors_col[block] if want_color else None
                     bint = intensity_col[block] if want_intensity else None
-                    bext = {sl: np.asarray(extras_cols[sl][block], dtype=np.float32) for sl in export_slugs}
+                    bext = {sl: np.asarray(extras_cols[sl][block]) for sl in export_slugs}
                     bts = (np.asarray(timestamps_col[block], dtype=np.float64)
                            if write_timestamp else None)
                 _stage(base + 0.3 * share, "Packing coordinates")
@@ -24675,7 +24753,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                     if sl in _LAS_FLAG_COLUMNS:
                         record[_LAS_FLAG_COLUMNS[sl]] = (col > 0.5).astype(np.uint8)
                     else:
-                        record[sl] = col
+                        record[sl] = col.astype(dim_types[sl], copy=False)
                 if bts is not None:
                     record.gps_time = bts
                 if class_source is not None:
@@ -24686,7 +24764,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                 writer.write_points(record)
                 del record, bpos, bcol, bint, bext, bts
             _stage(0.95, "Finalizing")
-            pad = 0.001
+            pad = float(np.max(scales))
             writer.header.mins = (pos_min - pad).tolist()
             writer.header.maxs = (pos_max + pad).tolist()
         _replace_with_retry(tmp, dest)
@@ -24759,7 +24837,7 @@ def _do_point_cloud_export(
                 sess, _resolve_export_dest(request.dest_path), fmt=fmt,
                 columns=request.columns, translation=src.translation, progress=progress,
                 classification_column=request.classification_column,
-                class_palettes=request.class_palettes)
+                class_palettes=request.class_palettes, las_scale=request.las_scale)
         # The read copies every surviving point plus every column; an export
         # of a large cloud is one of the biggest transients in the process.
         n_src = _source_point_count_estimate(src)
@@ -24955,14 +25033,14 @@ def _do_point_cloud_export(
         # Version 1.4 (was 1.2) because extra dimensions need the 1.4 header —
         # same pairing the importer uses. Point format 3 is valid in both.
         header = laspy.LasHeader(point_format=point_format, version="1.4")
-        min_coords = points.min(axis=0)
-        # floor() the offset: a raw min on a projected/UTM cloud can leave the
-        # scaled int32 one quantum past its range. See the LAS UTM offset fix.
-        header.offsets = np.floor(min_coords)
-        header.scales = [0.001, 0.001, 0.001]  # 1mm precision
-        # Declare every scalar as a float32 extra dimension, named by slug —
-        # identical to `_xyz_to_las`, so our own importer reads them back as the
-        # same named scalars (and PotreeConverter carries them into the octree).
+        # Scale and offset from the data (`las_precision`): never the 1 mm grid
+        # this used to hard-code, which snapped fine clouds to it.
+        _set_las_precision(header, points.min(axis=0), points.max(axis=0),
+                           sample=_sample_rows(points), scale=request.las_scale)
+        # Declare every scalar as an extra dimension, named by slug, so our own
+        # importer reads them back as the same named scalars (and
+        # PotreeConverter carries them into the octree). Integer columns stay
+        # integer (`las_precision.extra_dim_dtype`).
         # The per-pulse timestamp leaves the float32 extra dims and rides the
         # standard float64 gps_time field (formats 6 and 7 both carry it).
         # float32 steps 0.03 s at GPS week-seconds and 32 s at adjusted-standard
@@ -24976,8 +25054,13 @@ def _do_point_cloud_export(
                 _mark_gps_time_absolute(header)
         class_source = _las_class_source(list(export_extras), request.classification_column)
         dim_extras = [sl for sl in export_extras if sl not in _LAS_FLAG_COLUMNS]
+        _src_sess = (_peek_cloud_session(getattr(request.source, "session_id", None))
+                     if request.source is not None else None)
+        dim_types = {slug: las_precision.extra_dim_dtype(
+                         export_extras[slug], _declared_dtype(_src_sess, slug))
+                     for slug in dim_extras}
         for slug in dim_extras:
-            header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
+            header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=dim_types[slug]))
         palette_vlrs, palette_evlrs = _las_palette_vlrs(request.class_palettes, dim_extras, class_source)
         for v in palette_vlrs:
             header.vlrs.append(v)
@@ -24985,7 +25068,7 @@ def _do_point_cloud_export(
             header.evlrs = list(header.evlrs or []) + palette_evlrs
         las = laspy.LasData(header)
 
-        # Each assignment quantizes to the header scale (the 1 mm grid), which is
+        # Each assignment quantizes to the header scale, which is
         # where the bulk of the per-axis cost is. X carries the one-off setup, so
         # it is consistently the slowest of the three.
         _stage(0.20, "Packing coordinates")
@@ -24999,10 +25082,12 @@ def _do_point_cloud_export(
         # has no red/green/blue dimension to assign to.
         if want_color:
             _stage(0.65, "Packing colors")
+            # Rounded, not truncated: 0-1 floats are k/65535 to float precision,
+            # and truncating 17407.9999 wrote 17407.
             colors = np.clip(np.asarray(colors_arr, dtype=np.float64), 0, 1)
-            las.red = (colors[:, 0] * 65535).astype(np.uint16)
-            las.green = (colors[:, 1] * 65535).astype(np.uint16)
-            las.blue = (colors[:, 2] * 65535).astype(np.uint16)
+            las.red = np.rint(colors[:, 0] * 65535).astype(np.uint16)
+            las.green = np.rint(colors[:, 1] * 65535).astype(np.uint16)
+            las.blue = np.rint(colors[:, 2] * 65535).astype(np.uint16)
 
         # Intensity rides the standard LAS dimension (uint16). `_read_points_from_source`
         # hands it back as 0-1 floats, matching the /65535 it applied on the way out,
@@ -25015,7 +25100,7 @@ def _do_point_cloud_export(
         if has_intensity and (not request.columns or "intensity" in request.columns):
             _stage(0.72, "Packing intensity")
             inten = np.clip(np.asarray(src_intensity, dtype=np.float64), 0, 1)
-            las.intensity = (inten * 65535).astype(np.uint16)
+            las.intensity = np.rint(inten * 65535).astype(np.uint16)
 
         if export_timestamps is not None:
             las.gps_time = np.asarray(export_timestamps, dtype=np.float64)
@@ -25027,7 +25112,7 @@ def _do_point_cloud_export(
                 if slug in _LAS_FLAG_COLUMNS:
                     las[_LAS_FLAG_COLUMNS[slug]] = (np.asarray(col) > 0.5).astype(np.uint8)
                 else:
-                    las[slug] = col.astype(np.float32)
+                    las[slug] = np.asarray(col).astype(dim_types[slug], copy=False)
 
         # ALSO write a class column into the standard LAS `classification` byte.
         #
@@ -26217,6 +26302,11 @@ class PointCloudPreviewResponse(BaseModel):
     # implicitly before units existed.
     detected_units: Optional[str] = None
     units_certain: bool = False
+    # PLY only: `element face N` from the header (0 = a point cloud). PLY is
+    # both a mesh and a point-cloud container, and the in-app import browser
+    # uses this to show a face-bearing file's MESH options (up/forward axes)
+    # instead of point-cloud columns. None for every other format.
+    face_count: Optional[int] = None
 
 
 def _tokenize_ascii_format(fmt: str) -> List[str]:
@@ -26302,11 +26392,6 @@ def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
     (e.g. '# x y z r255 g255 b255 row column is_miss') so pandas — which is told
     comment='#' — skips it as data while a human still sees the labels. We
     recover those labels here. `was_commented` lets callers that drive pandas's
-    # PLY only: `element face N` from the header (0 = a point cloud). PLY is
-    # both a mesh and a point-cloud container, and the in-app import browser
-    # uses this to show a face-bearing file's MESH options (up/forward axes)
-    # instead of point-cloud columns. None for every other format.
-    face_count: Optional[int] = None
     `skiprows` know the line is already dropped by `comment='#'` and must NOT be
     counted again.
     """
@@ -27048,7 +27133,7 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
         # 'extra' whose slug normalizes to an ox/oy/oz alias). These are world/UTM
         # emission coordinates needing FULL float64 precision, so — unlike every
         # other branch above — they must NOT become a float32 extra dim (the LAS is
-        # 1 mm-quantized and extras are float32; both would shatter them). Instead
+        # quantized and its extras typed per column; neither is the source of truth). Instead
         # emit an `origin:<canonical>` sentinel token so the streaming reader keeps
         # the column (it's not a skip name, so pandas/usecols read it) and captures
         # it into the float64 origin side-channel, exactly like `capture_full_xyz`
@@ -28780,7 +28865,7 @@ class _PositionSink:
     """Where a converter writes the FULL-PRECISION coordinates of the points it
     converts: the session's source-of-truth positions.
 
-    The LAS a converter writes is 1 mm-quantized (it only feeds the octree), so
+    The LAS a converter writes is quantized (it only feeds the octree), so
     positions must come from the source itself. They used to be gathered as a
     list of chunks and concatenated at the end, holding two full copies at the
     peak, and the session then read positions back out of the LAS as well and
@@ -28985,14 +29070,14 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     the [{slug, label}, ...] list of carried scalar attributes (for the cache's
     slug→label sidecar). `full_xyz` is the (N,3) float64 source-precision
     coordinate array when `capture_full_xyz` is set, else None — the LAS itself
-    is 1 mm-quantized and must not be the session's source of truth, so the
+    is quantized and must not be the session's source of truth, so the
     session reads positions from this instead (see _xyz_to_las_stream).
 
     `origins` is the (N,3) float64 per-pulse beam-origin array when
     `capture_origins` is set AND the column plan carried an ox/oy/oz triple (the
     `origin:*` tokens), else None. Like `full_xyz` it is captured directly from
     the source columns — origins are world/UTM coordinates and must keep full
-    precision, so they bypass the 1 mm LAS / float32 extras entirely and feed the
+    precision, so they bypass the octree LAS and its extras entirely and feed the
     LAD path's ground-truth-origin shortcut (see CloudSession.beam_origins).
     """
     import laspy  # local: only when this code path runs
@@ -29042,7 +29127,8 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     # metadata.json attributes list and decode into named buffers in the
     # potree-core 2.0 loader.
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    # Scale and offset are set after the pre-pass below has seen the data
+    # (`_set_las_precision`).
     # A timestamp column is pulled OUT of the extra dims and written to the
     # standard float64 gps_time field instead — see `_split_timestamp_extra_dim`
     # for the 32-seconds-at-GPS-magnitude reason. Point format 3 carries
@@ -29093,7 +29179,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     # ONE pre-pass over just the x/y/z (and intensity) columns, for three
     # things the stream below needs up front:
     #   * the data MIN, the LAS offset, so projected clouds (UTM northings
-    #     ~5.4e6 m) fit the 32-bit int range (with offset 0 and 1 mm scale only
+    #     ~5.4e6 m) fit the 32-bit int range (with offset 0 and a 10 µm scale only
     #     +-2.1 km is representable);
     #   * the intensity/reflectance column's GLOBAL finite range, so its uint16
     #     mapping is consistent across chunks (a per-chunk min/max would band
@@ -29120,6 +29206,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                      if text_pos else {})
         xyz_idx = [col_of[pos] for pos in xyz_pos]
         xyz_min = np.array([np.inf, np.inf, np.inf])
+        xyz_max = np.array([-np.inf, -np.inf, -np.inf])
         gmin, gmax = np.inf, -np.inf
         kept_rows = 0
         for col_chunk in pd.read_csv(
@@ -29145,6 +29232,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
             kept_rows += int(present.sum())
             if finite.any():
                 xyz_min = np.minimum(xyz_min, [float(block[finite, k].min()) for k in xyz_idx])
+                xyz_max = np.maximum(xyz_max, [float(block[finite, k].max()) for k in xyz_idx])
             if intensity_pos is not None:
                 vals = block[:, col_of[intensity_pos]]
                 vals = vals[np.isfinite(vals)]
@@ -29153,7 +29241,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                     gmax = max(gmax, float(vals.max()))
         if intensity_pos is not None and np.isfinite(gmin) and np.isfinite(gmax):
             intensity_lo, intensity_hi = gmin, gmax
-        header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
+        _set_las_precision(header, xyz_min, xyz_max)  # octree input: no `sample`
         for pos, ed in text_pos.items():
             class_names, text_codes[ed["col"]] = _text_column_codes(text_seen[pos])
             ed["palette"] = _text_column_palette(ed["slug"], ed["label"], class_names)
@@ -29210,7 +29298,7 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
     column-mismatch errors (raised here from the float casts) into a clean 400.
     Returns the total points written.
 
-    The LAS this writes is quantized to the header's 1 mm scale — fine as the
+    The LAS this writes is quantized to the header's scale — fine as the
     octree's input (the octree is a display cache) but NOT precise enough to be
     the session's source-of-truth array (1 mm shatters precision-sensitive ops
     like triangulation; see CloudSession.positions). So the FULL-PRECISION
@@ -29286,7 +29374,7 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                 # x,y,z order (regardless of source column order) and filtered to
                 # the exact same rows as xyz above, so the concatenation aligns
                 # point-for-point with positions/colors/extras. Origins stay
-                # float64 — never routed through the 1 mm LAS or float32 extras.
+                # float64 — never routed through the octree LAS or its extras.
                 origins_out.append(np.column_stack([
                     chunk[origin_cols['origin_x']].to_numpy(dtype=np.float64),
                     chunk[origin_cols['origin_y']].to_numpy(dtype=np.float64),
@@ -29303,9 +29391,9 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                     record.green = chunk[gc].to_numpy(dtype=np.uint16) * 256
                     record.blue = chunk[bc].to_numpy(dtype=np.uint16) * 256
                 else:
-                    record.red = np.clip(chunk[rc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
-                    record.green = np.clip(chunk[gc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
-                    record.blue = np.clip(chunk[bc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
+                    record.red = np.clip(np.rint(chunk[rc].to_numpy(dtype=np.float64) * 65535.0), 0, 65535).astype(np.uint16)
+                    record.green = np.clip(np.rint(chunk[gc].to_numpy(dtype=np.float64) * 65535.0), 0, 65535).astype(np.uint16)
+                    record.blue = np.clip(np.rint(chunk[bc].to_numpy(dtype=np.float64) * 65535.0), 0, 65535).astype(np.uint16)
             if intensity_role is not None:
                 # Map intensity/reflectance to the LAS uint16 field, normalizing
                 # the column's GLOBAL finite range (computed above) — handles dB,
@@ -29422,7 +29510,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
     if miss_col:
         reserved.add(miss_col)
 
-    # Carry every other numeric property as a float32 extra dim. Dedupe slugs
+    # Carry every other numeric property as an extra dim of its own type. Dedupe slugs
     # the same way the ASCII path does, since two headers can sanitize alike.
     extra_dims: List[dict] = []
     used_slugs: set[str] = set()
@@ -29440,7 +29528,11 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
             slug = f"{base[:29]}_{i}"
             i += 1
         used_slugs.add(slug)
-        extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
+        # The property's own type (`int`, `uchar`, `double`, ...) carries
+        # through to the LAS extra dim and so to the session: as float32 an
+        # int above 2**24 or any double lost precision (`las_precision`).
+        extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col),
+                           "dtype": np.dtype(vertex[col].dtype).name})
 
     # `vertex` is plyfile's memory map of a binary PLY (ASCII PLY is parsed
     # into RAM by plyfile itself). Nothing below materializes a full float64
@@ -29457,6 +29549,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
         has_miss_info = True
     nonfinite = np.zeros(n_vertex, dtype=bool)
     xyz_min = np.full(3, np.inf)
+    xyz_max = np.full(3, -np.inf)
     for _a in range(0, n_vertex, _LAS_WRITE_CHUNK):
         _b = min(n_vertex, _a + _LAS_WRITE_CHUNK)
         _bx = np.asarray(vertex["x"][_a:_b], dtype=np.float64)
@@ -29466,6 +29559,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
         nonfinite[_a:_b] = _nf
         if (~_nf).any():
             xyz_min = np.minimum(xyz_min, [_bx[~_nf].min(), _by[~_nf].min(), _bz[~_nf].min()])
+            xyz_max = np.maximum(xyz_max, [_bx[~_nf].max(), _by[~_nf].max(), _bz[~_nf].max()])
     if nonfinite.any():
         is_miss[nonfinite] = 1.0
         has_miss_info = True
@@ -29483,15 +29577,19 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
 
     n = int(keep.sum())
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
-    # 32-bit int range — see _session_to_las for the full rationale.
-    header.offsets = (np.floor(xyz_min) if n else np.zeros(3))
+    # Scale and offset from the data, so the octree is as precise as the
+    # session (`_set_las_precision`); the offset still keeps projected (UTM)
+    # coordinates inside the LAS 32-bit int range.
+    if n:
+        _set_las_precision(header, xyz_min, xyz_max)  # octree input: no `sample`
+    else:
+        _set_las_precision(header, np.zeros(3), np.zeros(3))
     # Timestamp → standard float64 gps_time, never a float32 extra dim
     # (see `_split_timestamp_extra_dim`).
     extra_dims, ts_dim = _split_timestamp_extra_dim(extra_dims)
     for ed in extra_dims:
-        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"],
+                                                     type=np.dtype(ed.get("dtype") or "float32")))
     if ts_dim is not None:
         # The clock-identity flag is a header field, so decide it before the
         # first block is written: one pass over the timestamp column alone.
@@ -29507,7 +29605,7 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
 
     idx = np.flatnonzero(keep)
     # The session's positions at the PLY's own precision (the LAS below is
-    # 1 mm-quantized): into `positions_sink` when the caller wants them.
+    # quantized, however finely): into `positions_sink` when the caller wants them.
     if positions_sink is not None:
         positions_sink.allocate(n)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
@@ -29536,7 +29634,8 @@ def _ply_to_las(source_path: _Path, out_las: _Path,
                 if ed["slug"] == _MISS_SLUG and ed.get("col") is None:
                     record[_MISS_SLUG] = is_miss[blk]
                 else:
-                    record[ed["slug"]] = np.asarray(vertex[ed["col"]][blk]).astype(np.float32)
+                    record[ed["slug"]] = np.asarray(vertex[ed["col"]][blk]).astype(
+                        np.dtype(ed.get("dtype") or "float32"))
             if ts_dim is not None:
                 record.gps_time = np.asarray(vertex[ts_dim["col"]][blk], dtype=np.float64)
             writer.write_points(record)
@@ -29689,6 +29788,16 @@ def _pcd_unpack_rgb(v: np.ndarray, declared_float: bool) -> np.ndarray:
     return np.column_stack([(bits >> 16) & 255, (bits >> 8) & 255, bits & 255]).astype(np.uint8)
 
 
+def _pcd_field_dtype(h: dict, field: str) -> str:
+    """numpy dtype name of a PCD field from its header TYPE and SIZE."""
+    k = h["fields"].index(field)
+    kind = {"F": "f", "I": "i", "U": "u"}.get(str(h["types"][k]).upper(), "f")
+    try:
+        return np.dtype(f"{kind}{int(h['sizes'][k])}").name
+    except TypeError:
+        return "float32"
+
+
 def _pcd_to_las(source_path: _Path, out_las: _Path,
                 positions_sink: "Optional[_PositionSink]" = None) -> tuple[int, List[dict]]:
     """Convert a PCD to LAS for the octree, streaming, and keep every field.
@@ -29700,7 +29809,7 @@ def _pcd_to_las(source_path: _Path, out_las: _Path,
     (canonical nx/ny/nz), curvature, labels, … - as float32 scalar fields, a
     timestamp as float64 gps_time. Points with non-finite x/y/z (an organized
     cloud's empty pixels) are dropped. The session's positions go into
-    `positions_sink` at the file's own precision, not the LAS's 1 mm.
+    `positions_sink` at the file's own precision, not the LAS's quantum.
 
     binary_compressed (LZF, one compressed block per column) cannot be streamed,
     so it goes through open3d as before: positions and RGB only.
@@ -29736,12 +29845,17 @@ def _pcd_to_las(source_path: _Path, out_las: _Path,
                 slug = f"{base[:29]}_{i}"
                 i += 1
             used.add(slug)
-            extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
+            # The field's own type (PCD TYPE/SIZE: F4, F8, I4, U2, ...)
+            # carries through to the LAS extra dim and so to the session:
+            # as float32 an integer above 2**24 or an F8 lost precision.
+            extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col),
+                               "dtype": _pcd_field_dtype(h, col)})
         extra_dims, ts_dim = _split_timestamp_extra_dim(extra_dims)
 
         # Pass 1: the kept count, the offset, the intensity range, the clock.
         n = 0
         xyz_min = np.full(3, np.inf)
+        xyz_max = np.full(3, -np.inf)
         ilo, ihi = np.inf, -np.inf
         ts_absolute = False
         for ch in _pcd_iter_chunks(source_path, h, _LAS_WRITE_CHUNK):
@@ -29750,6 +29864,7 @@ def _pcd_to_las(source_path: _Path, out_las: _Path,
             n += int(keep.sum())
             if keep.any():
                 xyz_min = np.minimum(xyz_min, xyz[keep].min(axis=0))
+                xyz_max = np.maximum(xyz_max, xyz[keep].max(axis=0))
             if intensity_col is not None:
                 iv = np.asarray(ch[intensity_col], dtype=np.float64)[keep]
                 iv = iv[np.isfinite(iv)]
@@ -29761,10 +29876,13 @@ def _pcd_to_las(source_path: _Path, out_las: _Path,
                     ts_absolute = True
 
         header = laspy.LasHeader(point_format=3, version="1.4")
-        header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-        header.offsets = np.floor(xyz_min) if n else np.zeros(3)
+        if n:
+            _set_las_precision(header, xyz_min, xyz_max)  # octree input: no `sample`
+        else:
+            _set_las_precision(header, np.zeros(3), np.zeros(3))
         for ed in extra_dims:
-            header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+            header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"],
+                                                         type=np.dtype(ed.get("dtype") or "float32")))
         if ts_absolute:
             _mark_gps_time_absolute(header)
         if positions_sink is not None:
@@ -29792,7 +29910,8 @@ def _pcd_to_las(source_path: _Path, out_las: _Path,
                 if ts_dim is not None:
                     record.gps_time = np.asarray(ch[ts_dim["col"]], dtype=np.float64)[keep]
                 for ed in extra_dims:
-                    record[ed["slug"]] = np.asarray(ch[ed["col"]], dtype=np.float32)[keep]
+                    record[ed["slug"]] = np.asarray(
+                        ch[ed["col"]], dtype=np.dtype(ed.get("dtype") or "float32"))[keep]
                 writer.write_points(record)
         extra_out = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
@@ -29819,8 +29938,11 @@ def _pcd_to_las_open3d(source_path: _Path, out_las: _Path,
     positions, colors, _ = _load_ply_pcd_arrays(str(source_path))
     n = len(positions)
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = (np.floor(positions[:, :3].min(axis=0)) if n else np.zeros(3))
+    if n:
+        _set_las_precision(header, positions[:, :3].min(axis=0),
+                           positions[:, :3].max(axis=0))  # octree input: no `sample`
+    else:
+        _set_las_precision(header, np.zeros(3), np.zeros(3))
     if positions_sink is not None:
         positions_sink.allocate(n)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
@@ -29933,7 +30055,8 @@ def _e57_scan_params(header, has_grid: bool) -> dict:
 
 
 def _e57_to_las(source_path: _Path, out_las: _Path,
-                scan_index: Optional[int] = None) -> tuple[int, List[dict]]:
+                scan_index: Optional[int] = None,
+                positions_sink: "Optional[_PositionSink]" = None) -> tuple[int, List[dict]]:
     """Convert an E57 to LAS, recovering sky/miss points from the structured
     grid so the LAD inversion can account for beams that returned nothing.
 
@@ -30004,18 +30127,30 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
             extra_dims.append({"slug": "row_index", "label": "Row Index"})
             extra_dims.append({"slug": "column_index", "label": "Column Index"})
         header_las = laspy.LasHeader(point_format=3, version="1.4")
-        header_las.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-        # Offset at the first scanner position: LAS stores (value - offset) /
-        # 0.001 in an int32, i.e. +/- 2 147 km around the offset, so any
-        # terrestrial project fits around its first origin - and, unlike the
-        # data minimum, it is known before a point is read.
-        try:
-            _first_trans = np.asarray(e.get_header(scan_range[0]).translation, dtype=np.float64).reshape(3)
-        except Exception:
-            _first_trans = np.zeros(3)
-        header_las.offsets = np.floor(_first_trans)
+        # The header is written before a point is read, so bound the cloud by
+        # what IS known up front: every scan's origin, and the reach of a
+        # placed miss (_MISS_GAP_DISTANCE) around it - no return is farther.
+        # `_set_las_precision` picks the finest scale that extent fits.
+        _origins = []
+        for _si in scan_range:
+            try:
+                _origins.append(np.asarray(e.get_header(_si).translation,
+                                           dtype=np.float64).reshape(3))
+            except Exception:
+                pass
+        _origins_arr = np.asarray(_origins) if _origins else np.zeros((1, 3))
+        _reach = _MISS_GAP_DISTANCE + 1.0
+        _set_las_precision(header_las, _origins_arr.min(axis=0) - _reach,
+                           _origins_arr.max(axis=0) + _reach)
         for ed in extra_dims:
             header_las.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+        # The session's positions at full float64 precision, as every other
+        # converted format gives them: the LAS above only feeds the octree.
+        # (E57 used to be the one format whose session read its coordinates
+        # back from this LAS, then a fixed 1 mm grid.) Each scan's raw read
+        # returns exactly its header point_count records.
+        if positions_sink is not None:
+            positions_sink.allocate(sum(int(e.get_header(_si).point_count) for _si in scan_range))
         writer = laspy.open(str(out_las), mode="w", header=header_las)
         n = 0
         miss_count = 0
@@ -30182,6 +30317,8 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
             else:
                 scan_rgb = None
 
+            if positions_sink is not None:
+                positions_sink.write(world)
             # Write this scan now, in blocks, and let its arrays go.
             for _a in range(0, n_cell, _LAS_WRITE_CHUNK):
                 _b = min(n_cell, _a + _LAS_WRITE_CHUNK)
@@ -30214,7 +30351,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
         e.close()
         if writer is not None:
             if n > 0:
-                pad = 0.001
+                pad = float(np.max(writer.header.scales))
                 writer.header.mins = (xyz_min - pad).tolist()
                 writer.header.maxs = (xyz_max + pad).tolist()
             writer.close()
@@ -30917,7 +31054,7 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
 
     With `out_las` set, writes that LAS and returns `(n, extra_dims, full_xyz)`;
     `full_xyz` is the float64 world coordinate array, because PTX is an ASCII
-    source and the LAS synthesized here is 1 mm-quantized so it must not become
+    source and the LAS synthesized here is quantized so it must not become
     the session's source of truth.
 
     With `out_las=None` it writes NOTHING and returns `(LasReadResult, scan_meta)`
@@ -30992,8 +31129,7 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
                   {"slug": "row_index", "label": "Row Index"},
                   {"slug": "column_index", "label": "Column Index"}]
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.floor(lo) if np.all(np.isfinite(lo)) else np.zeros(3)
+    _set_las_precision(header, lo, hi)
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
@@ -31067,7 +31203,7 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
             positions[sl, 2] = world[2].T.ravel()
             if out_intensity is not None:
                 iv = np.where(valid, (grid[3] - inten_lo) / inten_span, 0.0)
-                out_intensity[sl] = np.clip(iv.T.ravel() * 65535.0, 0, 65535).astype(np.uint16)
+                out_intensity[sl] = np.clip(np.rint(iv.T.ravel() * 65535.0), 0, 65535).astype(np.uint16)
             if out_colors is not None and block.n_tokens >= 7:
                 # PTX color is 0-255; *256 lifts it into the 16-bit LAS channel,
                 # matching every other converter. Misses go black.
@@ -31211,20 +31347,19 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     conversion for XYZ/PLY; empty for PCD, which carries position + RGB only).
 
     `full_xyz` is the (N,3) float64 SOURCE-PRECISION coordinate array for every
-    converted format (XYZ family, PLY, PCD, PTX): the LAS we synthesize is
-    1 mm-quantized and so must not be the session's source of truth (1 mm
-    shatters triangulation). It is written into `positions_sink` when the
+    converted format (XYZ family, PLY, PCD, E57, PTX): the LAS we synthesize is
+    quantized (`las_precision`) and only feeds the octree, so it must not be the
+    session's source of truth. It is written into `positions_sink` when the
     caller passes one (the session store, for a large cloud - see
     _PositionSink), else into RAM. None for LAS/LAZ, which keep their own
-    header scale (the user's original precision), and for E57, whose converter
-    still reads positions back from its LAS (a known 1 mm residual). Callers
-    that need the session array use `full_xyz` when present and otherwise fall
-    back to reading the LAS.
+    header scale (the user's original precision). Callers that need the session
+    array use `full_xyz` when present and otherwise fall back to reading the
+    LAS.
 
     `beam_origins` is the (N,3) float64 per-pulse origin array for the XYZ-family
     branch when the column plan carried an ox/oy/oz triple, else None — captured
     at full precision alongside `full_xyz` (origins are world/UTM coords that must
-    not pass through the 1 mm LAS / float32 extras). For LAS/LAZ it is None here:
+    not pass through the quantized LAS or its extras). For LAS/LAZ it is None here:
     those origins live in ExtraBytes and are read later by `_read_las_into_arrays`.
     PLY/PCD/E57 do not carry an ASCII origin triple, so None.
 
@@ -31252,12 +31387,13 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
         return out, True, extra_dims, sink.result(), None
     if ext == "e57":
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _e57_to_las(source_path, out, scan_index=scan_index)
-        return out, True, extra_dims, None, None
+        sink = positions_sink if positions_sink is not None else _PositionSink()
+        _, extra_dims = _e57_to_las(source_path, out, scan_index=scan_index, positions_sink=sink)
+        return out, True, extra_dims, sink.result(), None
     if ext == "ptx":
         # PTX is an ASCII source, so the same precision rule as the XYZ family
         # applies: return the float64 coordinates rather than let the session read
-        # back the 1 mm-quantized LAS.
+        # back the quantized LAS.
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims, full_xyz = _ptx_to_las(source_path, out, block_index=scan_index)
         return out, True, extra_dims, full_xyz, None
@@ -32398,9 +32534,14 @@ def _preview_ply(file_path: str) -> PointCloudPreviewResponse:
             remappable=False,
         ))
     warning = None if is_ascii else "Binary PLY: preview rows unavailable (fields shown from header)."
+    try:
+        face_count = _ply_header_face_count(Path(file_path))
+    except OSError:
+        face_count = None
     return PointCloudPreviewResponse(
         kind='ply', delimiter=None, has_header=True,
         columns=columns, sample_rows=sample_rows, warning=warning,
+        face_count=face_count,
     )
 
 
@@ -32534,14 +32675,9 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
 
 
 def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
-    try:
-        face_count = _ply_header_face_count(Path(file_path))
-    except OSError:
-        face_count = None
     """Summarize an E57's structure for the import wizard without decoding the
     full point data. Reports the scan count, total points, and which attributes
     the file carries (read cheaply from the first scan's declared `point_fields`,
-        face_count=face_count,
     no point decode). Columns are fixed (E57 defines its own layout), so they're
     not remappable — we surface position plus whatever of intensity / RGB the
     file actually contains, so the user can see (and color by) them.
@@ -35122,7 +35258,7 @@ class CloudSession:
     column_plan: Optional[Any]       # ColumnPlan | None (wizard layout, honored once)
     positions: np.ndarray            # (N,3) float64 — FULL source resolution.
     # For ASCII/XYZ imports this comes straight from the source via
-    # `_xyz_to_las(capture_full_xyz=True)`, NOT from reading back the 1 mm-scale
+    # `_xyz_to_las(capture_full_xyz=True)`, NOT from reading back the quantized
     # octree LAS — that quantization shatters precision-sensitive ops like Helios
     # triangulation (it projects to spherical angles from the scan origin, where
     # 1 mm jitter blows up edge lengths). LAS/LAZ inputs keep their own header
@@ -35409,12 +35545,12 @@ def _epsg_from_wkt_vlr(header) -> Optional[int]:
 # source declares another unit is SCALED TO METERS at import, and the source
 # unit is kept only as provenance.
 #
-# Normalizing (rather than carrying a unit and scaling at every use site) is
-# forced by the intermediate LAS this backend writes, which hardcodes
-# `header.scales = [0.001]*3` — 0.001 in SOURCE units. That is a 1 mm quantum
-# for a meter cloud but a 1 METER quantum for a kilometer-unit one, so a cloud
-# that is not converted before the write is silently destroyed. Converting first
-# makes the existing 1 mm quantum true for every input.
+# Normalizing (rather than carrying a unit and scaling at every use site) also
+# keeps every LAS the backend writes in one unit. Their quantum is chosen from
+# the data (`las_precision`, 10 µm unless the points already sit on a coarser
+# LAS grid); it used to be a hard-coded 1 mm in SOURCE units, which was a
+# 1 METER quantum for a kilometer-unit cloud and too coarse for a fine scan in
+# any unit.
 _UNIT_TO_METERS: Dict[str, float] = {
     "m": 1.0,
     "km": 1000.0,
@@ -35760,6 +35896,23 @@ def _las_dim_dtype(dim) -> np.dtype:
     return np.dtype(dt) if dt is not None else np.dtype(np.uint8)
 
 
+def _las_extra_dim_read_dtype(d) -> np.dtype:
+    """The numpy type to hold a LAS extra dimension in: its declared type, or
+    float64 when the dim carries a scale/offset (laspy hands back the scaled
+    float64 value). A non-numeric or multi-element dim falls back to float32,
+    the old behavior."""
+    scaled = getattr(d, "scales", None) is not None or getattr(d, "offsets", None) is not None
+    if scaled:
+        return np.dtype(np.float64)
+    try:
+        dt = np.dtype(d.dtype)
+    except TypeError:
+        return np.dtype(np.float32)
+    if dt.kind in "iuf" and dt.shape == () and getattr(d, "num_elements", 1) in (1, None):
+        return dt
+    return np.dtype(np.float32)
+
+
 def _read_las_into_arrays(las_path: _Path, store=None,
                           positions: "Optional[np.ndarray]" = None) -> "LasReadResult":
     """Read a LAS file into RAM as the session's source-of-truth arrays, in
@@ -35814,7 +35967,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
         extra_dims = list(pf.extra_dimensions)
 
         # `positions` given: the converter already wrote the source's FULL-
-        # precision coordinates (see _PositionSink); the LAS's 1 mm copy is
+        # precision coordinates (see _PositionSink); the LAS's quantized copy is
         # neither allocated nor read.
         fill_positions = positions is None
         if fill_positions:
@@ -35841,8 +35994,12 @@ def _read_las_into_arrays(las_path: _Path, store=None,
                 break
         _origin_skip = set(origin_names or ())
 
-        # Extra dims → float32 columns keyed by canonical slug (see the slug
-        # rules below); the file's own spelling stays as the label.
+        # Extra dims → columns keyed by canonical slug (see the slug rules
+        # below); the file's own spelling stays as the label. Each is read in
+        # the type the file DECLARES (a scaled dim in float64), and that type
+        # is recorded as `dtype` in its meta: they were all float32, which
+        # turned integers above 2**24 and every float64 into approximations
+        # that compaction then locked in as if exact (`las_precision`).
         extras: Dict[str, np.ndarray] = {}
         extra_dims_meta: List[dict] = []
         extra_sources: List["tuple[str, str]"] = []   # (file dim name, slug)
@@ -35874,8 +36031,9 @@ def _read_las_into_arrays(las_path: _Path, store=None,
                 slug = name
             col = f"x{len(extra_cols)}"
             extra_cols[col] = slug
-            extras[slug] = _alloc(col, (n,), np.float32)
-            extra_dims_meta.append({"slug": slug, "label": name})
+            _dt = _las_extra_dim_read_dtype(d)
+            extras[slug] = _alloc(col, (n,), _dt)
+            extra_dims_meta.append({"slug": slug, "label": name, "dtype": _dt.name})
             extra_sources.append((name, slug))
 
         # Candidate columns whose fate depends on their CONTENTS: the multi-return
@@ -35964,7 +36122,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
                 for k, nm in enumerate(origin_names):
                     beam_origins[sl, k] = np.asarray(chunk[nm], dtype=np.float64)
             for name, slug in extra_sources:
-                extras[slug][sl] = np.asarray(chunk[name], dtype=np.float32)
+                extras[slug][sl] = np.asarray(chunk[name], dtype=extras[slug].dtype)
             for name, cand in candidates.items():
                 # Allocated LAZILY: most standard dims are constant (a LAS we
                 # converted ourselves has them all zero), so a full-length array
@@ -36303,14 +36461,15 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
                 pos_min = np.minimum(pos_min, b.min(axis=0))
                 pos_max = np.maximum(pos_max, b.max(axis=0))
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    # Offset to the data minimum, NOT [0,0,0]: a LAS coordinate is stored as a
-    # 32-bit int (value - offset) / scale, so with offset 0 and 1 mm scale the
-    # representable range is only ±2.1 km. Real-world projected clouds (UTM
-    # northings ~5.4e6 m) overflow that. Subtracting the per-axis minimum keeps
-    # the stored ints small for any CRS; laspy re-applies offset on read, so
-    # downstream coordinates are unchanged.
-    header.offsets = (np.floor(pos_min) if n else np.zeros(3, dtype=np.float64))
+    # Scale and offset from the data (`_set_las_precision`). The offset sits at
+    # the data minimum, NOT [0,0,0]: a LAS coordinate is stored as a 32-bit int
+    # (value - offset) / scale, and real-world projected clouds (UTM northings
+    # ~5.4e6 m) overflow that around 0. The scale is the grid the points are
+    # already on, else 10 µm, coarsened only if the extent needs it.
+    if n:
+        _scales = _set_las_precision(header, pos_min, pos_max)  # octree input: no `sample`
+    else:
+        _scales = _set_las_precision(header, np.zeros(3), np.zeros(3))
     # Drop a `timestamp` extra dim from the SCHEMA and write the float64
     # `sess.timestamps` to the standard gps_time field instead (below). Imports no
     # longer create such a dim, but a session restored from an octree built before
@@ -36391,7 +36550,7 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             writer.write_points(record)
             del record, bpos, bcol, bint, bts, bext
         if n > 0:
-            pad = 0.001  # matches header.scales — keeps boundary points in-bbox
+            pad = float(np.max(_scales))  # one quantum — keeps boundary points in-bbox
             writer.header.mins = (pos_min - pad).tolist()
             writer.header.maxs = (pos_max + pad).tolist()
     return n
@@ -36526,13 +36685,16 @@ def _gather_miss_positions(sess: "CloudSession",
 def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
     """Write position-only miss points to a LAS for PotreeConverter. The miss
     octree renders flat-orange, so it carries no colors/intensity/extra-dims.
-    Mirrors `_session_to_las`'s header (pt fmt 3, 1 mm scale, offset = floor(min)
-    so far-field coords don't overflow the LAS int32). Returns the count."""
+    Mirrors `_session_to_las`'s header (pt fmt 3, `_set_las_precision`, so
+    far-field coords don't overflow the LAS int32). Returns the count."""
     import laspy
     n = int(positions.shape[0])
     header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = (np.floor(positions.min(axis=0)) if n else np.zeros(3, dtype=np.float64))
+    if n:
+        _set_las_precision(header, positions.min(axis=0),
+                           positions.max(axis=0))  # octree input: no `sample`
+    else:
+        _set_las_precision(header, np.zeros(3), np.zeros(3))
     # Chunk the write so the laspy record is one block, not all M misses at once —
     # a sparse scan can be 30-50% sky, so the miss set is itself multi-million-row.
     # See `_session_to_las` for the rationale.
@@ -36546,7 +36708,7 @@ def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
             writer.write_points(record)
             del record
         if n > 0:
-            pad = 0.001
+            pad = float(np.max(header.scales))
             writer.header.mins = (positions.min(axis=0) - pad).tolist()
             writer.header.maxs = (positions.max(axis=0) + pad).tolist()
     return n
@@ -36679,8 +36841,7 @@ class CloudSessionCreateRequest(BaseModel):
     # The unit the SOURCE FILE's coordinates are in, chosen (or confirmed) in the
     # import wizard: one of _UNIT_TO_METERS' slugs. Positions are scaled to
     # meters at create — BEFORE the world shift, before every derived metric,
-    # and before the intermediate LAS write whose 1 mm quantum is expressed in
-    # source units. None / omitted / "m" = no scaling, which is what every
+    # and before the intermediate LAS write, so the octree is in meters too. None / omitted / "m" = no scaling, which is what every
     # import did before units existed.
     source_units: Optional[str] = None
     # Far-field distance (m) used by miss auto-detection's DISTANCE fallback only
@@ -37056,7 +37217,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                 store_box.pop("store", None)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
-        # synthesized is 1 mm-quantized — coarse enough to shatter precision-
+        # synthesized is quantized — and once was coarse enough to shatter precision-
         # sensitive ops like triangulation — so prefer the source-precision xyz
         # `_source_to_las` captured during conversion. Colors/intensity/extras
         # still come from the LAS read (it filters NaN-xyz rows identically, so
@@ -37087,7 +37248,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         gps_time_encoding = _las.gps_time_encoding
         read_warnings = list(_las.warnings or [])
         # Beam origins: for LAS/LAZ they're read from ExtraBytes by
-        # `_read_las_into_arrays`. For the ASCII/XYZ path the 1 mm LAS can't carry
+        # `_read_las_into_arrays`. For the ASCII/XYZ path the quantized LAS can't carry
         # them (origins are world/UTM coords needing full precision), so prefer the
         # float64 triple `_source_to_las` captured from the source columns. Like
         # `full_xyz`, guard the row count so a malformed plan can't desync them
@@ -37110,8 +37271,9 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # BEFORE the global shift, and before every derived metric below
         # (ground_z, robust_extent, point_spacing) — all of which feed
         # meter-calibrated thresholds — and before the intermediate LAS write,
-        # whose `header.scales = [0.001]*3` is expressed in SOURCE units. A
-        # kilometer-unit cloud written unscaled is quantized to 1 meter.
+        # so the octree is in meters too (its quantum is chosen from the data,
+        # `las_precision`; it was a fixed 0.001 in SOURCE units, i.e. 1 meter
+        # for a kilometer-unit cloud).
         #
         # Deliberately positions + beam origins only: intensity, classification,
         # timestamps and color are dimensionless or carry their own units.
@@ -39688,17 +39850,26 @@ def _float_only_slugs() -> set:
             | {"timestamp", HEIGHT_ABOVE_GROUND_SLUG})
 
 
-def _compact_column(arr: np.ndarray, slug: "Optional[str]" = None) -> np.ndarray:
+def _compact_column(arr: np.ndarray, slug: "Optional[str]" = None,
+                    declared: "Optional[str]" = None) -> np.ndarray:
     """`arr` in the narrowest integer type that holds it exactly, or float32
-    when it is not all whole numbers (or exceeds int32), or when `slug` names a
-    continuous quantity (_float_only_slugs). Returns `arr` itself when it
-    already has that type."""
+    when it is not all whole numbers, or when `slug` names a continuous
+    quantity (_float_only_slugs). Returns `arr` itself when it already has that
+    type.
+
+    Never lossy for what a source DECLARED (`declared`, the importer's record of
+    the file's type): a float64 column stays float64, and whole numbers beyond
+    int32 stay int64 rather than collapsing to float32, which rounds above
+    2**24. A tool's own float64 output with no declaration still compacts to
+    float32, as before."""
     if slug is not None and slug in _float_only_slugs():
         return arr if arr.dtype == np.float32 else np.asarray(arr, dtype=np.float32)
     r = _integral_range(arr)
     dt = _narrow_int_dtype(*r) if r is not None else None
+    if dt is None and r is not None and -2 ** 63 <= r[0] and r[1] < 2 ** 63:
+        dt = np.dtype(np.int64)
     if dt is None:
-        dt = np.dtype(np.float32)
+        dt = np.dtype(np.float64) if declared == "float64" else np.dtype(np.float32)
     if arr.dtype == dt:
         return arr
     return np.asarray(arr).astype(dt)
@@ -39748,7 +39919,7 @@ def _session_compact_extras_locked(sess: "CloudSession", skip: "Optional[set]" =
     for slug, arr in list(sess.extras.items()):
         if skip and slug in skip:
             continue
-        new = _compact_column(arr, slug)
+        new = _compact_column(arr, slug, _declared_dtype(sess, slug))
         if new is arr:
             continue
         store = getattr(sess, "store", None)
@@ -40674,6 +40845,8 @@ def session_info(session_id: str):
         has_timestamps = (sess.timestamps is not None
                           and sess.timestamps.shape[0] == sess.positions.shape[0])
         crs = sess.crs_epsg
+        source_units = getattr(sess, "source_units", None)
+        source_unit_scale = getattr(sess, "source_unit_scale", None)
     # Every per-point column readable by name from `/arrays?fields=` and usable
     # in a filter: the extras, plus intensity and timestamp, which the session
     # keeps on their own fields rather than in `extras`.
@@ -40685,7 +40858,14 @@ def session_info(session_id: str):
             "world_shift": None if shift is None else [float(v) for v in shift],
             "columns": columns, "extra_dims": meta, "has_colors": has_colors,
             "has_intensity": has_intensity, "has_timestamps": has_timestamps,
-            "crs_epsg": crs}
+            "crs_epsg": crs,
+            # The unit the source was declared in and its factor to meters
+            # (positions are always meters once imported). Left out of this
+            # response, a script that imported with source_units="mm" could not
+            # see afterwards that the conversion had happened.
+            "source_units": source_units,
+            "source_unit_scale": (None if source_unit_scale is None
+                                  else float(source_unit_scale))}
 
 
 _ARRAY_COLUMN_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -40742,8 +40922,16 @@ def _session_from_arrays(members: "Dict[str, np.ndarray]",
                 f"Column name {name!r} is not allowed: use letters, digits and '_', "
                 "starting with a letter or '_'."))
         a = _column(name, arr, (n,))
-        extras[name] = a.astype(np.float32) if a.dtype.kind == "f" or a.dtype == np.bool_ else a
-        meta.append({"slug": name, "label": _MISS_LABEL if name == _MISS_SLUG else name})
+        # A float64 or integer array keeps its type (recorded as `dtype`, so
+        # compaction and `/arrays` give it back as handed in); float16/32 and
+        # bool are stored float32 as before. Casting every float to float32 cut
+        # a script's float64 columns to 7 digits.
+        extras[name] = (a.astype(np.float32) if (a.dtype.kind == "f" and a.dtype != np.float64)
+                        or a.dtype == np.bool_ else a)
+        entry = {"slug": name, "label": _MISS_LABEL if name == _MISS_SLUG else name}
+        if a.dtype.kind in "iuf" and a.dtype != np.float16:
+            entry["dtype"] = np.dtype(a.dtype).name
+        meta.append(entry)
 
     shift = None
     if world_shift is not None:
@@ -40846,7 +41034,11 @@ def session_arrays(session_id: str, include_misses: bool = False,
     Members: `positions` (N,3) float64; `colors` (N,3) float32 in 0-1 and
     `intensity` (N,) float32 in 0-1 when the cloud has them and `colors` is set
     (or they are named in `fields`); `timestamp` float64; one member per extra
-    column under its slug, in its stored dtype. `.npz` rather than a PHB1 frame
+    column under its slug, in the type its source file declared (else int32 for
+    whole numbers, float32/float64 as stored; `las_precision.
+    column_dtype_for_reading`). Never the storage type: storage narrows each
+    cloud's integer columns to fit its own values, so the same column used to
+    come back int8 from one file and uint8 from the next. `.npz` rather than a PHB1 frame
     because PHB1 carries only f32/u32, and world coordinates need float64.
     `fields` (comma-separated slugs) limits the extra columns returned; the
     filtering still happens in lockstep, since it only drops whole members."""
@@ -40863,10 +41055,13 @@ def session_arrays(session_id: str, include_misses: bool = False,
         members["colors"] = np.asarray(cols, dtype=np.float32)
     if intensity is not None and (colors or (wanted and "intensity" in wanted)):
         members["intensity"] = np.asarray(intensity, dtype=np.float32)
+    sess = _peek_cloud_session(session_id)
     for slug, col in extra_cols.items():
         if slug in members or (wanted is not None and slug not in wanted):
             continue
-        members[slug] = np.asarray(col)
+        arr = np.asarray(col)
+        dt = las_precision.column_dtype_for_reading(arr, _declared_dtype(sess, slug))
+        members[slug] = arr.astype(dt, copy=False)
     if wanted is not None:
         missing = wanted - set(members)
         if missing:
@@ -43456,7 +43651,7 @@ def _translate_octree_in_place(cache_id: Optional[str],
     # Key on the source octree plus the exact translation, so the same move on
     # the same cloud reuses the result. Rounded to 1e-9 m before hashing: the
     # matrix arrives as a float64 product of several transforms, and hashing raw
-    # bits would miss cache on noise far below the octree's own 1 mm quantum.
+    # bits would miss cache on noise far below the octree's own quantum.
     dstr = ",".join(f"{float(v):.9f}" for v in np.asarray(delta, dtype=np.float64).reshape(3))
     cache_key = _hashlib.sha1(f"{cache_id}|translate|{dstr}".encode("utf-8")).hexdigest()
     cache_dir = _octree_cache_root() / cache_key

@@ -140,6 +140,9 @@ def generate_chunk(rng: np.random.Generator, n: int, extent: float, centers: np.
     }
 
 
+VENDOR_LAS_SCALE = 0.001
+
+
 def write_cloud(out: Path, n_points: int, *, extent: float = 60.0, n_trees: int = 36,
                 ground_fraction: float = 0.45, miss_fraction: float = 0.0,
                 seed: int = 0, chunk: int = CHUNK, quiet: bool = False) -> int:
@@ -150,7 +153,11 @@ def write_cloud(out: Path, n_points: int, *, extent: float = 60.0, n_trees: int 
     scanner = np.array([extent / 2.0, extent / 2.0, SCANNER_HEIGHT_M])
 
     hdr = laspy.LasHeader(point_format=3, version="1.4")
-    hdr.scales = np.array([0.001, 0.001, 0.001])
+    # 1 mm ON PURPOSE: this fabricates benchmark INPUT shaped like a typical
+    # vendor TLS file, which is written on a 1 mm grid. It is not a Phytograph
+    # writer; those choose their quantum in `las_precision` (and keep a grid
+    # like this one exactly on re-export).
+    hdr.scales = np.array([VENDOR_LAS_SCALE] * 3)
     hdr.offsets = np.array([0.0, 0.0, 0.0])
     hdr.add_extra_dim(laspy.ExtraBytesParams(name="is_miss", type=np.uint8))
     hdr.add_extra_dim(laspy.ExtraBytesParams(name="ground_truth", type=np.uint8))
