@@ -26,11 +26,8 @@ import {
   exportClassPalettes, importClassPalettes,
 } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
-import {
-  ColormapName,
-  COLORMAP_NAMES,
-  COLORMAP_LABELS,
-} from '../lib/colormaps';
+import { ColormapName } from '../lib/colormaps';
+import { ColormapOptions } from './ColormapOptions';
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
 import { TriangulationPopup, type TriangulationStartArgs } from './TriangulationPopup';
 import type { GridOption } from '../lib/gridOption';
@@ -24417,9 +24414,7 @@ export default function PointCloudViewer({
           }}
           className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
         >
-          {COLORMAP_NAMES.map(name => (
-            <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
-          ))}
+          <ColormapOptions />
         </select>
       </div>
     );
@@ -30147,9 +30142,7 @@ export default function PointCloudViewer({
                         onChange={(e) => setColormap(e.target.value as ColormapName)}
                         className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
                       >
-                        {COLORMAP_NAMES.map((name) => (
-                          <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
-                        ))}
+                        <ColormapOptions />
                       </select>
 
                       {dataRange && (

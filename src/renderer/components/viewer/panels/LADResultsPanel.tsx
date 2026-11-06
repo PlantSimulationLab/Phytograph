@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { Grid3x3, Eye, EyeOff, Trash2, Download, BarChart3 } from 'lucide-react';
 import type { LADResultEntry } from '../../../lib/pointCloudTypes';
 import { ladRange } from '../../../lib/pointCloudHelpers';
-import { ColormapName, COLORMAP_NAMES, COLORMAP_LABELS } from '../../../lib/colormaps';
+import { ColormapName } from '../../../lib/colormaps';
+import { ColormapOptions } from '../../ColormapOptions';
 import {
   ladExportVariables, rasterBlockedReason, type LadExportFormat,
 } from '../../../lib/ladExport';
@@ -457,9 +458,7 @@ export function LADResultsPanel({
                       onChange={(e) => onColormapChange(result.id, e.target.value as ColormapName)}
                       className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
                     >
-                      {COLORMAP_NAMES.map(name => (
-                        <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
-                      ))}
+                      <ColormapOptions gradientsOnly />
                     </select>
                   </div>
                   {/* Reading the result, as opposed to writing it out: the

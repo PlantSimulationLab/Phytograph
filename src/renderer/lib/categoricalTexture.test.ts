@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { categoricalTexels, CATEGORICAL_TEXTURE_MIN } from './categoricalTexture';
+import { categoricalTexels, CATEGORICAL_TEXTURE_MIN, discreteColormapScheme } from './categoricalTexture';
+import { discreteColor } from './colormaps';
 import type { CategoricalScheme } from './classification';
 import type { RGB } from './colormaps';
 
@@ -51,5 +52,43 @@ describe('categoricalTexels', () => {
   it('fills an empty range with the unknown color', () => {
     const tex = categoricalTexels(scheme([500]), [0, 10], GRAY);
     expect(Array.from(tex.data.slice(0, 4))).toEqual([128, 128, 128, 255]);
+  });
+});
+
+// The octree shader only has t = (v - lo) / span, so a discrete (label)
+// colormap is drawn as a class texture with one class per integer. What has to
+// hold: sampling the texture where the shader would, for value v, returns the
+// map's color for v — and v+1 a different one.
+describe('discreteColormapScheme', () => {
+  const texelAt = (tex: { width: number; data: Uint8Array }, t: number) => {
+    const i = Math.min(tex.width - 1, Math.max(0, Math.floor(t * tex.width)));
+    return [tex.data[4 * i], tex.data[4 * i + 1], tex.data[4 * i + 2]];
+  };
+  const bytes = (c: number[]) => c.map((x) => Math.round(x * 255));
+
+  for (const name of ['tab20', 'glasbey', 'golden'] as const) {
+    it(`${name}: each integer in range samples its own value-keyed color`, () => {
+      const range: [number, number] = [0, 300];
+      const scheme = discreteColormapScheme(name, range);
+      expect(scheme.classes.length).toBe(301);
+      const tex = categoricalTexels(scheme, range, [0.6, 0.6, 0.6]);
+      for (let v = 0; v <= 300; v++) {
+        expect(texelAt(tex, (v - range[0]) / 300)).toEqual(bytes(discreteColor(name, v)));
+      }
+    });
+  }
+
+  it('lays out a negative / offset range correctly', () => {
+    const range: [number, number] = [-7, 12];
+    const tex = categoricalTexels(discreteColormapScheme('tab20', range), range, [0.6, 0.6, 0.6]);
+    for (let v = -7; v <= 12; v++) {
+      expect(texelAt(tex, (v + 7) / 19)).toEqual(bytes(discreteColor('tab20', v)));
+    }
+  });
+
+  it('strides past the texture width instead of allocating unbounded classes', () => {
+    const scheme = discreteColormapScheme('tab20', [0, 65535], 16384);
+    expect(scheme.classes.length).toBeLessThanOrEqual(8192);
+    expect(scheme.classes.length).toBeGreaterThan(4000);
   });
 });

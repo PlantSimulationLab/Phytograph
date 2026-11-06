@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
-import { ColormapName, sampleColormap } from '../../../lib/colormaps';
-import { categoricalSchemeForCloud, buildCategoricalGradientStops, UNKNOWN_CLASS_COLOR } from '../../../lib/classification';
-import { categoricalTexels } from '../../../lib/categoricalTexture';
+import { ColormapName, isDiscreteColormap, sampleColormap } from '../../../lib/colormaps';
+import { categoricalSchemeForCloud, buildCategoricalGradientStops, UNKNOWN_CLASS_COLOR, type CategoricalScheme } from '../../../lib/classification';
+import { categoricalTexels, discreteColormapScheme } from '../../../lib/categoricalTexture';
 import type { CloudFilters, OverlayColumn, PointCloudData } from '../../../lib/pointCloudTypes';
 import { fetchSessionColumn, fetchSessionColumnRows } from '../../../utils/backendApi';
 import {
@@ -1098,6 +1098,9 @@ export function OctreePointCloud({
     // bypasses the renderer's outputColorSpace conversion), so the
     // colormap on screen exactly matches what the colorbar overlay
     // shows from the same sampleColormap call.
+    // The value range a nearest-filtered class texture was laid out over, when
+    // one is bound (categorical column or discrete label colormap). E2E seam.
+    let classTextureRange: [number, number] | null = null;
     if (colorMode === 'height' || colorMode === 'intensity' || scalarActive) {
       // Categorical scalar (e.g. ground_class): build a STEP gradient so each
       // class renders as a flat distinct color rather than a position along a
@@ -1130,15 +1133,14 @@ export function OctreePointCloud({
             data.octree?.observedClasses?.[selectedScalarField ?? ''],
           )
         : null);
-      if (categorical && bandRange) {
-        const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);
+      const applyClassTexture = (scheme: CategoricalScheme, range: [number, number]) => {
+        const stops = buildCategoricalGradientStops(scheme, range);
         (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
         // ...but SAMPLE our own texture. potree-core bakes those stops into a
         // 64-pixel, linearly filtered canvas, so past ~64 classes neighbors
         // shared a pixel and drew as one averaged color (lib/categoricalTexture).
         const { width, data } = categoricalTexels(
-          categorical, [bandRange[0], bandRange[1]], UNKNOWN_CLASS_COLOR,
-          gl.capabilities.maxTextureSize);
+          scheme, range, UNKNOWN_CLASS_COLOR, gl.capabilities.maxTextureSize);
         const tex = new THREE.DataTexture(data, width, 1, THREE.RGBAFormat);
         tex.magFilter = THREE.NearestFilter;
         tex.minFilter = THREE.NearestFilter;
@@ -1146,6 +1148,26 @@ export function OctreePointCloud({
         (m as any).uniforms.gradient.value = tex;
         categoricalTexRef.current?.dispose();
         categoricalTexRef.current = tex;
+      };
+      // A discrete (label) colormap colors by VALUE, cycling, and the shader
+      // only has t — so lay one class per integer over the range the shader
+      // maps t against, colored by the map, and draw it through the same
+      // nearest-filtered class texture as a categorical column. Height mode's
+      // shader maps over heightMin/heightMax (display frame), so its bands go
+      // over the same range in world Z, which is what the values are in.
+      const discreteRange: [number, number] | null = !categorical && isDiscreteColormap(colormap)
+        ? (colorMode === 'height'
+          ? [(m as any).heightMin + (displayOffset?.z ?? 0), (m as any).heightMax + (displayOffset?.z ?? 0)]
+          : effectiveRange ?? null)
+        : null;
+      if (categorical && bandRange) {
+        applyClassTexture(categorical, [bandRange[0], bandRange[1]]);
+        classTextureRange = [bandRange[0], bandRange[1]];
+      } else if (discreteRange && isDiscreteColormap(colormap)) {
+        applyClassTexture(
+          discreteColormapScheme(colormap, discreteRange, gl.capabilities.maxTextureSize),
+          discreteRange);
+        classTextureRange = discreteRange;
       } else {
         const stopCount = 32;
         const gradient: Array<[number, THREE.Color]> = [];
@@ -1183,6 +1205,23 @@ export function OctreePointCloud({
         colorMode,
         pointColorType: (m as any).pointColorType,
         scalarField: scalarActive ? (selectedScalarField ?? null) : null,
+        // The class texture actually bound to the shader's `gradient` uniform
+        // (null for a smooth potree gradient): its texels and the value range
+        // they span, so a spec can look up the color the shader samples for a
+        // value — t = (v - lo) / (hi - lo), texel floor(t * width).
+        classTexture: (() => {
+          const tex = (m as any).uniforms?.gradient?.value;
+          // Keyed on the bound uniform alone, so a class texture left bound after
+          // switching back to a gradient shows up here instead of hiding.
+          if (!(tex instanceof THREE.DataTexture)) return null;
+          const img = tex.image as { width: number; data: Uint8Array };
+          return {
+            nearest: tex.magFilter === THREE.NearestFilter,
+            width: img.width,
+            range: classTextureRange,
+            rgba: Array.from(img.data),
+          };
+        })(),
       };
     }
 

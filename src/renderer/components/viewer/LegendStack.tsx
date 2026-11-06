@@ -1,4 +1,4 @@
-import { colormapToCssGradient } from '../../lib/colormaps';
+import { colormapToCssGradient, discretePeriod, isDiscreteColormap } from '../../lib/colormaps';
 import { formatColorbarTick } from '../../lib/pointCloudHelpers';
 import { LegendEntry, layoutLegend } from '../../lib/colorChannel';
 
@@ -35,8 +35,36 @@ export interface LegendStackProps {
   renderEditor?: (entry: LegendEntry) => React.ReactNode;
 }
 
+// A discrete (label) colormap: colors are keyed to each value, cycling, so
+// min/mid/max ticks along the swatch would wrongly suggest the colors encode
+// magnitude. Show the palette as blocks and say how it maps instead.
+function DiscreteBody({ entry }: { entry: LegendEntry }) {
+  if (!isDiscreteColormap(entry.colormap)) return null;
+  const period = discretePeriod(entry.colormap);
+  return (
+    <div className="flex items-stretch gap-2" data-testid="legend-discrete">
+      <div
+        className="w-4 rounded-sm border border-neutral-600 shrink-0"
+        style={{ height: BAR_HEIGHT / 2, background: colormapToCssGradient(entry.colormap, 0, 'to bottom') }}
+      />
+      <div className="flex flex-col gap-1 text-[10px] text-neutral-300 leading-tight max-w-[110px]">
+        <span>One color per value</span>
+        <span className="text-neutral-400">
+          {Number.isFinite(period) ? `repeats every ${period}` : 'never repeats'}
+        </span>
+        {entry.min !== undefined && entry.max !== undefined && (
+          <span className="text-neutral-400">
+            {formatColorbarTick(entry.min)} – {formatColorbarTick(entry.max)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // A continuous gradient bar with min/mid/max ticks.
 function ContinuousBody({ entry }: { entry: LegendEntry }) {
+  if (isDiscreteColormap(entry.colormap)) return <DiscreteBody entry={entry} />;
   const min = entry.min ?? 0;
   const max = entry.max ?? 0;
   const mid = (min + max) / 2;

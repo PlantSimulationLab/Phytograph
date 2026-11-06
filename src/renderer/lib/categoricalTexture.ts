@@ -14,8 +14,8 @@
 // the class whose sample point is closest (the same midpoint cells
 // `buildCategoricalGradientStops` lays out).
 
-import type { CategoricalScheme } from './classification';
-import type { RGB } from './colormaps';
+import type { CategoricalScheme, ClassDef } from './classification';
+import { discreteColor, type DiscreteColormapName, type RGB } from './colormaps';
 
 /** Texture widths are powers of two from 256 up to the caller's `maxWidth`
  *  (the GPU's MAX_TEXTURE_SIZE; WebGL2 guarantees only 2048, desktop GPUs
@@ -79,4 +79,31 @@ export function categoricalTexels(
   // points are closer than the midpoint rule can separate at this width.
   for (const p of pts) put(Math.min(width - 1, Math.max(0, Math.floor(p.t * width))), p.color);
   return { width, data };
+}
+
+/**
+ * A class list for a DISCRETE (label) colormap over `range`: one class per
+ * integer, each colored by the map (palette[round(v) mod K]), so the octree
+ * shader — which only has t — can draw a value-keyed colormap through the same
+ * nearest-filtered class texture as a categorical column.
+ *
+ * Past the texture's resolution (half its width, since `categoricalTexels`
+ * wants two texels per class) the integers are strided, so neighbors share a
+ * texel. Integer label columns sit far below that; only a discrete map chosen
+ * for a wide continuous field (e.g. intensity 0–65535) hits it.
+ */
+export function discreteColormapScheme(
+  name: DiscreteColormapName, range: [number, number],
+  maxWidth: number = CATEGORICAL_TEXTURE_MAX,
+): CategoricalScheme {
+  const lo = Math.round(Math.min(range[0], range[1]));
+  const hi = Math.round(Math.max(range[0], range[1]));
+  const cap = Math.max(1, Math.floor(
+    Math.max(CATEGORICAL_TEXTURE_MIN, Math.min(CATEGORICAL_TEXTURE_MAX, maxWidth)) / 2));
+  const step = Math.max(1, Math.ceil((hi - lo + 1) / cap));
+  const classes: ClassDef[] = [];
+  for (let v = lo; v <= hi; v += step) {
+    classes.push({ value: v, label: String(v), color: discreteColor(name, v) });
+  }
+  return { attribute: name, classes };
 }

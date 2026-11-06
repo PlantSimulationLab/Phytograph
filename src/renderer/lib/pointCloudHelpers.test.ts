@@ -53,6 +53,7 @@ import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
 import { parsePoseStreamCsv } from './poseStream';
 import type { HeliosGrid } from '../utils/backendApi';
 import * as THREE from 'three';
+import { discreteColor } from './colormaps';
 
 // Build a minimal MeshData from a flat vertex list and triangle index list.
 function makeMesh(
@@ -2021,5 +2022,30 @@ describe('voxelKeepIndices / voxelResampleCloud', () => {
   it('refuses a streamed (octree) cloud, whose positions are empty', () => {
     const cloud = { positions: new Float32Array(0), pointCount: 100 } as unknown as PointCloudData;
     expect(() => voxelResampleCloud(cloud, 1)).toThrow(/flat cloud/);
+  });
+});
+
+// A mesh layer can be a label band (a segmented DTM's region ids). Under a
+// discrete label colormap each triangle is colored by its VALUE, cycling, so
+// regions 3 and 4 differ and 3 and 23 share tab20's color.
+describe('buildMeshTriangleColors with a discrete (label) colormap', () => {
+  it('colors each triangle by its layer value, independent of the range', () => {
+    // Three separate triangles; layer value is per vertex, constant per face.
+    const mesh = makeMesh(
+      [0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 2, 1, 0, 4, 0, 0, 5, 0, 0, 4, 1, 0],
+      [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    );
+    const layer = new Float32Array([3, 3, 3, 4, 4, 4, 23, 23, 23]);
+    const built = buildMeshTriangleColors(mesh, 'layer', 'tab20', undefined, layer)!;
+    const face = (t: number) => Array.from(built.colors.slice(t * 9, t * 9 + 3));
+    const expected = (v: number) => Array.from(new Float32Array(discreteColor('tab20', v)));
+    expect(face(0)).toEqual(expected(3));
+    expect(face(1)).toEqual(expected(4));
+    expect(face(2)).toEqual(expected(23));
+    expect(face(0)).toEqual(face(2));   // 3 and 23: one tab20 cycle apart
+    expect(face(0)).not.toEqual(face(1));
+    // A pinned range doesn't move a label's color.
+    const pinned = buildMeshTriangleColors(mesh, 'layer', 'tab20', { min: 0, max: 1000 }, layer)!;
+    expect(Array.from(pinned.colors)).toEqual(Array.from(built.colors));
   });
 });

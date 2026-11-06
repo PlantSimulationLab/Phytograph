@@ -8,7 +8,7 @@
 // renderer and the octree (potree) renderer.
 //
 // Pure + stateless — safe to unit-test directly.
-import type { RGB } from './colormaps';
+import { goldenAngleColor, type RGB } from './colormaps';
 
 export interface ClassDef {
   value: number;   // the integer class value stored in the scalar attribute
@@ -125,40 +125,12 @@ const NOISE_SCHEME: CategoricalScheme = {
 // id 0 ("unassigned") is a muted gray.
 export const TREE_INSTANCE_ATTRIBUTE = 'tree_instance';
 
-// Dark gray, deliberately OUTSIDE the tree palette's lightness band (trees are
-// saturated hues at L≈0.50–0.62). A medium gray reads as just a desaturated
-// tree; going much darker makes "unassigned"/ground stand out as clearly
-// not-a-tree in the tree_instance coloring.
-const TREE_UNASSIGNED_COLOR: RGB = [0.22, 0.22, 0.22];
-// Golden-angle hue step keeps successive ids far apart on the color wheel.
-const GOLDEN_ANGLE_DEG = 137.508;
-
-function hslToRgb(h: number, s: number, l: number): RGB {
-  // h in [0,360), s,l in [0,1]. Standard HSL→sRGB.
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const hp = (((h % 360) + 360) % 360) / 60;
-  const x = c * (1 - Math.abs((hp % 2) - 1));
-  let r = 0, g = 0, b = 0;
-  if (hp < 1) [r, g, b] = [c, x, 0];
-  else if (hp < 2) [r, g, b] = [x, c, 0];
-  else if (hp < 3) [r, g, b] = [0, c, x];
-  else if (hp < 4) [r, g, b] = [0, x, c];
-  else if (hp < 5) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-  const m = l - c / 2;
-  return [r + m, g + m, b + m];
-}
-
-// Deterministic color for a tree instance id. id 0 → gray; ids 1..N cycle the
-// hue wheel by the golden angle, alternating lightness/saturation slightly so
-// even hues that wrap around stay distinguishable.
+// Deterministic color for a tree instance id: id 0 → dark gray; ids 1..N cycle
+// the hue wheel by the golden angle. The palette itself lives in colormaps.ts
+// (`goldenAngleColor`) so the 'Golden-angle (labels)' colormap and these
+// instance schemes are one definition and can never drift apart.
 export function treeInstanceColor(id: number): RGB {
-  const i = Math.round(id);
-  if (i <= 0) return TREE_UNASSIGNED_COLOR;
-  const hue = ((i - 1) * GOLDEN_ANGLE_DEG) % 360;
-  const sat = 0.62 + 0.18 * ((i % 3) / 2);   // 0.62..0.80
-  const light = 0.50 + 0.12 * ((i % 2));     // 0.50 or 0.62
-  return hslToRgb(hue, sat, light);
+  return goldenAngleColor(id);
 }
 
 // Build a categorical scheme spanning ids 0..maxId, so the existing

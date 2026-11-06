@@ -1,6 +1,6 @@
 import { useRef, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
-import { ColormapName, sampleColormap } from '../../../lib/colormaps';
+import { ColormapName, colormapColorForValue } from '../../../lib/colormaps';
 import { categoricalSchemeFor, colorForClassValue } from '../../../lib/classification';
 import type { PointCloudData, ColorMode, CloudFilters } from '../../../lib/pointCloudTypes';
 import { hasEnabledFilter, pointPassesFilters } from '../../../lib/pointCloudHelpers';
@@ -151,10 +151,8 @@ export function PointCloud({
     if (colorMode === 'intensity' && data.intensities && data.intensities.length >= count) {
       const lo = rangeMin ?? 0;
       const hi = rangeMax ?? 1;
-      const span = (hi - lo) || 1;
       for (let i = 0; i < count; i++) {
-        const t = (data.intensities[i] - lo) / span;
-        const [r, g, b] = sampleColormap(colormap, t);
+        const [r, g, b] = colormapColorForValue(colormap, data.intensities[i], lo, hi);
         colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
       }
     } else if (colorMode === 'scalar' && selectedScalarField && data.scalarFields?.[selectedScalarField]) {
@@ -169,10 +167,8 @@ export function PointCloud({
       } else {
         const lo = rangeMin ?? field.min;
         const hi = rangeMax ?? field.max;
-        const span = (hi - lo) || 1;
         for (let i = 0; i < count; i++) {
-          const t = (field.values[i] - lo) / span;
-          const [r, g, b] = sampleColormap(colormap, t);
+          const [r, g, b] = colormapColorForValue(colormap, field.values[i], lo, hi);
           colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
         }
       }
@@ -183,11 +179,8 @@ export function PointCloud({
       const maxVal = axis === 0 ? max.x : axis === 1 ? max.y : max.z;
       const lo = rangeMin ?? (isFinite(minVal) ? minVal : 0);
       const hi = rangeMax ?? (isFinite(maxVal) ? maxVal : 1);
-      const span = (hi - lo) || 1;
       for (let i = 0; i < count; i++) {
-        const v = data.positions[i * 3 + axis];
-        const t = (v - lo) / span;
-        const [r, g, b] = sampleColormap(colormap, t);
+        const [r, g, b] = colormapColorForValue(colormap, data.positions[i * 3 + axis], lo, hi);
         colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
       }
     } else {

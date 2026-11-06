@@ -26,8 +26,10 @@ scan showing its wood/leaf classes beside a raw scan colored by height.
 | **Scalar Field** | Color by any per-point scalar the cloud carries | Imported clouds with extra columns — reflectance, deviation, timestamp, target index — plus anything a tool wrote or you [derived with a formula](../workflows/scalar-fields.md). |
 
 When a scalar mode is active, a colormap selector becomes available in
-the right panel: viridis (default), plasma, inferno, magma, turbo, jet,
-coolwarm, grayscale.
+the right panel. It offers two groups. The **gradients** are viridis
+(default), plasma, inferno, magma, turbo, jet, coolwarm and grayscale.
+The **label** maps are Tab20, Glasbey and Golden-angle; see
+[Label colormaps](#label-colormaps).
 
 ## The legend stack
 
@@ -85,6 +87,31 @@ turbo — without one picker dragging the other along.
 A scalar field selection belongs to the cloud that carries it, so
 deleting a segmented scan removes its mode with it; other clouds are
 unaffected.
+
+### Label colormaps
+
+A gradient stretches its colors across the field's range, so for an
+integer label column (instance ids, segment ids) neighbors such as 41
+and 42 come out nearly the same color. The three **label** colormaps
+instead give each value its own color, cycling through a fixed palette:
+
+| Colormap | Colors | Notes |
+|---|---|---|
+| **Tab20** | 20, then repeats | matplotlib's qualitative palette; familiar and print-friendly. |
+| **Glasbey** | 256, then repeats | Colors picked to be as different from each other as possible; best for many instances. |
+| **Golden-angle** | Never repeats | The palette tree segmentation uses for `tree_instance`, so any column can match it. Values 0 and below are dark gray ("unassigned"). |
+
+Label *v* always gets the same color, so consecutive labels always
+differ. Decimal values are rounded to the nearest integer first. The
+**Range** fields don't change any label's color. The legend shows the
+palette and how often it repeats, with no min/mid/max ticks. Use these
+maps for label columns you left as **Scalar** at import. A column marked
+**Label** in the import wizard already gets per-class colors and a class
+legend.
+
+A label map works on any scalar, but on a continuous field such as
+height it simply bands the values at every whole unit. The Leaf Area
+Density picker offers only the gradients.
 
 ### Fields you derive yourself
 

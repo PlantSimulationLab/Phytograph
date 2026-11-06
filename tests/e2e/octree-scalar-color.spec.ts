@@ -108,6 +108,58 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     expect(tgtMin).toBeGreaterThanOrEqual(1);
     expect(tgtMax).toBeLessThanOrEqual(8);
     expect(tgtMax).toBeGreaterThan(tgtMin);
+
+    // ── Discrete label colormap on an integer column left as Scalar ─────────
+    // Target Index is integer labels 1..8. Under a gradient, neighbors 4 and 5
+    // render nearly the same color; a label colormap must give each VALUE its
+    // own palette color (palette[v mod 20] for Tab20), drawn through a
+    // nearest-filtered class texture so no two values blend.
+    //
+    // Read from the texture actually bound to the shader (the material
+    // effect's own seam), not from what the picker says it asked for.
+    const readClassTexture = () => page.evaluate(() => {
+      const all = (window as any).__octreeRenderMode ?? {};
+      const entry = (Object.values(all) as any[]).find((m) => m.scalarField === 'target_index');
+      return entry?.classTexture ?? null;
+    });
+    // Independent oracle: matplotlib's tab20, written out here rather than
+    // imported from the code under test.
+    const TAB20 = ['1f77b4', 'aec7e8', 'ff7f0e', 'ffbb78', '2ca02c', '98df8a', 'd62728', 'ff9896', '9467bd'];
+    const hexAt = (tex: { width: number; range: [number, number]; rgba: number[] }, v: number) => {
+      const t = (v - tex.range[0]) / ((tex.range[1] - tex.range[0]) || 1);
+      const i = Math.min(tex.width - 1, Math.max(0, Math.floor(t * tex.width)));
+      return tex.rgba.slice(4 * i, 4 * i + 3).map((b) => b.toString(16).padStart(2, '0')).join('');
+    };
+
+    // Before: a smooth gradient, so no class texture is bound.
+    expect(await readClassTexture()).toBeNull();
+
+    const displayColormap = page.getByTestId('display-colormap');
+    await displayColormap.selectOption('tab20');
+    await expect(displayColormap).toHaveValue('tab20');
+
+    await expect.poll(async () => (await readClassTexture())?.nearest ?? false, { timeout: 10_000 }).toBe(true);
+    const tex = await readClassTexture();
+    const observed = [] as string[];
+    for (let v = Math.ceil(tgtMin); v <= Math.floor(tgtMax); v++) {
+      observed.push(hexAt(tex, v));
+      expect(hexAt(tex, v)).toBe(TAB20[v % 20]);
+    }
+    // Every label present gets its own color.
+    expect(new Set(observed).size).toBe(observed.length);
+    expect(observed.length).toBeGreaterThanOrEqual(2);
+
+    // The legend says how the map works instead of drawing min/mid/max ticks
+    // that would imply the colors encode magnitude.
+    const discreteLegend = colorbar.getByTestId('legend-discrete');
+    await expect(discreteLegend).toBeVisible();
+    await expect(discreteLegend).toContainText('repeats every 20');
+
+    // Back to a gradient: the class texture must be unbound (the colormap
+    // change does not remount the material, so this is a real transition).
+    await displayColormap.selectOption('viridis');
+    await expect.poll(readClassTexture, { timeout: 10_000 }).toBeNull();
+    await expect(colorbar.getByTestId('legend-discrete')).toHaveCount(0);
   } finally {
     await close();
   }

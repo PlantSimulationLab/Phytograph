@@ -254,7 +254,10 @@ The right panel has:
   high-density (Retina) display 0.5 draws a single device pixel.
 - **Colormap selector** — viridis (default), plasma, inferno, magma, turbo,
   jet, coolwarm, grayscale. Applies when coloring by any scalar (height,
-  intensity, scalar field).
+  intensity, scalar field). Under **Labels (discrete)** it also has
+  Tab20, Glasbey and Golden-angle, which give every integer value its own
+  color for instance or segment ids (see
+  [Label colormaps](../reference/color-modes.md#label-colormaps)).
 
 ## Command palette
 

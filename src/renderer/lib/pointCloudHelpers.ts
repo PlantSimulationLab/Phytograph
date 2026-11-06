@@ -5,7 +5,7 @@ import type { AlignedArrays, CloudFilters, FilterRange, HitPoints, MeshData, Sha
 import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry, LADWoodSplit } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire, shiftPoseStream } from './poseStream';
-import { sampleColormapInto, type ColormapName } from './colormaps';
+import { colormapColorForValueInto, type ColormapName } from './colormaps';
 import { applyTriangleFilter } from './triangleFilter';
 import { MISS_ATTRIBUTE } from './classification';
 
@@ -757,14 +757,13 @@ export function buildMeshTriangleColors(
 
   const min = rangeOverride?.min ?? scalars.min;
   const max = rangeOverride?.max ?? scalars.max;
-  const span = (max - min) || 1;
-
   // Reused 3-slot scratch so the colormap lookup doesn't allocate per triangle.
+  // Value-keyed: a discrete (label) colormap colors a layer by its integer
+  // value, a gradient by its position in [min,max].
   const rgb = new Float32Array(3);
   for (let t = 0; t < triangleCount; t++) {
     const value = scalars.values[t];
-    const tNorm = Number.isFinite(value) ? (value - min) / span : 0;
-    sampleColormapInto(colormap, tNorm, rgb, 0);
+    colormapColorForValueInto(colormap, Number.isFinite(value) ? value : min, min, max, rgb, 0);
     const base = t * 9;
     for (let k = 0; k < 3; k++) {
       const dst = base + k * 3;

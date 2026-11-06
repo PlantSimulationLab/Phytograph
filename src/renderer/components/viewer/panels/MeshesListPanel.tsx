@@ -8,7 +8,8 @@ import { CROWN_SHAPE_LABELS, type CrownShape } from '../../../lib/crownFit';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 import type { TriangleFilterEstimate } from '../../../lib/triangleFilter';
-import { ColormapName, COLORMAP_NAMES } from '../../../lib/colormaps';
+import { ColormapName } from '../../../lib/colormaps';
+import { ColormapOptions } from '../../ColormapOptions';
 import { stopClickAfterTextSelection } from '../../../lib/textSelection';
 
 // How long to wait after the last keystroke before re-deriving the filtered
@@ -1125,9 +1126,7 @@ export function MeshesListPanel({
                       onChange={(e) => onColormapChange(mesh.id, e.target.value as ColormapName)}
                       className="flex-1 min-w-0 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
                     >
-                      {COLORMAP_NAMES.map(name => (
-                        <option key={name} value={name}>{name}</option>
-                      ))}
+                      <ColormapOptions />
                     </select>
                     {isColormapOverridden(mesh.id) && (
                       <button
