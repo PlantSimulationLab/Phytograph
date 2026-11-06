@@ -33,6 +33,23 @@
 // aren't loaded until a child is), so this under-fills a region more than one
 // level short — the safe direction.
 //
+// The N·d² model also assumes the missing points would each have lit new
+// pixels. On oversampled data they don't: a 4.1M-point tomato scan (25 cm
+// box, 65 µm spacing, laid out in scan lines) stacks many points per pixel at
+// full detail, so √k-grown stand-ins painted flat, solid patches where the real
+// detail shows texture — and stayed, because that cloud exceeds the 2M budget
+// in any close view. So the grown size is also capped at the projected sample
+// gap of the DRAWN node (root spacing / 2^depth): its points then at most tile
+// the surface gap-free, which is exactly what its children would have shown
+// once their own spacing (half that) fell under the point size; growing past
+// it only paints area no sample stands for. Where that gap is under the base
+// size the node already draws gap-free and the point keeps its chosen size.
+// Not the cut CHILD's gap: a node's bounding-sphere radius is ~111x its
+// spacing, so a child at the budget frontier (>= 50 px radius, a few hundred at
+// most) projects a gap of only ~0.5-3 px, under the base size in nearly every
+// view, and a child-gap cap switched the fill off on exactly the large scans it
+// exists for.
+//
 // Mechanics, riding on potree's ADAPTIVE machinery (its `getLOD` walks a
 // per-material visibility texture to the deepest drawn node containing each
 // point):
@@ -41,8 +58,11 @@
 //    patched `getLOD` records the factor only when the point's octant has
 //    deeper data that wasn't drawn, so a true leaf — full detail, the user
 //    zoomed in to see individual returns — keeps its fixed pixel size.
-//  - The adaptive branch's world-space size is replaced by `size * fillFactor`,
-//    so `size` keeps meaning PIXELS, exactly as under FIXED.
+//  - The adaptive branch's world-space size is replaced by
+//    `min(size * fillFactor, max(size, nodeGapPx))`, so `size` keeps meaning
+//    PIXELS, exactly as under FIXED, and the fill never outgrows the drawn
+//    node's sample gap (above). A NaN gap (zero spacing or scale) falls back
+//    to the uncapped fill rather than an undefined point size.
 //  - A texture builder that can't throw. potree's `updateVisibilityTextureData`
 //    writes into a texture hard-wired at 2048 texels with `data.set`, which
 //    throws a RangeError the frame a cloud has more than 2048 visible nodes —
@@ -193,7 +213,10 @@ const PATCHES: ReadonlyArray<[RegExp, string]> = [
   ],
   [
     /float worldSpaceSize = 2\.0 \* size \* spacing \/ getPointSizeAttenuation\(\);\s*pointSize = useOrthographicCamera \? \(worldSpaceSize \/ orthoWidth\) \* screenWidth : worldSpaceSize \* projFactor;/g,
-    'getLOD();\n    pointSize = size * fillFactor;',
+    `float nodeGap = spacing / pow(2.0, getLOD());
+    float nodeGapPx = useOrthographicCamera ? (nodeGap / orthoWidth) * screenWidth : nodeGap * projFactor / scale;
+    pointSize = size * fillFactor;
+    if (!isnan(nodeGapPx)) pointSize = min(pointSize, max(size, nodeGapPx));`,
   ],
 ];
 

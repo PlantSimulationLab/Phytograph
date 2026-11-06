@@ -436,7 +436,11 @@ Heavy data never crosses IPC as JSON:
       at full detail draws at exactly the user's pixel size. Children potree
       skipped for projecting under `minNodePixelSize` don't count — the texture
       builder re-runs that test, since the shader can't tell the two apart and
-      filling them enlarged nearly every point in every view. Potree's own adaptive
+      filling them enlarged nearly every point in every view. The grown size is
+      also capped at the projected sample gap of the drawn node (root spacing /
+      2^depth), i.e. at most gap-free tiling: on oversampled data the missing
+      points stack in pixels already lit, and the uncapped √k painted solid
+      patches that persisted wherever the cloud exceeded the budget. Potree's own adaptive
       size (sized from octree spacing) was tried and made the boundary worse —
       real scans aren't gap-free at full detail. It also replaces potree's
       visibility-texture builder, which throws past 2048 visible nodes.

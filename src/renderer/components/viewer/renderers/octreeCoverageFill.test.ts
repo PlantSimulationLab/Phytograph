@@ -149,7 +149,7 @@ describe('patchLodShader against potree-core', () => {
     const { source, patched } = patchLodShader(m.vertexShader);
     expect(patched).toBe(true);
     expect(source).toContain('float fillFactor = 1.0;');
-    expect(source).toContain('pointSize = size * fillFactor;');
+    expect(source).toContain('pointSize = min(pointSize, max(size, nodeGapPx));');
     expect(source).not.toContain('worldSpaceSize');
     // Declared once, before the octree getLOD that assigns it.
     expect(source.match(/float fillFactor = 1\.0;/g)).toHaveLength(1);
@@ -175,7 +175,7 @@ describe('installCoverageFill', () => {
     m.pointSizeType = PointSizeType.FIXED;
     m.pointSizeType = PointSizeType.ADAPTIVE; // the setter rebuilds the shader
     expect(m.vertexShader).toContain('#define adaptive_point_size');
-    expect(m.vertexShader).toContain('pointSize = size * fillFactor;');
+    expect(m.vertexShader).toContain('pointSize = min(pointSize, max(size, nodeGapPx));');
 
     (m as any).updateVisibilityTextureData([node('r0'), node('r', { 0: 100, 1: 200 }, 100)]);
     const offsets = (m as any).visibleNodeTextureOffsets as Map<string, number>;
