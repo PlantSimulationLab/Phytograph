@@ -644,17 +644,22 @@ export function MeshesListPanel({
               data-mesh-position={(() => { const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`; })()}
               data-mesh-scale={(() => { const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 }; return `${s.x.toFixed(2)},${s.y.toFixed(2)},${s.z.toFixed(2)}`; })()}
               onClick={(e) => onSelect(mesh.id, e.ctrlKey || e.metaKey, e.shiftKey)}
-              className={`flex items-center gap-2 p-2 rounded cursor-pointer select-none transition-colors ${
+              className={`flex flex-col gap-0.5 p-2 rounded cursor-pointer select-none transition-colors ${
                 isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
               }`}
             >
+              {/* Line 1 — expander + swatch/icon + the name, on a row of its own,
+                  the same layout as the Scans panel. The name used to share its
+                  line with the action icons, which in a 256px panel left it only
+                  a few characters before the ellipsis. */}
+              <div className="flex items-center gap-1.5 min-w-0">
               {/* Expander for the per-mesh inline options; a spacer keeps other
                   rows aligned. */}
               {canExpand ? (
                 <button
                   data-testid="mesh-color-expand"
                   onClick={(e) => { e.stopPropagation(); onToggleExpanded(mesh.id); }}
-                  className="p-0.5 hover:bg-neutral-600 rounded flex-shrink-0"
+                  className="p-0.5 -ml-1 hover:bg-neutral-600 rounded flex-shrink-0"
                   title="Mesh options"
                 >
                   {isExpanded
@@ -662,7 +667,7 @@ export function MeshesListPanel({
                     : <ChevronRight className="w-3 h-3 text-neutral-400" />}
                 </button>
               ) : (
-                <div className="w-4 flex-shrink-0" />
+                <div className="w-4 -ml-1 flex-shrink-0" />
               )}
               {mesh.isPlant ? (
                 <Leaf className="w-3 h-3 flex-shrink-0 text-green-400" />
@@ -714,12 +719,19 @@ export function MeshesListPanel({
                   <div
                     className="text-xs text-neutral-200 truncate cursor-text"
                     data-testid="mesh-row-name"
-                    title="Double-click to rename"
+                    // The full name, so a truncated one can be read by hovering
+                    // (as on a scan row). Double-click still renames.
+                    title={displayName}
                     onDoubleClick={(e) => { e.stopPropagation(); onRenamingChange(mesh.id, displayName); }}
                   >
                     {displayName}
                   </div>
                 )}
+              </div>
+              </div>
+              {/* Line 2 — subtitle + the per-row action icons. */}
+              <div className="flex items-center gap-1.5 min-w-0">
+              <div className="flex-1 min-w-0">
                 {mesh.gridSubdivisions ? (
                   // A grid voxel is a box, so its triangle count (always 12) is
                   // meaningless. Show a compact subtitle; full geometry
@@ -755,7 +767,10 @@ export function MeshesListPanel({
                   </div>
                 ) : (
                   <div className="text-[10px] text-neutral-500 flex items-center gap-1 min-w-0">
-                    <span className="truncate" data-testid="mesh-row-count">
+                    {/* flex-1 pins the groups button to the right end, beside the
+                        icons: right after a short count it would sit on the row's
+                        center, where a click is meant to select the mesh. */}
+                    <span className="flex-1 min-w-0 truncate" data-testid="mesh-row-count">
                       {mesh.data.triangleCount.toLocaleString()} triangles
                       {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
                       {mesh.isPlant && ' · Helios Plant'}
@@ -810,6 +825,7 @@ export function MeshesListPanel({
               >
                 <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
               </button>
+              </div>
             </div>
 
             {/* Object groups: one row each, with its own eye and (for a

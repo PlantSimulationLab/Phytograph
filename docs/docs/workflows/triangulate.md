@@ -176,7 +176,10 @@ sea of points; it stays in the scene and can be re-shown (eye icon).
 
 ### Manage a mesh in the Meshes list
 
-Each mesh row supports a few quick edits:
+Each mesh row shows its name on a line of its own, with the triangle count
+and the eye / transform / delete icons below it, as a scan row does. A
+name too long to fit is cut off with an ellipsis; hover over it to read
+the whole name. Each row supports a few quick edits:
 
 - **Rename** — double-click the mesh name to edit it in place. Press
   <kbd>Enter</kbd> to commit or <kbd>Esc</kbd> to cancel; clearing the
