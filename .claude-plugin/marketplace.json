@@ -1,0 +1,14 @@
+{
+  "name": "plantsimulationlab-phytograph",
+  "description": "Claude Code plugins for Phytograph, LiDAR point-cloud processing for plants and trees",
+  "owner": {
+    "name": "Plant Simulation Lab, UC Davis"
+  },
+  "plugins": [
+    {
+      "name": "phytograph",
+      "source": "./python/claude-plugin/phytograph",
+      "description": "Process plant and tree point clouds with the phytograph Python package, using the guidance shipped with the installed version"
+    }
+  ]
+}

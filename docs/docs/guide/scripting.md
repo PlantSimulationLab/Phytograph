@@ -113,8 +113,8 @@ information is read as meters, so pass `source_units` (`"mm"`, `"cm"`, `"ft"`,
 export real-world values. The script never sees the shift.
 
 **Sky/miss points** (beams that hit nothing) are left out of `positions`,
-`to_numpy()` and every tool by default, just as in the app. To get them, pass
-`to_numpy(include_misses=True)`. `export` writes them, so a round trip keeps
+`to_numpy()` and every tool except `be.lad()` by default, just as in the app.
+To get them, pass `to_numpy(include_misses=True)`. `export` writes them, so a round trip keeps
 everything you imported.
 
 ## Analysis tools
@@ -122,30 +122,53 @@ everything you imported.
 A forest plot, from file to tree list:
 
 ```python
+import warnings
 import phytograph as pg
 
 with pg.Backend(progress=True) as be:
     plot = be.open("plot.laz")
-    plot.segment_ground()                    # adds the ground_class column
+    plot.segment_ground(auto_class_threshold=True)  # adds ground_class; tolerance measured
     plot.dem(add_height_column=True).to_raster("dtm.tif")
     plot.segment_trees(seeds=plot.detect_stems())   # adds tree_instance
     plot.tree_inventory().to_csv("trees.csv")       # DBH, height, crown, ...
-    for tree_id, qsm in plot.tree_qsms().items():
+    plot.segment_wood(method="ml")                  # QSMs want wood only
+    with warnings.catch_warnings(record=True) as failed:
+        warnings.simplefilter("always")
+        qsms = plot.tree_qsms()                     # a failed tree is a warning
+    for tree_id, qsm in qsms.items():
         qsm.to_csv(f"qsm-{tree_id}.csv")
+    print(len(failed), "tree(s) without a QSM")
 ```
 
 Each segmentation tool writes its result as a **column** on the cloud, just as
 the app does. Read the column with `cloud.column(...)`, filter on it, or split by
-it. Parameters you leave out get the values the app would fill in. For ground,
-DEM and tree segmentation those values are based on the size of this cloud;
-`cloud.defaults()` shows them.
+it.
+
+Every tool lists its parameters, with units, defaults and which way to move
+them, in its signature: `help(pg.Cloud.segment_trees)`. A misspelled keyword, or
+one the chosen `method` does not use, raises an error that names the valid
+ones.
+
+**Parameters you leave out.** For ground, DEM and tree segmentation, the values
+are based on the size of this cloud, as the app fills them in;
+`cloud.defaults()` shows them. A few defaults differ from the app's:
+
+| Tool | Script default | The app's choice |
+|---|---|---|
+| `segment_ground` | `auto_class_threshold=False` | `auto_class_threshold=True` (tolerance measured from the scan) |
+| `segment_wood` | `method="sota"` | `method="ml"` (more accurate) |
+| `skeleton` | `search_radius=0.05`, `threshold_filter=30` | `search_radius=0` (automatic), `threshold_filter=5` |
+| `be.lad` | `lmax=0.1` | estimated from the scan |
+| `qsm` | every point (refused above 3 million) | the tree thinned to 60 000 points |
+
+The [recipes](#recipes) use the app's choices.
 
 | Call | Result |
 |---|---|
 | `cloud.compute_normals()` | Columns `nx`, `ny`, `nz`, `curvature`, `verticality`. |
 | `cloud.segment_ground()` | Column `ground_class`: `pg.GROUND` (1) or `pg.NON_GROUND` (2). |
 | `cloud.dem(cell_size=..., surface="dtm"/"dsm", add_height_column=False)` | A `DEM`: `.z` grid (NaN in empty cells), `.origin`, `.cell_size`, `.mesh`, `.layers` (slope, aspect, …). Write it with `.to_raster("dem.tif")` or `.asc`. `add_height_column=True` also adds a `height_above_ground` column. |
-| `cloud.denoise(method="ror"/"sor")` | Column `noise_class` (`pg.NOISE` = 2). No points are deleted; use `filter(where={"noise_class": [pg.NOISE_CLEAN]})` to remove the flagged points. |
+| `cloud.denoise(method="ror"/"sor"/"voxel_count")` | Column `noise_class` (`pg.NOISE` = 2). No points are deleted; use `filter(where={"noise_class": [pg.NOISE_CLEAN]})` to remove the flagged points. |
 | `cloud.detect_stems()` | An `(N, 3)` array of trunk positions at breast height. Needs `height_above_ground`, so run `dem(add_height_column=True)` first. |
 | `cloud.segment_trees(seeds=None, method="treeiso"/"chm")` | Column `tree_instance` (0 = ground or unassigned). Run `segment_ground()` first. |
 | `cloud.segment_wood()` | Column `wood_class`: `pg.WOOD` (1) or `pg.LEAF` (2). |
@@ -174,6 +197,69 @@ res.lad              # (nx, ny, nz) array in m²/m³
 res.total_leaf_area
 res.to_csv("lad.csv")   # one row per voxel
 ```
+
+## Recipes
+
+The tools above each do one thing. `phytograph.recipes` runs the usual sequences
+in the right order, with the settings the app uses where the bare tool's default
+differs (ground tolerance measured from the scan, wood separated by the ML
+model), and checks the result the way the app's warnings would:
+
+```python
+import json
+from phytograph import recipes
+
+with pg.Backend() as be, be.open("plot.laz") as plot:
+    inv, record = recipes.plot_inventory(plot)   # ground → DEM → stems → trees → inventory
+    print(record.advisories)                     # what the app would show as warnings
+    json.dump(record.to_dict(), open("inventory-record.json", "w"))
+```
+
+| Recipe | Does |
+|---|---|
+| `clean(cloud)` | Flags outliers and removes them from the cloud. Refuses if more than 20% would go. |
+| `ground_and_heights(cloud)` | Adds `ground_class` and `height_above_ground`, and returns the DTM. |
+| `plot_trees(cloud)` | Adds `tree_instance`, seeded from the stems at breast height. |
+| `plot_inventory(cloud)` | Measures DBH, height and crown for every tree. |
+| `tree_qsm(tree)` | Builds a QSM of one tree: ground off, wood kept, thinned to 60 000 points. |
+| `register_pair(moving, target)` | Global search, then ICP. Refuses a poor fit and puts `moving` back. |
+| `herbaceous_organs(plant)` | Adds organ and leaflet labels on one herbaceous plant. |
+
+Each returns a record of what it ran, its parameters and the package and engine
+versions. Keep it with your results. A result that fails a check raises
+`recipes.RecipeError`, and the message says what to change.
+
+## Using it with an AI coding agent
+
+The package ships guidance for AI coding agents (Claude Code, Codex, Cursor,
+Gemini CLI, …): an agent skill describing the recipes, the order of
+operations, where the defaults differ from the app's, and what a failed result
+looks like. It always matches the installed version. There are three ways to
+give it to an agent:
+
+- **Write it into your project.** From your project folder, run
+  `python -m phytograph agent-files`. This writes `AGENTS.md`, which Codex,
+  Cursor and Claude Code read, and a one-line `CLAUDE.md` that points Claude
+  Code at it. Run it again after upgrading the package. A file is updated only
+  while its first line is the `phytograph-managed-file` marker. Delete that
+  line to keep your own edits, and the command never touches the file again.
+  Set `PHYTOGRAPH_AGENT_FILES=0` to turn the command off. If you already have
+  a `CLAUDE.md`, add the line `@AGENTS.md` to it. Gemini CLI reads `AGENTS.md`
+  once you add it to its `context.fileName` setting.
+- **Install the skill** into an agent's skills folder:
+  `python -m phytograph skills install` copies it into `.claude/skills/`;
+  pass `--to` for another folder. `python -m phytograph skills path` (or
+  `pg.skills_dir()`) shows where the installed package keeps it.
+- **Claude Code plugin.** In Claude Code, run
+  `/plugin install phytograph --marketplace PlantSimulationLab/Phytograph`
+  (or, from a shell,
+  `claude plugin marketplace add PlantSimulationLab/Phytograph`, then
+  `claude plugin install phytograph@plantsimulationlab-phytograph`). The plugin finds the
+  installed package's skill and reads that, so it always matches your
+  version.
+
+When something in that guidance is wrong, an agent is told to end its reply
+with a one-line suggested correction. Please send it to us as an issue.
 
 ## Long runs, cancel and cost warnings
 

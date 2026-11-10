@@ -131,6 +131,38 @@ Run them with `npm run test:python`. They use a real backend launched from
   `_thread.interrupt_main` does *not* reproduce this, because it can't interrupt
   a blocking socket read, so the test sends SIGINT.
 
+## Explicit signatures, and guidance for agents
+
+Agents (and people) learn the API from `help()`. So every tool spells its
+parameters out, with units, defaults and the direction to move them, instead of
+taking `**params`.
+
+- **Silent drops are the reason.** The backend's request models ignore keys they
+  don't know, so a misspelled keyword used to run on the default without a
+  word. `phytograph/_tools.py:checked_tool` makes an unknown keyword a
+  `TypeError` that lists the valid ones. With a per-method table it also makes a
+  keyword the chosen `method` ignores a `ValueError`.
+- **Pinned against the models.**
+  `backend-api/tests/test_scripting_client_signatures.py` imports `main` and
+  checks four things for each tool: every keyword is a model field; every
+  concrete default equals the model's (`None` means "the backend or the extent
+  decides"); every model field is exposed or excluded with a reason; and every
+  keyword is in the docstring. Adding a field to a request model therefore
+  fails that test until the client exposes it or says why not.
+- **The skill is the one source of guidance.** It is
+  `phytograph/skills/phytograph/SKILL.md` plus `references/`, and it ships in
+  the wheel. Everything else derives from it:
+    - `python -m phytograph agent-files` writes it into a user's project as
+      `AGENTS.md`, in `_agent_files.py`, following the same marker-line rule as
+      Helios's `generate_agent_files.cmake`;
+    - `skills install` copies it;
+    - the Claude Code plugin (`python/claude-plugin/`, listed in
+      `.claude-plugin/marketplace.json`) only points at the installed copy;
+    - `docs/hooks/llms_txt.py` puts it in `llms-full.txt`.
+- **Docs and skill stay honest.** `python/tests/_snippets.py` binds every call
+  written in the skill, its references, the root `AGENTS.md` and the scripting
+  guide against the real signature (`test_skill.py`, `test_docs_scripting.py`).
+
 ## Arrays in, and the shipped wheel (Phase 3)
 
 - **`POST /api/cloud/session/create-from-arrays`** takes an `.npz` body and

@@ -24,4 +24,9 @@ same version is installed, its engine is used instead. See
 [Scripting with Python](https://plantsimulationlab.github.io/Phytograph/guide/scripting/) for
 the user guide, and `docs/docs/developers/architecture/scripting-client.md` for how it works.
 
+**AI coding agents.** The package ships an agent skill that matches its version.
+Run `python -m phytograph agent-files` in your project to write an `AGENTS.md` (and a
+`CLAUDE.md` that imports it) for Claude Code, Codex and Cursor, or
+`python -m phytograph skills install` to copy the skill into `.claude/skills/`.
+
 Run the tests with `npm run test:python` from the repo root. They launch a real backend.

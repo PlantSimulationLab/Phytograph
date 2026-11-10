@@ -114,6 +114,22 @@ for task-by-task walkthroughs.
 
 ---
 
+## Scripting and AI coding agents
+
+`pip install phytograph` runs the same processing from Python, with no window
+and no app install (see
+**[Scripting with Python](https://plantsimulationlab.github.io/Phytograph/guide/scripting/)**).
+The package ships guidance for AI coding agents that matches its version:
+`python -m phytograph agent-files` writes an `AGENTS.md` into your project, and
+[`AGENTS.md`](AGENTS.md) at the root of this repository is the starting point
+for an agent that clones it. In Claude Code, the plugin installs in one step:
+
+```text
+/plugin install phytograph --marketplace PlantSimulationLab/Phytograph
+```
+
+---
+
 ## Building from source / contributing
 
 The instructions above are for **using** Phytograph. If you want to build it

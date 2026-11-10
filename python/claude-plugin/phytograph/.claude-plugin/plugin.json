@@ -1,0 +1,10 @@
+{
+  "name": "phytograph",
+  "description": "Process plant and tree point clouds with the phytograph Python package, using the guidance shipped with the installed version",
+  "author": {
+    "name": "Plant Simulation Lab, UC Davis"
+  },
+  "homepage": "https://plantsimulationlab.github.io/Phytograph/guide/scripting/",
+  "repository": "https://github.com/PlantSimulationLab/Phytograph",
+  "license": "MIT"
+}
