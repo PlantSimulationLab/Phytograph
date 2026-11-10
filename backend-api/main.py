@@ -278,7 +278,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.97.0"
+BACKEND_VERSION = "0.98.0"
 
 import logging
 logger = logging.getLogger("phytograph")

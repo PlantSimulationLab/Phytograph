@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "phytograph"
 # Kept equal to package.json's "version" and backend-api/main.py BACKEND_VERSION
 # (see CLAUDE.md "Version-lock contract"); test_version_lock_quintet (python/tests/test_backend.py) pins it.
-version = "0.97.0"
+version = "0.98.0"
 description = "Headless Python scripting API for Phytograph (LiDAR point clouds and plant architecture)."
 readme = "README.md"
 requires-python = ">=3.9"
