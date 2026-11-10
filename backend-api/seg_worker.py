@@ -66,6 +66,10 @@ def _json_default(o):
 def run(workdir: str) -> int:
     """Run the one segmentation request staged in `workdir`. Returns an exit
     code (0 = success, 1 = failure with error.txt written)."""
+    # Armed here, not only under `__main__`: the backend re-enters
+    # backend_wrapper.py with PHYTOGRAPH_SEG_WORKER set, which calls run()
+    # directly. tests/test_seg_worker_orphan.py pins this.
+    _watch_parent()
     import numpy as np
 
     try:
@@ -335,5 +339,4 @@ if __name__ == "__main__":
     if not _workdir:
         sys.stderr.write("seg_worker: no workdir (set PHYTOGRAPH_SEG_WORKER)\n")
         sys.exit(2)
-    _watch_parent()
     sys.exit(run(_workdir))
