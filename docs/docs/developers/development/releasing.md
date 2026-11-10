@@ -29,10 +29,8 @@ depend on one by accident. The first macos-15 run caught exactly that.
 helios-core's visualizer did `find_package(X11 REQUIRED)` on every platform,
 although macOS draws through Cocoa, so `libhelios` linked Homebrew's
 libX11/libXext and PyInstaller bundled macOS-15-only copies.
-`scripts/build-pyhelios.mjs` now guards that lookup on Apple before compiling,
-using `scripts/helios-patches.mjs`, which becomes a no-op once the same change is
-in Helios. Both scripts are part of the backend cache key, so a cached bundle
-can't bring the old link back.
+Helios now guards that lookup on Apple (helios-core 1.3.96). Phytograph
+patched it at build time until then.
 
 ## Publishing and download links
 

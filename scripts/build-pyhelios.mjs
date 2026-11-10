@@ -41,11 +41,10 @@
 // Windows, and Linux.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyToolchainCheck } from './toolchain-check.mjs';
-import { patchVisualizerX11 } from './helios-patches.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -127,26 +126,6 @@ console.log(`[build-pyhelios] python:   ${python}`);
 console.log(`[build-pyhelios] source:   ${pyheliosDir}`);
 console.log(`[build-pyhelios] mode:     ${buildMode}`);
 console.log(`[build-pyhelios] plugins:  ${PLUGINS.join(', ')}`);
-
-// 0. macOS: keep X11 out of libhelios.
-//
-// helios-core's visualizer CMakeLists does `find_package(X11 REQUIRED)` on every
-// platform, but on macOS GLFW draws through Cocoa and nothing calls Xlib — so
-// the link is accidental, and it is not harmless: CMake finds HOMEBREW's
-// libX11/libXext, PyInstaller then bundles them (with libXdmcp/libXau), and a
-// Homebrew bottle is built for the RUNNER's macOS. On the macos-15 runner that
-// made four bundled dylibs require macOS 15 against the app's 14.0 floor
-// (MACOSX_DEPLOYMENT_TARGET can't lower a prebuilt bottle), which
-// scripts/check-macos-floor.mjs caught. Guard the find on Apple until the same
-// change lands upstream in Helios; then the anchor is gone and this is a no-op.
-// The edit itself is scripts/helios-patches.mjs (pure, unit-tested).
-if (process.platform === 'darwin') {
-  const cml = join(pyheliosDir, 'helios-core', 'plugins', 'visualizer', 'CMakeLists.txt');
-  const { text, status } = patchVisualizerX11(readFileSync(cml, 'utf8'));
-  if (status === 'patched') writeFileSync(cml, text);
-  console.log(`[build-pyhelios] visualizer X11 on macOS: ${
-    { patched: 'guarded (not linked)', already: 'already guarded', absent: 'no unguarded find_package(X11) (fixed upstream?)' }[status]}`);
-}
 
 // 1. Compile the native library via PyHelios's own build script.
 const buildArgs = [
