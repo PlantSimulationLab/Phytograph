@@ -241,10 +241,13 @@ export function hasNonZeroShift(worldShift?: Vec3 | number[] | null): boolean {
 
 // Coordinates print at millimeter resolution. Huge (UTM-scale) values keep the
 // same 3 decimals — they're what the user needs to compare against the source
-// file — but anything non-finite degrades to a dash rather than "NaN".
+// file — but anything non-finite degrades to a dash rather than "NaN". A value
+// that rounds to zero prints "0.000", never "-0.000": an octree hands a point
+// on y = 0 back a float32 hair below zero, and the sign would claim a side.
 export function formatCoord(v: number): string {
   if (!isFinite(v)) return '—';
-  return v.toFixed(3);
+  const s = v.toFixed(3);
+  return s === '-0.000' ? '0.000' : s;
 }
 
 // Scalar attributes span wildly different magnitudes (a 0..1 reflectance, a

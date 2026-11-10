@@ -253,7 +253,9 @@ test('PLY declares selected scalars as named properties', async () => {
   const text = await readExported(savePath);
 
   const [head, body] = text.split('end_header\n');
-  expect(head).toContain('property float Deviation');
+  // Deviation holds only whole numbers (0..4), so it is declared `int`: an
+  // export keeps a scalar's type rather than widening it to float.
+  expect(head).toContain('property int Deviation');
   expect(head).toContain('element vertex 60');
 
   const rows = body.split('\n').filter((l) => l.trim().length > 0);

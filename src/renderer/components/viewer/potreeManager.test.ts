@@ -6,7 +6,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // others' nodes, cycling clouds in and out every frame. These tests pin the
 // invariant that fixes it — ONE call per frame carrying EVERY active octree.
 
-const updatePointClouds = vi.fn();
+// potree-core's updatePointClouds always returns its visibility result, which
+// updateAllPointClouds reads to tell whether tiles are still streaming.
+const visibilityResult = () => ({ nodeLoadPromises: [] as unknown[], exceededMaxLoadsToGPU: false });
+const updatePointClouds = vi.fn((..._args: unknown[]) => visibilityResult());
 vi.mock('potree-core', () => ({
   Potree: class {
     pointBudget = 0;
@@ -90,7 +93,7 @@ describe('updateAllPointClouds', () => {
 
   it('runs afterUpdate hooks only after the shared update', () => {
     const order: string[] = [];
-    updatePointClouds.mockImplementation(() => order.push('update'));
+    updatePointClouds.mockImplementation(() => { order.push('update'); return visibilityResult(); });
     register({ octree: makeOctree('a'), afterUpdate: () => order.push('after:a') });
     register({ octree: makeOctree('b'), afterUpdate: () => order.push('after:b') });
 
@@ -98,7 +101,7 @@ describe('updateAllPointClouds', () => {
 
     // Hooks read visibleNodes, so they must not interleave with the update.
     expect(order).toEqual(['update', 'after:a', 'after:b']);
-    updatePointClouds.mockImplementation(() => {});
+    updatePointClouds.mockImplementation(() => visibilityResult());
   });
 
   it('skips afterUpdate for clouds excluded this frame', () => {

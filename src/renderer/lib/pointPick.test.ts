@@ -71,7 +71,14 @@ describe('formatting', () => {
   it('prints coordinates at millimeter resolution, including UTM magnitudes', () => {
     expect(formatCoord(61.4472)).toBe('61.447');
     expect(formatCoord(4271883.9019)).toBe('4271883.902');
-    expect(formatCoord(-0.0004)).toBe('-0.000');
+  });
+
+  it('prints a coordinate that rounds to zero without a sign, and keeps real negatives', () => {
+    expect(formatCoord(-0.0004)).toBe('0.000');
+    expect(formatCoord(-1e-9)).toBe('0.000');
+    expect(formatCoord(-0)).toBe('0.000');
+    expect(formatCoord(-0.0006)).toBe('-0.001');
+    expect(formatCoord(-12.5)).toBe('-12.500');
   });
 
   it('degrades non-finite coordinates to a dash rather than NaN', () => {
