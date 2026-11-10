@@ -47,6 +47,10 @@ theme:
 extra_css:
   - stylesheets/phytograph.css
 
+# llms.txt / llms-full.txt for AI agents, generated from the nav on every build.
+hooks:
+  - hooks/llms_txt.py
+
 plugins:
   - search
   - mkdocstrings:

@@ -11,6 +11,8 @@ on:
       - "docs/**"
       - "README.md"
       - ".github/workflows/docs.yml"
+      # llms-full.txt carries the package's agent skill.
+      - "python/phytograph/skills/**"
   workflow_dispatch:
 
 permissions:
