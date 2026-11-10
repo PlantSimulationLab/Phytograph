@@ -16,14 +16,18 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import httpx
 
 from . import _ports
+from ._tools import checked_tool
 from ._transport import ProgressFn, Transport
 from ._version import EXPECTED_BACKEND_VERSION
 from .errors import BackendNotFound, BackendStartError, PhytographError, VersionMismatch
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .results import DEM, Grid, LADResult, Scan
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -466,17 +470,88 @@ class Backend:
                                           buf.getvalue(), params=params)
         return Cloud(self, info["session_id"], info=info, name=name or "arrays")
 
-    def lad(self, scans: Sequence["Scan"], grid: "Grid", **options: Any) -> "LADResult":
+    @checked_tool()
+    def lad(self, scans: Sequence[Scan], grid: Grid, *, lmax: float = 0.1,
+            max_aspect_ratio: float = 4.0, min_voxel_hits: Optional[int] = None,
+            element_width: float = 0.05, gtheta: Optional[float] = None,
+            gtheta_override: bool = False, gtheta_spec: Optional[Mapping[str, Any]] = None,
+            occlusion_threshold_m: Optional[float] = None, fill_occluded: bool = False,
+            wood_split: Optional[Mapping[str, Any]] = None, terrain_follow: bool = False,
+            safety_fraction: float = 0.1, dem: Optional[DEM] = None) -> LADResult:
         """Leaf area density by Beer's-law inversion over a voxel ``grid``,
         from one or more :class:`~phytograph.results.Scan` positions.
 
         Unlike every other tool this one NEEDS the sky/miss points (they are the
-        transmitted beams), so import scans with their misses. Options are
-        ``LADComputeRequest`` fields: ``lmax``, ``max_aspect_ratio``,
-        ``min_voxel_hits``, ``gtheta``/``gtheta_override``, ``element_width``,
-        ``terrain_follow``, …"""
+        transmitted beams), so import scans with their misses; the API cannot
+        backfill them. First-echo-only data biases LAD high. Never invert a
+        leaf-only cloud: beams stopped by wood would read as transmitted.
+        ``NaN`` in the result is unsolved, not zero.
+
+        Parameters
+        ----------
+        lmax : float
+            Longest triangle edge (m) in the triangulation that estimates
+            G(theta). The app estimates it from the scan; set it for the scene's
+            point spacing (a few times the spacing at the canopy's range).
+        max_aspect_ratio : float
+            Thinnest triangle kept. Higher keeps more slivers.
+        min_voxel_hits : int, optional
+            Hits a voxel needs to be solved; ``None`` = the engine's default.
+        element_width : float
+            Vegetation element width (m) for the sampling uncertainty:
+            ~0.05 broadleaf, ~0.002 conifer; <= 0 drops that term.
+        gtheta : float, optional
+            Mean leaf projection coefficient G(theta) in (0, 1] (0.5 =
+            spherical). Always used for moving-platform scans, and for static
+            scans when ``gtheta_override=True``.
+        gtheta_override : bool
+            Static scans skip the triangulation and use ``gtheta``.
+        gtheta_spec : mapping, optional
+            Wins over ``gtheta``: ``{"spatial": "constant", "spec": {"kind":
+            "dewit", "dewit": "spherical"}}``, or ``"spatial": "profile"`` with
+            ``"profile": [spec per z-level]``. ``kind`` is ``constant``
+            (``value``), ``dewit`` or ``beta`` (``beta_mu``, ``beta_nu``).
+        occlusion_threshold_m : float, optional
+            Total probed path length (m) below which a voxel is flagged
+            ``under_sampled``; ``None`` = 100 x the mean voxel side.
+        fill_occluded : bool
+            Estimate occluded voxels by kriging (flagged ``lad_filled``, never
+            added to the total leaf area).
+        wood_split : mapping, optional
+            Which column splits leaf from wood. ``None`` (default) uses
+            ``wood_class`` when the cloud has it; ``{"slug": None}`` turns the
+            split off; ``{"slug": "col", "wood_values": [...], "leaf_values":
+            [...]}`` uses another column.
+        terrain_follow : bool
+            Shift each voxel column to ride the ground surface; needs ``dem``.
+        safety_fraction : float
+            Clearance between the ground and the lowest voxel, as a fraction of
+            one voxel's height.
+        dem : DEM, optional
+            A :meth:`Cloud.dem` result (``surface="dtm"``) for ``terrain_follow``.
+        """
         from .results import LADResult
-        body = {"scans": [s._entry() for s in scans], "grid": grid._body(), **options}
+        if terrain_follow and dem is None:
+            raise ValueError("lad(terrain_follow=True) needs dem=cloud.dem(surface='dtm')")
+        if dem is not None and not terrain_follow:
+            raise ValueError("lad(dem=...) is used only with terrain_follow=True")
+        body: Dict[str, Any] = {"scans": [s._entry() for s in scans], "grid": grid._body()}
+        body.update({k: v for k, v in dict(
+            lmax=lmax, max_aspect_ratio=max_aspect_ratio, min_voxel_hits=min_voxel_hits,
+            element_width=element_width, gtheta=gtheta, gtheta_override=gtheta_override,
+            gtheta_spec=None if gtheta_spec is None else dict(gtheta_spec),
+            occlusion_threshold_m=occlusion_threshold_m, fill_occluded=fill_occluded,
+            wood_split=None if wood_split is None else dict(wood_split),
+            terrain_follow=terrain_follow, safety_fraction=safety_fraction).items()
+            if v is not None})
+        if dem is not None:
+            import numpy as np
+            nodata = -9999.0   # JSON carries no NaN; DemRaster's void sentinel
+            z = np.asarray(dem.z, dtype=np.float64)
+            body["dem"] = {"grid_z": np.where(np.isfinite(z), z, nodata).ravel().tolist(),
+                           "nx": int(z.shape[1]), "ny": int(z.shape[0]),
+                           "cell": float(dem.cell_size),
+                           "origin": [float(v) for v in dem.origin[:2]], "nodata": nodata}
         res = self._transport.post_stream("/api/lad/compute", body)
         if not isinstance(res, dict) or not res.get("success"):
             err = res.get("error") if isinstance(res, dict) else res

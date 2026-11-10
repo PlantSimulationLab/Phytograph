@@ -13,6 +13,8 @@ Run Phytograph's point-cloud processing headless, from a script::
 The package is pure Python (httpx + numpy). The compute runs in the same backend
 the desktop app ships, located automatically (see :class:`Backend`).
 """
+from pathlib import Path as _Path
+
 from ._version import EXPECTED_BACKEND_VERSION, __version__
 from .backend import Backend
 from .cloud import Cloud
@@ -20,8 +22,17 @@ from .errors import (BackendNotFound, BackendStartError, Canceled, CostWarning,
                      PhytographError, VersionMismatch)
 from .results import (DEM, GROUND, LEAF, NOISE, NOISE_CLEAN, NON_GROUND, QSM, WOOD, Grid,
                       Inventory, LADResult, Mesh, Registration, Scan, Skeleton)
+from . import recipes  # noqa: E402  (after the classes it names in its type hints)
 
-__all__ = ["Backend", "Cloud", "PhytographError", "BackendNotFound", "BackendStartError",
+
+def skills_dir() -> _Path:
+    """The agent skills shipped with this version (agentskills.io ``SKILL.md``
+    folders, one per kind of work). A harness copies them into an agent's
+    skills directory, so the instructions it reads match the package it calls."""
+    return _Path(__file__).resolve().parent / "skills"
+
+
+__all__ = ["recipes", "skills_dir", "Backend", "Cloud", "PhytographError", "BackendNotFound", "BackendStartError",
            "VersionMismatch", "Canceled", "CostWarning", "EXPECTED_BACKEND_VERSION", "__version__",
            "DEM", "Mesh", "QSM", "Skeleton", "Inventory", "Registration", "LADResult", "Scan", "Grid",
            "GROUND", "NON_GROUND", "WOOD", "LEAF", "NOISE", "NOISE_CLEAN"]

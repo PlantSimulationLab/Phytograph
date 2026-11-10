@@ -20,6 +20,10 @@ test = ["pytest"]
 [tool.setuptools.packages.find]
 include = ["phytograph*"]
 
+[tool.setuptools.package-data]
+# The agent skills ship with the code they describe (phytograph.skills_dir()).
+phytograph = ["skills/*/*.md", "skills/*/*/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"

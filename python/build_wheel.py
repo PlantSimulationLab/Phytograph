@@ -83,6 +83,11 @@ def build(out_dir: Path, *, backend_digests: "dict | None" = None,
         if "__pycache__" in src.parts:
             continue
         files[src.relative_to(HERE).as_posix()] = src.read_bytes()
+    # Agent skills ship with the code they describe, at the same version
+    # (phytograph.skills_dir()). Only SKILL.md folders, nothing generated.
+    for src in sorted((PKG / "skills").rglob("*")):
+        if src.is_file() and "__pycache__" not in src.parts and not src.name.startswith("."):
+            files[src.relative_to(HERE).as_posix()] = src.read_bytes()
     if "phytograph/__init__.py" not in files:
         raise SystemExit("build_wheel: phytograph/__init__.py is missing")
     if backend_digests is not None:
