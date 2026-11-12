@@ -35,15 +35,18 @@ def _message(detail: Any) -> str:
 class Transport:
     def __init__(self, base_url: str, token: Optional[str], *,
                  progress: Optional[ProgressFn] = None, confirm_costly: bool = True,
-                 timeout: float = 60.0):
+                 timeout: float = 60.0, client: Optional[httpx.Client] = None):
         headers = {TOKEN_HEADER: token} if token else {}
         # `timeout` bounds GETs and DELETEs, which are cheap reads. POSTs get no
         # read timeout: some session edits (extract, transform) are synchronous
         # and can run minutes on a large cloud with no keepalives, and a client
         # that gave up would leave the backend to COMMIT the edit anyway — a
         # retry would then apply it twice. Ctrl-C is the way out of a long call.
-        self._client = httpx.Client(base_url=base_url, headers=headers,
-                                    timeout=httpx.Timeout(timeout, connect=10.0))
+        # `client`: an already-built httpx.Client to send through instead, e.g.
+        # a starlette TestClient wrapping the app in this same process (the
+        # one-shot `run` mode, which opens no socket at all).
+        self._client = client if client is not None else httpx.Client(
+            base_url=base_url, headers=headers, timeout=httpx.Timeout(timeout, connect=10.0))
         self._post_timeout = httpx.Timeout(None, connect=10.0)
         self.base_url = base_url
         self.progress = progress

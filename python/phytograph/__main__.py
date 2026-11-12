@@ -5,6 +5,8 @@
     python -m phytograph download --dest DIR   # install under DIR (use with PHYTOGRAPH_BACKEND_CACHE=DIR)
     python -m phytograph where                 # which backend `Backend()` would launch
     python -m phytograph identity [--json]     # that backend's exact build, without starting it
+    python -m phytograph run RECIPE --in F --out D --work W [--param k=v ...]
+                                               # one recipe, in-process: no server, no network
     python -m phytograph agent-files [DIR]     # AGENTS.md + CLAUDE.md for coding agents
     python -m phytograph skills install        # copy the agent skill into .claude/skills
 """
@@ -26,7 +28,58 @@ def _progress(frac, msg):
     print(f"\r  {pct}{msg}".ljust(78), end="", file=sys.stderr, flush=True)
 
 
+EXIT_ENGINE_MISSING = 4
+
+
+def _cmd_run(argv) -> int:
+    """Exec the installed engine in one-shot mode (backend-api/oneshot.py).
+
+    Never downloads. On POSIX the engine REPLACES this process, so the process
+    the caller started is the engine itself: its exit status is the run's, and
+    killing it kills the run. ``--engine PATH`` / ``--source`` choose the engine
+    as ``Backend()`` would; every other argument is the engine's (``run --help``)."""
+    from .backend import _resolve_command
+    from .errors import BackendNotFound
+
+    engine, source, rest = None, "auto", []
+    it = iter(argv)
+    for a in it:
+        if a in ("--engine", "--source"):
+            val = next(it, None)
+            if val is None:
+                print(f"phytograph run: error: {a} needs a value", file=sys.stderr)
+                return 2
+            if a == "--engine":
+                engine = val
+            else:
+                source = val
+        elif a.startswith("--engine="):
+            engine = a.split("=", 1)[1]
+        elif a.startswith("--source="):
+            source = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    try:
+        cmd, _cwd, resources, _desc = _resolve_command(source, engine, None, offline=True)
+    except (BackendNotFound, ValueError) as e:
+        print(f"phytograph run: engine not available: {e}", file=sys.stderr)
+        return EXIT_ENGINE_MISSING
+    if resources.is_dir():
+        os.environ.setdefault("PHYTOGRAPH_RESOURCES", str(resources))
+    full = [*cmd, "--run-recipe", *rest]
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if sys.platform == "win32":
+        import subprocess
+        return subprocess.call(full)
+    os.execv(full[0], full)
+    return 1  # pragma: no cover - execv does not return
+
+
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["run"]:
+        return _cmd_run(argv[1:])
     ap = argparse.ArgumentParser(prog="python -m phytograph", description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("download", help="download and verify the backend for this version")
@@ -36,6 +89,8 @@ def main(argv=None) -> int:
                    help="install under this folder instead of the per-user cache; a later "
                         "process finds it through PHYTOGRAPH_BACKEND_CACHE=DEST")
     sub.add_parser("where", help="show which backend Backend() would use")
+    sub.add_parser("run", help="run one recipe in the installed engine, in-process "
+                               "(no server, no network); `run --help` for its options")
     idp = sub.add_parser(
         "identity", help="print the exact build of the backend Backend() would use",
         description="Read the engine's identity stamp without starting it or using the network: "

@@ -88,3 +88,6 @@ tifffile>=2023.7.10
 # `sklearn.mixture`, so the packaged backend raised ModuleNotFoundError on every
 # wood segmentation while dev (which has the venv) passed.
 scikit-learn>=1.2
+# The one-shot `--run-recipe` mode (oneshot.py) drives the app through
+# starlette's TestClient, which needs httpx; it is bundled into the engine.
+httpx>=0.27

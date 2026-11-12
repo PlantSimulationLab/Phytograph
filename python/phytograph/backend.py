@@ -198,8 +198,11 @@ class Backend:
         self._identity: Optional[Dict[str, Any]] = None
         progress_fn = _progress_printer() if progress is True else (progress or None)
         self._startup_progress = progress_fn
+        client = None
         if _attach is not None:
             self.url, token, self.description = _attach["url"], _attach["token"], f"attached {_attach['url']}"
+            client = _attach.get("client")
+            self._identity = _attach.get("identity")
         else:
             argv, cwd, resources, self.description = _resolve_command(source, executable, progress_fn, offline)
             self._command = (list(argv), Path(cwd))
@@ -211,7 +214,7 @@ class Backend:
                 extra["PHYTOGRAPH_THREADS"] = str(threads)
             self._launch(argv, cwd, resources, port, token, extra)
         self._transport = Transport(self.url, token, progress=progress_fn,
-                                    confirm_costly=confirm_costly)
+                                    confirm_costly=confirm_costly, client=client)
         try:
             self._wait_healthy(startup_timeout if _attach is None else 10.0)
             self.version = self._check_version()
@@ -229,6 +232,15 @@ class Backend:
             from ._identity import identity_for_command
             self._identity = identity_for_command(*self._command)
         return self._identity
+
+    @classmethod
+    def _in_process(cls, client: Any, *, identity: Optional[Dict[str, Any]] = None,
+                    **kwargs: Any) -> "Backend":
+        """A backend whose app runs in THIS process, reached through ``client``
+        (a starlette TestClient). Used by the engine's one-shot ``--run-recipe``
+        mode; nothing is launched and no socket is opened."""
+        return cls(_attach={"url": str(client.base_url).rstrip("/"), "token": None,
+                            "client": client, "identity": identity}, **kwargs)
 
     @classmethod
     def attach(cls, url: str, token: Optional[str] = None, **kwargs: Any) -> "Backend":

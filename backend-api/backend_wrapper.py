@@ -7,6 +7,15 @@ Handles matplotlib font cache building before starting uvicorn
 import sys
 import os
 
+# One-shot mode (`--run-recipe`, see oneshot.py): parse its arguments and point
+# every write location and the thread cap at the caller's choice now, before
+# anything below can import numpy or open a temp file.
+_ONESHOT = None
+if __name__ == "__main__":
+    import oneshot
+    if oneshot.requested(sys.argv):
+        _ONESHOT = oneshot.prepare(sys.argv[2:])
+
 # First, before anything can import numpy: every child process (seg worker,
 # tile pool) re-runs this and inherits the environment it sets.
 import thread_cap
@@ -76,6 +85,8 @@ if os.environ.get("PHYTOGRAPH_IMPORT_SELFTEST"):
         "csf_cloth",         # ground segmentation (numba; settled below too)
         "pye57", "plyfile", "laspy", "pyproj", "tifffile",  # IO
         "open3d", "scipy", "pytexit",
+        "httpx", "starlette.testclient", "oneshot",  # one-shot --run-recipe
+        "phytograph.recipes", "phytograph._identity", "phytograph.advisories",
         # pyhelios is deliberately NOT here: loading it pulls in the native
         # libhelios, whose resolution depends on cwd/env rather than on what
         # PyInstaller bundled, so it reports failures this check can't act on.
@@ -149,7 +160,7 @@ def _parse_args(argv):
     return parser.parse_args(argv)
 
 
-_ARGS = _parse_args(sys.argv[1:])
+_ARGS = None if _ONESHOT is not None else _parse_args(sys.argv[1:])
 
 
 def _resolve_port(args) -> int:
@@ -289,6 +300,17 @@ logger.info("Matplotlib initialized with minimal config")
 logger.info("Starting Phytograph backend server...")
 from main import app, reap_seg_workers
 thread_cap.apply_runtime()
+
+if _ONESHOT is not None:
+    try:
+        _code = oneshot.run(app, _ONESHOT)
+    finally:
+        reap_seg_workers()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # os._exit: the app's background threads (open3d warm-up, executors) must
+    # not hold the process open after the recipe is done.
+    os._exit(_code)
 import uvicorn
 import parent_watchdog
 

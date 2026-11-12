@@ -117,6 +117,11 @@ const BUNDLED_EXTRA_SOURCES = [
   'docker/riegl/rxpshim.def',
 ];
 
+// Bundled Python packages that live outside backend-api/, walked like
+// BUNDLED_SOURCE_DIRS (non-recursive, .py only). The scripting client runs
+// inside the engine in one-shot mode (backend-api/oneshot.py).
+const BUNDLED_EXTRA_DIRS = ['python/phytograph'];
+
 export function backendBundleDir() {
   return join(root, 'resources', 'phytograph_backend');
 }
@@ -201,6 +206,15 @@ export function hashBackendSources() {
       const full = join(dir, name);
       if (!statSync(full).isFile()) continue;
       files.push([relative(backendDir, full).split(pathSep).join('/'), full]);
+    }
+  }
+  for (const rel of BUNDLED_EXTRA_DIRS) {
+    const dir = join(root, ...rel.split('/'));
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.py')) continue;
+      const full = join(dir, name);
+      if (statSync(full).isFile()) files.push([`${rel}/${name}`, full]);
     }
   }
   for (const rel of BUNDLED_EXTRA_SOURCES) {

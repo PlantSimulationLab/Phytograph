@@ -213,6 +213,17 @@ const treeisoExtraArgs = [
 // because RIEGL's license forbids redistributing a prebuilt copy (on Windows it
 // statically links their scanlib). _shim_source_dir() finds them beside
 // rxp_reader.py, which inside the bundle means sys._MEIPASS.
+// The scripting client, for the one-shot `--run-recipe` mode (oneshot.py):
+// the recipe runs inside the engine against the app through starlette's
+// TestClient, which needs httpx.
+const clientExtraArgs = [
+  '--paths', join(root, 'python'),
+  '--hidden-import', 'oneshot',
+  '--collect-submodules', 'phytograph',
+  '--hidden-import', 'httpx',
+  '--hidden-import', 'starlette.testclient',
+];
+
 const rieglDir = join(root, 'docker', 'riegl');
 const rieglExtraArgs = [
   '--paths', rieglDir,
@@ -240,6 +251,7 @@ const pyinstallerArgs = [
   ...pyheliosExtraArgs,
   ...treeisoExtraArgs,
   ...rieglExtraArgs,
+  ...clientExtraArgs,
   'backend_wrapper.py',
 ];
 

@@ -27431,6 +27431,13 @@ def _seg_worker_command() -> "list[str]":
     return [sys.executable, wrapper]
 
 
+# One-shot mode (oneshot.py) keeps every child in the CALLER's process group: a
+# harness that kills the group it started must reach the converter and the seg
+# workers too. Cancel's killpg then falls back to a single-pid kill (see the
+# SAFETY guard in _kill_seg_worker); one-shot runs have no cancel anyway.
+_CHILDREN_OWN_GROUP = os.environ.get("PHYTOGRAPH_ONESHOT") != "1"
+
+
 class _SegProc:
     """A worker child spawned via `os.posix_spawn` (POSIX) instead of
     `subprocess.Popen`.
@@ -27475,8 +27482,9 @@ class _SegProc:
                 (os.POSIX_SPAWN_DUP2, out_fd, 1),
                 (os.POSIX_SPAWN_DUP2, fd, 2),
             ]
+            group = {"setpgroup": 0} if _CHILDREN_OWN_GROUP else {}
             self.pid = os.posix_spawn(argv[0], argv, env,
-                                      file_actions=file_actions, setpgroup=0)
+                                      file_actions=file_actions, **group)
         finally:
             os.close(fd)
             if opened_out:
