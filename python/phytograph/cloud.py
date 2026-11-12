@@ -606,8 +606,9 @@ class Cloud:
         for r in res.get("results") or []:
             if not r.get("success"):
                 import warnings
+                from .advisories import QSMFailedWarning
                 warnings.warn(f"QSM failed for tree {r.get('tree_id')}: {r.get('error')}",
-                              stacklevel=3)  # past checked_tool
+                              QSMFailedWarning, stacklevel=3)  # past checked_tool
                 continue
             out[int(r["tree_id"])] = QSM(cylinders=list(r.get("cylinders") or []),
                                          shoots=list(r.get("shoots") or []),

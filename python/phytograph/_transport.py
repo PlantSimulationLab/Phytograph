@@ -138,4 +138,8 @@ class Transport:
                 raise
             if not self.confirm_costly:
                 raise CostWarning(f"{path}: {_message(e.detail)}", status=409, detail=warning) from None
+            import warnings
+            from .advisories import CostAcknowledgedWarning
+            warnings.warn(f"{path}: confirmed automatically: {_message(e.detail)}",
+                          CostAcknowledgedWarning, stacklevel=2)
             return send({**body, "acknowledge_cost": True})

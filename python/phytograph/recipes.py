@@ -22,12 +22,15 @@ workflow pages.
 """
 from __future__ import annotations
 
+import functools
+import warnings
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ._version import __version__
+from .advisories import Advisory, PhytographWarning
 from .errors import PhytographError
 from .results import GROUND, NOISE_CLEAN, NON_GROUND, WOOD
 
@@ -68,7 +71,9 @@ class Step:
 @dataclass
 class RecipeRecord:
     """What a recipe ran. ``advisories`` are results that passed the checks
-    but deserve a look (the app would show them as a warning toast)."""
+    but deserve a look (the app would show them as a warning toast), each a
+    ``{"code", "message", "step"}`` dict; codes are listed in
+    :data:`phytograph.advisories.ADVISORIES`."""
     recipe: str
     params: Dict[str, Any]
     phytograph_version: str
@@ -78,15 +83,21 @@ class RecipeRecord:
     # whenever the native code does. None for an attached backend.
     engine: Optional[Dict[str, Any]] = None
     steps: List[Step] = field(default_factory=list)
-    advisories: List[str] = field(default_factory=list)
+    advisories: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return _jsonable(asdict(self))
 
     def _step(self, op: str, params: Dict[str, Any], res: Any = None) -> Any:
         self.steps.append(Step(op, dict(params), _summary(res)))
-        self.advisories.extend(_advisories(res, op))
+        for code, message in _advisories(res):
+            self._advise(code, message, op)
         return res
+
+    def _advise(self, code: str, message: str, step: Optional[str] = None) -> None:
+        a = Advisory(code, message, step).to_dict()
+        if a not in self.advisories:
+            self.advisories.append(a)
 
     def _fail(self, message: str) -> "RecipeError":
         return RecipeError(f"{self.recipe}: {message}", detail=self.to_dict())
@@ -102,9 +113,89 @@ def _start(recipe: str, cloud: "Cloud", params: Dict[str, Any]) -> RecipeRecord:
                "source_path": info.get("source_path") or info.get("file_path")})
 
 
+# Response fields that carry an advisory, and the code each maps to.
+_ADVISORY_KEYS = {
+    "warning": "backend.warning",
+    "warnings": "backend.warning",
+    "advisories": "backend.warning",
+    "quality_warning": "backend.quality_warning",
+    "fusion_warning": "backend.fusion_warning",
+    "scene_advisory": "registration.scene",
+    "ground_warning": "backend.ground_warning",
+}
+_GROUND_WARNING_TEXT = "tree segmentation ran without usable ground labels"
+
+
+def _advisories(res: Any) -> List[Tuple[str, str]]:
+    if not isinstance(res, dict):
+        return []
+    out: List[Tuple[str, str]] = []
+    for k, code in _ADVISORY_KEYS.items():
+        v = res.get(k)
+        if v is True and k == "ground_warning":
+            out.append((code, _GROUND_WARNING_TEXT))
+        elif isinstance(v, str) and v:
+            out.append((code, v))
+        elif isinstance(v, (list, tuple)):
+            out.extend((code, str(w)) for w in v if w)
+    return out
+
+
+def _records_warnings(fn: Callable) -> Callable:
+    """Capture the warnings raised while a recipe runs into its record (and
+    still show them): a :class:`PhytographWarning` under its own code, any
+    other as ``python.warning``. A recipe that fails carries them in the
+    :class:`RecipeError`'s record too."""
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        error: Optional[RecipeError] = None
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                out = fn(*args, **kwargs)
+            except RecipeError as e:
+                error = e
+        # Re-emit only after leaving the block: inside it, each re-emitted
+        # warning would be appended to `caught` while it is being iterated.
+        caught = list(caught)
+        found = _warning_advisories(caught)
+        _reemit(caught)
+        if error is not None:
+            if isinstance(error.detail, dict):
+                adv = error.detail.setdefault("advisories", [])
+                adv.extend(a for a in found if a not in adv)
+            raise error
+        rec = out[-1] if isinstance(out, tuple) else out
+        rec.advisories.extend(a for a in found if a not in rec.advisories)
+        return out
+    return wrapper
+
+
+def _warning_advisories(caught) -> List[Dict[str, Any]]:
+    out = []
+    for w in caught:
+        # Deprecations describe code, not results (and, in one-shot mode, the
+        # engine's own run in this process); they are shown but not recorded.
+        if issubclass(w.category, (DeprecationWarning, PendingDeprecationWarning)):
+            continue
+        if issubclass(w.category, PhytographWarning):
+            a = Advisory(w.category.code, str(w.message))
+        else:
+            a = Advisory("python.warning", f"{w.category.__name__}: {w.message}")
+        if a.to_dict() not in out:
+            out.append(a.to_dict())
+    return out
+
+
+def _reemit(caught) -> None:
+    for w in caught:
+        warnings.warn_explicit(w.message, w.category, w.filename, w.lineno, source=w.source)
+
+
 # --------------------------------------------------------------------------
 # Recipes
 # --------------------------------------------------------------------------
+@_records_warnings
 def clean(cloud: "Cloud", *, method: str = "ror", max_flagged: float = NOISE_REFUSE_FRACTION,
           **params: Any) -> RecipeRecord:
     """Flag outliers and delete them, in place. Run it PER SCAN, before
@@ -125,13 +216,15 @@ def clean(cloud: "Cloud", *, method: str = "ror", max_flagged: float = NOISE_REF
                         "scanner noise is 0.1-3%. The radius or neighbor count is wrong for this "
                         "cloud's spacing; leave them unset to have them measured.")
     if frac > NOISE_ADVISORY_FRACTION:
-        rec.advisories.append(f"clean: {frac:.1%} flagged, above the usual 0.1-3%")
+        rec._advise("clean.noise_fraction_high", f"{frac:.1%} flagged, above the usual 0.1-3%",
+                    "denoise")
     if flagged:
         cloud.filter(where={"noise_class": [NOISE_CLEAN]})
         rec._step("filter", {"where": {"noise_class": [NOISE_CLEAN]}}, {"points": len(cloud)})
     return rec
 
 
+@_records_warnings
 def ground_and_heights(cloud: "Cloud", *, cell_size: Optional[float] = None,
                        fill_voids: bool = False,
                        **ground_params: Any) -> Tuple["DEM", RecipeRecord]:
@@ -162,11 +255,12 @@ def ground_and_heights(cloud: "Cloud", *, cell_size: Optional[float] = None,
                       "add_height_column": True},
               {"grid": list(dem.z.shape), "finite_fraction": finite})
     if finite < 0.5:
-        rec.advisories.append(f"ground_and_heights: only {finite:.0%} of DEM cells have ground; "
-                              "consider fill_voids=True")
+        rec._advise("ground.dem_sparse", f"only {finite:.0%} of DEM cells have ground; "
+                    "consider fill_voids=True", "dem")
     return dem, rec
 
 
+@_records_warnings
 def plot_trees(cloud: "Cloud", *, seeds: Optional[np.ndarray] = None, use_stem_seeds: bool = True,
                method: str = "treeiso", **tree_params: Any) -> Tuple[int, RecipeRecord]:
     """Individual trees in a plot → ``tree_instance``. Ground and heights
@@ -198,6 +292,7 @@ def plot_trees(cloud: "Cloud", *, seeds: Optional[np.ndarray] = None, use_stem_s
     return n, rec
 
 
+@_records_warnings
 def plot_inventory(cloud: "Cloud", *, breast_height_m: float = 1.3,
                    **inventory_params: Any) -> Tuple["Inventory", RecipeRecord]:
     """DBH, height and crown per tree. Segments the trees first unless
@@ -219,18 +314,22 @@ def plot_inventory(cloud: "Cloud", *, breast_height_m: float = 1.3,
             flags[f] = flags.get(f, 0) + 1
     rec._step("tree_inventory", {"breast_height_m": breast_height_m, **inventory_params},
               {"trees": len(inv), "flags": flags})
-    rec.advisories.extend(f"tree_inventory: {w}" for w in inv.warnings)
+    for w in inv.warnings:
+        rec._advise("inventory.tool_warning", str(w), "tree_inventory")
     if len(inv) == 0:
         raise rec._fail("the inventory measured no tree")
     if flags.get("no_stem"):
-        rec.advisories.append(f"plot_inventory: {flags['no_stem']} tree(s) with no stem fitted "
-                              "(merged or occluded)")
+        rec._advise("inventory.no_stem", f"{flags['no_stem']} tree(s) with no stem fitted "
+                    "(merged or occluded)", "tree_inventory")
     return inv, rec
 
 
+@_records_warnings
 def tree_qsm(cloud: "Cloud", *, remove_ground: bool = True, wood_method: Optional[str] = "ml",
              max_points: int = QSM_POINTS, seed: int = 0,
-             **qsm_params: Any) -> Tuple["QSM", RecipeRecord]:
+             twig_radius_mm: float = 4.23, w_growthlength: float = 1.0, w_area: float = 0.0,
+             w_colinear: float = 0.0, axis_termination: bool = True,
+             fork_symmetry: float = 0.75) -> Tuple["QSM", RecipeRecord]:
     """A QSM of ONE tree. Leaf-off trees are what QSMs are for: leaves are
     fitted as spurious branches, which is why the wood is kept first.
 
@@ -243,13 +342,21 @@ def tree_qsm(cloud: "Cloud", *, remove_ground: bool = True, wood_method: Optiona
     ``fork_symmetry`` (default 0.75): 0.6-0.7 for open-center trees,
     0.85-0.95 for a central leader. ``twig_radius_mm`` (4.23) anchors the
     radius taper. The returned QSM's ``metrics['trunk_diameter_mm']`` is in mm
-    while cylinder ``radius`` is in m."""
+    while cylinder ``radius`` is in m. The QSM keywords (``twig_radius_mm``,
+    ``w_growthlength``, ``w_area``, ``w_colinear``, ``axis_termination``,
+    ``fork_symmetry``) are :meth:`Cloud.qsm`'s, with its defaults."""
+    qsm_params = {"twig_radius_mm": twig_radius_mm, "w_growthlength": w_growthlength,
+                  "w_area": w_area, "w_colinear": w_colinear,
+                  "axis_termination": axis_termination, "fork_symmetry": fork_symmetry}
     rec = _start("tree_qsm", cloud, {"remove_ground": remove_ground, "wood_method": wood_method,
                                      "max_points": max_points, "seed": seed, **qsm_params})
     owned: List["Cloud"] = []
     try:
         work = cloud
         if remove_ground:
+            # segment_ground writes ground_class; do it on a copy so the
+            # caller's cloud is untouched, as documented.
+            work = _copy(rec, work, owned)
             gp = {"auto_class_threshold": True}
             rec._step("segment_ground", gp, work.segment_ground(**gp))
             work = _extract(rec, work, {"ground_class": [NON_GROUND]}, "non-ground", owned)
@@ -259,7 +366,14 @@ def tree_qsm(cloud: "Cloud", *, remove_ground: bool = True, wood_method: Optiona
             work = _extract(rec, work, {"wood_class": [WOOD]}, "wood", owned)
         if len(work) > max_points:
             work = _thin(rec, work, max_points, seed, owned)
-        q = work.qsm(**qsm_params)
+        try:
+            q = work.qsm(**qsm_params)
+        except PhytographError as e:
+            # The builder ran and refused this input (`success: false`): an
+            # unusable result, like the zero-cylinder case below.
+            if isinstance(e.detail, dict) and e.detail.get("success") is False:
+                raise rec._fail(f"the QSM could not be built: {e.detail.get('error')}") from None
+            raise
         cov = np.array([c.get("surf_cov", np.nan) for c in q.cylinders], dtype=float)
         inferred = float(np.mean(cov < QSM_INFERRED_RADIUS_COVERAGE)) if len(cov) else 0.0
         rec._step("qsm", qsm_params, {"cylinders": len(q), "inferred_radius_fraction": inferred,
@@ -269,15 +383,17 @@ def tree_qsm(cloud: "Cloud", *, remove_ground: bool = True, wood_method: Optiona
             raise rec._fail("no cylinder was fitted: the crown is disconnected from the base "
                             "(over-cropped trunk, over-thinned, or a single view).")
         if inferred > 0.5:
-            rec.advisories.append(f"tree_qsm: {inferred:.0%} of cylinder radii have surface "
-                                  f"coverage under {QSM_INFERRED_RADIUS_COVERAGE} and come from "
-                                  "the taper model, not the points")
+            rec._advise("qsm.inferred_radius",
+                        f"{inferred:.0%} of cylinder radii have surface coverage under "
+                        f"{QSM_INFERRED_RADIUS_COVERAGE} and come from the taper model, not "
+                        "the points", "qsm")
         return q, rec
     finally:
         for c in owned:
             c.close()
 
 
+@_records_warnings
 def register_pair(moving: "Cloud", target: "Cloud", *, global_first: bool = True,
                   max_rmse_fraction: float = REGISTRATION_RMSE_FRACTION,
                   scene_type: str = "agriculture",
@@ -311,11 +427,13 @@ def register_pair(moving: "Cloud", target: "Cloud", *, global_first: bool = True
                         f"{max_rmse_fraction:.0%}); the clouds were not aligned and 'moving' was "
                         "put back. Crop to the overlap, or give an initial pose.")
     if reg.rmse == 0:
-        rec.advisories.append("register_pair: zero RMSE can mean no overlap at all")
+        rec._advise("registration.zero_rmse", "zero RMSE can mean no overlap at all",
+                    "register_icp")
     # The matrix that took `moving` from where it started to where it is now.
     return _with_matrix(reg, total), rec
 
 
+@_records_warnings
 def herbaceous_organs(cloud: "Cloud", *, model_id: Optional[str] = None) -> RecipeRecord:
     """``plant_organ`` (1 soil, 2 stem, 3 leaf) and ``leaflet_id`` on ONE
     herbaceous dicot plant scanned at about 3 mm spacing or finer, soil or pot
@@ -356,6 +474,17 @@ def _extract(rec: RecipeRecord, cloud: "Cloud", where: Dict[str, Any], what: str
     return child
 
 
+def _copy(rec: RecipeRecord, cloud: "Cloud", owned: List["Cloud"]) -> "Cloud":
+    p = cloud.positions
+    pad = max(1.0, _diagonal(cloud))
+    child = cloud.extract(box=(p.min(0) - pad, p.max(0) + pad), name=f"{cloud.name}-copy")
+    if child is None or len(child) != len(cloud):
+        raise rec._fail("could not copy the input cloud")
+    owned.append(child)
+    rec._step("copy", {}, {"points": len(child)})
+    return child
+
+
 def _thin(rec: RecipeRecord, cloud: "Cloud", n: int, seed: int, owned: List["Cloud"]) -> "Cloud":
     """A seeded uniform subsample, as a new cloud. Uniform rather than voxel:
     the QSM's own skeleton handles density, and this is reproducible exactly."""
@@ -379,23 +508,11 @@ def _with_matrix(reg: "Registration", m: np.ndarray) -> "Registration":
 
 def _merge(rec: RecipeRecord, sub: RecipeRecord) -> None:
     rec.steps.extend(Step(f"{sub.recipe}.{s.op}", s.params, s.summary) for s in sub.steps)
-    rec.advisories.extend(sub.advisories)
+    for a in sub.advisories:
+        if a not in rec.advisories:
+            rec.advisories.append(a)
 
 
-_ADVISORY_KEYS = ("warning", "warnings", "quality_warning", "advisories")
-
-
-def _advisories(res: Any, op: str) -> List[str]:
-    if not isinstance(res, dict):
-        return []
-    out: List[str] = []
-    for k in _ADVISORY_KEYS:
-        v = res.get(k)
-        if isinstance(v, str) and v:
-            out.append(f"{op}: {v}")
-        elif isinstance(v, (list, tuple)):
-            out.extend(f"{op}: {w}" for w in v if w)
-    return out
 
 
 def _summary(res: Any) -> Dict[str, Any]:

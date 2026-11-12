@@ -60,6 +60,23 @@ def test_tree_qsm_on_one_extracted_stem(backend):
                 t.close()
 
 
+def test_tree_qsm_leaves_its_input_without_new_columns(backend):
+    """Ground is segmented on a copy: the input gains no ground_class."""
+    with backend.open(FOREST) as c:
+        recipes.plot_trees(c)
+        trees = c.split("tree_instance")
+        try:
+            fresh = backend.from_numpy(max(trees.values(), key=len).positions)
+            with fresh:
+                before = set(fresh.columns)
+                assert "ground_class" not in before
+                recipes.tree_qsm(fresh, wood_method=None, max_points=3000)
+                assert set(fresh.columns) == before
+        finally:
+            for t in trees.values():
+                t.close()
+
+
 def test_tree_qsm_is_reproducible_from_its_seed(backend):
     with backend.open(FOREST) as c:
         recipes.plot_trees(c)
@@ -98,3 +115,14 @@ def test_register_pair_recovers_a_known_offset(backend):
         assert rec.steps[-1].summary["rmse_fraction"] < recipes.REGISTRATION_RMSE_FRACTION
         d = np.abs(moving.positions.mean(0) - target.positions.mean(0))
         assert d.max() < 0.01
+
+
+def test_tree_qsm_spells_out_cloud_qsm_keywords_with_the_same_defaults():
+    import inspect
+    from phytograph import Cloud
+    qsm = {k: p.default for k, p in inspect.signature(Cloud.qsm).parameters.items() if k != "self"}
+    tq = inspect.signature(recipes.tree_qsm).parameters
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in tq.values())
+    assert {k: tq[k].default for k in qsm} == qsm
+    with pytest.raises(TypeError):
+        recipes.tree_qsm(None, fork_symetry=0.9)
