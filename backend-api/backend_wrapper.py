@@ -6,6 +6,11 @@ Handles matplotlib font cache building before starting uvicorn
 
 import sys
 import os
+
+# First, before anything can import numpy: every child process (seg worker,
+# tile pool) re-runs this and inherits the environment it sets.
+import thread_cap
+thread_cap.apply_env()
 import logging
 import tempfile
 from logging.handlers import RotatingFileHandler
@@ -283,6 +288,7 @@ logger.info("Matplotlib initialized with minimal config")
 # Now import and run the main app
 logger.info("Starting Phytograph backend server...")
 from main import app, reap_seg_workers
+thread_cap.apply_runtime()
 import uvicorn
 import parent_watchdog
 

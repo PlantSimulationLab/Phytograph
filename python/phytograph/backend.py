@@ -170,14 +170,22 @@ class Backend:
         ``libhelios`` on first start, which takes minutes.
     env:
         Extra environment for the backend (e.g. ``PHYTOGRAPH_MAX_CLOUD_SESSIONS``).
+    threads:
+        Cap on every thread pool the backend uses (OpenMP, BLAS, torch, open3d,
+        its Python executors), passed as ``PHYTOGRAPH_THREADS``. ``None`` keeps
+        an inherited ``PHYTOGRAPH_THREADS``, else lets each library choose.
     """
 
     def __init__(self, *, source: str = "auto", executable: Optional[PathLike] = None,
                  progress: Union[ProgressFn, bool, None] = None, confirm_costly: bool = True,
                  startup_timeout: float = 600.0, env: Optional[Dict[str, str]] = None,
+                 threads: Optional[int] = None,
                  _attach: Optional[Dict[str, Any]] = None):
         if source not in ("auto", "app", "dev", "download"):
             raise ValueError("source must be 'auto', 'app', 'dev' or 'download'")
+        if threads is not None and (isinstance(threads, bool) or not isinstance(threads, int)
+                                    or threads < 1):
+            raise ValueError(f"threads must be a positive integer, got {threads!r}")
         self._proc: Optional[subprocess.Popen] = None
         self._log_path: Optional[Path] = None
         self._log_seen = 0
@@ -191,7 +199,10 @@ class Backend:
             port = _ports.find_free_port()
             token = secrets.token_hex(32)
             self.url = f"http://127.0.0.1:{port}"
-            self._launch(argv, cwd, resources, port, token, env or {})
+            extra = dict(env or {})
+            if threads is not None:
+                extra["PHYTOGRAPH_THREADS"] = str(threads)
+            self._launch(argv, cwd, resources, port, token, extra)
         self._transport = Transport(self.url, token, progress=progress_fn,
                                     confirm_costly=confirm_costly)
         try:

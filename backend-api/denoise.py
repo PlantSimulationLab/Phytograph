@@ -76,6 +76,8 @@ import time
 from typing import Any, Optional
 
 import numpy as np
+
+import thread_cap
 from scipy.spatial import cKDTree
 
 # Session column written by the denoise endpoints. Two classes so the Filter
@@ -162,7 +164,7 @@ def _nn_distances(points: np.ndarray, sample: int = 200_000,
                                min(sample, len(points))).astype(np.int64)]
     if tree is None:
         tree = cKDTree(points)
-    dist, _ = tree.query(probe, k=2, workers=-1)
+    dist, _ = tree.query(probe, k=2, workers=thread_cap.kd_workers())
     nn = dist[:, 1]
     return nn[np.isfinite(nn) & (nn > 0)]
 

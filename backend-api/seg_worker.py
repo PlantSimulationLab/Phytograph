@@ -71,6 +71,8 @@ def run(workdir: str) -> int:
     # directly. tests/test_seg_worker_orphan.py pins this.
     _watch_parent()
     import numpy as np
+    import thread_cap
+    thread_cap.apply_runtime()
 
     try:
         with open(os.path.join(workdir, "request.json"), "r") as f:

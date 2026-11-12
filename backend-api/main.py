@@ -1,3 +1,6 @@
+# Before numpy/open3d load: PHYTOGRAPH_THREADS pins their native pools.
+import thread_cap
+thread_cap.apply_env()
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -510,7 +513,7 @@ try:
 except (ValueError, TypeError):
     _MAX_WORKER_THREADS = None
 if _MAX_WORKER_THREADS is None:
-    _MAX_WORKER_THREADS = max(8, min(16, (os.cpu_count() or 4)))
+    _MAX_WORKER_THREADS = max(8, min(16, (os.cpu_count() or 4)))  # thread_cap: request concurrency, deliberately uncapped
 
 # ==================== MEMORY BUDGET / ADMISSION ====================
 #
@@ -617,6 +620,13 @@ def health_check():
 def get_version():
     """Version endpoint for Tauri app to check backend compatibility"""
     return {"version": BACKEND_VERSION}
+
+
+@app.get("/api/runtime")
+def get_runtime():
+    """The thread limits this process is actually running with
+    (``PHYTOGRAPH_THREADS``, see thread_cap.py). Seg workers inherit them."""
+    return {"threads": thread_cap.report()}
 
 
 def _gpu_name() -> "str | None":
@@ -7033,7 +7043,7 @@ def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
         sub = points[:, :3]
     tree = cKDTree(sub)
     qi = rng.choice(len(sub), min(n_query, len(sub)), replace=False)
-    dist, _ = tree.query(sub[qi], k=2, workers=-1)
+    dist, _ = tree.query(sub[qi], k=2, workers=thread_cap.kd_workers())
     nn = dist[:, 1]
     nn = nn[np.isfinite(nn) & (nn > 0)]
     return float(np.median(nn)) if nn.size else 0.0
@@ -8737,7 +8747,7 @@ def _treeiso_spacing_probe(points: np.ndarray) -> Optional[Tuple[float, int]]:
     if len(pts) > 200_000:
         idx = np.random.default_rng(0).choice(len(pts), 200_000, replace=False)
         sample = pts[idx]
-    dist, _ = cKDTree(pts).query(sample, k=2, workers=-1)
+    dist, _ = cKDTree(pts).query(sample, k=2, workers=thread_cap.kd_workers())
     nn = dist[:, 1]
     nn = nn[np.isfinite(nn) & (nn > 0)]
     if nn.size == 0:
@@ -11611,7 +11621,7 @@ def _do_spacing_check(request: HeliosTriangulationRequest) -> dict:
 
     tree = cKDTree(pts)
     # k=2: [0] is the point itself (distance 0), [1] is its nearest neighbor.
-    dist, _ = tree.query(pts, k=2, workers=-1)
+    dist, _ = tree.query(pts, k=2, workers=thread_cap.kd_workers())
     nn = dist[:, 1]
     nn = nn[np.isfinite(nn) & (nn > 0)]
     if nn.size == 0:
@@ -16887,7 +16897,7 @@ def _lad_block_cells_limit(n_cells: int) -> Optional[int]:
         except ValueError:
             pinned = 0
         return pinned if pinned > 0 else None
-    per_cell = _LAD_SCRATCH_BYTES_PER_CELL_THREAD * max(1, os.cpu_count() or 1)
+    per_cell = _LAD_SCRATCH_BYTES_PER_CELL_THREAD * thread_cap.cpu_count()
     allowance = memory_budget.budget_bytes() // 4
     if n_cells * per_cell <= allowance:
         return None
@@ -18871,7 +18881,7 @@ def _wood_local_pca_features(
     q_chunk = max(1, min(chunk, n))
     for start in range(0, n, q_chunk):
         end = min(start + q_chunk, n)
-        _, idx_block = tree.query(pts[start:end], k=k_max_eff, workers=-1)
+        _, idx_block = tree.query(pts[start:end], k=k_max_eff, workers=thread_cap.kd_workers())
         if idx_block.ndim == 1:  # k==1 edge case
             idx_block = idx_block[:, None]
         nbr_idx[start:end] = idx_block.astype(np.int32, copy=False)
@@ -19667,7 +19677,7 @@ def segment_wood(
             # voxel_down_sample averages/reorders points, so reflectance can't be
             # strided — assign each downsampled point its nearest full-res point's
             # reflectance (same NN mapping used to propagate labels back).
-            _, nn_down = cKDTree(pts_full).query(pts, k=1, workers=-1)
+            _, nn_down = cKDTree(pts_full).query(pts, k=1, workers=thread_cap.kd_workers())
             refl = refl_full[nn_down]
         else:
             refl = None
@@ -19724,10 +19734,10 @@ def segment_wood(
     from scipy.spatial import cKDTree
 
     nn_tree = cKDTree(pts)
-    _, nn = nn_tree.query(pts_full, k=1, workers=-1)
+    _, nn = nn_tree.query(pts_full, k=1, workers=thread_cap.kd_workers())
     labels_full = labels_down[nn].astype(np.int32)
     full_tree = cKDTree(pts_full)
-    _, full_idx = full_tree.query(pts_full, k=int(min(reg_k, n_full)), workers=-1)
+    _, full_idx = full_tree.query(pts_full, k=int(min(reg_k, n_full)), workers=thread_cap.kd_workers())
     if full_idx.ndim == 1:
         full_idx = full_idx[:, None]
     labels_full = _wood_regularize(labels_full, full_idx.astype(np.int32), reg_k, max(1, reg_iters))
@@ -19800,7 +19810,7 @@ def build_neighbor_graph(points: np.ndarray, search_radius: float, max_neighbors
     chunk = 200_000
     for start in range(0, n_points, chunk):
         end = min(start + chunk, n_points)
-        dist_block, idx_block = tree.query(points[start:end], k=k, workers=-1)
+        dist_block, idx_block = tree.query(points[start:end], k=k, workers=thread_cap.kd_workers())
         if idx_block.ndim == 1:  # k == 1 edge case (n_points == 1)
             idx_block = idx_block[:, None]
             dist_block = dist_block[:, None]
@@ -40475,7 +40485,7 @@ class SessionExtractByColumnRequest(BaseModel):
 # Concurrency cap for the batch octree builds. PotreeConverter is itself
 # multithreaded and the per-build cost is dominated by process spin-up for the
 # small per-tree clouds, so a modest pool wins big without oversubscribing.
-_EXTRACT_BUILD_POOL = min(8, max(2, (_os.cpu_count() or 4)))
+_EXTRACT_BUILD_POOL = thread_cap.pool_size(min(8, max(2, thread_cap.cpu_count())))
 
 
 def _slice_children_by_column(sess: "CloudSession", slug: str, exclude: set,
@@ -46941,7 +46951,7 @@ def _reject_sparse_voxels(points: np.ndarray,
 # Open3D's fixed per-call overhead, so a few in flight fill the cores the one
 # search leaves idle. Memory is small -- each search holds only rasters and
 # the shared, already-decimated clouds.
-_COARSE_WORKERS = 4
+_COARSE_WORKERS = thread_cap.pool_size(4)
 
 # Shortlist depth for the coarse RETRY pass only (the other matching settings,
 # tried when the default's graph does not close). The default pass keeps
@@ -46959,12 +46969,12 @@ _RETRY_REFINE_TOP_K = 32
 # Scans ingested at once. Each holds a full cloud plus the working-copy
 # temporaries (~0.8 GB on a 13.7 M-point scan), so this is the memory bound as
 # much as the parallelism.
-_INGEST_WORKERS = 3
+_INGEST_WORKERS = thread_cap.pool_size(3)
 
 # Concurrent fine aligns -- see the pipelined loop in `_do_multi_scan_register`.
 # Each in-flight align holds one source pyramid (~320 MB at the point cap), so
 # this is also the memory bound on top of the reference.
-_FINE_ALIGN_WORKERS = 2
+_FINE_ALIGN_WORKERS = thread_cap.pool_size(2)
 
 
 def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) -> dict:

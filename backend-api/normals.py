@@ -20,7 +20,7 @@ Measured on a 12-core M-series, 3 M points, k=20:
 
     open3d estimate_normals, KNN (OpenMP)              0.83 M pts/s
     open3d estimate_normals, Hybrid (radius + max_nn)  0.80 M pts/s
-    scipy cKDTree(workers=-1) + batched eigh           0.26 M pts/s
+    scipy cKDTree(workers=thread_cap.kd_workers()) + batched eigh           0.26 M pts/s
 
 open3d is 3.2x faster and the two agree to `mean |dot| = 1.0` -- identical
 answers, so there is no accuracy argument for the slow one.
@@ -80,6 +80,8 @@ import os
 from typing import Any, Optional, Sequence, Tuple
 
 import numpy as np
+
+import thread_cap
 from scipy.spatial import cKDTree
 
 import open3d_warmup
@@ -187,7 +189,7 @@ def knn_distance_percentile(points: np.ndarray, k: int, q: float = 99.0,
                                min(sample, len(finite))).astype(np.int64)]
     if tree is None:
         tree = cKDTree(finite, leafsize=64, compact_nodes=False, balanced_tree=False)
-    dist, _ = tree.query(probe, k=kk, workers=-1)
+    dist, _ = tree.query(probe, k=kk, workers=thread_cap.kd_workers())
     far = dist[:, -1]
     far = far[np.isfinite(far) & (far > 0)]
     if far.size == 0:
@@ -335,7 +337,7 @@ def _resolve_local_job(name):
 
 
 def _omp_per_worker(workers: int) -> int:
-    cpu = os.cpu_count() or 1
+    cpu = thread_cap.cpu_count()
     return max(1, cpu // max(1, int(workers)))
 
 

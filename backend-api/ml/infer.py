@@ -27,6 +27,8 @@ trainer, so the network's input is built one way only.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+
+import thread_cap
 import os
 
 import numpy as np
@@ -71,6 +73,7 @@ def to_torch(batch: dict, device) -> dict:
     """Move a collated batch to ``device``: positions and features as float32,
     indices as int64."""
     import torch
+    thread_cap.apply_torch(torch)
 
     out = {}
     for key, val in batch.items():
@@ -117,6 +120,7 @@ def predict(
     polled before each batch (raising :class:`Canceled`).
     """
     import torch
+    thread_cap.apply_torch(torch)
 
     xyz = np.asarray(xyz, dtype=np.float64)
     n = len(xyz)
@@ -162,7 +166,7 @@ def predict(
     order = np.random.default_rng(0).permutation(m)
     cursor = 0
     done = 0
-    threads = threads or max(1, min(8, (os.cpu_count() or 2) - 1))
+    threads = thread_cap.pool_size(threads or max(1, min(8, thread_cap.cpu_count() - 1)))
     pool = ThreadPoolExecutor(max_workers=threads)
 
     def build_one(seed):
@@ -187,7 +191,7 @@ def predict(
                     # Claim this seed's inner region now, so the next seed in
                     # the same batch lands elsewhere. The crop query is
                     # repeated in build_one, which is cheaper than holding it.
-                    d, idx = tree.query(vox[s], k=k_crop, workers=-1)
+                    d, idx = tree.query(vox[s], k=k_crop, workers=thread_cap.kd_workers())
                     d, idx = np.atleast_1d(d), np.atleast_1d(idx)
                     claimed[idx[d <= pkg.crop_inner_fraction * d[-1]]] = True
                     claimed[s] = True

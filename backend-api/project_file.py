@@ -32,6 +32,8 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
+import thread_cap
+
 FORMAT = "phytograph-project"
 # 2: session columns are `.pz` (write_array), and an octree a saved session
 #    can rebuild exactly is left out (`manifest["regenerate"]`). Version-1
@@ -118,7 +120,7 @@ _PZ_SAMPLE_ROWS = 1 << 17
 _PZ_LEVEL = 1
 _PZ_FILTERS = ("none", "shuffle", "delta_shuffle")
 _PZ_KINDS = "biuf"   # bool, signed, unsigned, float: nothing else is written
-_PZ_WORKERS = max(1, min(8, (os.cpu_count() or 2)))
+_PZ_WORKERS = thread_cap.pool_size(min(8, thread_cap.cpu_count()))
 _INT_OF_SIZE = {1: np.int8, 2: np.int16, 4: np.int32, 8: np.int64}
 
 

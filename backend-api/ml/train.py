@@ -36,6 +36,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+import thread_cap
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from .data.cache import open_cache
@@ -247,7 +249,7 @@ def train(cfg: dict, steps_override: int | None = None) -> Path:
     opt_cfg = cfg.get("optim", {})
     batch = int(opt_cfg.get("batch", 8))
     steps = int(steps_override or opt_cfg.get("steps", 40000))
-    workers = int(cfg.get("workers", max(1, (os.cpu_count() or 2) - 2)))
+    workers = int(cfg.get("workers", max(1, thread_cap.cpu_count() - 2)))
     loader = DataLoader(CropStream(sampler, seed), batch_size=batch, collate_fn=collate, num_workers=workers,
                         persistent_workers=workers > 0, prefetch_factor=4 if workers else None)
 

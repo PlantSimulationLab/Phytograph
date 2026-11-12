@@ -28,6 +28,12 @@ import numpy as np
 import numpy_indexed as npi
 from scipy.spatial import cKDTree, ConvexHull
 from scipy.sparse import csr_matrix
+
+try:  # Phytograph: honour the engine's PHYTOGRAPH_THREADS cap.
+    from thread_cap import kd_workers as _kd_workers
+except ImportError:  # pragma: no cover - vendored module used standalone
+    def _kd_workers():
+        return -1
 from scipy.sparse.csgraph import connected_components
 from skimage import draw
 
@@ -707,7 +713,7 @@ def _split_across_gaps(xyz_dec, labels_dec, max_outlier_gap):
     # reabsorbed. A user on sparse data who reaches for a smaller number to split
     # more would otherwise get quieter, wronger output with no indication.
     if len(xyz_dec) >= 2:
-        nn = cKDTree(xyz_dec).query(xyz_dec, k=2, workers=-1)[0][:, 1]
+        nn = cKDTree(xyz_dec).query(xyz_dec, k=2, workers=_kd_workers())[0][:, 1]
         nn = nn[np.isfinite(nn) & (nn > 0)]
         if nn.size:
             floor = 2.0 * float(np.median(nn))

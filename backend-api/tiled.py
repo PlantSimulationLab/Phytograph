@@ -446,6 +446,8 @@ def iter_tiles(plan: TilePlan, points: np.ndarray) -> Iterator[Tuple[Tile, np.nd
 import multiprocessing as _mp
 import os as _os
 
+import thread_cap
+
 
 def worker_count(n_tiles: int, *, per_worker_bytes: int, budget_bytes: int,
                  baseline_bytes: int = 400 * 1024 ** 2) -> int:
@@ -468,7 +470,7 @@ def worker_count(n_tiles: int, *, per_worker_bytes: int, budget_bytes: int,
     # direct segment_ground in a test) the tiles run in-process.
     if not _os.environ.get("PHYTOGRAPH_SEG_WORKER"):
         return 1
-    cpu = _os.cpu_count() or 1
+    cpu = thread_cap.cpu_count()
     if n_tiles < 4 or cpu < 2:
         return 1
     fits = max(1, int(budget_bytes // max(1, per_worker_bytes + baseline_bytes)))

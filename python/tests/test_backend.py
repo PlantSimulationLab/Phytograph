@@ -178,3 +178,18 @@ def test_export_las_scale_and_typed_columns(backend, tmp_path):
     assert np.allclose(laspy.read(str(tmp_path / "coarse.laz")).header.scales, 0.001)
     with pytest.raises(ValueError):
         c.export(tmp_path / "bad.laz", las_scale=0)
+
+
+def test_threads_must_be_a_positive_integer():
+    for bad in (0, -1, 1.5, "2", True):
+        with pytest.raises(ValueError, match="threads"):
+            pg.Backend(source="dev", threads=bad)
+
+
+def test_threads_caps_the_backends_native_pools():
+    with pg.Backend(source="dev", threads=2) as be:
+        report = be._transport.get_json("/api/runtime")["threads"]
+    assert report["cap"] == 2
+    assert report["env"]["OMP_NUM_THREADS"] == "2"
+    assert report["native_pools"]
+    assert {p["num_threads"] for p in report["native_pools"]} == {2}

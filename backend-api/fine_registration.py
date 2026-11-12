@@ -116,6 +116,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+import thread_cap
+
 import open3d_warmup
 
 # Correspondence window as a multiple of the level's voxel. Three voxels is
@@ -317,7 +319,7 @@ def median_spacing(points: np.ndarray, sample: int = 20000) -> Optional[float]:
     probe = finite[np.linspace(0, len(finite) - 1,
                                min(sample, len(finite))).astype(int)]
     tree = cKDTree(finite, leafsize=64, compact_nodes=False, balanced_tree=False)
-    dist, _ = tree.query(probe, k=2, workers=-1)
+    dist, _ = tree.query(probe, k=2, workers=thread_cap.kd_workers())
     spacing = float(np.median(dist[:, 1]))
     return spacing if np.isfinite(spacing) and spacing > 0 else None
 

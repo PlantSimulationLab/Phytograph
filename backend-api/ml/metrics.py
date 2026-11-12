@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import thread_cap
+
 
 def confusion(truth_idx: np.ndarray, pred_idx: np.ndarray, n: int) -> np.ndarray:
     """(n, n) counts, rows = truth, columns = prediction. Truth < 0 is ignored."""
@@ -53,7 +55,7 @@ def boundary_mask(xyz: np.ndarray, truth_idx: np.ndarray, radius: float = 0.02) 
     step = 500_000
     for s in range(0, len(xyz), step):
         q = xyz[s:s + step]
-        _, nb = tree.query(q, k=9, distance_upper_bound=radius, workers=-1)
+        _, nb = tree.query(q, k=9, distance_upper_bound=radius, workers=thread_cap.kd_workers())
         valid = nb < len(xyz)
         lab = np.where(valid, truth_idx[np.minimum(nb, len(xyz) - 1)], truth_idx[s:s + step, None])
         out[s:s + step] = (lab != truth_idx[s:s + step, None]).any(axis=1)
