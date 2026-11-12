@@ -17,6 +17,7 @@ from pathlib import Path as _Path
 
 from ._version import EXPECTED_BACKEND_VERSION, __version__
 from .backend import Backend
+from ._identity import engine_identity
 from .cloud import Cloud
 from .errors import (BackendNotFound, BackendStartError, Canceled, CostWarning,
                      PhytographError, VersionMismatch)
@@ -32,7 +33,7 @@ def skills_dir() -> _Path:
     return _Path(__file__).resolve().parent / "skills"
 
 
-__all__ = ["recipes", "skills_dir", "Backend", "Cloud", "PhytographError", "BackendNotFound", "BackendStartError",
+__all__ = ["recipes", "skills_dir", "engine_identity", "Backend", "Cloud", "PhytographError", "BackendNotFound", "BackendStartError",
            "VersionMismatch", "Canceled", "CostWarning", "EXPECTED_BACKEND_VERSION", "__version__",
            "DEM", "Mesh", "QSM", "Skeleton", "Inventory", "Registration", "LADResult", "Scan", "Grid",
            "GROUND", "NON_GROUND", "WOOD", "LEAF", "NOISE", "NOISE_CLEAN"]

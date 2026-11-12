@@ -285,3 +285,61 @@ def test_pruning_also_removes_old_backend_archives():
     pattern = re.search(r"const BINARY_RE = /(.+)/i", src).group(1)
     for os_name, arch in _download.SUPPORTED:
         assert re.search(pattern, _download.asset_name(VERSION, os_name, arch), re.I)
+
+
+# ── offline / strict mode ───────────────────────────────────────────────────
+
+def test_offline_with_nothing_installed_refuses_without_touching_the_network(release, monkeypatch):
+    vdir, requests = release
+    make_archive(vdir)
+    monkeypatch.setenv(_download.OFFLINE_ENV, "1")
+    with pytest.raises(pg.BackendNotFound, match="Offline mode"):
+        _download.install()
+    with pytest.raises(pg.BackendNotFound, match="Offline mode"):
+        pg.Backend(source="download")
+    assert requests == []
+    assert _download.cached_executable() is None
+
+
+def test_offline_argument_overrides_the_environment(release, monkeypatch):
+    vdir, requests = release
+    make_archive(vdir)
+    monkeypatch.delenv(_download.OFFLINE_ENV, raising=False)
+    with pytest.raises(pg.BackendNotFound, match="Offline mode"):
+        pg.Backend(source="download", offline=True)
+    assert requests == []
+
+
+def test_offline_still_uses_an_installed_backend(release, monkeypatch):
+    vdir, requests = release
+    make_archive(vdir)
+    _download.install()
+    requests.clear()
+    monkeypatch.setenv(_download.OFFLINE_ENV, "1")
+    with pg.Backend(source="download") as be:
+        assert be.version == VERSION
+    assert requests == []
+
+
+def test_offline_archive_install_needs_its_digest_locally(release, tmp_path, monkeypatch):
+    vdir, requests = release
+    archive = make_archive(vdir)
+    hand = tmp_path / "by-hand"
+    hand.mkdir()
+    copy = hand / archive.name
+    copy.write_bytes(archive.read_bytes())       # no .sha256 beside it
+    monkeypatch.setenv(_download.OFFLINE_ENV, "1")
+    with pytest.raises(pg.BackendNotFound, match="Offline mode"):
+        _download.install(archive=copy)
+    assert requests == []
+
+
+def test_download_dest_installs_where_the_cache_variable_then_finds_it(release, tmp_path, monkeypatch):
+    from phytograph.__main__ import main
+    vdir, _ = release
+    make_archive(vdir)
+    dest = tmp_path / "engine-store"
+    assert main(["download", "--dest", str(dest)]) == 0
+    monkeypatch.setenv("PHYTOGRAPH_BACKEND_CACHE", str(dest))
+    exe = _download.cached_executable()
+    assert exe is not None and dest in exe.parents

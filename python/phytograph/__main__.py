@@ -2,13 +2,17 @@
 
     python -m phytograph download              # fetch + verify now (e.g. before going offline)
     python -m phytograph download --archive F  # install from an archive copied over by hand
+    python -m phytograph download --dest DIR   # install under DIR (use with PHYTOGRAPH_BACKEND_CACHE=DIR)
     python -m phytograph where                 # which backend `Backend()` would launch
+    python -m phytograph identity [--json]     # that backend's exact build, without starting it
     python -m phytograph agent-files [DIR]     # AGENTS.md + CLAUDE.md for coding agents
     python -m phytograph skills install        # copy the agent skill into .claude/skills
 """
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +32,18 @@ def main(argv=None) -> int:
     d = sub.add_parser("download", help="download and verify the backend for this version")
     d.add_argument("--archive", type=Path,
                    help="install from this already-downloaded archive instead (still verified)")
+    d.add_argument("--dest", type=Path,
+                   help="install under this folder instead of the per-user cache; a later "
+                        "process finds it through PHYTOGRAPH_BACKEND_CACHE=DEST")
     sub.add_parser("where", help="show which backend Backend() would use")
+    idp = sub.add_parser(
+        "identity", help="print the exact build of the backend Backend() would use",
+        description="Read the engine's identity stamp without starting it or using the network: "
+                    "versions, libhelios and sources digests, PyHelios/helios-core commits, "
+                    "package versions, the verified archive digest, and `key`, which changes "
+                    "whenever the native code does.")
+    idp.add_argument("--json", action="store_true", help="one JSON document on stdout")
+    idp.add_argument("--source", default="auto", choices=("auto", "app", "dev", "download"))
     a = sub.add_parser(
         "agent-files", help="write AGENTS.md and CLAUDE.md for AI coding agents into a project",
         description="Write AGENTS.md (this version's agent guidance) and CLAUDE.md (@AGENTS.md) "
@@ -63,7 +78,18 @@ def main(argv=None) -> int:
             for name, what in _agent_files.install_skills(args.dest, force=args.force).items():
                 print(f"{what} {args.dest / name}")
             return 0
+        if args.cmd == "identity":
+            from ._identity import engine_identity
+            ident = engine_identity(source=args.source)
+            if args.json:
+                print(json.dumps(ident, indent=2, sort_keys=True))
+            else:
+                for k in sorted(ident):
+                    print(f"{k}: {json.dumps(ident[k]) if isinstance(ident[k], (dict, list)) else ident[k]}")
+            return 0
         if args.cmd == "download":
+            if args.dest is not None:
+                os.environ["PHYTOGRAPH_BACKEND_CACHE"] = str(args.dest.expanduser().resolve())
             os_name, arch = _download.platform_key()
             name = _download.asset_name(EXPECTED_BACKEND_VERSION, os_name, arch)
             print(f"phytograph {EXPECTED_BACKEND_VERSION}: backend {name}", file=sys.stderr)

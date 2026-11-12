@@ -169,8 +169,30 @@ def _check_glibc(os_name: str) -> None:
 # --------------------------------------------------------------------------
 # Download + install
 # --------------------------------------------------------------------------
+OFFLINE_ENV = "PHYTOGRAPH_OFFLINE"
+
+
+def is_offline(override: Optional[bool] = None) -> bool:
+    """Whether network access is forbidden: ``override`` if given, else
+    ``PHYTOGRAPH_OFFLINE`` (``1``/``true``/``yes``)."""
+    if override is not None:
+        return bool(override)
+    return os.environ.get(OFFLINE_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _offline_error(what: str) -> BackendNotFound:
+    return BackendNotFound(
+        f"Offline mode ({OFFLINE_ENV}) forbids {what}. Install the backend beforehand with "
+        "`python -m phytograph download [--dest DIR]` (and set PHYTOGRAPH_BACKEND_CACHE=DIR "
+        "where it is used), or point PHYTOGRAPH_BACKEND_EXE at a backend executable.")
+
+
 def _http_get(url: str, dest: Optional[Path], progress: Optional[ProgressFn],
-              what: str) -> Optional[bytes]:
+              what: str, *, no_network: bool = False) -> Optional[bytes]:
+    # The one place this package opens a connection for an install, so the
+    # offline refusal here covers every path that could reach the network.
+    if no_network:
+        raise _offline_error(f"downloading {url}")
     import httpx
     try:
         with httpx.stream("GET", url, follow_redirects=True,
@@ -247,15 +269,23 @@ def _safe_extract(archive: Path, dest: Path) -> None:
 
 
 def install(*, version: str = EXPECTED_BACKEND_VERSION, archive: Optional[Path] = None,
-            progress: Optional[ProgressFn] = None) -> Path:
+            progress: Optional[ProgressFn] = None, offline: Optional[bool] = None) -> Path:
     """Make the backend for this client's version available locally and return
     its executable. Downloads it unless a verified copy is cached, or installs
-    from ``archive`` (a file you downloaded yourself — still verified)."""
+    from ``archive`` (a file you downloaded yourself — still verified).
+
+    ``offline`` (default: ``PHYTOGRAPH_OFFLINE``) refuses any network access:
+    a missing backend raises :class:`BackendNotFound` at once, and an archive
+    installs only with its digest available locally."""
+    no_network = is_offline(offline)
     os_name, arch = platform_key()
     _check_glibc(os_name)
     exe = cached_executable(version)
     if exe is not None and archive is None:
         return exe
+    if no_network and archive is None:
+        raise _offline_error(
+            f"downloading the backend, and none is installed under {cache_root()}")
 
     name = asset_name(version, os_name, arch)
     base = os.environ.get("PHYTOGRAPH_BACKEND_URL", DEFAULT_URL_BASE).rstrip("/")
@@ -275,7 +305,7 @@ def install(*, version: str = EXPECTED_BACKEND_VERSION, archive: Optional[Path] 
         if side.is_file():
             expected = side.read_text().split()[0].strip().lower()
     if expected is None:
-        body = _http_get(url + ".sha256", None, None, "checksum")
+        body = _http_get(url + ".sha256", None, None, "checksum", no_network=no_network)
         if body is None:
             if src_archive is not None:
                 raise BackendNotFound(
@@ -292,7 +322,8 @@ def install(*, version: str = EXPECTED_BACKEND_VERSION, archive: Optional[Path] 
             src = src_archive
         else:
             src = tmp / name
-            if _http_get(url, src, progress, f"Phytograph backend {version}") is None:
+            if _http_get(url, src, progress, f"Phytograph backend {version}",
+                         no_network=no_network) is None:
                 raise _not_published(version, name)
         got = sha256_file(src)
         if got != expected:

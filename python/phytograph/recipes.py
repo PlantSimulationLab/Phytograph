@@ -74,6 +74,9 @@ class RecipeRecord:
     phytograph_version: str
     backend_version: Optional[str]
     input: Dict[str, Any]
+    # The engine build (phytograph.engine_identity()); its ``key`` changes
+    # whenever the native code does. None for an attached backend.
+    engine: Optional[Dict[str, Any]] = None
     steps: List[Step] = field(default_factory=list)
     advisories: List[str] = field(default_factory=list)
 
@@ -94,6 +97,7 @@ def _start(recipe: str, cloud: "Cloud", params: Dict[str, Any]) -> RecipeRecord:
     return RecipeRecord(
         recipe=recipe, params=dict(params), phytograph_version=__version__,
         backend_version=getattr(cloud._be, "version", None),
+        engine=getattr(cloud._be, "identity", None),
         input={"name": cloud.name, "session_id": cloud.session_id, "points": len(cloud),
                "source_path": info.get("source_path") or info.get("file_path")})
 

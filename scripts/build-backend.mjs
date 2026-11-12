@@ -32,6 +32,7 @@ import {
   hashLibhelios,
   readBackendVersionFromSource,
 } from './backend-version.mjs';
+import { BACKEND_IDENTITY_FILE, buildIdentity } from './backend-identity.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -312,6 +313,18 @@ proc.on('exit', (code) => {
   writeFileSync(
     join(distPath, 'phytograph_backend', BACKEND_LIBHELIOS_HASH_FILE),
     `${builtLib ?? 'unbuilt'}\n`);
+  // Fourth: everything above plus submodule describes and package versions,
+  // as one document a harness can read without launching the engine.
+  const identity = buildIdentity({
+    root,
+    python: python ? python.path : null,
+    version: builtVersion,
+    sourcesSha256: builtHash,
+    libheliosSha256: builtLib,
+  });
+  writeFileSync(
+    join(distPath, 'phytograph_backend', BACKEND_IDENTITY_FILE),
+    `${JSON.stringify(identity, null, 2)}\n`);
   console.log(
     `[build-backend] stamped bundle as version ${builtVersion} ` +
     `(sources ${builtHash.slice(0, 16)}…, libhelios ${(builtLib ?? 'unbuilt').slice(0, 16)}…)`);

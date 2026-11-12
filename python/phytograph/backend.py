@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import httpx
 
@@ -88,7 +88,7 @@ def _bundle_command(exe: Path, description: str):
 
 
 def _resolve_command(source: str, executable: Optional[PathLike],
-                     progress: Optional[ProgressFn] = None):
+                     progress: Optional[ProgressFn] = None, offline: Optional[bool] = None):
     """(argv, cwd, resources_dir, description) for the backend to launch.
 
     Order: an explicit executable; a dev checkout's venv (when this package
@@ -134,7 +134,7 @@ def _resolve_command(source: str, executable: Optional[PathLike],
                 + (f" ({'; '.join(other_versions)})" if other_versions else "") + ".")
 
     # "auto" and "download": a cached download, else fetch it now.
-    exe_path = _download.install(progress=progress)
+    exe_path = _download.install(progress=progress, offline=offline)
     return _bundle_command(exe_path, f"downloaded backend {exe_path.parents[2]}")
 
 
@@ -170,6 +170,10 @@ class Backend:
         ``libhelios`` on first start, which takes minutes.
     env:
         Extra environment for the backend (e.g. ``PHYTOGRAPH_MAX_CLOUD_SESSIONS``).
+    offline:
+        Never use the network: a backend that is not already installed raises
+        :class:`~phytograph.errors.BackendNotFound` instead of being downloaded.
+        ``None`` reads ``PHYTOGRAPH_OFFLINE``.
     threads:
         Cap on every thread pool the backend uses (OpenMP, BLAS, torch, open3d,
         its Python executors), passed as ``PHYTOGRAPH_THREADS``. ``None`` keeps
@@ -179,7 +183,7 @@ class Backend:
     def __init__(self, *, source: str = "auto", executable: Optional[PathLike] = None,
                  progress: Union[ProgressFn, bool, None] = None, confirm_costly: bool = True,
                  startup_timeout: float = 600.0, env: Optional[Dict[str, str]] = None,
-                 threads: Optional[int] = None,
+                 threads: Optional[int] = None, offline: Optional[bool] = None,
                  _attach: Optional[Dict[str, Any]] = None):
         if source not in ("auto", "app", "dev", "download"):
             raise ValueError("source must be 'auto', 'app', 'dev' or 'download'")
@@ -190,12 +194,15 @@ class Backend:
         self._log_path: Optional[Path] = None
         self._log_seen = 0
         self._work_dir: Optional[Path] = None
+        self._command: Optional[Tuple[Sequence[str], Path]] = None
+        self._identity: Optional[Dict[str, Any]] = None
         progress_fn = _progress_printer() if progress is True else (progress or None)
         self._startup_progress = progress_fn
         if _attach is not None:
             self.url, token, self.description = _attach["url"], _attach["token"], f"attached {_attach['url']}"
         else:
-            argv, cwd, resources, self.description = _resolve_command(source, executable, progress_fn)
+            argv, cwd, resources, self.description = _resolve_command(source, executable, progress_fn, offline)
+            self._command = (list(argv), Path(cwd))
             port = _ports.find_free_port()
             token = secrets.token_hex(32)
             self.url = f"http://127.0.0.1:{port}"
@@ -211,6 +218,17 @@ class Backend:
         except BaseException:
             self.close()
             raise
+
+    @property
+    def identity(self) -> Optional[Dict[str, Any]]:
+        """The engine build this backend runs (see :func:`phytograph.engine_identity`):
+        versions, the libhelios and sources digests, submodule commits, and a
+        ``key`` that changes whenever the native code does. ``None`` for an
+        attached backend, whose files this process cannot see."""
+        if self._identity is None and self._command is not None:
+            from ._identity import identity_for_command
+            self._identity = identity_for_command(*self._command)
+        return self._identity
 
     @classmethod
     def attach(cls, url: str, token: Optional[str] = None, **kwargs: Any) -> "Backend":
