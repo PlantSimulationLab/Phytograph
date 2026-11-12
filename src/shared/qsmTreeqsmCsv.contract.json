@@ -1,0 +1,139 @@
+{
+  "_comment": "One QSM (the /api/qsm/build cylinders+shoots shape) and its exact TreeQSM-layout CSV. Asserted by src/renderer/lib/qsmExport.test.ts (qsmToCylinderCsv) and python/tests/test_qsm_export.py (QSM.to_treeqsm_csv). Covers a null fit, a zero-length cylinder, a shoot missing from the shoot table (shoot 9 -> parentSegmentID -1), and numbers whose JS and Python spellings differ.",
+  "qsm": {
+    "cylinders": [
+      {
+        "cyl_id": 0,
+        "parent_id": -1,
+        "shoot_id": 0,
+        "rank": 0,
+        "start": [
+          14.214899182919819,
+          -14.067255152071336,
+          -12.782708215433592
+        ],
+        "end": [
+          14.220117137063943,
+          -14.067828180137639,
+          -12.750220930444751
+        ],
+        "radius": 0.03947519440898834,
+        "surf_cov": 0.9629629629629629,
+        "mad": 0.0021
+      },
+      {
+        "cyl_id": 1,
+        "parent_id": 0,
+        "shoot_id": 0,
+        "rank": 0,
+        "start": [
+          14.220117137063943,
+          -14.067828180137639,
+          -12.750220930444751
+        ],
+        "end": [
+          14.3,
+          -14.0,
+          -12.0
+        ],
+        "radius": 0.035,
+        "surf_cov": null,
+        "mad": null
+      },
+      {
+        "cyl_id": 2,
+        "parent_id": 1,
+        "shoot_id": 1,
+        "rank": 1,
+        "start": [
+          14.3,
+          -14.0,
+          -12.0
+        ],
+        "end": [
+          14.3,
+          -14.0,
+          -12.0
+        ],
+        "radius": 1e-07,
+        "surf_cov": 0.5,
+        "mad": 1e-06
+      },
+      {
+        "cyl_id": 3,
+        "parent_id": 1,
+        "shoot_id": 2,
+        "rank": 1,
+        "start": [
+          0,
+          0,
+          0
+        ],
+        "end": [
+          2,
+          0,
+          0
+        ],
+        "radius": 1e-05,
+        "surf_cov": 1,
+        "mad": 0
+      },
+      {
+        "cyl_id": 4,
+        "parent_id": 3,
+        "shoot_id": 9,
+        "rank": 2,
+        "start": [
+          1e+21,
+          -0.5,
+          0.1
+        ],
+        "end": [
+          1e+21,
+          0.5,
+          0.30000000000000004
+        ],
+        "radius": 0.1,
+        "surf_cov": 0.25,
+        "mad": 1.5e-07
+      }
+    ],
+    "shoots": [
+      {
+        "shoot_id": 0,
+        "rank": 0,
+        "cylinder_ids": [
+          0,
+          1
+        ],
+        "parent_shoot_id": -1,
+        "parent_cyl_id": -1,
+        "child_shoot_ids": [
+          1,
+          2
+        ]
+      },
+      {
+        "shoot_id": 1,
+        "rank": 1,
+        "cylinder_ids": [
+          2
+        ],
+        "parent_shoot_id": 0,
+        "parent_cyl_id": 1,
+        "child_shoot_ids": []
+      },
+      {
+        "shoot_id": 2,
+        "rank": 1,
+        "cylinder_ids": [
+          3
+        ],
+        "parent_shoot_id": 0,
+        "parent_cyl_id": 1,
+        "child_shoot_ids": []
+      }
+    ]
+  },
+  "csv": "ID,parentID,branchID,branchOrder,segmentID,parentSegmentID,startX,startY,startZ,endX,endY,endZ,axisX,axisY,axisZ,radius,length,surfaceCoverage,meanAbsDeviation\n0,-1,0,0,0,-1,14.214899182919819,-14.067255152071336,-12.782708215433592,14.220117137063943,-14.067828180137639,-12.750220930444751,0.15855875312213275,-0.017412689568996206,0.987195988672122,0.03947519440898834,0.03290864768660557,0.9629629629629629,0.0021\n1,0,0,0,0,-1,14.220117137063943,-14.067828180137639,-12.750220930444751,14.3,-14,-12,0.10545526964443191,0.0895415958192589,0.9903845155909701,0.035,0.7575047051266633,,\n2,1,1,1,1,0,14.3,-14,-12,14.3,-14,-12,0,0,0,1e-7,0,0.5,0.000001\n3,1,2,1,2,0,0,0,0,2,0,0,1,0,0,0.00001,2,1,0\n4,3,9,2,9,-1,1e+21,-0.5,0.1,1e+21,0.5,0.30000000000000004,0,0.9805806756909201,0.19611613513818404,0.1,1.019803902718557,0.25,1.5e-7\n"
+}

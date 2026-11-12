@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import math
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -190,6 +191,65 @@ class Inventory:
 
 
 # --------------------------------------------------------------------------
+# TreeQSM-layout CSV. Mirrors qsmToCylinderCsv in src/renderer/lib/qsmExport.ts;
+# src/shared/qsmTreeqsmCsv.contract.json holds one QSM and its exact text, and
+# both writers are tested against it.
+TREEQSM_CSV_HEADER = (
+    "ID,parentID,branchID,branchOrder,segmentID,parentSegmentID,"
+    "startX,startY,startZ,endX,endY,endZ,"
+    "axisX,axisY,axisZ,radius,length,surfaceCoverage,meanAbsDeviation")
+
+
+def _js_number(x: Any) -> str:
+    """``String(x)`` for a JS number: the shortest round-trip digits, laid out
+    by ECMAScript's Number::toString rules (``1`` not ``1.0``, ``1e-7`` not
+    ``1e-07``, ``0.00001`` not ``1e-05``). Non-finite values are empty, as the
+    app writes them."""
+    from decimal import Decimal
+
+    v = float(x)
+    if not np.isfinite(v):
+        return ""
+    if v == 0:
+        return "0"
+    sign, digits, exp = Decimal(repr(abs(v))).as_tuple()
+    ds = "".join(map(str, digits)).rstrip("0")
+    exp += len(digits) - len(ds)
+    k, n = len(ds), len(ds) + exp        # value = 0.<ds> x 10^n
+    if k <= n <= 21:
+        out = ds + "0" * (n - k)
+    elif 0 < n <= 21:
+        out = ds[:n] + "." + ds[n:]
+    elif -6 < n <= 0:
+        out = "0." + "0" * (-n) + ds
+    else:
+        e = n - 1
+        mant = ds if k == 1 else ds[0] + "." + ds[1:]
+        out = f"{mant}e{'+' if e >= 0 else '-'}{abs(e)}"
+    return ("-" if v < 0 else "") + out
+
+
+def treeqsm_csv(cylinders: Sequence[Dict[str, Any]], shoots: Sequence[Dict[str, Any]]) -> str:
+    parent_of_shoot = {s["shoot_id"]: s["parent_shoot_id"] for s in shoots}
+    lines = [TREEQSM_CSV_HEADER]
+    for c in cylinders:
+        start, end = c["start"], c["end"]
+        d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+        n = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])   # as Math.sqrt
+        axis = [0.0, 0.0, 0.0] if n == 0 else [d[0] / n, d[1] / n, d[2] / n]
+        cov, mad = c.get("surf_cov"), c.get("mad")
+        lines.append(",".join([
+            str(c["cyl_id"]), str(c["parent_id"]),
+            str(c["shoot_id"]), str(c["rank"]),
+            str(c["shoot_id"]), str(parent_of_shoot.get(c["shoot_id"], -1)),
+            *(_js_number(v) for v in (*start, *end, *axis, c["radius"], n)),
+            "" if cov is None else _js_number(cov),
+            "" if mad is None else _js_number(mad),
+        ]))
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
 @dataclass
 class QSM:
     """A quantitative structure model: ``cylinders`` (one dict each), ``shoots``
@@ -204,8 +264,42 @@ class QSM:
         return len(self.cylinders)
 
     def to_csv(self, path: PathLike) -> Path:
-        """One row per cylinder."""
+        """One row per cylinder: every field of the cylinder dicts, flattened
+        (``start_x`` …). For TreeQSM/SimpleForest/rTwig tools use
+        :meth:`to_treeqsm_csv`."""
         return _write_rows(path, self.cylinders)
+
+    def to_treeqsm_csv(self, path: PathLike) -> Path:
+        """The cylinder table in the layout the app's File → Export QSM writes
+        (TreeQSM/SimpleForest columns, readable by rTwig), byte for byte.
+
+        One row per cylinder, base to tip within each branch, in metres:
+
+        ``ID``, ``parentID``
+            Cylinder id and its parent cylinder's id (-1 for the base).
+        ``branchID``, ``segmentID``
+            Both the cylinder's shoot (Phytograph has one branch notion, the
+            continuous shoot, so the two columns are equal).
+        ``branchOrder``
+            The shoot's rank: trunk 0, +1 per branching.
+        ``parentSegmentID``
+            The parent shoot (-1 for the trunk).
+        ``startX..Z``, ``endX..Z``
+            Cylinder axis end points, world coordinates.
+        ``axisX..Z``
+            Unit axis direction (0, 0, 0 for a zero-length cylinder).
+        ``radius``, ``length``
+            Metres.
+        ``surfaceCoverage``, ``meanAbsDeviation``
+            Fit quality: fraction of the surface the points cover, and mean
+            absolute distance of points from the surface (m). Empty when the
+            radius was not fitted from points.
+
+        ``growthLength`` and ``reverseBranchOrder`` are not written (rTwig
+        derives them)."""
+        p = Path(path)
+        p.write_text(treeqsm_csv(self.cylinders, self.shoots), newline="")
+        return p
 
 
 # --------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import type { QSMEntry } from './pointCloudTypes';
 import type { QSMCylinder } from '../utils/backendApi';
 import { rankColorRgb, rankColorLinear, shootColorRgb, hexToRgb, srgbToLinear } from './qsmColors';
 import { importedMeshColorsAreSrgb } from '../utils/backendApi';
+import treeqsmContract from '../../shared/qsmTreeqsmCsv.contract.json';
 
 const TUBE_SEGMENTS = 12;
 const RING_STRIDE = TUBE_SEGMENTS + 1; // duplicated seam vertex per ring
@@ -851,5 +852,15 @@ describe('OBJ color round-trip', () => {
       .find(f => f.name.endsWith('.mtl'))!.text!;
     const [r] = kdOf(mtl, 'leaf');
     expect(r).toBeCloseTo(LEAF_LINEAR, 5);
+  });
+});
+
+// The Python client's QSM.to_treeqsm_csv is pinned to the same document
+// (python/tests/test_qsm_export.py), so a script's export and the app's are
+// byte-identical.
+describe('qsmToCylinderCsv contract', () => {
+  it('writes exactly the contract text', () => {
+    const qsm = treeqsmContract.qsm as unknown as QSMEntry;
+    expect(qsmToCylinderCsv(qsm)).toBe(treeqsmContract.csv);
   });
 });
