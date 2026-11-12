@@ -10,6 +10,8 @@ script. The package is a thin client: `pg.Backend()` starts a private engine pro
 it over loopback HTTP. The engine is a ~400 MB download, fetched once per version and cached; set
 `PHYTOGRAPH_BACKEND_CACHE` to put that cache somewhere specific, or run
 `python -m phytograph download` ahead of time. This skill matches the package version it ships in.
+With no network or inside a sandbox, run one recipe with no server at all:
+`python -m phytograph run tree_qsm --in F --out D --work W` (docs: guide/headless).
 
 ```python
 import phytograph as pg

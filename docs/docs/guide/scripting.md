@@ -289,4 +289,8 @@ with a one-line suggested correction. Please send it to us as an issue.
 5. Otherwise, it downloads one (see [Install](#install)).
 
 Pass `pg.Backend(source="download")` to always use the downloaded engine, or
-`source="app"` to require the installed app.
+`source="app"` to require the installed app. `pg.Backend(offline=True)` (or
+`PHYTOGRAPH_OFFLINE=1`) never downloads: a missing engine is an error.
+
+To run a recipe with no server and no network, for example inside a sandbox,
+use `python -m phytograph run`. See [Running in a sandbox](headless.md).

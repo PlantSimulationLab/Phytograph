@@ -99,6 +99,7 @@ nav:
       - Your first import: guide/first-import.md
       - Tour of the interface: guide/interface-tour.md
       - Scripting with Python: guide/scripting.md
+      - Running in a sandbox: guide/headless.md
       - Reporting bugs & requesting features: guide/feedback.md
   - Concepts:
       - concepts/index.md
