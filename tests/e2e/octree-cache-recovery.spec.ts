@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rm } from 'node:fs/promises';
+import { rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
@@ -274,6 +274,25 @@ test('recovers an EDITED cloud from its live session, not from its source file',
     await expect(
       page.locator('[data-testid="toast-error"]', { hasText: 'Point cloud unavailable' }),
     ).toHaveCount(0);
+
+    // The session log tells the whole story without the user's files (issue #7
+    // had only a bare "Octree load failed"): the load failure names the
+    // session, the renderer says which recovery it ran and how it ended, and
+    // the backend says what that session held, with the deleted id MISSING.
+    // All three name the same session, so they can be matched in an export.
+    const logPath = await page.evaluate(() => (window as any).electronAPI.logs.getPath() as Promise<string>);
+    let log = '';
+    await expect.poll(async () => {
+      log = await readFile(logPath, 'utf-8').catch(() => '');
+      return /\[octree-recovery\].*rebuilt from the session as octree [0-9a-f]{40}/.test(log)
+        && /rebuild_octree [0-9a-f]+: session held/.test(log);
+    }, { timeout: 15_000 }).toBe(true);
+    const start = /\[octree-recovery\] "scalars[^"]*" \(session ([0-9a-f]+), octree ([0-9a-f]{40}), edited=true\): octree missing; rebuilding it from the session/.exec(log);
+    expect(start, 'renderer recovery start line').not.toBeNull();
+    const [, sessionId, missingId] = start!;
+    expect(missingId).toBe(editedCacheId);
+    expect(log).toMatch(new RegExp(`Octree load failed for ${editedCacheId} \\(cloud "scalars[^"]*", session ${sessionId}\\)`));
+    expect(log).toMatch(new RegExp(`rebuild_octree ${sessionId}: session held [^\\n]*${editedCacheId} \\(MISSING\\)`));
   } finally {
     await close();
   }

@@ -6,11 +6,13 @@ import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
 import { splitProjectPaths } from "./lib/projectPaths";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
+import type { StitchOptions } from "./components/StitchDialog";
+import { resolveStitchSessions, stitchRemoveActions, StitchCanceledError, type StitchInput } from "./lib/stitchSessions";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import { scanDisplayName, type Scan, type ScanRegistration, createScanColorAllocator } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, OCTREE_PATH_EXTENSIONS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
-import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCanceledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
+import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCanceledError, CostWarningError, type TreeCostWarning, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
 import { isIdentityAxes, isMeshAxes, meshAxesRotationDeg, type MeshAxes } from "./lib/meshAxes";
 
@@ -221,6 +223,28 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // Progress shown over the viewer while a Stitch Clouds merge runs in the
   // backend (concatenate sessions + rebuild octree). Reuses the same modal.
   const [stitchProgress, setStitchProgress] = useState<BulkImportProgressState | null>(null);
+  // Cancellation for the in-flight stitch, same shape as the import's: the run
+  // id is what /api/cancel/{id} targets so the backend stops (and frees the
+  // half-built merge), the abort tears down the fetch.
+  const stitchAbortRef = useRef<AbortController | null>(null);
+  const stitchRunIdRef = useRef<string | null>(null);
+  const cancelStitch = useCallback(() => {
+    if (stitchRunIdRef.current) void cancelRun(stitchRunIdRef.current);
+    stitchAbortRef.current?.abort();
+  }, []);
+  // A stitch the backend wants confirmed first (409 cost_warning): the request
+  // to resend, and the estimate to show. null = no prompt open.
+  const [stitchCostPrompt, setStitchCostPrompt] = useState<{
+    ids: string[];
+    opts: StitchOptions;
+    warning: TreeCostWarning;
+    // Sessions the refused attempt re-created from source files (scan id →
+    // session id). The prompt owns them: a retry reuses them, Cancel frees them.
+    recreated: Record<string, string>;
+  } | null>(null);
+  const freeStitchSessions = useCallback((recreated: Record<string, string>) => {
+    for (const sid of Object.values(recreated)) void deleteCloudSession(sid).catch(() => {});
+  }, []);
   // null = closed; otherwise the open feedback dialog's mode.
   const [feedbackMode, setFeedbackMode] = useState<FeedbackMode | null>(null);
   // Whether the About dialog is open (opened from the app / Help menu).
@@ -330,6 +354,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // #3b82f6 again and the scene rendered two identical swatches.
   const scansRef = useRef(scans);
   scansRef.current = scans;
+  // The scene as of the latest render, for callbacks that outlive the render
+  // that created them (a stitch commits minutes after it was started).
+  const sceneRef = useRef(scene);
+  sceneRef.current = scene;
   // Same reason, for the other colored objects imports create. Seeding from
   // scans alone gave every mesh imported one at a time the same color: none of
   // the meshes already on the scene was ever "used", so each separate import
@@ -1755,7 +1783,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // every octree cloud to the origin (issue #3: green dot, un-framable camera).
   // The backend reads the in-RAM arrays, reconciles differing global shifts, and
   // unions scalar columns, returning a new session + octree we wrap as a Scan.
-  const handleStitchScans = useCallback(async (ids: string[], opts?: { retainOriginals?: boolean }) => {
+  const handleStitchScans = useCallback(async (
+    ids: string[], opts?: StitchOptions,
+    // Sessions an earlier attempt re-created (a cost prompt's retry), by scan id.
+    reuse: Record<string, string> = {},
+  ) => {
     if (ids.length < 2) return;
     // Retain mode: the sources stay in the scene (hidden) rather than being
     // removed. The backend merge already leaves the input sessions untouched,
@@ -1781,17 +1813,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         data: newData,
         // No params on the merged scan — origin is no longer meaningful.
       };
-      const cur = scene.state.scans;
-      const removeActions = retain ? [] : scansToStitch.map((s) => {
-        const index = cur.findIndex((x) => x.id === s.id);
-        return {
-          t: 'remove' as const, kind: 'scan' as const, id: s.id, index, object: s,
-          editState: scene.state.editStates.get(s.id),
-          filters: scene.state.cloudFilters.get(s.id),
-          sessionId: s.data?.octree?.sessionId ?? null,
-        };
-      });
-      scene.commit({
+      // From the LIVE scene, not the one this handler closed over minutes ago:
+      // see stitchRemoveActions.
+      const removeActions = retain ? [] : stitchRemoveActions(
+        sceneRef.current.state, scansToStitch.map((s) => s.id));
+      sceneRef.current.commit({
         label: retain
           ? `Stitch ${scansToStitch.length} scans (kept originals)`
           : `Stitch ${scansToStitch.length} scans`,
@@ -1855,47 +1881,79 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     }
 
     // All octree/session-backed → merge in the backend.
-    setStitchProgress({ current: 0, total: scansToStitch.length, label: `Merging ${scansToStitch.length} clouds into one`, hint: 'Combining points and rebuilding the octree — large scans can take a moment.' });
+    const includeMisses = opts?.includeMisses ?? true;
+    const stitchLabel = `Merging ${scansToStitch.length} clouds into one`;
+    // `current: 1` of `total: 1` so the bar is driven by the backend's streamed
+    // fraction (BulkImportProgress fills `current - 1 + fraction` of `total`).
+    setStitchProgress({ current: 1, total: 1, label: stitchLabel, fraction: 0, hint: 'Combining points and rebuilding the octree — large scans can take a while.' });
+    const abort = new AbortController();
+    stitchAbortRef.current = abort;
+    stitchRunIdRef.current = null;
+    // Sessions re-created from source files for this stitch, by scan id. They
+    // belong to no scan, so the stitch frees them itself when it ends, success
+    // included (the merged cloud is its own copy). The one exception is a cost
+    // prompt, which takes them over for the retry. See lib/stitchSessions.ts.
+    const recreated: Record<string, string> = {};
+    let handedToPrompt = false;
     try {
       // Ensure every input has a live session id. A cloud whose session was
       // evicted (backend restart / idle) but still has a source path is
       // re-created from that path (deterministic — same cache id), mirroring
       // handleOctreeMissing.
-      const sessionIds: string[] = [];
-      for (const s of scansToStitch) {
+      const inputs: StitchInput[] = scansToStitch.map((s) => {
         const octree = s.data!.octree!;
-        if (octree.sessionId) {
-          sessionIds.push(octree.sessionId);
-        } else {
-          // No live session: the only way to get points is to re-read the source
-          // file. That is only valid while the cloud still matches that file —
-          // an edited cloud (baked transform, applied crop, filter, split) would
-          // silently merge its PRE-EDIT geometry. Refuse instead.
-          if (octree.divergedFromSource) {
-            throw new Error(
-              `"${s.data!.fileName ?? s.label}" has been edited since import and its cached data ` +
-              `is no longer loaded, so stitching it would use the original unedited file. ` +
-              `Re-import and redo the edits, then stitch.`,
+        return {
+          scanId: s.id,
+          sessionId: octree.sessionId ?? null,
+          recreate: async (signal) => {
+            // No live session: the only way to get points is to re-read the
+            // source file. That is only valid while the cloud still matches
+            // that file — an edited cloud (baked transform, applied crop,
+            // filter, split) would silently merge its PRE-EDIT geometry.
+            if (octree.divergedFromSource) {
+              throw new Error(
+                `"${s.data!.fileName ?? s.label}" has been edited since import and its cached data ` +
+                `is no longer loaded, so stitching it would use the original unedited file. ` +
+                `Re-import and redo the edits, then stitch.`,
+              );
+            }
+            const rebuilt = await createCloudSession(
+              octree.sourceXyzPath,
+              octree.asciiFormat ?? null,
+              octree.columnPlan ?? null,
+              octree.worldShift ?? null,
+              // Positions 5-6 are defaults. 7 and 9 make this cancelable: the
+              // signal tears down the fetch and the run id is what Cancel
+              // sends to /api/cancel so the backend stops too.
+              null, null, signal, undefined,
+              (runId) => { stitchRunIdRef.current = runId; },
+              null, null,
+              // The SOURCE UNIT is part of the rebuild descriptor: this re-reads
+              // the raw file, still in its original unit. Without it a feet scan
+              // whose session was swept (30-min idle TTL — routine) comes back
+              // 3.28x larger and is merged at that scale into a meter batch.
+              octree.sourceUnits ?? null,
             );
-          }
-          const rebuilt = await createCloudSession(
-            octree.sourceXyzPath,
-            octree.asciiFormat ?? null,
-            octree.columnPlan ?? null,
-            octree.worldShift ?? null,
-            // The SOURCE UNIT is part of the rebuild descriptor: this re-reads
-            // the raw file, still in its original unit. Without it a feet scan
-            // whose session was swept (30-min idle TTL — routine) comes back
-            // 3.28x larger and is merged at that scale into a meter batch.
-            // Positions 5-11 are defaults; units is the 12th.
-            null, null, undefined, undefined, undefined, null, null,
-            octree.sourceUnits ?? null,
-          );
-          sessionIds.push(rebuilt.session_id);
-        }
-      }
+            return rebuilt.session_id;
+          },
+        };
+      });
+      const sessionIds = await resolveStitchSessions(inputs, recreated, abort.signal, reuse);
+      stitchRunIdRef.current = null;
 
-      const { merged } = await sessionMerge(sessionIds);
+      const { merged } = await sessionMerge(sessionIds, {
+        includeMisses,
+        acknowledgeCost: opts?.acknowledgeCost ?? false,
+        signal: abort.signal,
+        onRunId: (runId) => { stitchRunIdRef.current = runId; },
+        onProgress: (fraction, message) => {
+          setStitchProgress((prev) => prev && {
+            ...prev,
+            fraction: fraction ?? prev.fraction,
+            label: message ? `${stitchLabel} — ${message}` : prev.label,
+          });
+        },
+      });
 
       // Wrap the merged session's octree as a PointCloudData. Carry column
       // plan / ascii / categoricals from the FIRST input for provenance; the new
@@ -1932,9 +1990,23 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       }
       commitStitch(newData);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to stitch clouds';
-      showToast({ type: 'error', title: 'Stitch failed', message: msg, duration: 0 });
+      if (err instanceof CostWarningError) {
+        // Not a failure: the backend wants a yes before a big merge. The
+        // prompt resends the same request with acknowledgeCost, and takes over
+        // the re-created sessions so the retry does not import them again.
+        handedToPrompt = true;
+        setStitchCostPrompt({ ids, opts: opts ?? {}, warning: err.costWarning, recreated });
+      } else if (err instanceof ScanCanceledError || err instanceof StitchCanceledError
+                 || abort.signal.aborted) {
+        showToast({ type: 'info', title: 'Stitch canceled', message: 'The clouds were left as they were.' });
+      } else {
+        const msg = err instanceof Error ? err.message : 'Failed to stitch clouds';
+        showToast({ type: 'error', title: 'Stitch failed', message: msg, duration: 0 });
+      }
     } finally {
+      if (!handedToPrompt) freeStitchSessions(recreated);
+      stitchAbortRef.current = null;
+      stitchRunIdRef.current = null;
       setStitchProgress(null);
     }
   }, [scans, scene, handleHideScan]);
@@ -2517,7 +2589,67 @@ function App({ onResetScene }: { onResetScene: () => void }) {
 
       {/* Stitch Clouds merge progress — reuses the same modal as imports, but
           with its own header (the default reads "Importing scans…"). */}
-      <BulkImportProgress progress={stitchProgress} title="Stitching clouds…" />
+      <BulkImportProgress progress={stitchProgress} title="Stitching clouds…" onCancel={cancelStitch} />
+
+      {/* A stitch past the cost guideline (time or memory): say what it will
+          take before committing to it, and offer the smaller stitch when sky/
+          miss points are a large part of it. */}
+      {stitchCostPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div
+            data-testid="stitch-cost-dialog"
+            className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 p-6"
+          >
+            <h2 className="text-lg font-semibold text-white mb-2">Large stitch</h2>
+            <p data-testid="stitch-cost-message" className="text-sm text-neutral-300 mb-3">
+              {stitchCostPrompt.warning.message}
+            </p>
+            <p className="text-xs text-neutral-500 mb-5">
+              Stitching fewer clouds at a time, then stitching the results, keeps each step smaller.
+            </p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                data-testid="stitch-cost-cancel"
+                onClick={() => {
+                  freeStitchSessions(stitchCostPrompt.recreated);
+                  setStitchCostPrompt(null);
+                }}
+                className="px-4 py-2 bg-neutral-700 hover:bg-neutral-600 text-neutral-100 rounded-lg transition-colors text-sm"
+              >
+                Cancel
+              </button>
+              {(stitchCostPrompt.warning.misses ?? 0) > 0 && stitchCostPrompt.opts.includeMisses !== false && (
+                <button
+                  data-testid="stitch-cost-without-misses"
+                  onClick={() => {
+                    const { ids, opts, recreated } = stitchCostPrompt;
+                    setStitchCostPrompt(null);
+                    // A smaller request gets its own estimate, so it is NOT
+                    // pre-acknowledged: the backend prompts again if it is
+                    // still past the guideline.
+                    void handleStitchScans(ids, { ...opts, includeMisses: false, acknowledgeCost: false }, recreated);
+                  }}
+                  className="px-4 py-2 bg-neutral-700 hover:bg-neutral-600 text-neutral-100 rounded-lg transition-colors text-sm"
+                >
+                  Stitch without sky/miss points
+                </button>
+              )}
+              <button
+                data-testid="stitch-cost-confirm"
+                onClick={() => {
+                  const { ids, opts, recreated } = stitchCostPrompt;
+                  setStitchCostPrompt(null);
+                  void handleStitchScans(ids, { ...opts, acknowledgeCost: true }, recreated);
+                }}
+                className="px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors text-sm"
+              >
+                Stitch anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Feedback dialog — opened from the toolbar buttons or Help menu. */}
       <FeedbackDialog

@@ -25,9 +25,33 @@ in world coordinates, and you want a single combined cloud.
    here.)
 3. Optionally tick **Keep original clouds** to merge non-destructively — see
    below.
-4. Click **Stitch**. The clouds are combined in the backend (a brief
-   progress indicator shows while the merged cloud's octree is built), and a
-   single new cloud replaces the originals in the scene.
+4. If any selected cloud has sky/miss points, the dialog shows **Include
+   sky/miss points** (on by default). Untick it to leave them out of the
+   merged cloud. A stitched cloud has no single scanner origin, so Leaf Area
+   Density (the tool that uses misses) can't run on it anyway, and on a
+   terrestrial scan misses can be a third or more of all points.
+5. Click **Stitch**. The clouds are combined in the backend while a progress
+   bar shows each stage (combining points, building the octree), and a single
+   new cloud replaces the originals in the scene. **Cancel** stops the stitch
+   at any point and leaves the clouds as they were.
+
+### Large stitches
+
+Stitching many large scans can take minutes. When the estimate is over about
+a minute and a half, or needs more memory than the computer has free, a
+**Large stitch** prompt says what it expects before anything starts:
+
+- **Stitch anyway** runs it as asked.
+- **Stitch without sky/miss points** (offered when the clouds have misses)
+  runs the smaller stitch instead.
+- **Cancel** returns to the scene. Stitching a few clouds at a time, then
+  stitching the results, keeps each step smaller.
+
+A large merged cloud is written to disk as it is built rather than held in
+memory. Together with its display octree and the temporary files the build
+uses, a stitch needs free disk space of roughly two to three times the size of
+the merged cloud. If there isn't enough, the stitch is refused before it
+starts and the message says how much it needs and on which disk.
 
 Stitching is reversible: a single **Undo** removes the merged cloud and
 restores the original clouds exactly as they were, so you can re-stitch with

@@ -16,6 +16,9 @@ export interface StitchCloudOption {
   // cloud has one, the dialog warns that origin-dependent analyses (Backfill
   // Misses overlay, Helios triangulation, LAD) will be unavailable on the merge.
   hasOrigin?: boolean;
+  // Whether this cloud carries sky/miss points. The dialog offers to leave
+  // them out only when a selected cloud has some.
+  hasMisses?: boolean;
 }
 
 export interface StitchMeshOption {
@@ -30,13 +33,22 @@ export interface StitchMeshOption {
 
 export type StitchMode = 'clouds' | 'meshes';
 
+// What a point-cloud stitch was asked to do. `acknowledgeCost` is never set by
+// the dialog: App adds it when the user confirms a cost prompt.
+export interface StitchOptions {
+  retainOriginals?: boolean;
+  // false leaves sky/miss points (is_miss != 0) out of the merged cloud.
+  includeMisses?: boolean;
+  acknowledgeCost?: boolean;
+}
+
 interface StitchDialogProps {
   isOpen: boolean;
   onClose: () => void;
   clouds: StitchCloudOption[];
   initialSelectedIds?: Set<string>;
   // `opts` is an object so future stitch options stay additive.
-  onStitch: (ids: string[], opts: { retainOriginals: boolean }) => void;
+  onStitch: (ids: string[], opts: { retainOriginals: boolean; includeMisses: boolean }) => void;
   meshes?: StitchMeshOption[];
   initialSelectedMeshIds?: Set<string>;
   onMergeMeshes?: (ids: string[], opts: { retainOriginals: boolean; matchColors: boolean; removeOverlap: boolean }) => void;
@@ -59,6 +71,9 @@ export function StitchDialog({
   // removed from the scene. Deliberately not persisted — resets on every open,
   // so the destructive default is always an explicit choice.
   const [retainOriginals, setRetainOriginals] = useState(false);
+  // Keep sky/miss points in the merged cloud. On by default (and on every
+  // open) so a plain stitch keeps every point, as it always has.
+  const [includeMisses, setIncludeMisses] = useState(true);
   // What a mesh merge does where its sources cover the same surface. Both off
   // by default (and on every open): a plain merge changes no color or triangle.
   const [matchColors, setMatchColors] = useState(false);
@@ -83,6 +98,7 @@ export function StitchDialog({
     const meshSelected = !!initialSelectedMeshIds && meshes.some(m => initialSelectedMeshIds.has(m.id));
     setMode((meshSelected && seed.size === 0) || (clouds.length === 0 && meshes.length > 0) ? 'meshes' : 'clouds');
     setRetainOriginals(false);
+    setIncludeMisses(true);
     setMatchColors(false);
     setRemoveOverlap(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -104,6 +120,10 @@ export function StitchDialog({
   // lost (plain XYZ/LAS clouds that never had an origin).
   const originsLost = useMemo(
     () => clouds.filter(c => selected.has(c.id) && c.hasOrigin).length,
+    [clouds, selected],
+  );
+  const anyMisses = useMemo(
+    () => clouds.some(c => selected.has(c.id) && c.hasMisses),
     [clouds, selected],
   );
 
@@ -211,6 +231,27 @@ export function StitchDialog({
             </span>
           </label>
 
+          {!meshMode && anyMisses && (
+            <label
+              data-testid="stitch-include-misses"
+              className="flex items-center gap-2 select-none cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={includeMisses}
+                onChange={(e) => setIncludeMisses(e.target.checked)}
+                className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-green-600"
+              />
+              <span className="flex flex-col">
+                <span className="text-xs text-neutral-300">Include sky/miss points</span>
+                <span className="text-[10px] text-neutral-500">
+                  Leaving them out makes a large stitch smaller and faster. A stitched cloud has no
+                  single scanner origin, so Leaf Area Density (the tool that uses them) can&rsquo;t run on it anyway.
+                </span>
+              </span>
+            </label>
+          )}
+
           {meshMode && (
             <>
               <label
@@ -294,7 +335,7 @@ export function StitchDialog({
             data-testid="stitch-run"
             onClick={() => {
               if (meshMode) onMergeMeshes?.(Array.from(picked), { retainOriginals, matchColors, removeOverlap });
-              else onStitch(Array.from(picked), { retainOriginals });
+              else onStitch(Array.from(picked), { retainOriginals, includeMisses: includeMisses || !anyMisses });
               onClose();
             }}
             disabled={!canStitch}

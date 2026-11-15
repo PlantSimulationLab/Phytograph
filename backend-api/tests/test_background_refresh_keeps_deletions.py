@@ -30,6 +30,16 @@ LOW_X = {"kind": "box", "min": [-1, -1, -10], "max": [2.5, 6, 10], "invert": Fal
 LOW_Y = {"kind": "box", "min": [-1, -1, -10], "max": [6, 1.0, 10], "invert": False}
 HIGH_Y = {"kind": "box", "min": [-1, 4.0, -10], "max": [6, 6, 10], "invert": False}
 
+@pytest.fixture(autouse=True)
+def _store_backed_sessions_follow_the_count_cap(monkeypatch):
+    """These tests force an eviction by setting `_MAX_CLOUD_SESSIONS` to 0.
+    Store-backed sessions have their own, much higher cap now (they hold no
+    RAM), so tie that cap back to the patched one for this file: what is under
+    test here is what an eviction DOES to a store-backed session, not when one
+    happens (test_session_eviction.py covers that)."""
+    monkeypatch.setenv("PHYTOGRAPH_MAX_STORE_BACKED_SESSIONS", "0")
+
+
 
 @pytest.fixture(params=["ram", "store"])
 def session(request, client, tmp_path, monkeypatch):
@@ -207,6 +217,6 @@ def test_children_count_the_hits_they_cannot_restore(session, client):
     res = client.post("/api/cloud/session/merge",
                       json={"session_ids": [dup.session_id, leftover.session_id]})
     assert res.status_code == 200, res.text
-    merged = main._get_cloud_session(res.json()["merged"]["session_id"])
+    merged = main._get_cloud_session(decode_streamed_json(res.content)["merged"]["session_id"])
     assert merged.unrestorable_hit_count == (dup.unrestorable_hit_count
                                              + leftover.unrestorable_hit_count)

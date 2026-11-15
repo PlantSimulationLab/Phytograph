@@ -380,6 +380,123 @@ class LocalRequestGuard:
 app.add_middleware(LocalRequestGuard)
 
 
+class KeepaliveResponses:
+    """Send keepalives for a slow response, so a client can use an IDLE deadline.
+
+    Every long operation that does not stream on its own used to sit behind a
+    fixed deadline on the WHOLE request (2, 5 or 10 minutes depending on the
+    call). Time grows with the cloud, so any such limit eventually cuts off a
+    request that is still working, and the backend then finishes work nobody
+    will collect: issue #7. A request with `?keepalive=1` is answered as
+    follows instead:
+
+      - If the endpoint answers within `first_wait` seconds, its response is
+        passed through UNTOUCHED: status code, headers and body. Every refusal
+        the client acts on (400, 404, a 409 cost prompt) is decided before the
+        work starts, so it keeps its real status.
+      - Otherwise this commits to `200 application/octet-stream`, sends four
+        bytes of whitespace every `interval` seconds while the endpoint works,
+        and then the endpoint's body. Leading whitespace is valid before JSON
+        and is skipped before a PHB1 frame, and four bytes at a time keeps
+        binary payloads 4-byte aligned.
+      - A LATE failure cannot change the status any more, so it is reported in
+        band as a PHP1 `error` marker carrying the endpoint's `detail` text,
+        exactly as the streaming endpoints report theirs.
+
+    Raw ASGI (BaseHTTPMiddleware breaks client-disconnect propagation, which
+    cancellation depends on). `receive` is handed down untouched, so an endpoint
+    that polls for a disconnect still sees one. Registered INSIDE CORSMiddleware,
+    so the 200 this may send still gets its CORS headers. Endpoints that take
+    their own `keepalive` parameter (split, extract, …) answer at once with a
+    stream and so pass straight through here.
+    """
+
+    first_wait = 3.0
+    interval = 5.0
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or b"keepalive=1" not in scope.get("query_string", b""):
+            return await self.app(scope, receive, send)
+        import asyncio
+
+        queue: "asyncio.Queue" = asyncio.Queue()
+
+        async def capture(message):
+            await queue.put(message)
+
+        task = asyncio.ensure_future(self.app(scope, receive, capture))
+        task.add_done_callback(lambda _t: queue.put_nowait(None))   # end of stream
+
+        async def next_message(timeout):
+            try:
+                return await asyncio.wait_for(queue.get(), timeout)
+            except asyncio.TimeoutError:
+                return KeepaliveResponses   # sentinel: nothing yet
+
+        try:
+            first = await next_message(self.first_wait)
+            if first is not KeepaliveResponses:
+                # Answered promptly: pass everything through as it is.
+                message = first
+                while message is not None:
+                    await send(message)
+                    message = await queue.get()
+                return await task
+            # Slow: commit to a keepalive stream.
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/octet-stream"),
+                                    (b"x-phytograph-keepalive", b"1")]})
+            while True:
+                message = await next_message(self.interval)
+                if message is not KeepaliveResponses:
+                    break
+                await send({"type": "http.response.body", "body": b"    ", "more_body": True})
+            status = message.get("status", 500) if message is not None else 500
+            if message is not None and status == 200:
+                while True:
+                    message = await queue.get()
+                    if message is None:
+                        break
+                    if message["type"] == "http.response.body":
+                        # The endpoint's own last chunk says "no more"; the
+                        # stream's end is the empty chunk sent below.
+                        await send({**message, "more_body": True})
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+            # A late failure: report it in band.
+            body = b""
+            while message is not None:
+                message = await queue.get()
+                if message is not None and message["type"] == "http.response.body":
+                    body += message.get("body", b"")
+            await send({"type": "http.response.body", "more_body": False,
+                        "body": _pack_progress_marker(
+                            None, "", error=self._detail_text(body, status))})
+        finally:
+            if not task.done():
+                task.cancel()
+            elif not task.cancelled():
+                task.exception()    # retrieved, so asyncio does not warn about it
+
+    @staticmethod
+    def _detail_text(body: bytes, status: int) -> str:
+        try:
+            detail = json.loads(body.decode("utf-8")).get("detail")
+        except Exception:
+            detail = None
+        if isinstance(detail, str) and detail:
+            return detail
+        if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+            return detail["message"]
+        return f"The backend reported an error (HTTP {status})."
+
+
+app.add_middleware(KeepaliveResponses)
+
+
 @app.get("/api/token-check")
 def token_check():
     """200 only past LocalRequestGuard: how a supervisor tells that a backend on
@@ -548,6 +665,15 @@ async def _warm_open3d() -> None:
     libhelios was already loaded at module import, so the macOS libomp
     ordering above holds."""
     open3d_warmup.start_background_warmup()
+
+
+@app.on_event("startup")
+async def _log_octree_cache_at_startup() -> None:
+    """One line on the cache's size, cap and location (see
+    `_octree_cache_summary`). Walking a multi-GB cache takes a moment, so it runs
+    on a worker thread and startup does not wait for it."""
+    import asyncio
+    asyncio.get_running_loop().run_in_executor(None, _octree_cache_summary, "startup")
 
 
 @app.on_event("startup")
@@ -8135,7 +8261,14 @@ def _lad_statistics_bytes(request: "LADExportRequest") -> bytes:
 
 
 @app.post("/api/lad/export")
-def export_lad(request: LADExportRequest):
+def export_lad(request: LADExportRequest, http_request: Request = None, keepalive: bool = False):
+    """Write a LAD voxel grid: see `_do_export_lad`. `?keepalive=1` streams
+    keepalives ahead of the JSON (see `_keepalive_json`): the time grows with
+    the grid, and the limit used to be a fixed 5 minutes on the whole request."""
+    return _keepalive_json(keepalive, http_request, lambda: _do_export_lad(request))
+
+
+def _do_export_lad(request: LADExportRequest):
     """Write a LAD voxel grid as GeoTIFF / CSV / AMAPVox .vox / summary .txt.
 
     Declared `def`, not `async def`: this is blocking CPU work over a potentially
@@ -27210,8 +27343,11 @@ def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str],
 
 def _pack_pointcloud_response(positions: np.ndarray,
                               colors: Optional[np.ndarray],
-                              intensity: Optional[np.ndarray]) -> StreamingResponse:
-    """Stream a packed binary response matching the renderer decoder.
+                              intensity: Optional[np.ndarray],
+                              as_bytes: bool = False):
+    """Stream a packed binary response matching the renderer decoder (or, with
+    `as_bytes`, return the same bytes as one buffer, for a keepalive stream to
+    send after its keepalives).
 
     Response layout (little-endian):
       offset  size   field
@@ -27241,6 +27377,8 @@ def _pack_pointcloud_response(positions: np.ndarray,
         if intensity is not None:
             yield np.ascontiguousarray(intensity, dtype=np.float32).tobytes()
 
+    if as_bytes:
+        return b"".join(chunks())
     return StreamingResponse(chunks(), media_type='application/octet-stream')
 
 
@@ -27961,6 +28099,7 @@ def _bin_frame_streaming_response(
     request: "Optional[Request]" = None,
     cancel_event: "Optional[threading.Event]" = None,
     run_id: "Optional[str]" = None,
+    on_abandoned=None,
 ) -> StreamingResponse:
     """Run build_frame() off-thread, emitting keepalives until it's done (so
     WebKit's ~60s stall timeout doesn't fire on long computations), then the PHB1
@@ -27977,7 +28116,13 @@ def _bin_frame_streaming_response(
     Cancellation: when `cancel_event`/`run_id` are supplied, the run_id rides the
     first PHP1 marker (so the client can target /api/cancel/{run_id}), the stream
     loop also sets the event if the client disconnects, and a worker that raises
-    ScanCanceled yields a terminal `canceled` marker instead of a frame."""
+    ScanCanceled yields a terminal `canceled` marker instead of a frame.
+
+    `on_abandoned(frame)` is called (on a worker thread) when the worker
+    produced a frame that the client never took: it left just as the work
+    finished, or the worker was already past its last cancel checkpoint. An
+    endpoint whose result owns something only the client could free (a new
+    session) passes it to release that."""
     import asyncio
     import inspect
     import queue as _queue
@@ -28013,6 +28158,7 @@ def _bin_frame_streaming_response(
         fut = loop.run_in_executor(None, _run)
         silent_for = 0.0
         disconnect_checked = 0.0
+        delivered = False
         try:
             while not fut.done():
                 emitted = False
@@ -28053,7 +28199,11 @@ def _bin_frame_streaming_response(
             except _queue.Empty:
                 pass
             try:
-                yield await fut
+                frame = await fut
+                yield frame
+                # Resumed after the frame: the consumer took it. A client that
+                # went away instead leaves this generator closed AT the yield.
+                delivered = True
             except ScanCanceled:
                 # Cooperative cancel landed: the worker unwound its Context/
                 # LiDARCloud (memory freed). Tell the client instead of a frame.
@@ -28069,7 +28219,11 @@ def _bin_frame_streaming_response(
                 # a user's attached log actionable.
                 import traceback
                 traceback.print_exc()
-                yield _pack_progress_marker(None, "", error=str(e) or e.__class__.__name__)
+                # An HTTPException's own text is "404: Cloud session not found";
+                # the client wants the detail it would have had as a status.
+                text = (e.detail if isinstance(e, HTTPException) and isinstance(e.detail, str)
+                        else str(e))
+                yield _pack_progress_marker(None, "", error=text or e.__class__.__name__)
         finally:
             # The stream is ending while the worker is still running: the client
             # went away (Starlette cancels this generator on disconnect, usually
@@ -28085,6 +28239,20 @@ def _bin_frame_streaming_response(
                 reporter.propagate_cancel()
             if run_id is not None:
                 _clear_run(run_id)
+            # A result nobody collected. The worker either finished just before
+            # the client left, or is past its last cancel checkpoint and will
+            # finish anyway; both produce a result with no reader. Hand it to
+            # the endpoint's cleanup (off the loop: it takes locks and deletes
+            # files) so it does not outlive the request.
+            if on_abandoned is not None and not delivered:
+                def _abandon(done_fut):
+                    if done_fut.cancelled() or done_fut.exception() is not None:
+                        return  # no result: the worker cleaned up after itself
+                    loop.run_in_executor(None, on_abandoned, done_fut.result())
+                if fut.done():
+                    _abandon(fut)
+                else:
+                    fut.add_done_callback(_abandon)
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
 
@@ -28611,14 +28779,28 @@ def _read_points_and_extras(
 
 
 @app.post("/api/pointcloud/import_by_path")
-def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
+def import_pointcloud_by_path(request: ImportPointCloudByPathRequest,
+                              http_request: Request = None, keepalive: bool = False):
     """Parse a point-cloud file from disk and stream back a packed binary
     representation. Dispatches by extension:
 
     * `.xyz` / `.txt` / `.csv` / `.pts` / `.asc` → pandas + optional
       Helios `ascii_format` hint.
     * `.ply` / `.pcd` → open3d (handles ASCII and binary).
+
+    `?keepalive=1` sends 4-byte whitespace keepalives while the file is parsed
+    and then the same packed bytes, so the client's deadline can be an idle one
+    (parsing time grows with the file; the limit used to be a fixed 10 minutes
+    on the whole request). A failure then arrives in band as a PHP1 `error`
+    marker. The keepalives keep the float arrays 4-byte aligned.
     """
+    if keepalive:
+        return _bin_frame_streaming_response(
+            lambda: _import_pointcloud_by_path(request, as_bytes=True), request=http_request)
+    return _import_pointcloud_by_path(request)
+
+
+def _import_pointcloud_by_path(request: ImportPointCloudByPathRequest, as_bytes: bool = False):
     positions, colors, intensity = _load_pointcloud_arrays(
         request.file_path, request.ascii_format, request.column_plan
     )
@@ -28635,7 +28817,7 @@ def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
             )
         if np.any(ws != 0.0):
             positions = positions.astype(np.float64, copy=False) - ws
-    return _pack_pointcloud_response(positions, colors, intensity)
+    return _pack_pointcloud_response(positions, colors, intensity, as_bytes=as_bytes)
 
 
 # ============================================================================
@@ -32010,6 +32192,103 @@ def _pending_deleted_count_locked(sess: "CloudSession") -> int:
     return int(built) - remaining
 
 
+def _octree_disk_state(cache_id: "Optional[str]") -> str:
+    """`<id> (on disk)`, `<id> (MISSING)` or `none`, for diagnostic log lines."""
+    if not cache_id:
+        return "none"
+    present = (_octree_cache_root() / cache_id / "metadata.json").is_file()
+    return f"{cache_id} ({'on disk' if present else 'MISSING'})"
+
+
+def _describe_session_octrees_locked(sess: "CloudSession") -> str:
+    """The three octree ids a session can be drawn from, each with whether it is
+    on disk. Caller holds `_cloud_session_lock`."""
+    return (f"octree={_octree_disk_state(getattr(sess, 'octree_cache_id', None))} "
+            f"rendered={_octree_disk_state(getattr(sess, 'rendered_octree_cache_id', None))} "
+            f"miss={_octree_disk_state(getattr(sess, 'miss_octree_cache_id', None))}")
+
+
+def _octree_cache_summary(context: str) -> None:
+    """Log the cache's size against its cap and how much of it live clouds pin.
+
+    The issue #7 cache was 26.6 GB against a 21.5 GB cap, which showed only
+    because an over-cap warning happened to fire. Logged at startup and on each
+    project open, so a log always says what state the cache was in."""
+    try:
+        root = _octree_cache_root()
+        pinned = _live_session_octree_ids()
+        count = pinned_count = 0
+        total = pinned_bytes = 0
+        if root.is_dir():
+            for child in root.iterdir():
+                if (not child.is_dir() or len(child.name) != 40
+                        or not all(c in "0123456789abcdef" for c in child.name)):
+                    continue
+                size = _dir_total_size(child)
+                count += 1
+                total += size
+                if child.name in pinned:
+                    pinned_count += 1
+                    pinned_bytes += size
+        logger.info(
+            "octree cache (%s): %d entr%s, %.1f GB of a %.1f GB cap; %d pinned by "
+            "open clouds (%.1f GB); root %s",
+            context, count, "y" if count == 1 else "ies", total / 1e9,
+            _octree_cache_max_bytes() / 1e9, pinned_count, pinned_bytes / 1e9, root)
+    except Exception as e:  # pragma: no cover - a diagnostic must never fail its caller
+        logger.warning("octree cache summary (%s) failed: %s", context, e)
+
+
+# Octrees a session stopped referencing a moment ago: id -> when the grace ends.
+#
+# The backend replaces a cloud's octree the instant a rebuild finishes, but the
+# renderer goes on DRAWING the old one until the response arrives and the new
+# octree has streamed in, and its scene document names the old id for as long.
+# The rebuild's own cache trim ran in that window and, on a cache over its cap,
+# deleted the old octree at once: tiles 404'd mid-handover, and a project saved
+# right then recorded an octree that existed nowhere (the second way to reach
+# issue #7's "Octree load failed"; `_do_project_save` covers the first).
+#
+# So an id that any session just let go of stays pinned for a grace period.
+# Recorded at ONE place, `CloudSession.__setattr__`, because the three octree
+# fields are assigned at about thirty sites and a per-site rule is one someone
+# forgets. A leaf lock.
+_OCTREE_ID_FIELDS = frozenset(
+    ("octree_cache_id", "rendered_octree_cache_id", "miss_octree_cache_id"))
+_recently_replaced_octrees: Dict[str, float] = {}
+_recently_replaced_lock = threading.Lock()
+
+
+def _octree_replaced_grace_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("PHYTOGRAPH_OCTREE_REPLACED_GRACE_S", "300")))
+    except (ValueError, TypeError):
+        return 300.0
+
+
+def _note_octree_replaced(cache_id: str) -> None:
+    grace = _octree_replaced_grace_s()
+    if grace <= 0:
+        return
+    with _recently_replaced_lock:
+        _recently_replaced_octrees[cache_id] = time.time() + grace
+
+
+def _recently_replaced_octree_ids() -> "set[str]":
+    now = time.time()
+    with _recently_replaced_lock:
+        for cid in [c for c, until in _recently_replaced_octrees.items() if until <= now]:
+            del _recently_replaced_octrees[cid]
+        return set(_recently_replaced_octrees)
+
+
+# Octree ids a project save in progress still has to copy into its file (see
+# `_do_project_save`). One set per running save; guarded by `_save_pin_lock`,
+# a leaf lock.
+_save_pinned_octrees: "List[set]" = []
+_save_pin_lock = threading.Lock()
+
+
 def _live_session_octree_ids() -> "set[str]":
     """The octree cache ids every live cloud session is currently rendering from.
 
@@ -32017,8 +32296,14 @@ def _live_session_octree_ids() -> "set[str]":
     their filesystem work with the lock released. `_cloud_sessions` is genuinely
     concurrent (blocking endpoints run in anyio's worker threadpool), so it must
     not be iterated unlocked.
+
+    Also every id a project save in progress is about to embed: such an octree
+    may no longer be referenced by any session by the time the save reaches it.
     """
-    ids: "set[str]" = set()
+    ids: "set[str]" = _recently_replaced_octree_ids()
+    with _save_pin_lock:
+        for pinned in _save_pinned_octrees:
+            ids.update(pinned)
     with _cloud_session_lock:
         # A SPILLED session is still a cloud in the user's scene -- it is out of
         # RAM, not out of the project -- so its octrees stay pinned. Dropping the
@@ -32041,7 +32326,8 @@ def _live_session_octree_ids() -> "set[str]":
 
 
 def _evict_octree_cache(max_bytes: int,
-                        keep: "Optional[Union[_Path, Iterable[_Path]]]" = None) -> List[str]:
+                        keep: "Optional[Union[_Path, Iterable[_Path]]]" = None,
+                        reason: str = "") -> List[str]:
     """Trim the octree cache to at most `max_bytes` of regular file content,
     removing oldest-accessed cache directories first. Returns the cache_ids
     that were evicted.
@@ -32129,7 +32415,18 @@ def _evict_octree_cache(max_bytes: int,
         evicted.append(candidate.name)
         total -= size
 
-    if total > max_bytes:
+    if evicted:
+        # Every deletion by id, and what triggered it. An octree that a cloud
+        # later fails to load ("no such file") is then traceable from a log
+        # alone: issue #7's could not be, because nothing recorded evictions.
+        logger.info(
+            "octree cache trim%s: evicted %d entr%s to get under the %.1f GB cap "
+            "(now %.1f GB): %s",
+            f" after {reason}" if reason else "", len(evicted),
+            "y" if len(evicted) == 1 else "ies", max_bytes / 1e9, total / 1e9,
+            ", ".join(evicted))
+
+    if total > max_bytes and _octree_overcap_warning_due(total):
         logger.warning(
             "Octree cache is %.1f GB, over its %.1f GB cap: every remaining entry is "
             "pinned by a live cloud session (evicting one would destroy an edited "
@@ -32139,6 +32436,28 @@ def _evict_octree_cache(max_bytes: int,
         )
 
     return evicted
+
+
+# The over-cap warning above fires on every trim, i.e. after every bake, and a
+# cache held over its cap by live clouds stays there for the whole session:
+# issue #7's log repeated the identical line 40 times, burying everything else.
+# Say it once, then again only when the size moves by a gigabyte or ten minutes
+# have passed.
+_OCTREE_OVERCAP_REPEAT_S = 600.0
+_OCTREE_OVERCAP_REPEAT_BYTES = 1e9
+_octree_overcap_last: "List[float]" = [0.0, 0.0]   # [time, total bytes]
+_octree_overcap_lock = threading.Lock()
+
+
+def _octree_overcap_warning_due(total: float) -> bool:
+    now = time.time()
+    with _octree_overcap_lock:
+        last_t, last_total = _octree_overcap_last
+        due = (now - last_t >= _OCTREE_OVERCAP_REPEAT_S
+               or abs(total - last_total) >= _OCTREE_OVERCAP_REPEAT_BYTES)
+        if due:
+            _octree_overcap_last[:] = [now, float(total)]
+        return due
 
 
 # ---------------------------------------------------------------------------
@@ -34767,11 +35086,49 @@ def _install_compacted_store_locked(sess: "CloudSession", compacted: dict) -> No
     _delete_session_store_dir(old_root)
 
 
+# Store directories a delete could not remove yet. Windows refuses to delete a
+# file that still has a mapped view, and a session's columns are exactly that
+# for as long as ANY reference to one of its arrays is alive (an in-flight
+# request, a frame not yet collected). The delete used to be one best-effort
+# try: a canceled 20 GB merge, or any deleted store-backed cloud, could then
+# sit on disk until the next launch reaped the directory. They are retried on
+# every session sweep instead, which runs constantly.
+_pending_store_deletes: "set[str]" = set()
+_pending_store_delete_lock = threading.Lock()
+
+
 def _delete_session_store_dir(store_dir) -> None:
+    path = _Path(store_dir)
     try:
-        _shutil.rmtree(_Path(store_dir), ignore_errors=True)
+        _shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
+    with _pending_store_delete_lock:
+        if path.exists():
+            _pending_store_deletes.add(str(path))
+        else:
+            _pending_store_deletes.discard(str(path))
+
+
+def _retry_pending_store_deletes() -> None:
+    """Try again to remove store directories an earlier delete left behind."""
+    with _pending_store_delete_lock:
+        pending = list(_pending_store_deletes)
+    if not pending:
+        return
+    # A dropped array's map is only released when the array is collected.
+    import gc
+    gc.collect()
+    for raw in pending:
+        path = _Path(raw)
+        try:
+            _shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+        if not path.exists():
+            with _pending_store_delete_lock:
+                _pending_store_deletes.discard(raw)
+            logger.info("removed session store %s on a later attempt", path.name)
 
 
 def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
@@ -34824,6 +35181,9 @@ def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
         # when this file was written, which for a restored-then-re-evicted
         # session is unrelated to how recently the user touched the cloud.
         "last_accessed": float(getattr(sess, "last_accessed", 0.0) or 0.0),
+        # Sizes and column flags, so a merge can plan (and refuse) a batch of
+        # evicted clouds without reading every one of them back first.
+        "merge_profile": _merge_profile_or_none(sess),
         "store_dir": store_dir,
         # Recorded so `_live_session_octree_ids` keeps pinning the octrees of a
         # cloud that is still in the user's scene but no longer in RAM. Without
@@ -34988,6 +35348,17 @@ def _trim_session_spills() -> None:
             _delete_session_store_dir(entry["store_dir"])
 
 
+def _max_store_backed_sessions() -> int:
+    """How many store-backed sessions may stay registered at once (see
+    `_eviction_victims_locked`). Each is a handful of memory maps, so the limit
+    is about open mappings, not RAM. Never below the RAM cap."""
+    try:
+        n = int(os.environ.get("PHYTOGRAPH_MAX_STORE_BACKED_SESSIONS", "64"))
+    except (ValueError, TypeError):
+        n = 64
+    return max(n, _MAX_CLOUD_SESSIONS)
+
+
 def _eviction_victims_locked(now: float, pinned: "set[str]") -> List[str]:
     """TTL and count victims (`_evict_session_ids`), plus MEMORY victims: while
     the RAM-resident sessions together exceed `_SESSION_RAM_FRACTION` of the
@@ -34995,7 +35366,16 @@ def _eviction_victims_locked(now: float, pinned: "set[str]") -> List[str]:
     session's maps count as nothing (page cache), so evicting one costs a
     small pickle and frees whatever RAM arrays it had grown since restore.
     Caller holds `_cloud_session_lock`."""
-    victims = list(_evict_session_ids(_cloud_sessions, _MAX_CLOUD_SESSIONS, now))
+    # The count cap bounds RAM, so it counts the sessions that HOLD RAM. A
+    # store-backed session is memory maps (page cache the OS reclaims on its
+    # own) plus a small object, yet it used to take a slot like any other: with
+    # a cap of 7 and 26 store-backed scans in the scene (issue #7), every crop
+    # across the scene spilled and restored 10-12 clouds per step for nothing.
+    # Those get their own, much higher cap; the idle TTL applies to both.
+    in_ram = {sid: s for sid, s in _cloud_sessions.items() if getattr(s, "store", None) is None}
+    on_disk = {sid: s for sid, s in _cloud_sessions.items() if sid not in in_ram}
+    victims = list(_evict_session_ids(in_ram, _MAX_CLOUD_SESSIONS, now))
+    victims += _evict_session_ids(on_disk, _max_store_backed_sessions(), now)
     taken = set(victims)
     limit = memory_budget.budget_bytes() * _SESSION_RAM_FRACTION
     resident = {sid: _session_ram_bytes(s) for sid, s in _cloud_sessions.items() if sid not in taken}
@@ -35062,6 +35442,21 @@ def _sweep_cloud_sessions() -> None:
             # while pickle is still walking them -- which is precisely why it is
             # discarded rather than kept as a fallback.
             claimed_back = _spilling_sessions.pop(sid, None) is None
+            # Indexed in the SAME critical section it leaves `_spilling_sessions`
+            # in. Done in a second one, the session was for a moment in no
+            # registry at all: a lookup then answered 404 for a cloud that
+            # exists, and `_live_session_octree_ids` omitted its octrees, so a
+            # cache trim running right then could delete them.
+            if not claimed_back:
+                if entry is not None:
+                    _spilled_sessions[sid] = entry
+                else:
+                    # The write failed. Any entry from an EARLIER eviction of
+                    # this same session describes the cloud as it was before
+                    # whatever was done to it since, so serving that back would
+                    # silently undo the user's edits. Drop it: a 404 is
+                    # recoverable, wrong data is not.
+                    stale = _spilled_sessions.pop(sid, None)
         if claimed_back:
             if entry is not None:
                 try:
@@ -35069,15 +35464,6 @@ def _sweep_cloud_sessions() -> None:
                 except OSError:
                     pass
             continue
-        with _cloud_session_lock:
-            if entry is not None:
-                _spilled_sessions[sid] = entry
-            else:
-                # The write failed. Any entry from an EARLIER eviction of this
-                # same session describes the cloud as it was before whatever was
-                # done to it since, so serving that back would silently undo the
-                # user's edits. Drop it: a 404 is recoverable, wrong data is not.
-                stale = _spilled_sessions.pop(sid, None)
         if entry is None and stale is not None:
             try:
                 _Path(stale["path"]).unlink()
@@ -35090,6 +35476,7 @@ def _sweep_cloud_sessions() -> None:
         )
     if evicted:
         _trim_session_spills()
+    _retry_pending_store_deletes()
 
 
 def _sweep_plant_sessions() -> None:
@@ -35517,6 +35904,16 @@ class CloudSession:
     # subset/split/merge paths that build a child session may carry it forward
     # or not without risking correctness.
     derived_fields: Dict[str, str] = field(default_factory=dict)
+
+    def __setattr__(self, name, value):
+        # An octree id this session stops referencing stays pinned in the cache
+        # for a grace period: the renderer is still drawing it. One chokepoint
+        # for every assignment site (see `_recently_replaced_octrees`).
+        if name in _OCTREE_ID_FIELDS:
+            old = self.__dict__.get(name)
+            if old and old != value:
+                _note_octree_replaced(old)
+        object.__setattr__(self, name, value)
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -36626,7 +37023,8 @@ def _farthest_from_origin(positions: "np.ndarray", mask: "np.ndarray",
 
 
 def _gather_miss_positions(sess: "CloudSession",
-                           origin: Optional[List[float]]) -> tuple[np.ndarray, float]:
+                           origin: Optional[List[float]],
+                           scratch_dir: "Optional[_Path]" = None) -> tuple[np.ndarray, float]:
     """Surviving sky/miss positions for the miss octree, in display form.
 
     Gathers the session's interleaved misses (`extras[is_miss] != 0`, honoring
@@ -36645,10 +37043,34 @@ def _gather_miss_positions(sess: "CloudSession",
     This is the projection math factored out of the former `get_cloud_misses`
     endpoint, MINUS the _MISS_OVERLAY_CAP stride — the octree streams via LOD, so
     there is no cap and no aliasing. Returns (positions (M,3) float64, radius).
+
+    With `scratch_dir` and no origin, a miss set big enough to belong in a
+    session store (`_session_should_use_store`) is gathered chunk by chunk into
+    a memory-mapped file there instead of RAM, and that map is returned. Only a
+    stitched cloud gets that large: issue #7's kept 133 M misses, 3.2 GB as one
+    float64 array, which undid the point of writing the merge itself to disk.
+    The caller owns `scratch_dir` and must drop the array before removing it.
     """
     with _cloud_session_lock:
         keep = ~sess.deleted
         miss_arr = sess.extras.get(_MISS_SLUG)
+        backfilled_rows = 0
+        if sess.backfilled_misses is not None and sess.backfilled_misses.get("positions") is not None:
+            backfilled_rows = int(len(sess.backfilled_misses["positions"]))
+        if (miss_arr is not None and origin is None and scratch_dir is not None
+                and backfilled_rows == 0):
+            is_miss = (np.asarray(miss_arr) != 0) & keep
+            n_miss = int(np.count_nonzero(is_miss))
+            if _session_should_use_store(n_miss):
+                rows = np.flatnonzero(is_miss)
+                del is_miss
+                out = np.lib.format.open_memmap(
+                    str(_Path(scratch_dir) / "miss_positions.npy"), mode="w+",
+                    dtype=np.float64, shape=(n_miss, 3))
+                src = np.asarray(sess.positions)
+                for a, b in session_store.iter_ranges(n_miss):
+                    out[a:b] = src[rows[a:b]]
+                return out, 0.0
         if miss_arr is not None:
             is_miss = (miss_arr != 0) & keep
             hits = (~(miss_arr != 0)) & keep
@@ -36746,12 +37168,19 @@ def _build_miss_octree(sess: "CloudSession",
     with a silently missing miss overlay."""
     import tempfile
     try:
-        positions, _radius = _gather_miss_positions(sess, origin)
-        if positions.shape[0] == 0:
-            return None
         with tempfile.TemporaryDirectory() as td:
-            miss_las = _Path(td) / "octree_misses.las"
-            _miss_positions_to_las(positions, miss_las)
+            # The directory doubles as scratch for a miss set too big for RAM
+            # (see `_gather_miss_positions`). The array may be a map of a file
+            # in it, so it is dropped as soon as the LAS is written: Windows
+            # cannot remove a directory holding a mapped file.
+            positions, _radius = _gather_miss_positions(sess, origin, scratch_dir=_Path(td))
+            try:
+                if positions.shape[0] == 0:
+                    return None
+                miss_las = _Path(td) / "octree_misses.las"
+                _miss_positions_to_las(positions, miss_las)
+            finally:
+                del positions
             cache_key, _cache_dir, _meta = _build_octree_from_las(
                 miss_las, [], cancel_event=cancel_event)
         return cache_key
@@ -39369,7 +39798,7 @@ def _finish_bake(sess: "CloudSession", session_id: str, remaining: int,
     keep_dirs = [cache_dir]
     if miss_cache_id:
         keep_dirs.append(_octree_cache_root() / miss_cache_id)
-    _evict_octree_cache(max_bytes, keep=keep_dirs)
+    _evict_octree_cache(max_bytes, keep=keep_dirs, reason=f"bake {session_id}")
 
     with _cloud_session_lock:
         # Normally 0 — bake clears `deleted_history` — but a delete that lands
@@ -40298,12 +40727,147 @@ class SessionSplitRequest(BaseModel):
     scalar_filters: Optional[List[ScalarFilter]] = None
 
 
+def _keepalive_json(keepalive: bool, http_request, work, on_abandoned=None):
+    """Run `work()` (returns a JSON-able value) as a plain response, or, with
+    `keepalive`, as a stream that sends a keepalive at least every 5 s ahead of
+    the JSON.
+
+    For the whole-cloud session operations that have no progress to report but
+    whose time grows with the cloud: split, extract, duplicate, transform and
+    rebuild_octree. Each sat behind a fixed whole-request client deadline (5 or
+    10 minutes), which is the failure issue #7 hit on merge: on a 200 M-point
+    cloud the client gives up, the backend finishes anyway, and the two disagree
+    about what exists. With `keepalive` the renderer's deadline is an IDLE one.
+
+    Opt-in by query parameter so the plain JSON contract is unchanged for the
+    scripting client and for direct callers. In keepalive mode a failure is
+    reported in band (the 200 is already sent), with the same detail text.
+
+    `on_abandoned()` is called when the work finished but nobody took the result
+    (the client disconnected or canceled): the place to undo what only that
+    client could have used."""
+    if not keepalive:
+        return work()
+    return _bin_frame_streaming_response(
+        lambda: json.dumps(work()).encode("utf-8"),
+        request=http_request,
+        on_abandoned=(lambda _frame: on_abandoned()) if on_abandoned is not None else None)
+
+
+def _append_split_leftover_locked(sess: "CloudSession", leftover: "CloudSession") -> bool:
+    """Give a split's leftover points back to a parent that was COMPACTED since
+    the split: its moved rows no longer exist to be un-deleted, so they are
+    appended instead (parent rows first, then the leftover's). Returns whether
+    it was done. Caller holds `_cloud_session_lock`.
+
+    The append is a two-input merge whose arrays are then installed on the
+    parent, the way a compaction installs its own. That merge takes only
+    surviving rows, so it is refused (False) when the parent has deletions or
+    undo history of its own since the compaction: appending would silently
+    apply those deletions for good and drop their undo. That needs a delete to
+    land in the short window after the compacting bake, on top of the bake
+    landing during the split at all."""
+    if (np.asarray(sess.deleted).any() or sess.deleted_history
+            or sess.deleted_base is not None or getattr(sess, "label_history", None)):
+        return False
+    old_store = sess.store
+    # Named for the PARENT (the `<id>.g<N>-<nonce>.store` form a compaction
+    # uses), whether or not the parent had a store before: the result may be
+    # big enough to need one even if the compacted parent was not.
+    generation = (old_store.generation + 1) if old_store is not None else 1
+    root = (_session_spill_root()
+            / f"{sess.session_id}.g{generation}-{uuid.uuid4().hex[:8]}.store")
+    restored_hits = _hit_row_count_locked(leftover, np.flatnonzero(~np.asarray(leftover.deleted)))
+    merged = _merge_sessions_locked([sess, leftover], store_root=root, register=False)
+    if merged.store is not None:
+        while merged.store.generation < generation:
+            merged.store.bump_generation()
+    for f in ("positions", "colors", "intensity", "timestamps", "beam_origins", "deleted"):
+        setattr(sess, f, getattr(merged, f))
+    sess.extras = merged.extras
+    # The parent's own metadata entries are kept (they carry more than the
+    # merge's slug/label/dtype), for the columns that came through.
+    have = {e.get("slug") for e in sess.extra_dims_meta}
+    sess.extra_dims_meta = (
+        [e for e in sess.extra_dims_meta if e.get("slug") in merged.extras]
+        + [e for e in merged.extra_dims_meta if e["slug"] not in have])
+    sess.store = merged.store
+    # The compaction counted the moved hits as lost for good; they are back.
+    sess.unrestorable_hit_count = max(
+        0, int(getattr(sess, "unrestorable_hit_count", 0) or 0) - restored_hits)
+    sess.octree_point_count = None
+    _mark_octree_stale_locked(sess)
+    if old_store is not None:
+        old_root = old_store.root
+        old_store.close()
+        _delete_session_store_dir(old_root)
+    return True
+
+
+def _undo_split(undo: dict) -> None:
+    """Put a split back: un-delete the rows it moved off the parent and discard
+    the leftover session. For a split that failed after its commit, or whose
+    result the client never collected. Either way the renderer still shows the
+    cloud whole, so leaving the commit in place silently lost those points to a
+    session nothing pointed at.
+
+    If the parent was compacted since the split, its rows were renumbered and
+    the moved ones are gone from it; the leftover's points are appended to it
+    instead (`_append_split_leftover_locked`). Only when even that is not
+    possible is the leftover kept, as the points' one remaining copy."""
+    sess, rows, leftover_id = undo.get("sess"), undo.get("rows"), undo.get("leftover_id")
+    restored = True
+    if sess is not None and rows is not None:
+        with _cloud_session_lock:
+            # Only while the parent's rows are still the ones the split indexed:
+            # a compaction since then renumbers them.
+            if sess.positions is undo.get("positions") and len(sess.deleted) == undo.get("n"):
+                sess.deleted[rows] = False
+                _mark_octree_stale_locked(sess)
+            else:
+                restored = False
+        if not restored and leftover_id:
+            try:
+                leftover = _get_cloud_session(leftover_id)   # may page it back in
+                with _cloud_session_lock:
+                    restored = _append_split_leftover_locked(sess, leftover)
+            except Exception:
+                logger.exception("split of %s: appending the leftover back failed",
+                                 getattr(sess, "session_id", "?"))
+                restored = False
+            if restored:
+                logger.info("split of %s undone by appending its leftover %s back "
+                            "(the cloud was compacted since)", sess.session_id, leftover_id)
+    if leftover_id:
+        if restored:
+            _discard_cloud_session(leftover_id)
+        else:
+            # The parent can take the points back neither way, so the leftover
+            # is their only copy: keep it rather than destroy data.
+            logger.warning("split of %s could not be undone (the cloud was compacted and "
+                           "then edited); its leftover session %s is kept",
+                           getattr(sess, "session_id", "?"), leftover_id)
+    undo.clear()
+
+
 @app.post("/api/cloud/session/{session_id}/split")
-def session_split(session_id: str, request: SessionSplitRequest):
+def session_split(session_id: str, request: SessionSplitRequest,
+                  http_request: Request = None, keepalive: bool = False):
     """Keep the filter-passing points on this session; move the excluded points
     to a NEW leftover session. Rebuilds both octrees from arrays. Returns
     {kept: {...octree}, leftover: {session_id, ...octree}} (leftover null if
-    empty). No file read."""
+    empty). No file read.
+
+    `?keepalive=1` streams keepalives ahead of the JSON (see `_keepalive_json`).
+    A split that fails after committing, or whose result is never collected, is
+    undone (`_undo_split`)."""
+    undo: dict = {}
+    return _keepalive_json(keepalive, http_request,
+                           lambda: _do_session_split(session_id, request, undo),
+                           on_abandoned=lambda: _undo_split(undo))
+
+
+def _do_session_split(session_id: str, request: SessionSplitRequest, undo: dict) -> dict:
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump() if request.region else None
     if region_dict is not None:
@@ -40369,20 +40933,32 @@ def session_split(session_id: str, request: SessionSplitRequest):
             # Split is a non-undoable commit (renderer clears its erase undo stack),
             # so reset the undo history to keep both sides in lock-step.
             idx_surv = np.where(surv)[0]
-            sess.deleted[idx_surv[leftover_mask]] = True
+            moved_rows = idx_surv[leftover_mask]
+            sess.deleted[moved_rows] = True
             if leftover_mask.any():
                 _mark_normals_stale_locked(sess)
             _commit_delete_history_locked(sess)
             sess.label_history = {}   # label undo must not reach across this commit either
             _mark_octree_stale_locked(sess)
             sess.octree_pose = None    # see the invariant note in delete_cloud_region
+            # What `_undo_split` needs to put this back.
+            undo.update(sess=sess, rows=moved_rows, positions=sess.positions,
+                        n=len(sess.deleted),
+                        leftover_id=leftover.session_id if leftover is not None else None)
 
-    leftover_meta = None
-    if leftover is not None:
-        lk, lcd, lmeta = _session_rebuild(leftover)
-        leftover_meta = {"session_id": leftover.session_id, "point_count": int(len(leftover.positions)),
-                         "cache_id": lk, "cache_dir": str(lcd), **lmeta}
-    kk, kcd, kmeta = _session_rebuild(sess)
+    try:
+        leftover_meta = None
+        if leftover is not None:
+            lk, lcd, lmeta = _session_rebuild(leftover)
+            leftover_meta = {"session_id": leftover.session_id, "point_count": int(len(leftover.positions)),
+                             "cache_id": lk, "cache_dir": str(lcd), **lmeta}
+        kk, kcd, kmeta = _session_rebuild(sess)
+    except BaseException:
+        # The commit above already took the leftover's points off the parent. A
+        # failed octree build would otherwise leave them on a session the
+        # caller is never told about, while it reports the split as failed.
+        _undo_split(undo)
+        raise
 
     return {
         "session_id": session_id,
@@ -40400,11 +40976,45 @@ class SessionExtractRequest(BaseModel):
     scalar_filters: Optional[List[ScalarFilter]] = None
 
 
+def _build_child_or_discard(child: "CloudSession", created: dict) -> tuple:
+    """`_session_rebuild(child)` for a session an endpoint just created and has
+    not handed to anyone. Records its id in `created` (for the abandoned-result
+    cleanup) and discards it if the octree build fails: the caller is about to
+    report a failure, and nobody would ever learn this session's id to free it."""
+    created["session_id"] = child.session_id
+    try:
+        return _session_rebuild(child)
+    except BaseException:
+        _discard_cloud_session(child.session_id)
+        created.clear()
+        raise
+
+
+def _discard_created(created: dict) -> None:
+    sid = created.get("session_id")
+    if sid:
+        logger.info("session %s was created for a result nobody collected; discarding it", sid)
+        _discard_cloud_session(sid)
+    created.clear()
+
+
 @app.post("/api/cloud/session/{session_id}/extract")
-def session_extract(session_id: str, request: SessionExtractRequest):
+def session_extract(session_id: str, request: SessionExtractRequest,
+                    http_request: Request = None, keepalive: bool = False):
     """Create a NEW child session from the filter-selected points (parent
     untouched). Returns {session_id, ...octree} or null if the selection is
-    empty. No source file read."""
+    empty. No source file read.
+
+    `?keepalive=1` streams keepalives ahead of the JSON (see `_keepalive_json`).
+    The child is discarded if its octree build fails or its result is never
+    collected."""
+    created: dict = {}
+    return _keepalive_json(keepalive, http_request,
+                           lambda: _do_session_extract(session_id, request, created),
+                           on_abandoned=lambda: _discard_created(created))
+
+
+def _do_session_extract(session_id: str, request: SessionExtractRequest, created: dict) -> dict:
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump() if request.region else None
     if region_dict is not None:
@@ -40447,7 +41057,7 @@ def session_extract(session_id: str, request: SessionExtractRequest):
     if not hits_selected:
         return {"session_id": session_id, "extracted": None}
     child = _session_subset(sess, sel)
-    ck, ccd, cmeta = _session_rebuild(child)
+    ck, ccd, cmeta = _build_child_or_discard(child, created)
     return {
         "session_id": session_id,
         "extracted": {"session_id": child.session_id, "point_count": int(len(child.positions)),
@@ -41167,21 +41777,40 @@ def session_extract_by_column(session_id: str, request: SessionExtractByColumnRe
 
 
 @app.post("/api/cloud/session/{session_id}/duplicate")
-def session_duplicate(session_id: str):
+def session_duplicate(session_id: str, http_request: Request = None, keepalive: bool = False):
     """Copy a session's SURVIVING points into a NEW independent session (parent
     untouched) and build its octree. This is the keep-everything degenerate case
     of `extract`: a pure array copy via `_session_subset` — NO source file read,
     so every wizard customization (column plan, custom labels, categorical
     slugs, dropped/renamed extras) is preserved on the copy. The new session is
     fully independent: later edits to either side don't affect the other.
-    Returns {session_id, duplicate: {session_id, point_count, ...octree}}."""
+    Returns {session_id, duplicate: {session_id, point_count, ...octree}}.
+
+    `?keepalive=1` streams keepalives ahead of the JSON (see `_keepalive_json`).
+    The copy is discarded if its octree build fails or its result is never
+    collected."""
+    created: dict = {}
+    return _keepalive_json(keepalive, http_request,
+                           lambda: _do_session_duplicate(session_id, created),
+                           on_abandoned=lambda: _discard_created(created))
+
+
+def _do_session_duplicate(session_id: str, created: dict) -> dict:
     sess = _get_cloud_session(session_id)
-    with _cloud_session_lock:
-        # `_session_subset_locked` keeps `surv[keep]`; an all-true keep over the
-        # survivors copies the whole surviving cloud.
-        keep = np.ones(int((~sess.deleted).sum()), dtype=bool)
-        child = _session_subset_locked(sess, keep)
-    ck, ccd, cmeta = _session_rebuild(child)
+    # A full copy of the cloud: counted against the memory budget like every
+    # other whole-cloud mutation (it was the one that was not). A store-backed
+    # copy is written to disk a chunk at a time, so it is charged a chunk.
+    n_copy = int((~sess.deleted).sum())
+    copy_bytes = (_session_mutation_bytes([sess], out_points=min(
+        n_copy, session_store.DEFAULT_CHUNK_ROWS)) if _session_should_use_store(n_copy)
+        else _session_mutation_bytes([sess]))
+    with _ADMISSION.admit(copy_bytes, f"duplicate {session_id}"):
+        with _cloud_session_lock:
+            # `_session_subset_locked` keeps `surv[keep]`; an all-true keep over
+            # the survivors copies the whole surviving cloud.
+            keep = np.ones(int((~sess.deleted).sum()), dtype=bool)
+            child = _session_subset_locked(sess, keep)
+    ck, ccd, cmeta = _build_child_or_discard(child, created)
     return {
         "session_id": session_id,
         "duplicate": {"session_id": child.session_id, "point_count": int(len(child.positions)),
@@ -41195,12 +41824,94 @@ class SessionMergeRequest(BaseModel):
     read. The inputs are left untouched (the renderer removes them from the
     scene, carrying each session id for deferred-free so undo can restore them)."""
     session_ids: List[str]
+    # False leaves every input's interleaved sky/miss points (is_miss != 0) out
+    # of the merged cloud. A stitched cloud has no single scanner origin, so LAD
+    # (the one tool that needs misses) cannot run on it anyway, and on a real
+    # orchard scan misses were 37% of the rows: that much less to copy, store
+    # and convert. Defaults to True so an existing caller's result is unchanged.
+    include_misses: bool = True
+    # Confirms a merge the backend answered 409 with a `cost_warning` for. Same
+    # contract as the segmentation tools' `acknowledge_cost`.
+    acknowledge_cost: bool = False
 
 
-def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
+class _LockHold:
+    """A lock taken by a wrapper that the function it calls may let go of and
+    take back (`_merge_sessions`): the wrapper's `finally` releases it only if
+    it is held at that moment."""
+
+    def __init__(self, lock):
+        self._lock = lock
+        self.held = False
+
+    def acquire(self) -> None:
+        self._lock.__enter__()
+        self.held = True
+
+    def release(self) -> None:
+        self.held = False
+        self._lock.__exit__(None, None, None)
+
+
+def _merge_sessions(sessions: List["CloudSession"], **kwargs) -> "CloudSession":
+    """`_merge_sessions_impl` for a caller that does NOT hold
+    `_cloud_session_lock`. The lock is held to snapshot the inputs and again to
+    register the result, and RELEASED for the copy in between.
+
+    The copy is the long part: measured 6 M points/s, so about a minute for
+    issue #7's 354.6 M points on an SSD and several on a slow disk, and holding
+    the global session lock across it stalled every session request on every
+    cloud for that long. The inputs' arrays are captured by reference under the
+    lock, and nothing edits a session's arrays in place except a label stroke
+    (which bumps `column_write_gen`): a transform or a compaction REPLACES them,
+    leaving the captured ones intact. So the copy reads a consistent snapshot,
+    and the result is refused if any input's edit generation moved meanwhile."""
+    hold = _LockHold(_cloud_session_lock)
+    hold.acquire()
+    try:
+        return _merge_sessions_impl(sessions, hold=hold, **kwargs)
+    finally:
+        if hold.held:
+            hold.release()
+
+
+def _merge_sessions_locked(sessions: List["CloudSession"], **kwargs) -> "CloudSession":
+    """`_merge_sessions_impl` for a caller that already HOLDS
+    `_cloud_session_lock` and keeps it throughout (small merges composed inside
+    a larger critical section; tests)."""
+    return _merge_sessions_impl(sessions, hold=None, **kwargs)
+
+
+def _merge_sessions_impl(
+    sessions: List["CloudSession"],
+    *,
+    include_misses: bool = True,
+    progress=None,
+    cancel_event: "Optional[threading.Event]" = None,
+    hold: "Optional[_LockHold]" = None,
+    store_root: "Optional[_Path]" = None,
+    register: bool = True,
+) -> "CloudSession":
     """Concatenate several sessions' SURVIVING points into one new registered
-    session. The CALLER MUST HOLD `_cloud_session_lock`. The octree is NOT built
+    session. Entered with `_cloud_session_lock` HELD (see the two wrappers);
+    with `hold` it lets go of the lock for the copy. The octree is NOT built
     here (caller rebuilds, outside the lock).
+
+    Memory: the output is preallocated once and filled in chunks of
+    `session_store.DEFAULT_CHUNK_ROWS`, straight into a disk-backed session
+    store when it is big enough to warrant one (`_session_should_use_store`, the
+    same rule an import and a split follow). It used to vstack every input's
+    survivors into one RAM array, holding the slices and the output at once:
+    issue #7 merged 13 orchard scans into 354.6 M points, estimated 44.3 GiB on
+    a machine with a 7.6 GB budget, and spent nine minutes paging. Now RAM holds
+    one chunk per column, and the cloud lives in the store like any other big
+    session.
+
+    `include_misses=False` drops each input's interleaved is_miss rows (and the
+    then all-zero `is_miss` column). `progress(fraction, message)` reports the
+    fill, and `cancel_event` is checked between chunks: a cancel raises
+    ScanCanceled before anything is registered, and deletes a half-written
+    store.
 
     Reconciliation (the whole point of a correct stitch — see issue #3):
       - world_shift: every session stores `stored = world - shift`. We pick the
@@ -41230,61 +41941,70 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     """
     import time
 
-    # Per-input surviving slices (snapshot once; caller holds the lock).
-    survs = [~s.deleted for s in sessions]
-    counts = [int(m.sum()) for m in survs]
+    # Which rows each input contributes, as a boolean mask (1 byte a row;
+    # snapshot once, the caller holds the lock). The fill turns one input's
+    # mask into absolute indices at a time (`_rows`), so each chunk gathers only
+    # its own rows: `positions[mask]` would materialize every survivor at once.
+    keeps: List[np.ndarray] = []
+    for s in sessions:
+        keep = ~np.asarray(s.deleted)
+        if not include_misses:
+            miss_col = s.extras.get(_MISS_SLUG)
+            if miss_col is not None:
+                keep &= (np.asarray(miss_col) == 0)
+        keeps.append(keep)
+    counts = [int(np.count_nonzero(k)) for k in keeps]
     total = int(sum(counts))
+    if total == 0:
+        # Nothing survives: there is nothing to stitch, and PotreeConverter
+        # cannot ingest 0 points.
+        raise RuntimeError("merge inputs have no surviving points.")
+    offsets = [0]
+    for c in counts:
+        offsets.append(offsets[-1] + c)
+    # Only survivors are concatenated, so each input's deleted hits are gone
+    # from the merged cloud, as is whatever that input had already lost.
+    # (Leaving misses out removes no hits, so it changes nothing here.)
+    unrestorable = 0
+    for s, keep in zip(sessions, keeps):
+        miss_col = s.extras.get(_MISS_SLUG)
+        kept_hits = (int(np.count_nonzero(keep & (np.asarray(miss_col) == 0)))
+                     if miss_col is not None else int(np.count_nonzero(keep)))
+        unrestorable += (int(getattr(s, "unrestorable_hit_count", 0) or 0)
+                         + _hit_row_count_locked(s) - kept_hits)
+    # Each input's edit generations, to check after a copy made without the
+    # lock that nothing rewrote geometry or columns underneath it.
+    edit_marks = [(getattr(s, "geometry_gen", 0), getattr(s, "column_write_gen", 0))
+                  for s in sessions]
+
+    def _rows(i: int) -> "Optional[np.ndarray]":
+        """Input i's contributing rows as absolute indices, or None for "every
+        row" (a plain slice: no index array at all). Built for ONE input at a
+        time by the fill below: holding all of them, as the first cut did, was
+        8 bytes x every merged point (2.8 GB for the 354.6 M-point stitch in
+        issue #7) against an admission that had counted one."""
+        if counts[i] == int(keeps[i].shape[0]):
+            return None
+        return np.flatnonzero(keeps[i])
 
     # Common output frame = first input's shift (None → true world coords).
     shift_out = sessions[0].world_shift
     shift_out_arr = (np.asarray(shift_out, dtype=np.float64)
                      if shift_out is not None else np.zeros(3, dtype=np.float64))
 
-    def _reshift(pts: np.ndarray, sess: "CloudSession") -> np.ndarray:
-        # stored_out = stored_i + (shift_i - shift_out); both None → no-op.
-        shift_i = (np.asarray(sess.world_shift, dtype=np.float64)
-                   if sess.world_shift is not None else np.zeros(3, dtype=np.float64))
-        delta = shift_i - shift_out_arr
+    # stored_out = stored_i + (shift_i - shift_out); both None → no-op. Computed
+    # now, under the lock, for the copy that runs without it.
+    shift_deltas = [
+        (np.asarray(s.world_shift, dtype=np.float64) if s.world_shift is not None
+         else np.zeros(3, dtype=np.float64)) - shift_out_arr
+        for s in sessions]
+
+    def _reshift(pts: np.ndarray, delta: np.ndarray) -> np.ndarray:
         out = pts.astype(np.float64, copy=False)
         if np.any(delta != 0.0):
             out = out + delta
         return out
 
-    positions = np.vstack([_reshift(s.positions[m], s) for s, m in zip(sessions, survs)])
-
-    # colors / intensity: all-or-nothing. Present iff any input has it; missing
-    # inputs fill neutral (white for color, 0 for intensity), matching the LAS
-    # scale the session stores (uint16 0-65535).
-    any_colors = any(s.colors is not None for s in sessions)
-    if any_colors:
-        color_parts = []
-        for s, m, c in zip(sessions, survs, counts):
-            if s.colors is not None:
-                color_parts.append(s.colors[m])
-            else:
-                color_parts.append(np.full((c, 3), 65535, dtype=np.uint16))
-        colors = np.vstack(color_parts)
-    else:
-        colors = None
-
-    any_intensity = any(s.intensity is not None for s in sessions)
-    if any_intensity:
-        intensity = np.concatenate([
-            s.intensity[m] if s.intensity is not None else np.zeros(c, dtype=np.uint16)
-            for s, m, c in zip(sessions, survs, counts)
-        ])
-    else:
-        intensity = None
-
-    any_timestamps = any(s.timestamps is not None for s in sessions)
-    if any_timestamps:
-        timestamps = np.concatenate([
-            np.asarray(s.timestamps, dtype=np.float64)[m] if s.timestamps is not None
-            else np.zeros(c, dtype=np.float64)
-            for s, m, c in zip(sessions, survs, counts)
-        ])
-    else:
-        timestamps = None
     # The column's CLOCK must travel with it. Dropping it made every merged
     # Adjusted-Standard cloud export (and save) as week-seconds time, which a
     # re-import reads as `gps_week` and the trajectory join then refuses. Kept
@@ -41295,18 +42015,6 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
                  for s in sessions if s.timestamps is not None}
     gps_time_encoding = next(iter(encodings)) if len(encodings) == 1 else None
 
-    any_beam = any(s.beam_origins is not None for s in sessions)
-    if any_beam:
-        beam_parts = []
-        for s, m, c in zip(sessions, survs, counts):
-            if s.beam_origins is not None:
-                beam_parts.append(_reshift(np.asarray(s.beam_origins, dtype=np.float64)[m], s))
-            else:
-                beam_parts.append(np.zeros((c, 3), dtype=np.float64))
-        beam_origins = np.vstack(beam_parts)
-    else:
-        beam_origins = None
-
     # Union of extra-dim slugs, ordered by first appearance; carry labels.
     merged_meta: List[dict] = []
     seen_slugs: set = set()
@@ -41316,27 +42024,21 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
             if slug is not None and slug not in seen_slugs:
                 seen_slugs.add(slug)
                 merged_meta.append({"slug": slug, "label": entry.get("label", slug)})
+    # The type a source file DECLARED for a column travels with it, when every
+    # input that declares one agrees. Without it the merged cloud's next
+    # compaction (any bake) narrows a declared float64 to float32, which is the
+    # loss `_compact_column`'s `declared` exists to prevent; and the in-RAM
+    # merge used to do that narrowing itself, on the spot.
+    for entry in merged_meta:
+        declared = {d for d in (_declared_dtype(s, entry["slug"]) for s in sessions) if d}
+        if len(declared) == 1:
+            entry["dtype"] = next(iter(declared))
     # Any slug that exists in `extras` but not in extra_dims_meta (defensive).
     for s in sessions:
         for slug in s.extras.keys():
             if slug not in seen_slugs:
                 seen_slugs.add(slug)
                 merged_meta.append({"slug": slug, "label": slug})
-
-    extras: Dict[str, np.ndarray] = {}
-    for entry in merged_meta:
-        slug = entry["slug"]
-        parts = []
-        for s, m, c in zip(sessions, survs, counts):
-            col = s.extras.get(slug)
-            if col is not None:
-                parts.append(np.asarray(col)[m])
-            else:
-                parts.append(np.zeros(c, dtype=np.uint8))
-        # Each input keeps its own type; the concatenation promotes to one
-        # that holds them all, and compaction then narrows it again.
-        extras[slug] = (_compact_column(np.concatenate(parts), slug) if parts
-                        else np.zeros(0, dtype=np.uint8))
 
     # Normals are the one column family the zero-fill above cannot honestly
     # extend. For a scalar like `ground_class`, 0 is a usable "unknown". For a
@@ -41351,11 +42053,16 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     # half-fabricated one is a silent lie. When EVERY input has them the union is
     # genuine and they are kept.
     _normal_slugs = [s for s, _ in normals_mod.COLUMNS]
-    if any(s in extras for s in _normal_slugs) and not all(
+    if any(s in seen_slugs for s in _normal_slugs) and not all(
             all(sl in sess_i.extras for sl in _normal_slugs) for sess_i in sessions):
-        for sl in _normal_slugs:
-            extras.pop(sl, None)
         merged_meta = [e for e in merged_meta if e["slug"] not in _normal_slugs]
+    # With misses excluded every surviving row is a hit, so `is_miss` would be
+    # an all-zero column claiming the cloud was checked for misses and had none.
+    if not include_misses:
+        merged_meta = [e for e in merged_meta if e["slug"] != _MISS_SLUG]
+    # A slug some input carries only in extra_dims_meta (no column) has nothing
+    # to concatenate; the old loop zero-filled it for every input, and so does
+    # this one, so the meta and the columns stay one-to-one.
 
     # CRS: keep it only if every input agrees (else the merged cloud has no single CRS).
     epsgs = {s.crs_epsg for s in sessions if s.crs_epsg is not None}
@@ -41374,6 +42081,136 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
                          if len(unit_scales) == 1 and None not in unit_scales else None)
 
     new_id = uuid.uuid4().hex[:8]
+    # `store_root` names the store's directory for a caller that will hand the
+    # arrays to an EXISTING session (`_append_split_leftover_locked`): the
+    # directory then has to carry that session's id, or nothing would ever
+    # clean it up.
+    store = None
+    if _session_should_use_store(total):
+        if store_root is None:
+            store = _new_session_store(new_id, total)
+        else:
+            _Path(store_root).parent.mkdir(parents=True, exist_ok=True)
+            store = session_store.SessionStore.create(_Path(store_root), total)
+
+    def _alloc(name: str, dtype, shape1: "Tuple[int, ...]" = ()) -> np.ndarray:
+        if store is not None:
+            return store.allocate_column(name, dtype, shape1)
+        return np.zeros((total,) + tuple(shape1), dtype=dtype)
+
+    def _common_dtype(arrays, fill_dtype) -> np.dtype:
+        # The type np.concatenate would promote the parts to: every present
+        # input's own type, plus the fill's when some input lacks the column.
+        present = [np.asarray(a).dtype for a in arrays if a is not None]
+        if len(present) < len(arrays):
+            present.append(np.dtype(fill_dtype))
+        return np.result_type(*present)
+
+    # (output name, getter, fill dtype, fill value, row shape, reshift?)
+    plan = [("positions", lambda s: s.positions, np.float64, 0.0, (3,), True)]
+    # colors / intensity / timestamps / beam origins: all-or-nothing. Present
+    # iff any input has it; inputs lacking it fill neutral (white for color, 0
+    # otherwise), matching the LAS scale the session stores (uint16 0-65535).
+    if any(s.colors is not None for s in sessions):
+        plan.append(("colors", lambda s: s.colors, np.uint16, 65535, (3,), False))
+    if any(s.intensity is not None for s in sessions):
+        plan.append(("intensity", lambda s: s.intensity, np.uint16, 0, (), False))
+    if any(s.timestamps is not None for s in sessions):
+        plan.append(("timestamps", lambda s: s.timestamps, np.float64, 0.0, (), False))
+    if any(s.beam_origins is not None for s in sessions):
+        plan.append(("beam_origins", lambda s: s.beam_origins, np.float64, 0.0, (3,), True))
+    extra_cols: Dict[str, str] = {}
+    for entry in merged_meta:
+        slug = entry["slug"]
+        col_name = f"x{len(extra_cols)}"
+        extra_cols[col_name] = slug
+        plan.append((col_name, (lambda s, _slug=slug: s.extras.get(_slug)),
+                     np.uint8, 0, (), False))
+
+    work_total = max(1, total * len(plan))
+    work_done = 0
+    out_cols: Dict[str, np.ndarray] = {}
+    # Every input column, captured BY REFERENCE while the lock is held. The
+    # copy below reads only these, never the sessions: an edit that lands
+    # meanwhile replaces a session's arrays and leaves these as they were.
+    srcs = {name: [get(s) for s in sessions] for name, get, *_rest in plan}
+    n_inputs = len(sessions)
+    if hold is not None:
+        hold.release()
+    try:
+        # Every output column first, then ONE INPUT AT A TIME across all of
+        # them, so a single input's row index is alive at once.
+        for name, _get, fill_dtype, _fill, shape1, _reshift_col in plan:
+            if name in ("positions", "beam_origins", "timestamps"):
+                dtype = np.dtype(np.float64)
+            else:
+                dtype = _common_dtype(srcs[name], fill_dtype)
+            out_cols[name] = _alloc(name, dtype, shape1)
+        for i in range(n_inputs):
+            off, c = offsets[i], counts[i]
+            take = _rows(i)
+            for name, _get, _fd, fill_value, _shape1, reshift in plan:
+                out = out_cols[name]
+                src = srcs[name][i]
+                if src is None:
+                    if fill_value:
+                        out[off:off + c] = fill_value
+                    work_done += c
+                    continue
+                src = np.asarray(src)
+                for a, b in session_store.iter_ranges(c):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise ScanCanceled()
+                    chunk = src[a:b] if take is None else src[take[a:b]]
+                    if reshift:
+                        chunk = _reshift(chunk, shift_deltas[i])
+                    out[off + a:off + b] = chunk
+                    work_done += b - a
+                    if progress is not None:
+                        progress(work_done / work_total,
+                                 f"Combining cloud {i + 1} of {n_inputs}")
+            del take
+        deleted = (store.allocate_column("deleted", np.bool_) if store is not None
+                   else np.zeros(total, dtype=bool))
+        if store is not None:
+            store.set_attr("extras", extra_cols)
+            store.set_attr("extras_order", [e["slug"] for e in merged_meta])
+            store.flush()
+        if hold is not None:
+            hold.acquire()
+            # Copied without the lock: refuse the result if an input's geometry
+            # or columns were rewritten meanwhile (a transform, a label stroke).
+            # Its captured arrays may be a mix of before and after, or simply no
+            # longer what the cloud is. Nothing has been registered yet.
+            for s, mark in zip(sessions, edit_marks):
+                if (getattr(s, "geometry_gen", 0), getattr(s, "column_write_gen", 0)) != mark:
+                    raise RuntimeError(
+                        "A cloud was edited while it was being stitched, so the stitch "
+                        "was abandoned. Nothing was changed; run the stitch again.")
+    except BaseException:
+        if store is not None:
+            root = store.root
+            # Drop every map before deleting: Windows refuses to remove a file
+            # that still has a mapped view, and a canceled 20 GB merge would
+            # otherwise sit on disk until the next launch.
+            out_cols.clear()
+            out = None  # noqa: F841 - releases the last column's map
+            store.close()
+            _delete_session_store_dir(root)
+        raise
+
+    positions = out_cols["positions"]
+    colors = out_cols.get("colors")
+    intensity = out_cols.get("intensity")
+    timestamps = out_cols.get("timestamps")
+    beam_origins = out_cols.get("beam_origins")
+    # Each column keeps the type that holds every input's own (already compact)
+    # type. It is NOT compacted again here: that narrowed a declared float64 to
+    # float32 in an in-RAM merge and not in a store-backed one, so the same
+    # stitch gave different columns depending on its size.
+    extras: Dict[str, np.ndarray] = {
+        slug: out_cols[col_name] for col_name, slug in extra_cols.items()}
+
     new_sess = CloudSession(
         session_id=new_id,
         source_path=sessions[0].source_path,  # provenance label only
@@ -41391,23 +42228,56 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         crs_epsg=crs_epsg,
         source_units=merged_units,
         source_unit_scale=merged_unit_scale,
-        deleted=np.zeros(total, dtype=bool),
+        deleted=deleted,
         deleted_history=[],
         octree_cache_id=None,
-        # Only survivors are concatenated, so each input's deleted hits are gone
-        # from the merged cloud, as is whatever that input had already lost.
-        unrestorable_hit_count=sum(
-            int(getattr(s, "unrestorable_hit_count", 0) or 0)
-            + _hit_row_count_locked(s) - _hit_row_count_locked(s, np.flatnonzero(m))
-            for s, m in zip(sessions, survs)),
+        unrestorable_hit_count=unrestorable,
         created_at=time.time(),
         last_accessed=time.time(),
         # A merged multi-scan cloud has no single beam apex → project misses at
         # true far-field coords (origin=None). Set by the endpoint after rebuild.
         miss_octree_origin=None,
     )
+    new_sess.store = store
+    if not register:
+        # The caller wants the arrays, not a session: nothing is published.
+        return new_sess
+    # Pinned BEFORE it is registered. The sweep can see a session the moment it
+    # is in the registry, and with every input pinned this one is the only
+    # victim: spilled in that gap, the caller would build its octree on an
+    # orphaned object while the spilled copy recorded no octree at all.
+    _pin_session(new_id)
     _cloud_sessions[new_id] = new_sess
     return new_sess
+
+
+def _discard_cloud_session(session_id: str, release_arrays: bool = False) -> bool:
+    """Free a session's arrays, its store and its spill. Returns whether it
+    existed. The body of DELETE /api/cloud/session/{id}, shared with the merge,
+    which must not leave a result nobody will ever be told about.
+
+    `release_arrays` also clears the session object's own array fields, so no
+    memory map of the store outlives it: Windows will not delete a mapped file,
+    and a canceled 20 GB merge would otherwise stay on disk until the next
+    launch. Only for a session NO other request can be using (the merge's own
+    unpublished result); a deleted session an in-flight request still reads
+    must keep its arrays."""
+    with _cloud_session_lock:
+        live = _cloud_sessions.pop(session_id, None)
+        existed = live is not None
+    if live is not None and release_arrays:
+        for name in ("positions", "colors", "intensity", "timestamps", "beam_origins"):
+            setattr(live, name, None)
+        live.deleted = np.zeros(0, dtype=bool)
+        live.extras = {}
+    if live is not None and live.store is not None:
+        live.store.close()
+    # An explicit delete must also reclaim the spill (and the store directory,
+    # which `_drop_session_spill` removes), or a scene the user cleared would
+    # leave its clouds on disk until the next launch wiped them.
+    existed = existed or session_id in _spilled_sessions or session_id in _spilling_sessions
+    _drop_session_spill(session_id)
+    return existed
 
 
 # ==================== PROJECT FILE (.phyto) ====================
@@ -41555,6 +42425,78 @@ def project_file_mod():
     return project_file
 
 
+def _log_project_save_octrees(sessions, snapshots, scene_octree_ids, embedded: set,
+                              regenerate: set) -> None:
+    """One line per saved cloud: each octree id it can be drawn from, and what
+    the save did with it -- `embedded` (copied into the file), `rebuilt on open`
+    (left out; open rebuilds it from the session) or `MISSING` (not in the cache,
+    so the reopened cloud has no display until the renderer rebuilds it). Plus
+    one line for ids the scene asked for that no saved session owns.
+
+    Together with `_log_project_open_octrees` this tells from a log alone where a
+    reopened cloud's display went, which issue #7's log could not."""
+    def outcome(cid):
+        if cid in embedded:
+            return "embedded"
+        if cid in regenerate:
+            return "rebuilt on open"
+        return "MISSING"
+
+    owned: set = set()
+    for (sid, _sess), fields in zip(sessions, snapshots):
+        parts = []
+        for k, label in (("octree_cache_id", "octree"),
+                         ("rendered_octree_cache_id", "rendered"),
+                         ("miss_octree_cache_id", "miss")):
+            cid = fields.get(k)
+            if cid:
+                owned.add(cid)
+                parts.append(f"{label}={cid} ({outcome(cid)})")
+        logger.info("project save: cloud %s: %s", sid, ", ".join(parts) or "no octree")
+    orphans = [c for c in dict.fromkeys(scene_octree_ids or []) if c not in owned]
+    if orphans:
+        logger.info("project save: scene octrees no saved cloud owns: %s",
+                    ", ".join(f"{c} ({outcome(c)})" for c in orphans))
+
+
+def _log_project_open_octrees(restored: Dict[str, "CloudSession"], embedded: set,
+                              regenerate: set, octree_map: Dict[str, str],
+                              cached_before: set,
+                              saved_ids: "Dict[str, Dict[str, Optional[str]]]") -> None:
+    """One line per reopened cloud: for each octree id it was saved with, where
+    the reopened display comes from -- `from file`, `already cached`, `rebuilt as
+    <new id>`, or `NONE` (the renderer will find it missing). Logged after the
+    rebuilds, before the sessions are handed back.
+
+    `saved_ids` is each cloud's three ids as the project stored them, captured
+    BEFORE the rebuilds: a rebuild overwrites the session's own field with the
+    new id, and looking the saved one back up through `octree_map` by value
+    names the wrong cloud when two saved ids rebuild to the same new one."""
+    root = _octree_cache_root()
+    for key, sess in restored.items():
+        parts = []
+        for attr, label in (("octree_cache_id", "octree"),
+                            ("rendered_octree_cache_id", "rendered"),
+                            ("miss_octree_cache_id", "miss")):
+            saved = (saved_ids.get(key) or {}).get(attr)
+            if not saved:
+                continue
+            if saved in octree_map:
+                how = f"rebuilt as {octree_map[saved]}"
+            elif saved in cached_before:
+                how = "already cached"
+            elif saved in embedded and (root / saved / "metadata.json").is_file():
+                how = "from file"
+            elif (root / saved / "metadata.json").is_file():
+                how = "on disk"
+            else:
+                how = "NONE" + (" (was meant to be rebuilt; the rebuild failed)"
+                                if saved in regenerate else " (not in the file or the cache)")
+            parts.append(f"{label}={saved} ({how})")
+        logger.info("project open: cloud %s -> session %s: %s", key, sess.session_id,
+                    ", ".join(parts) or "no octree")
+
+
 def _project_regenerable_octrees(fields: dict) -> List[str]:
     """The octree ids of a snapshot that open can rebuild EXACTLY from the
     saved session, so the project need not carry them.
@@ -41675,6 +42617,22 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
     except BaseException:
         _project_blob_drop(request.scene_token)
         raise
+    # Every octree this save may copy into the file is pinned against the cache
+    # trim until the save ends. The snapshot below decides WHICH octrees travel,
+    # but they are copied last, minutes later on a big project, and in between a
+    # display refresh that was already running can finish: the cloud takes a new
+    # octree, nothing references the old one, and the refresh's trim deletes it
+    # (always, on a cache already over its cap). The save then found nothing to
+    # copy and wrote a project whose cloud names an octree that exists nowhere.
+    # That is issue #7's "Octree load failed" on reopen. Registered BEFORE the
+    # snapshot with the ids the sessions hold right now, so there is no gap.
+    save_pins: set = set(request.octree_ids or [])
+    with _cloud_session_lock:
+        for _sid, s in sessions:
+            save_pins.update(c for c in (s.octree_cache_id, s.rendered_octree_cache_id,
+                                         s.miss_octree_cache_id) if c)
+    with _save_pin_lock:
+        _save_pinned_octrees.append(save_pins)
     try:
         # The deleted-mask copies plus one chunk buffer.
         with _ADMISSION.admit(n_total + (64 << 20), f"save project ({n_total:,} pts)"):
@@ -41682,6 +42640,11 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
             # each as its turn came let an edit to a later cloud land in its
             # saved arrays but not in the scene document staged before it.
             snapshots = [_project_session_snapshot(sess) for _sid, sess in sessions]
+            with _save_pin_lock:
+                for fields in snapshots:
+                    save_pins.update(
+                        fields[k] for k in ("octree_cache_id", "rendered_octree_cache_id",
+                                            "miss_octree_cache_id") if fields.get(k))
             with zipfile.ZipFile(partial, "w", allowZip64=True) as zf:
                 _report(0.02, "Writing scene")
                 zi = zipfile.ZipInfo(_PROJECT_SCENE_MEMBER, date_time=time.localtime()[:6])
@@ -41717,8 +42680,21 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
                     try:
                         if pf.write_octree(zf, cid, _octree_cache_root() / pf.check_cache_id(cid)):
                             octrees.append(cid)
+                        else:
+                            # Not on disk, so neither embedded nor rebuildable
+                            # on open: that cloud reopens with no display and
+                            # the renderer rebuilds it from the session ("no
+                            # such file" in its log, then a rebuild_octree).
+                            # Issue #7's log showed exactly that with nothing
+                            # saying why; this line is the why.
+                            logger.warning(
+                                "project save: display octree %s is not in the cache; the "
+                                "reopened cloud will rebuild its display from the session", cid)
                     except pf.ProjectError:
+                        logger.warning("project save: skipped invalid octree id %r", cid)
                         continue
+                _log_project_save_octrees(sessions, snapshots, request.octree_ids,
+                                          set(octrees), regenerate)
                 pf.write_manifest(zf, app_version=BACKEND_VERSION, sessions=entries, octrees=octrees,
                                   regenerate=sorted(regenerate))
             # Last cancel point: past the rename the file IS saved, and
@@ -41732,6 +42708,11 @@ def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
             pass
         raise
     finally:
+        with _save_pin_lock:
+            try:
+                _save_pinned_octrees.remove(save_pins)
+            except ValueError:
+                pass
         save_lock.release()
         _project_blob_drop(request.scene_token)
     if progress is not None:
@@ -41848,6 +42829,18 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
             with _ADMISSION.admit(min(total_n * 16, memory_budget.admission_budget_bytes()),
                                   f"open project ({total_n:,} pts)"):
                 octs = manifest.get("octrees", [])
+                # For the per-cloud open line: which of the project's octrees
+                # this machine already had before anything was installed.
+                # (Only well-formed ids are probed: this is a log line's input,
+                # and must not turn a malformed id the open used to ignore into
+                # a failed open.)
+                cached_before = {
+                    cid for cid in list(octs) + list(manifest.get("regenerate", []))
+                    if isinstance(cid, str) and len(cid) == 40
+                    and all(c in "0123456789abcdef" for c in cid)
+                    and (_octree_cache_root() / cid / "metadata.json").is_file()
+                }
+                _octree_cache_summary(f"opening {_Path(request.path).name}")
                 for j, cid in enumerate(octs):
                     _report(0.02 + 0.08 * j / max(1, len(octs)), "Installing display octrees")
                     cache_dir = _octree_cache_root() / cid
@@ -41873,11 +42866,18 @@ def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
             # whenever the two together exceed the budget (the admission
             # only lets an oversized job through when nothing else is in).
             regenerate = set(manifest.get("regenerate", []))
+            saved_ids = {
+                key: {attr: getattr(sess, attr, None)
+                      for attr in ("octree_cache_id", "rendered_octree_cache_id",
+                                   "miss_octree_cache_id")}
+                for key, sess in restored.items()}
             for i, sess in enumerate(restored.values()):
                 lo = 0.4 + 0.58 * i / max(1, len(restored))
                 hi = 0.4 + 0.58 * (i + 1) / max(1, len(restored))
                 _report(lo, f"Building display for cloud {i + 1}/{len(restored)}")
                 _project_rebuild_octrees(sess, regenerate, octree_map, progress, (lo, hi), warnings)
+            _log_project_open_octrees(restored, set(octs), regenerate, octree_map,
+                                      cached_before, saved_ids)
             token, path = _project_blob_new()
             try:
                 with zf.open(_PROJECT_SCENE_MEMBER) as src, open(path, "wb") as dst:
@@ -41926,54 +42926,267 @@ def project_open(request: ProjectOpenRequest, http_request: Request):
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
-@app.post("/api/cloud/session/merge")
-def session_merge(request: SessionMergeRequest):
-    """Concatenate the surviving points of >=2 sessions into one new session and
-    build its octree (+ a projected-miss octree when any input carried misses).
-    Reconciles differing global shifts and unions scalar extra-dim columns. No
-    source file read. Returns {merged: {session_id, point_count, ...octree}}."""
-    ids = list(request.session_ids or [])
-    if len(ids) < 2:
-        raise HTTPException(status_code=400, detail="merge requires at least 2 session ids.")
+def _merge_profile(sess: "CloudSession") -> dict:
+    """What a merge needs to know about one input to size itself, WITHOUT the
+    arrays: survivor and miss counts plus which columns it carries. The caller
+    holds `_cloud_session_lock` or owns `sess` outright (the spill writer).
 
-    sessions = [_get_cloud_session(sid) for sid in ids]  # 404 propagates per id
+    Recorded in every spill entry (`_spill_cloud_session`) so the merge's
+    pre-flight can size a batch of evicted clouds without reading them back.
+    Restoring them is minutes on a big batch, and it happened before the
+    response's first byte, i.e. before any progress or keepalive could reach
+    the client."""
+    surv = ~np.asarray(sess.deleted)
+    miss = sess.extras.get(_MISS_SLUG)
+    return {
+        "survivors": int(surv.sum()),
+        "misses": int(np.count_nonzero(np.asarray(miss)[surv])) if miss is not None else 0,
+        "n_extras": len(sess.extras),
+        "colors": sess.colors is not None,
+        "intensity": sess.intensity is not None,
+        "timestamps": sess.timestamps is not None,
+        "origins": sess.beam_origins is not None,
+    }
 
-    # Sizing read only, outside the lock: an unlocked count may be stale by a
-    # few points under a concurrent delete, which moves the ESTIMATE by a
-    # rounding error. The authoritative zero-check stays under the lock below,
-    # exactly where it was.
+
+def _merge_profile_or_none(sess: "CloudSession") -> "Optional[dict]":
+    """`_merge_profile` for the spill writer, which runs with the lock RELEASED.
+
+    A lookup can claim the session back mid-spill and a bake can then replace
+    its arrays between this function's reads, so the mask and the miss column
+    can disagree in length and the count raises. That must not escape: it failed
+    the request whose sweep it was, left this session stranded in
+    `_spilling_sessions` and skipped every later victim of that sweep. A
+    missing profile is fine (`_merge_profiles` reads the session instead), and
+    a claimed-back spill is discarded anyway."""
+    try:
+        return _merge_profile(sess)
+    except Exception:
+        return None
+
+
+def _merge_profiles(ids: List[str]) -> List[dict]:
+    """`_merge_profile` for each id, from the live session or its spill entry.
+
+    Pins every id first (so the sweep keeps the resident ones resident until the
+    worker takes them) and falls back to `_get_cloud_session` only for an id
+    with no recorded profile -- which is also how an unknown id becomes its 404,
+    before the stream starts."""
+    for sid in ids:
+        _pin_session(sid)
+    profiles: Dict[str, dict] = {}
+    with _cloud_session_lock:
+        for sid in ids:
+            sess = _cloud_sessions.get(sid) or _spilling_sessions.get(sid)
+            if sess is not None:
+                profiles[sid] = _merge_profile(sess)
+                continue
+            entry = _spilled_sessions.get(sid)
+            if entry is not None and entry.get("merge_profile") is not None:
+                profiles[sid] = dict(entry["merge_profile"])
+    for sid in ids:
+        if sid not in profiles:
+            sess = _get_cloud_session(sid)  # 404 propagates per id
+            with _cloud_session_lock:
+                profiles[sid] = _merge_profile(sess)
+    return [profiles[sid] for sid in ids]
+
+
+def _merge_estimate(profiles: List[dict], include_misses: bool) -> dict:
+    """Size of the merged cloud and what building it costs: points, RAM, the
+    store's disk, and an ETA (seconds + breakdown) for the cost advisory."""
+    hits = sum(max(0, p["survivors"] - p["misses"]) for p in profiles)
+    misses = sum(p["misses"] for p in profiles) if include_misses else 0
+    n_out = hits + misses
+    per_point = memory_budget.bytes_per_point(
+        n_extras=max((p["n_extras"] for p in profiles), default=0),
+        colors=any(p["colors"] for p in profiles),
+        intensity=any(p["intensity"] for p in profiles),
+        timestamps=any(p["timestamps"] for p in profiles),
+        origins=any(p["origins"] for p in profiles),
+    )
+    chunk_bytes = session_store.DEFAULT_CHUNK_ROWS * per_point
+    use_store = _session_should_use_store(n_out)
+    # What `_merge_sessions_locked` holds besides the output: every input's
+    # keep mask (1 byte a row), ONE input's row index (int64) and a chunk of a
+    # column in flight.
+    working = (sum(p["survivors"] for p in profiles)
+               + max((p["survivors"] for p in profiles), default=0) * 8
+               + 2 * chunk_bytes)
+    if use_store:
+        merge_ram = working
+        store_disk = n_out * per_point
+    else:
+        merge_ram = n_out * per_point + working
+        store_disk = 0
+    t_combine = n_out / _RATE_MERGE_PTS_PER_S
+    t_octree = _convert_seconds(hits)
+    t_miss = _convert_seconds(misses) if misses else 0.0
+    parts = [f"combining ~{_fmt_duration(t_combine)}", f"octree ~{_fmt_duration(t_octree)}"]
+    if misses:
+        parts.append(f"sky/miss octree ~{_fmt_duration(t_miss)}")
+    # Disk, by where it lands. The store is the cloud itself. The octree build
+    # writes the hits to a temporary LAS (about the session's own bytes a point)
+    # and converts it into the cache (~50 bytes a point, see
+    # `_project_regenerable_octrees`); kept misses add a position-only scratch
+    # array and LAS in temp and a smaller octree in the cache.
+    miss_scratch = misses * 24 if _session_should_use_store(misses) else 0
+    return {
+        "points": n_out,
+        "hits": hits,
+        "misses": misses,
+        "merge_ram": int(merge_ram),
+        # Admission covers the merge itself; the octree build admits its own
+        # PotreeConverter run. The advisory warns on whichever is larger.
+        "peak_ram": int(max(merge_ram, hits * _POTREE_BYTES_PER_POINT)),
+        "store_disk": int(store_disk),
+        "temp_disk": int(max(hits * per_point, misses * _MISS_LAS_BYTES_PER_POINT + miss_scratch)),
+        "cache_disk": int(hits * _OCTREE_DISK_BYTES_PER_POINT
+                          + misses * _MISS_LAS_BYTES_PER_POINT),
+        "seconds": t_combine + t_octree + t_miss,
+        "breakdown": ", ".join(parts),
+    }
+
+
+# A merge copies every column of every input through fancy indexing, into a
+# memory map when the result is large. Measured 6.2 M points/s (two 10 M-point
+# inputs, SSD); halved per the convention above. The first estimate borrowed the
+# 30 M/s np.save rate and promised 12 s for a step that takes minutes.
+_RATE_MERGE_PTS_PER_S = 3e6
+_OCTREE_DISK_BYTES_PER_POINT = 50
+_MISS_LAS_BYTES_PER_POINT = 34     # LAS point format 3
+
+
+def _volume_id(path) -> int:
+    """Which disk `path` is on (two paths with the same id share free space)."""
+    return os.stat(path).st_dev
+
+
+def _merge_disk_shortfall(est: dict) -> "Optional[str]":
+    """Why the merge described by `est` cannot fit on disk, or None when it can.
+
+    Counts everything the run writes, not just the store: the temporary LAS
+    files and the octrees are of the same order (issue #7's store was 23.8 GB,
+    with as much again around it), and a disk that only fits the store fills
+    minutes into the build. Needs are summed per VOLUME, since the spill
+    directory, the temp directory and the octree cache are often one disk."""
+    import tempfile
+    needs: Dict[object, list] = {}
+    for label, nbytes, path in (
+            ("the merged cloud", est["store_disk"], _session_spill_root()),
+            ("temporary files", est["temp_disk"], _Path(tempfile.gettempdir())),
+            ("the display octree", est["cache_disk"], _octree_cache_root())):
+        if nbytes <= 0:
+            continue
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(path).free
+            dev = _volume_id(path)
+        except OSError:
+            continue
+        entry = needs.setdefault(dev, [0, free, [], path])
+        entry[0] += nbytes
+        entry[1] = min(entry[1], free)
+        entry[2].append(label)
+    for need, free, labels, path in needs.values():
+        if free < need:
+            return (
+                f"Not enough free disk space to stitch: {est['points']:,} points need about "
+                f"{memory_budget.fmt_bytes(need)} on the disk holding {path} "
+                f"(for {', '.join(labels)}) but only {memory_budget.fmt_bytes(free)} is "
+                "free. Stitch fewer clouds at a time, or leave out sky/miss points.")
+    return None
+
+
+def _do_session_merge(
+    ids: List[str],
+    *,
+    include_misses: bool = True,
+    progress=None,
+    cancel_event: "Optional[threading.Event]" = None,
+    admit_bytes: "Optional[int]" = None,
+) -> dict:
+    """The merge worker: resolve the inputs, concatenate them, build the octree
+    (and the projected-miss octree), and return the endpoint's JSON body.
+
+    The merged session is registered before its octree exists, so ANY exit
+    other than a returned result -- a cancel, a converter failure -- discards it.
+    It used to survive both: issue #7's client gave up after 5 minutes, the
+    backend finished 4.5 minutes later, and the 354 M-point result stayed
+    resident (and its octrees pinned in the cache) with no scan pointing at it."""
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
+    def _checkpoint():
+        if cancel_event is not None and cancel_event.is_set():
+            raise ScanCanceled()
+
+    n = len(ids)
+    sessions = []
+    for k, sid in enumerate(ids):
+        _checkpoint()
+        _report(0.05 * k / n, f"Loading cloud {k + 1} of {n}")
+        sessions.append(_get_cloud_session(sid))
+    _checkpoint()
+    if admit_bytes is None:
+        admit_bytes = _merge_estimate(
+            [_merge_profile(s) for s in sessions], include_misses)["merge_ram"]
     n_est = sum(int((~s.deleted).sum()) for s in sessions)
 
-    # The biggest allocation the backend can make: every input's surviving
-    # points are sliced out and then vstacked into one new cloud, so the inputs'
-    # slices and the output are live at the same time. Admitted OUTSIDE
-    # `_cloud_session_lock` — `_acquire` sleeps on its Condition while it waits,
-    # and holding the session lock across that would stall every other session
-    # operation behind this one (and deadlock anything that admits under it).
-    with _ADMISSION.admit(
-            _session_mutation_bytes(sessions, out_points=n_est, copies=2.0),
-            f"merge {len(sessions)} sessions into {n_est:,} pts"):
-        with _cloud_session_lock:
-            # Refuse an all-empty merge (nothing survives) — PotreeConverter
-            # can't ingest 0 points, and there's nothing to stitch.
-            if sum(int((~s.deleted).sum()) for s in sessions) == 0:
-                raise HTTPException(
-                    status_code=400, detail="merge inputs have no surviving points.")
-            merged = _merge_sessions_locked(sessions)
+    _report(0.05, "Combining points")
+    # Admitted OUTSIDE `_cloud_session_lock` — `_acquire` sleeps on its
+    # Condition while it waits, and holding the session lock across that would
+    # stall every other session operation behind this one (and deadlock
+    # anything that admits under it).
+    with _ADMISSION.admit(admit_bytes, f"merge {n} sessions into {n_est:,} pts"):
+        # Takes `_cloud_session_lock` itself, and lets go of it for the copy.
+        # (An all-empty merge is refused inside, under the lock.)
+        merged = _merge_sessions(
+            sessions, include_misses=include_misses,
+            progress=_WindowedProgress(progress, 0.05, 0.35) if progress is not None else None,
+            cancel_event=cancel_event)
+    try:
+        # (`_merge_sessions_locked` pinned the new session before registering
+        # it, so this sweep cannot spill it out from under its octree build.)
+        _sweep_cloud_sessions()
+        _checkpoint()
+        has_misses = bool(include_misses and _MISS_SLUG in merged.extras
+                          and np.any(np.asarray(merged.extras[_MISS_SLUG]) != 0))
+        cache_key, cache_dir, meta = _session_rebuild(
+            merged, progress=progress, cancel_event=cancel_event,
+            span=(0.35, 0.8 if has_misses else 1.0),
+            # Nothing else can name this session yet, so its LAS write need not
+            # hold the global session lock: on a 200 M-point merge that is tens
+            # of seconds during which every other session request would stall.
+            private=True)
 
-    _sweep_cloud_sessions()
-    cache_key, cache_dir, meta = _session_rebuild(merged)
+        # Misses: any interleaved is_miss survivors on the merged cloud → build
+        # the projected-miss octree at true far-field coords (no single origin).
+        miss_octree_cache_id = None
+        if has_misses:
+            _checkpoint()
+            _report(0.8, "Building sky/miss octree")
+            miss_octree_cache_id = _build_miss_octree(merged, None, cancel_event=cancel_event)
+            with _cloud_session_lock:
+                merged.miss_octree_cache_id = miss_octree_cache_id
+        _checkpoint()
+        # A merged cloud's octree can be 10+ GB; trim the cache now rather than
+        # leaving it over its cap until some later bake happens to run.
+        keep_dirs = [cache_dir]
+        if miss_octree_cache_id:
+            keep_dirs.append(_octree_cache_root() / miss_octree_cache_id)
+        _evict_octree_cache(_octree_cache_max_bytes(), keep=keep_dirs,
+                            reason=f"merge {merged.session_id}")
+    except BaseException:
+        doomed = merged.session_id
+        # Drop this frame's reference too: the store's files cannot be removed
+        # on Windows while any array still maps them.
+        merged = None
+        _discard_cloud_session(doomed, release_arrays=True)
+        raise
 
-    # Misses: any interleaved is_miss survivors on the merged cloud → build the
-    # projected-miss octree at true far-field coords (no single origin).
-    miss_arr = merged.extras.get(_MISS_SLUG)
-    has_misses = bool(miss_arr is not None and np.any(miss_arr != 0))
-    miss_octree_cache_id = None
-    if has_misses:
-        miss_octree_cache_id = _build_miss_octree(merged, None)
-        with _cloud_session_lock:
-            merged.miss_octree_cache_id = miss_octree_cache_id
-
+    _report(1.0, "Done")
     world_shift_out = merged.world_shift.tolist() if merged.world_shift is not None else None
     return {
         "merged": {
@@ -41992,6 +43205,78 @@ def session_merge(request: SessionMergeRequest):
             **meta,
         },
     }
+
+
+@app.post("/api/cloud/session/merge")
+def session_merge(request: SessionMergeRequest, http_request: Request):
+    """Concatenate the surviving points of >=2 sessions into one new session and
+    build its octree (+ a projected-miss octree when any input carried misses).
+    Reconciles differing global shifts and unions scalar extra-dim columns. No
+    source file read.
+
+    Streams PHP1 progress markers ahead of its JSON tail
+    ({merged: {session_id, point_count, ...octree}}) and honors
+    /api/cancel/{run_id}, like every other long operation. It used to be one
+    blocking round trip under a fixed 5-minute client deadline: issue #7 stitched
+    13 orchard scans (354.6 M points), the backend took 9.3 minutes, and the
+    client had given up at 5 with the result still being built.
+
+    Everything that can refuse runs BEFORE the stream opens, so it arrives as a
+    real status code rather than an in-band error: 400 (fewer than 2 ids, nothing
+    survives), 404 (unknown id), 507 (no disk for the store) and 409 with a
+    `cost_warning` (past the time or memory guideline; resend with
+    `acknowledge_cost`). None of it reads a spilled session back
+    (`_merge_profiles`), so the response starts at once however many inputs
+    were evicted."""
+    ids = list(request.session_ids or [])
+    if len(ids) < 2:
+        raise HTTPException(status_code=400, detail="merge requires at least 2 session ids.")
+
+    est = _merge_estimate(_merge_profiles(ids), request.include_misses)
+    if est["points"] == 0:
+        raise HTTPException(status_code=400, detail="merge inputs have no surviving points.")
+
+    shortfall = _merge_disk_shortfall(est)
+    if shortfall is not None:
+        raise HTTPException(status_code=507, detail=shortfall)
+
+    if not request.acknowledge_cost:
+        warning = _cost_advisory(
+            f"Stitching {len(ids)} clouds into {est['points']:,} points",
+            est["seconds"], est["peak_ram"], breakdown=est["breakdown"])
+        if warning is not None:
+            if est["misses"] and request.include_misses:
+                warning["message"] += (
+                    f" {est['misses']:,} of those points are sky/miss points;"
+                    " leaving them out makes the stitch smaller and faster.")
+            warning["misses"] = int(est["misses"])
+            raise HTTPException(
+                status_code=409,
+                detail={"cost_warning": warning, "message": warning["message"]},
+            )
+
+    run_id, cancel_event = _new_cancel_token()
+    produced: Dict[str, str] = {}
+
+    def _work(progress):
+        body = _do_session_merge(
+            ids, include_misses=request.include_misses, progress=progress,
+            cancel_event=cancel_event, admit_bytes=est["merge_ram"])
+        produced["session_id"] = body["merged"]["session_id"]
+        return json.dumps(body).encode("utf-8")
+
+    def _abandoned(_frame):
+        # The result was built but never read (the client disconnected, or a
+        # cancel landed after the worker's last checkpoint). Nobody knows this
+        # session's id, so nobody can ever free it: do it here.
+        sid = produced.get("session_id")
+        if sid:
+            logger.info("merge result %s was never collected; discarding it", sid)
+            _discard_cloud_session(sid, release_arrays=True)
+
+    return _bin_frame_streaming_response(
+        _work, request=http_request, cancel_event=cancel_event, run_id=run_id,
+        on_abandoned=_abandoned)
 
 
 class SessionGroundSegmentRequest(BaseModel):
@@ -43285,7 +44570,17 @@ class DetectStemsRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/detect_stems")
-def session_detect_stems(session_id: str, request: DetectStemsRequest):
+def session_detect_stems(session_id: str, request: DetectStemsRequest,
+                         http_request: Request = None, keepalive: bool = False):
+    """Automatic trunk seeds: see `_do_session_detect_stems`. `?keepalive=1`
+    streams keepalives ahead of the JSON (see `_keepalive_json`): the pass and
+    the clustering grow with the cloud, and the limit used to be a fixed 10
+    minutes on the whole request."""
+    return _keepalive_json(keepalive, http_request,
+                           lambda: _do_session_detect_stems(session_id, request))
+
+
+def _do_session_detect_stems(session_id: str, request: DetectStemsRequest):
     """Find trunks in the session's breast-height layer and return one seed
     per trunk, in the session's STORED frame (the frame `seed_points` of
     segment_trees is compared in). Needs the `height_above_ground` column: a
@@ -44455,7 +45750,17 @@ class SessionTransformRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/transform")
-def session_transform(session_id: str, request: SessionTransformRequest):
+def session_transform(session_id: str, request: SessionTransformRequest,
+                      http_request: Request = None, keepalive: bool = False):
+    """Bake an affine transform into a session's geometry: see
+    `_do_session_transform`. `?keepalive=1` streams keepalives ahead of the JSON
+    (see `_keepalive_json`), so a rebuild on a very large cloud is not cut off
+    by a fixed client deadline."""
+    return _keepalive_json(keepalive, http_request,
+                           lambda: _do_session_transform(session_id, request))
+
+
+def _do_session_transform(session_id: str, request: SessionTransformRequest):
     """Bake an affine 4x4 transform into the session's in-RAM geometry and
     rebuild the octree. The matrix acts in WORLD coordinates; the session stores
     points with `world_shift` subtracted, so we conjugate by the shift:
@@ -44689,7 +45994,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         if prev_miss_octree_id:
             keep.append(_octree_cache_root() / prev_miss_octree_id)
         try:
-            _evict_octree_cache(_octree_cache_max_bytes(), keep=keep)
+            _evict_octree_cache(_octree_cache_max_bytes(), keep=keep, reason=f"transform {session_id}")
         except Exception:
             logger.exception("Octree cache eviction failed after a deferred transform.")
         return {"session_id": session_id, "point_count": remaining, "total_count": total,
@@ -44728,7 +46033,17 @@ def session_transform(session_id: str, request: SessionTransformRequest):
 
 
 @app.post("/api/cloud/session/{session_id}/rebuild_octree")
-def session_rebuild_octree(session_id: str):
+def session_rebuild_octree(session_id: str, http_request: Request = None,
+                           keepalive: bool = False):
+    """Rebuild a session's octree(s): see `_do_session_rebuild_octree`.
+    `?keepalive=1` streams keepalives ahead of the JSON (see `_keepalive_json`):
+    rebuilding issue #7's 222 M-hit merged cloud took 3.5 minutes for the hits
+    octree alone, against a fixed 10-minute client deadline."""
+    return _keepalive_json(keepalive, http_request,
+                           lambda: _do_session_rebuild_octree(session_id))
+
+
+def _do_session_rebuild_octree(session_id: str):
     """Rebuild a session's derived octree(s) from its CURRENT in-RAM arrays.
 
     The repayment step for a deferred transform: it brings the display cache back
@@ -44745,6 +46060,8 @@ def session_rebuild_octree(session_id: str):
     source file is read, and no deletions are applied (that is `bake`'s job)."""
     sess = _get_cloud_session(session_id)
     had_miss_octree = sess.miss_octree_cache_id is not None
+    with _cloud_session_lock:
+        held = _describe_session_octrees_locked(sess)
 
     # Clears octree_pose (see _session_rebuild).
     cache_key, cache_dir, meta = _session_rebuild(sess)
@@ -44754,11 +46071,17 @@ def session_rebuild_octree(session_id: str):
         miss_id = _build_miss_octree(sess, sess.miss_octree_origin)
         with _cloud_session_lock:
             sess.miss_octree_cache_id = miss_id
+    # The renderer calls this when a cloud's octree failed to load, among other
+    # reasons. Recording what the session held at that moment, and which of
+    # those ids were actually on disk, says whether the session's own octree
+    # went missing or the renderer was asking for an id the session never had.
+    logger.info("rebuild_octree %s: session held %s; rebuilt as octree=%s miss=%s",
+                session_id, held, cache_key, miss_id or "none")
 
     keep_dirs = [cache_dir]
     if miss_id:
         keep_dirs.append(_octree_cache_root() / miss_id)
-    _evict_octree_cache(_octree_cache_max_bytes(), keep=keep_dirs)
+    _evict_octree_cache(_octree_cache_max_bytes(), keep=keep_dirs, reason=f"rebuild_octree {session_id}")
 
     with _cloud_session_lock:
         remaining = int((~sess.deleted).sum())
@@ -44977,16 +46300,7 @@ def session_resample(session_id: str, request: SessionResampleRequest):
 @app.delete("/api/cloud/session/{session_id}")
 def delete_cloud_session(session_id: str):
     """Free a cloud session's in-RAM arrays."""
-    with _cloud_session_lock:
-        live = _cloud_sessions.pop(session_id, None)
-        existed = live is not None
-    if live is not None and live.store is not None:
-        live.store.close()
-    # An explicit delete must also reclaim the spill, or a scene the user cleared
-    # would leave its clouds on disk until the next launch wiped them.
-    existed = existed or session_id in _spilled_sessions or session_id in _spilling_sessions
-    _drop_session_spill(session_id)
-    return {"session_id": session_id, "deleted": existed}
+    return {"session_id": session_id, "deleted": _discard_cloud_session(session_id)}
 
 GROUND_CLASS_SLUG = "ground_class"
 GROUND_CLASS_LABEL = "Ground Class"

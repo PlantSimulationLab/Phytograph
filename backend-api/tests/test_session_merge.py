@@ -123,7 +123,7 @@ def test_merge_concatenates_and_spans_both_inputs(server, tmp_path):
     r = requests.post(f"{server}/api/cloud/session/merge",
                       json={"session_ids": [sa, sb]}, timeout=120)
     assert r.status_code == 200, r.text
-    m = r.json()["merged"]
+    m = decode_streamed_json(r.content)["merged"]
     assert m["point_count"] == 2000
     assert m["cache_id"]
 
@@ -151,7 +151,7 @@ def test_merge_reconciles_different_world_shifts(tmp_path, monkeypatch):
     sb = loop.run_until_complete(_create_session_direct(
         main.CloudSessionCreateRequest(source_path=str(b), ascii_format=GRID_FORMAT, world_shift=shift_b)))["session_id"]
 
-    merged = main.session_merge(main.SessionMergeRequest(session_ids=[sa, sb]))["merged"]
+    merged = main._do_session_merge([sa, sb])["merged"]
     mid = merged["session_id"]
     assert merged["point_count"] == 2000
 
@@ -195,7 +195,7 @@ def test_merge_unions_extra_columns_with_zero_fill(tmp_path, monkeypatch):
     assert "deviation" in main._cloud_sessions[sa].extras
     assert "deviation" not in main._cloud_sessions[sb].extras
 
-    merged = main.session_merge(main.SessionMergeRequest(session_ids=[sa, sb]))["merged"]
+    merged = main._do_session_merge([sa, sb])["merged"]
     sess = main._cloud_sessions[merged["session_id"]]
 
     assert "deviation" in sess.extras

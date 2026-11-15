@@ -55,7 +55,7 @@ def test_merge_is_admitted_while_it_concatenates(client, make_file_session,
                                                  tmp_path, observe_in_flight):
     a = _session(make_file_session, tmp_path, "a")
     b = _session(make_file_session, tmp_path, "b", offset=5.0)
-    seen = observe_in_flight("_merge_sessions_locked")
+    seen = observe_in_flight("_merge_sessions")
 
     r = client.post("/api/cloud/session/merge", json={"session_ids": [a, b]})
     assert r.status_code == 200, r.text

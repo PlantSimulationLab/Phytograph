@@ -18,6 +18,16 @@ import pytest
 import main
 from tests.binframe import decode_streamed_json
 
+@pytest.fixture(autouse=True)
+def _store_backed_sessions_follow_the_count_cap(monkeypatch):
+    """These tests force an eviction by setting `_MAX_CLOUD_SESSIONS` to 0.
+    Store-backed sessions have their own, much higher cap now (they hold no
+    RAM), so tie that cap back to the patched one for this file: what is under
+    test here is what an eviction DOES to a store-backed session, not when one
+    happens (test_session_eviction.py covers that)."""
+    monkeypatch.setenv("PHYTOGRAPH_MAX_STORE_BACKED_SESSIONS", "0")
+
+
 
 def _write_las(path, n=3000, seed=0):
     import laspy

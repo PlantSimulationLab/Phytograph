@@ -103,8 +103,13 @@ def _session_spill_registries_start_empty(monkeypatch, tmp_path_factory):
         "PHYTOGRAPH_SESSION_SPILL_ROOT",
         str(tmp_path_factory.mktemp("spill")),
     )
+    # The octree pins that are not tied to a session object leak the same way:
+    # a replaced octree stays pinned for a grace period, a store directory can
+    # be queued for a later delete. Both are process-wide.
     registries = (main._spilled_sessions, main._spilling_sessions,
-                  main._session_restore_locks, main._inflight_session_pins)
+                  main._session_restore_locks, main._inflight_session_pins,
+                  main._recently_replaced_octrees, main._save_pinned_octrees,
+                  main._pending_store_deletes)
     for registry in registries:
         registry.clear()
     yield

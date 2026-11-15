@@ -38,7 +38,21 @@ import {
   BackendTimeoutError,
   describeBackendError,
   isBackendUnreachable,
+  sessionMerge,
+  CostWarningError,
+  linkAbort,
+  sessionSplit,
+  sessionExtract,
+  duplicateCloudSession,
+  sessionTransform,
+  rebuildSessionOctree,
+  exportLAD,
+  detectStems,
+  keepaliveFetch,
+  sessionSegmentGround,
 } from './backendApi';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // Silence the production console.* calls — they're informational and just
 // pollute test output. We still capture them so a regression that loses
@@ -229,7 +243,7 @@ describe('extractSkeleton', () => {
     const spy = mockFetchOk(expected);
     const result = await extractSkeleton(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/skeleton/extract');
+    expect(url).toBe('http://127.0.0.1:8008/api/skeleton/extract?keepalive=1');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
     expect(result).toEqual(expected);
@@ -263,7 +277,7 @@ describe('segmentGround', () => {
     const spy = mockFetchOk(expected);
     const result = await segmentGround(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/segment/ground');
+    expect(url).toBe('http://127.0.0.1:8008/api/segment/ground?keepalive=1');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
     expect(result).toEqual(expected);
@@ -343,7 +357,7 @@ describe('generatePlantModel', () => {
     const spy = mockFetchOk(expected);
     await generatePlantModel(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/plant/generate');
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/generate?keepalive=1');
     expect(JSON.parse(init?.body as string)).toEqual(req);
   });
 
@@ -369,7 +383,7 @@ describe('generatePlantCanopy', () => {
     const spy = mockFetchOk(expected);
     await generatePlantCanopy(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/plant/canopy/generate');
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/canopy/generate?keepalive=1');
     expect(JSON.parse(init?.body as string)).toEqual(req);
   });
 
@@ -564,7 +578,7 @@ describe('plant sessions', () => {
     const spy = mockFetchOk({ success: true, session_id: 's1', plant_type: 'bean', current_age: 5 });
     await createPlantSession(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/plant/session/create');
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/session/create?keepalive=1');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
   });
@@ -589,7 +603,7 @@ describe('plant sessions', () => {
     });
     await advancePlantSession('s1', 1);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/plant/session/s1/advance');
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/session/s1/advance?keepalive=1');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual({ dt: 1 });
   });
@@ -661,7 +675,7 @@ describe('plant morph', () => {
     });
     await morphPlant(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/plant/morph');
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/morph?keepalive=1');
     expect(JSON.parse(init?.body as string)).toEqual(req);
   });
 
@@ -927,7 +941,7 @@ describe('point cloud LAS/LAZ import/export', () => {
     expect(result.pointCount).toBe(1);
     expect(Array.from(result.positions)).toEqual([7, 8, 9]);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/pointcloud/import');
+    expect(url).toBe('http://127.0.0.1:8008/api/pointcloud/import?keepalive=1');
     expect(init?.method).toBe('POST');
     expect(init?.body).toBeInstanceOf(FormData);
     const fd = init?.body as FormData;
@@ -1039,7 +1053,7 @@ describe('importPointCloudByPath (renamed from importXyzByPath; now also serves 
     expect(result.colors).toBeNull();
     expect(result.intensity).toBeNull();
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/pointcloud/import_by_path');
+    expect(url).toBe('http://127.0.0.1:8008/api/pointcloud/import_by_path?keepalive=1');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual({
       file_path: '/abs/scan.xyz',
@@ -1892,5 +1906,317 @@ describe('extractRieglProject argument shapes', () => {
     await extractRieglProject('/p.riproject', null, '/riv');
     const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
     expect(body.keep_columns).toBeNull();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Stitch (issue #7): the merge is a streamed, cancelable request that may be
+// answered with a confirmation prompt first.
+// ────────────────────────────────────────────────────────────────────────
+describe('sessionMerge', () => {
+  it('sends the options and returns the JSON tail', async () => {
+    const fetchSpy = mockFetchOk({ merged: { session_id: 'm1', point_count: 9, cache_id: 'c' } });
+    const res = await sessionMerge(['a', 'b'], { includeMisses: false, acknowledgeCost: true });
+    expect(res.merged.session_id).toBe('m1');
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toContain('/api/cloud/session/merge');
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual(
+      { session_ids: ['a', 'b'], include_misses: false, acknowledge_cost: true });
+  });
+
+  it('defaults to keeping misses and not acknowledging the cost', async () => {
+    const fetchSpy = mockFetchOk({ merged: { session_id: 'm1', point_count: 9, cache_id: 'c' } });
+    await sessionMerge(['a', 'b']);
+    expect(JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body))).toEqual(
+      { session_ids: ['a', 'b'], include_misses: true, acknowledge_cost: false });
+  });
+
+  it('turns a 409 cost_warning into a CostWarningError the caller can prompt on', async () => {
+    const warning = { message: 'Stitching 13 clouds is estimated at about 3 min', misses: 132829142 };
+    mockFetchError(409, { detail: { cost_warning: warning, message: warning.message } });
+    const err = await sessionMerge(['a', 'b']).catch((e) => e);
+    expect(err).toBeInstanceOf(CostWarningError);
+    expect((err as CostWarningError).costWarning.misses).toBe(132829142);
+    // Callers that branch on the status code still can.
+    expect((err as { status?: number }).status).toBe(409);
+  });
+
+  it('reports an object detail by its message, not as [object Object]', async () => {
+    mockFetchError(507, { detail: 'Not enough free disk space to stitch: …' });
+    await expect(sessionMerge(['a', 'b'])).rejects.toThrow(/Not enough free disk space/);
+    vi.restoreAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockFetchError(409, { detail: { message: 'too many children' } });
+    const err = await sessionMerge(['a', 'b']).catch((e) => e);
+    expect(String(err.message)).toContain('too many children');
+    expect(String(err.message)).not.toContain('[object Object]');
+  });
+
+  it('a signal aborted BEFORE the request starts still aborts it', async () => {
+    // addEventListener('abort') never fires for an already-aborted signal, so a
+    // Cancel clicked while the stitch was still preparing its inputs was
+    // ignored and the merge ran to completion.
+    const abort = new AbortController();
+    abort.abort();
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      expect((init as RequestInit).signal?.aborted).toBe(true);
+      throw new DOMException('Aborted', 'AbortError');
+    });
+    await expect(sessionMerge(['a', 'b'], { signal: abort.signal })).rejects.toThrow();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('linkAbort', () => {
+  it('aborts at once for an already-aborted signal, and later for a live one', () => {
+    const already = new AbortController();
+    already.abort();
+    const c1 = new AbortController();
+    linkAbort(already.signal, c1);
+    expect(c1.signal.aborted).toBe(true);
+
+    const live = new AbortController();
+    const c2 = new AbortController();
+    linkAbort(live.signal, c2);
+    expect(c2.signal.aborted).toBe(false);
+    live.abort();
+    expect(c2.signal.aborted).toBe(true);
+
+    const c3 = new AbortController();
+    linkAbort(undefined, c3);
+    expect(c3.signal.aborted).toBe(false);
+  });
+});
+
+// Whole-cloud session operations must not sit behind a fixed whole-request
+// deadline (issue #7's failure, on merge). Each asks the backend for keepalives
+// and uses the streaming reader, whose deadline restarts on every chunk.
+describe('whole-cloud session operations use keepalive, not a fixed deadline', () => {
+  const cases: Array<[string, () => Promise<unknown>, string]> = [
+    ['split', () => sessionSplit('s1', { scalarFilters: [] }), '/api/cloud/session/s1/split?keepalive=1'],
+    ['extract', () => sessionExtract('s1', { scalarFilters: [] }), '/api/cloud/session/s1/extract?keepalive=1'],
+    ['duplicate', () => duplicateCloudSession('s1'), '/api/cloud/session/s1/duplicate?keepalive=1'],
+    ['transform', () => sessionTransform('s1', new Array(16).fill(0)), '/api/cloud/session/s1/transform?keepalive=1'],
+    ['rebuild_octree', () => rebuildSessionOctree('s1'), '/api/cloud/session/s1/rebuild_octree?keepalive=1'],
+  ];
+  for (const [name, call, url] of cases) {
+    it(`${name} requests keepalives and reads a streamed reply`, async () => {
+      // A reply as the backend sends it in keepalive mode: whitespace
+      // keepalives, then the JSON.
+      const body = new TextEncoder().encode('        {"session_id":"s1","ok":true}');
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(body, { status: 200 }));
+      const res = await call() as { ok: boolean };
+      expect(res.ok).toBe(true);
+      expect(String(fetchSpy.mock.calls[0][0])).toContain(url);
+    });
+  }
+
+  it('none of them arms a fixed abortOnTimeout any more', () => {
+    const src = readFileSync(join(__dirname, 'backendApi.ts'), 'utf-8');
+    for (const fn of ['sessionSplit', 'sessionExtract', 'duplicateCloudSession',
+                      'sessionTransform', 'rebuildSessionOctree', 'sessionMerge']) {
+      const start = src.indexOf(`export async function ${fn}(`);
+      expect(start, fn).toBeGreaterThan(0);
+      const body = src.slice(start, src.indexOf('\nexport ', start + 10));
+      expect(body, fn).not.toMatch(/abortOnTimeout\(/);
+      expect(body, fn).toMatch(/fetchJsonWithProgress/);
+    }
+  });
+
+  it('a failure reported in the stream surfaces as an error', async () => {
+    const marker = new TextEncoder().encode(JSON.stringify({ error: 'Cloud session not found: s1' }));
+    const frame = new Uint8Array(8 + marker.length + ((4 - (marker.length % 4)) % 4));
+    frame.set([0x50, 0x48, 0x50, 0x31], 0);                         // 'PHP1'
+    new DataView(frame.buffer).setUint32(4, frame.length - 8, true);
+    frame.fill(0x20, 8);
+    frame.set(marker, 8);
+    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(frame, { status: 200 }));
+    await expect(duplicateCloudSession('s1')).rejects.toThrow(/Cloud session not found/);
+  });
+});
+
+describe('the remaining long operations use keepalive too', () => {
+  it('LAD export and stem detection request keepalives and read a streamed reply', async () => {
+    const body = () => new Response(new TextEncoder().encode('    {"success":true,"seeds":[],"layer_points":0}'), { status: 200 });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async () => body());
+    const lad = await exportLAD({ cells: [] } as never);
+    expect(lad.success).toBe(true);
+    const stems = await detectStems('s1');
+    expect(stems.seeds).toEqual([]);
+    expect(String(fetchSpy.mock.calls[0][0])).toContain('/api/lad/export?keepalive=1');
+    expect(String(fetchSpy.mock.calls[1][0])).toContain('/api/cloud/session/s1/detect_stems?keepalive=1');
+  });
+
+  function packedCloud(points: number[][]): Uint8Array {
+    const buf = new ArrayBuffer(32 + points.length * 12);
+    const u8 = new Uint8Array(buf);
+    u8.set([0x50, 0x48, 0x58, 0x31], 0);                       // 'PHX1'
+    new DataView(buf).setUint32(4, points.length, true);
+    new Float32Array(buf, 32, points.length * 3).set(points.flat());
+    return u8;
+  }
+
+  it('a by-path import decodes the cloud after any number of keepalives', async () => {
+    const cloud = packedCloud([[1, 2, 3], [4, 5, 6]]);
+    for (const keepalives of [0, 1, 7]) {
+      const body = new Uint8Array(keepalives * 4 + cloud.length);
+      body.fill(0x20, 0, keepalives * 4);
+      body.set(cloud, keepalives * 4);
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(body, { status: 200 }));
+      const res = await importPointCloudByPath('/tmp/a.xyz');
+      expect(res.pointCount).toBe(2);
+      expect(Array.from(res.positions)).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(String(fetchSpy.mock.calls[0][0])).toContain('/api/pointcloud/import_by_path?keepalive=1');
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('a by-path import that fails in the stream reports the backend message', async () => {
+    const marker = new TextEncoder().encode(JSON.stringify({ error: 'File not found: /tmp/a.xyz' }));
+    const frame = new Uint8Array(8 + marker.length + ((4 - (marker.length % 4)) % 4));
+    frame.set([0x50, 0x48, 0x50, 0x31], 0);
+    new DataView(frame.buffer).setUint32(4, frame.length - 8, true);
+    frame.fill(0x20, 8);
+    frame.set(marker, 8);
+    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(frame, { status: 200 }));
+    await expect(importPointCloudByPath('/tmp/a.xyz')).rejects.toThrow(/File not found/);
+  });
+
+  it('none of the three arms a fixed abortOnTimeout any more', () => {
+    const src = readFileSync(join(__dirname, 'backendApi.ts'), 'utf-8');
+    for (const fn of ['exportLAD', 'detectStems', 'importPointCloudByPath']) {
+      const start = src.indexOf(`export async function ${fn}(`);
+      expect(start, fn).toBeGreaterThan(0);
+      const body = src.slice(start, src.indexOf('\n}\n', start));
+      expect(body, fn).not.toMatch(/abortOnTimeout\(/);
+      expect(body, fn).toMatch(/keepalive=1/);
+    }
+  });
+});
+
+// Every remaining plain request goes through keepaliveFetch: the segmentation
+// tools, scalar-field compute, plant generation, QSM leaves, DEM export, …
+describe('keepaliveFetch', () => {
+  const idle = (ms = 1000) => {
+    const controller = new AbortController();
+    return { controller, timeoutId: abortOnTimeout(controller, ms, '/x'), timeoutMs: ms, endpoint: '/x' };
+  };
+  const slowHeaders = { 'x-phytograph-keepalive': '1', 'content-type': 'application/octet-stream' };
+
+  it('asks for keepalives and passes a prompt answer through untouched', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }));
+    const res = await keepaliveFetch('http://h/api/x', { method: 'POST' }, idle());
+    expect(String(fetchSpy.mock.calls[0][0])).toBe('http://h/api/x?keepalive=1');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it('appends to an existing query string', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    await keepaliveFetch('http://h/api/x?compact=false', {}, idle());
+    expect(String(fetchSpy.mock.calls[0][0])).toBe('http://h/api/x?compact=false&keepalive=1');
+  });
+
+  it('keeps a refusal as it was: status, and a body the caller can read', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ detail: 'nope' }), { status: 400, statusText: 'Bad Request' }));
+    const res = await keepaliveFetch('http://h/api/x', {}, idle());
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ detail: 'nope' });
+  });
+
+  it('strips the keepalives from a slow JSON answer', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response('            {"labels":[1,2]}', { status: 200, headers: slowHeaders }));
+    const res = await keepaliveFetch('http://h/api/x', {}, idle());
+    expect(await res.text()).toBe('{"labels":[1,2]}');
+  });
+
+  it('hands a slow BINARY answer back aligned at its first byte', async () => {
+    const payload = new Uint8Array([0x50, 0x48, 0x58, 0x31, 1, 2, 3, 4]);
+    const body = new Uint8Array(8 + payload.length);
+    body.fill(0x20, 0, 8);
+    body.set(payload, 8);
+    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(body, { status: 200, headers: slowHeaders }));
+    const res = await keepaliveFetch('http://h/api/x', {}, idle());
+    expect(Array.from(new Uint8Array(await res.arrayBuffer()))).toEqual(Array.from(payload));
+  });
+
+  it('throws the backend message when a slow request fails in the stream', async () => {
+    const marker = new TextEncoder().encode(JSON.stringify({ error: 'The worker ran out of memory' }));
+    const frame = new Uint8Array(8 + 8 + marker.length + ((4 - (marker.length % 4)) % 4));
+    frame.fill(0x20);
+    frame.set([0x50, 0x48, 0x50, 0x31], 8);
+    new DataView(frame.buffer).setUint32(12, frame.length - 16, true);
+    frame.set(marker, 16);
+    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(frame, { status: 200, headers: slowHeaders }));
+    await expect(keepaliveFetch('http://h/api/x', {}, idle())).rejects.toThrow('The worker ran out of memory');
+  });
+
+  it('restarts the deadline on every chunk, and still fires on silence', async () => {
+    vi.useFakeTimers();
+    try {
+      let push!: (c: Uint8Array | null) => void;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          push = (c) => (c ? controller.enqueue(c) : controller.close());
+        },
+      });
+      const deadline = idle(1000);
+      vi.spyOn(global, 'fetch').mockImplementation(async (_u, init) => {
+        (init as RequestInit).signal?.addEventListener('abort', () => {
+          try { (stream as unknown as { cancel(): void }).cancel(); } catch { /* already closed */ }
+        });
+        return new Response(stream, { status: 200, headers: slowHeaders });
+      });
+      const pending = keepaliveFetch('http://h/api/x', { signal: deadline.controller.signal }, deadline);
+      const space = new TextEncoder().encode('    ');
+      // Three chunks, 800 ms apart: 2.4 s in all, well past the 1 s deadline.
+      for (let i = 0; i < 3; i++) {
+        await vi.advanceTimersByTimeAsync(800);
+        push(space);
+        expect(deadline.controller.signal.aborted).toBe(false);
+      }
+      push(new TextEncoder().encode('{"ok":true}'));
+      push(null);
+      const res = await pending;
+      expect(await res.json()).toEqual({ ok: true });
+
+      // Silence for longer than the deadline does abort.
+      const quiet = idle(1000);
+      vi.spyOn(global, 'fetch').mockImplementation((_u, init) => new Promise((_resolve, reject) => {
+        (init as RequestInit).signal?.addEventListener('abort', () => reject(quiet.controller.signal.reason));
+      }));
+      const stalled = keepaliveFetch('http://h/api/x', { signal: quiet.controller.signal }, quiet)
+        .catch((e) => e);
+      await vi.advanceTimersByTimeAsync(1100);
+      expect(await stalled).toBeInstanceOf(BackendTimeoutError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a segmentation cost prompt still arrives as a CostWarningError', async () => {
+    mockFetchError(409, { detail: { cost_warning: { message: 'about 4 min' }, message: 'about 4 min' } });
+    const err = await sessionSegmentGround('s1', {}).catch((e) => e);
+    expect(err).toBeInstanceOf(CostWarningError);
+  });
+
+  it('no request in this module is left on a fixed whole-request deadline', () => {
+    // Every `abortOnTimeout` that is armed once must be handed to keepaliveFetch
+    // (which restarts it per chunk). The streaming readers restart theirs
+    // themselves and declare it with `let`.
+    const src = readFileSync(join(__dirname, 'backendApi.ts'), 'utf-8');
+    const armedOnce = [...src.matchAll(/const timeoutId = abortOnTimeout\(/g)];
+    expect(armedOnce.length).toBeGreaterThan(10);
+    for (const m of armedOnce) {
+      const after = src.slice(m.index!, m.index! + 2500);
+      const nextFetch = after.search(/await (keepaliveFetch|fetch)\(/);
+      expect(nextFetch, `no fetch after the deadline at offset ${m.index}`).toBeGreaterThan(0);
+      expect(after.slice(nextFetch, nextFetch + 21), `plain fetch at offset ${m.index}`)
+        .toBe('await keepaliveFetch(');
+    }
   });
 });

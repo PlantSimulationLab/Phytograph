@@ -303,6 +303,12 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
   (default 30 min), then evicts least-recently-accessed survivors down to
   `PHYTOGRAPH_MAX_CLOUD_SESSIONS` / `PHYTOGRAPH_MAX_PLANT_SESSIONS` (default 8
   each). Evicted plant sessions get their PyHelios context torn down.
+- **The cloud count cap counts sessions that hold RAM.** A store-backed
+  session (a large cloud whose columns are memory-mapped files) is page cache
+  plus a small object, so it does not take a slot; those have their own cap,
+  `PHYTOGRAPH_MAX_STORE_BACKED_SESSIONS` (default 64). Counting them made a
+  scene of 26 large scans under a cap of 7 spill and restore 10-12 clouds on
+  every multi-cloud step.
 - **An evicted CLOUD session is written to disk, not dropped.**
   `_sweep_cloud_sessions` pickles it under `<octree root>/.sessions/<pid>-<nonce>/`
   and `_get_cloud_session` reads it back on demand. RAM is capped exactly as

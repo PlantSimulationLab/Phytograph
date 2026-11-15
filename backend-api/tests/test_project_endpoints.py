@@ -570,3 +570,153 @@ def test_a_failed_octree_rebuild_opens_the_project_with_a_warning(client, cache_
     res = decode_streamed_json(client.post(
         f"/api/cloud/session/{s2.session_id}/rebuild_octree", json={}).content)
     assert res.get("cache_id"), res
+
+
+def test_a_display_octree_missing_at_save_is_logged(client, cache_root, tmp_path, caplog):
+    """A scene can reference a display octree that is no longer in the cache.
+    The save cannot embed it and open cannot rebuild it, so the reopened cloud
+    comes up with no display and the renderer rebuilds it ("no such file" in
+    issue #7's log, with nothing saying why). The save still succeeds, but it
+    must say which octree it could not carry."""
+    import logging
+    created = _session_from_xyz(client, tmp_path)
+    gone = "ab" * 20
+    with caplog.at_level(logging.WARNING, logger="phytograph"):
+        saved = _post_stream(client, "/api/project/save", {
+            "path": str(tmp_path / "gone.phyto"), "scene_token": _scene_token(client),
+            "session_ids": [created["session_id"]], "octree_ids": [created["cache_id"], gone]})
+    assert saved["success"], saved
+    hits = [r.getMessage() for r in caplog.records if gone in r.getMessage()]
+    assert hits and "not in the cache" in hits[0]
+    with zipfile.ZipFile(tmp_path / "gone.phyto") as zf:
+        assert not [n for n in zf.namelist() if gone in n]
+
+
+def _messages(caplog, needle):
+    return [r.getMessage() for r in caplog.records if needle in r.getMessage()]
+
+
+def test_save_and_open_log_where_every_cloud_display_comes_from(client, cache_root, tmp_path, caplog):
+    """The diagnostic chain for a reopened cloud with no display. A stale
+    cloud's drawn octree must travel in the file; when it has vanished from the
+    cache, save logs it MISSING and open logs it NONE, and the renderer's later
+    rebuild_octree logs what the session held. Each line names the ids, so the
+    three can be matched in an exported log without the project file."""
+    import logging
+    import shutil
+    f, _pts = _cloud_file(tmp_path)
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)
+    sid, drawn = created["session_id"], created["cache_id"]
+    # A pending deletion leaves `drawn` as the session's RENDERED (stale) octree.
+    client.post(f"/api/cloud/session/{sid}/delete_region",
+                json={"region": {"kind": "box", "min": [0, 0, 0], "max": [3, 3, 10]}})
+    assert main._cloud_sessions[sid].rendered_octree_cache_id == drawn
+    shutil.rmtree(cache_root / drawn)
+
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        target = _save(client, tmp_path, sid, [drawn])
+    save_lines = _messages(caplog, f"project save: cloud {sid}")
+    assert len(save_lines) == 1 and f"rendered={drawn} (MISSING)" in save_lines[0]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    assert opened["success"], opened
+    new_sid = opened["session_map"][sid]
+    open_lines = _messages(caplog, f"project open: cloud {sid} -> session {new_sid}")
+    assert len(open_lines) == 1
+    assert f"rendered={drawn} (NONE (not in the file or the cache))" in open_lines[0]
+    assert _messages(caplog, "octree cache (opening p.phyto)")
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        res = decode_streamed_json(client.post(
+            f"/api/cloud/session/{new_sid}/rebuild_octree", json={}).content)
+    line = _messages(caplog, f"rebuild_octree {new_sid}")
+    assert len(line) == 1
+    assert f"rendered={drawn} (MISSING)" in line[0] and f"rebuilt as octree={res['cache_id']}" in line[0]
+
+
+def test_open_logs_rebuilt_and_cached_displays(client, cache_root, tmp_path, caplog):
+    """The two healthy outcomes are logged too, so a NONE stands out."""
+    import logging
+    import shutil
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": "x y z timestamp target_index target_count"},
+    ).content)
+    sid, hits, miss = created["session_id"], created["cache_id"], created["miss_octree_cache_id"]
+    target = _save(client, tmp_path, sid, [hits, miss])
+
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        _post_stream(client, "/api/project/open", {"path": str(target)})
+    line = _messages(caplog, f"project open: cloud {sid}")[0]
+    assert f"octree={hits} (already cached)" in line and f"miss={miss} (already cached)" in line
+
+    shutil.rmtree(cache_root)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    m = opened["octree_map"]
+    line = _messages(caplog, f"project open: cloud {sid}")[0]
+    assert f"octree={hits} (rebuilt as {m[hits]})" in line
+    assert f"miss={miss} (rebuilt as {m[miss]})" in line
+
+
+def test_a_refresh_finishing_during_a_save_cannot_delete_the_octree_being_saved(
+        client, cache_root, tmp_path, monkeypatch):
+    """The cause of issue #7's "Octree load failed" on reopen. A save decides at
+    its snapshot which octrees travel in the file but copies them last. A
+    display refresh that finishes in between gives the cloud a new octree; with
+    the cache over its cap, the refresh's trim then deleted the old one, which
+    no session referenced any more, and the save wrote a project naming an
+    octree that existed nowhere. The save now pins what it is about to copy."""
+    f, _pts = _cloud_file(tmp_path)
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create", json={"source_path": str(f), "ascii_format": "x y z reflectance"},
+    ).content)
+    sid, drawn = created["session_id"], created["cache_id"]
+    client.post(f"/api/cloud/session/{sid}/delete_region",
+                json={"region": {"kind": "box", "min": [0, 0, 0], "max": [3, 3, 10]}})
+    assert main._cloud_sessions[sid].rendered_octree_cache_id == drawn
+
+    # Cache permanently over its cap, as the user's was (26.6 GB of 21.5).
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", "1")
+    pf = main.project_file_mod()
+    real_write_session = pf.write_session
+    fired = []
+
+    def write_session_then_refresh_lands(*a, **k):
+        out = real_write_session(*a, **k)
+        if not fired:
+            fired.append(1)
+            # The renderer's background refresh, finishing mid-save.
+            r = client.post(f"/api/cloud/session/{sid}/bake?compact=false")
+            assert r.status_code == 200, r.text
+            assert main._cloud_sessions[sid].rendered_octree_cache_id is None, (
+                "the refresh should have replaced the drawn octree")
+        return out
+
+    monkeypatch.setattr(pf, "write_session", write_session_then_refresh_lands)
+    target = _save(client, tmp_path, sid, [drawn])
+    assert fired, "the refresh never ran during the save"
+
+    with zipfile.ZipFile(target) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+        assert drawn in manifest["octrees"], "the save lost the octree it set out to embed"
+        assert [n for n in zf.namelist() if n.startswith(f"octrees/{drawn}/")]
+
+    # Another machine: the reopened cloud is drawable from what the file carries.
+    import shutil
+    client.delete(f"/api/cloud/session/{sid}")
+    shutil.rmtree(cache_root)
+    monkeypatch.delenv("PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES")
+    opened = _post_stream(client, "/api/project/open", {"path": str(target)})
+    reopened = main._cloud_sessions[opened["session_map"][sid]]
+    assert reopened.rendered_octree_cache_id == drawn
+    assert (cache_root / drawn / "metadata.json").is_file()
+
+    # And the pin does not outlive the save.
+    assert main._save_pinned_octrees == []

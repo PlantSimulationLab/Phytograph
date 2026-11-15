@@ -176,6 +176,36 @@ def test_stays_over_cap_rather_than_evicting_live_sessions(cache_root, no_live_s
     assert all((cache_root / cid).exists() for cid in IDS[:3])
 
 
+def test_the_over_cap_warning_is_said_once_not_after_every_bake(
+        cache_root, no_live_sessions, caplog, monkeypatch):
+    """Issue #7's log carried the identical over-cap line 40 times, one per
+    bake, burying everything else in it. Same state, same session: once. A real
+    change in size (or ten minutes) says it again."""
+    import logging
+    monkeypatch.setattr(main, "_octree_overcap_last", [0.0, 0.0])
+    for i, cid in enumerate(IDS[:3]):
+        make_octree(cache_root, cid, 500, used=1000.0 + i)
+        no_live_sessions[f"sess-{i}"] = _FakeSession(octree_cache_id=cid)
+
+    def warnings():
+        return [r for r in caplog.records if "over its" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING, logger="phytograph"):
+        for _ in range(5):
+            _evict_octree_cache(max_bytes=100)
+        assert len(warnings()) == 1
+
+        monkeypatch.setattr(main, "_OCTREE_OVERCAP_REPEAT_BYTES", 100)
+        make_octree(cache_root, IDS[3], 500, used=2000.0)
+        no_live_sessions["sess-3"] = _FakeSession(octree_cache_id=IDS[3])
+        _evict_octree_cache(max_bytes=100)
+        assert len(warnings()) == 2, "a cache that grew must be reported again"
+
+        monkeypatch.setattr(main, "_OCTREE_OVERCAP_REPEAT_S", 0.0)
+        _evict_octree_cache(max_bytes=100)
+        assert len(warnings()) == 3, "and the reminder interval still applies"
+
+
 def test_a_session_with_no_octree_at_all_pins_nothing(cache_root, no_live_sessions):
     """A session holding no octree id of any kind must not pin — or block —
     anything. (An unbaked edit is NOT this case: it keeps the drawn id in
@@ -364,3 +394,39 @@ def test_every_adoption_of_a_cache_dir_marks_it_used():
         f"{sorted(set(offenders))} adopt an octree cache dir without marking it "
         f"used — call _read_octree_metadata_and_mark_used"
     )
+
+
+def test_every_eviction_is_logged_by_id_with_its_trigger(cache_root, no_live_sessions, caplog):
+    """A cloud whose octree later fails to load ("no such file") must be
+    traceable from a log alone. Issue #7's was not: nothing recorded which
+    entries an eviction removed, or why it ran."""
+    import logging
+    make_octree(cache_root, IDS[0], 200, used=1000.0)
+    make_octree(cache_root, IDS[1], 200, used=2000.0)
+    make_octree(cache_root, IDS[2], 200, used=9000.0)
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        evicted = _evict_octree_cache(max_bytes=250, reason="bake abc123")
+    assert evicted == [IDS[0], IDS[1]]
+    lines = [r.getMessage() for r in caplog.records if "octree cache trim" in r.getMessage()]
+    assert len(lines) == 1
+    assert "after bake abc123" in lines[0]
+    assert IDS[0] in lines[0] and IDS[1] in lines[0] and IDS[2] not in lines[0]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        assert _evict_octree_cache(max_bytes=10_000, reason="bake abc123") == []
+    assert not [r for r in caplog.records if "octree cache trim" in r.getMessage()], (
+        "a trim that removes nothing should say nothing")
+
+
+def test_cache_summary_reports_size_cap_and_pins(cache_root, no_live_sessions, caplog, monkeypatch):
+    import logging
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", str(2_000_000_000))
+    make_octree(cache_root, IDS[0], 300_000_000, used=1000.0)
+    make_octree(cache_root, IDS[1], 200_000_000, used=2000.0)
+    no_live_sessions["s"] = _FakeSession(octree_cache_id=IDS[1])
+    with caplog.at_level(logging.INFO, logger="phytograph"):
+        main._octree_cache_summary("startup")
+    line = next(r.getMessage() for r in caplog.records if "octree cache (startup)" in r.getMessage())
+    assert "2 entries, 0.5 GB of a 2.0 GB cap" in line
+    assert "1 pinned by open clouds (0.2 GB)" in line

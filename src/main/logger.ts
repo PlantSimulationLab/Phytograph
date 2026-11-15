@@ -27,7 +27,8 @@
 import electronLog from 'electron-log/main.js';
 import { app } from 'electron';
 import { dirname, join } from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { ensureDir } from './ensureDir.js';
 import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { isBrokenPipe, pipeErrCode } from './brokenPipe.js';
 
@@ -284,7 +285,9 @@ export async function copySessionLogTo(destPath: string): Promise<void> {
   sections.push('----- backend (python, full) -----');
   sections.push(await readOrNote(backendPath));
 
-  await mkdir(dirname(destPath), { recursive: true });
+  // Not a bare mkdir: on Windows a recursive mkdir of a drive root (saving to
+  // D:\) throws EPERM although the directory plainly exists. See ensureDir.ts.
+  await ensureDir(dirname(destPath));
   await writeFile(destPath, sections.join('\n'), 'utf-8');
 }
 

@@ -84,7 +84,7 @@ describe('StitchDialog origin warning', () => {
   it('still runs the stitch when the user confirms past the warning', () => {
     const { onStitch, onClose } = open({ initialSelectedIds: new Set(['a', 'b']) });
     fireEvent.click(runButton());
-    expect(onStitch).toHaveBeenCalledWith(['a', 'b'], { retainOriginals: false });
+    expect(onStitch).toHaveBeenCalledWith(['a', 'b'], { retainOriginals: false, includeMisses: true });
     expect(onClose).toHaveBeenCalled();
   });
 });
@@ -104,7 +104,7 @@ describe('StitchDialog retain-originals option', () => {
     fireEvent.click(retainBox());
     expect(retainBox().checked).toBe(true);
     fireEvent.click(runButton());
-    expect(onStitch).toHaveBeenCalledWith(['a', 'b'], { retainOriginals: true });
+    expect(onStitch).toHaveBeenCalledWith(['a', 'b'], { retainOriginals: true, includeMisses: true });
   });
 
   it('resets to unchecked when the dialog is reopened', () => {
@@ -266,5 +266,49 @@ describe('StitchDialog mesh mode', () => {
     expect(runButton().disabled).toBe(true);
     fireEvent.click(runButton());
     expect(onMergeMeshes).not.toHaveBeenCalled();
+  });
+});
+
+// Issue #7: a stitched cloud has no single scanner origin, so the sky/miss
+// points that only LAD uses are dead weight on it (37% of the rows in the
+// reported orchard stitch). The option appears only when a selected cloud
+// carries misses, defaults ON (a plain stitch keeps every point, as before),
+// and resets on every open.
+describe('StitchDialog include-misses option', () => {
+  const WITH_MISSES: StitchCloudOption[] = [
+    { id: 'a', label: 'scan_a', hasMisses: true },
+    { id: 'b', label: 'scan_b' },
+    { id: 'c', label: 'scan_c' },
+  ];
+  const missBox = () =>
+    (screen.queryByTestId('stitch-include-misses')?.querySelector('input') ?? null) as HTMLInputElement | null;
+
+  it('is not offered when no selected cloud has misses', () => {
+    open({ clouds: WITH_MISSES, initialSelectedIds: new Set(['b', 'c']) });
+    expect(missBox()).toBeNull();
+  });
+
+  it('is offered, checked, when a selected cloud has misses', () => {
+    const { onStitch } = open({ clouds: WITH_MISSES, initialSelectedIds: new Set(['a', 'b']) });
+    expect(missBox()!.checked).toBe(true);
+    fireEvent.click(runButton());
+    expect(onStitch).toHaveBeenCalledWith(['a', 'b'], { retainOriginals: false, includeMisses: true });
+  });
+
+  it('passes includeMisses: false once unticked', () => {
+    const { onStitch } = open({ clouds: WITH_MISSES, initialSelectedIds: new Set(['a', 'b']) });
+    fireEvent.click(missBox()!);
+    fireEvent.click(runButton());
+    expect(onStitch).toHaveBeenCalledWith(['a', 'b'], { retainOriginals: false, includeMisses: false });
+  });
+
+  it('resets to checked when the dialog is reopened', () => {
+    const { view } = open({ clouds: WITH_MISSES, initialSelectedIds: new Set(['a', 'b']) });
+    fireEvent.click(missBox()!);
+    expect(missBox()!.checked).toBe(false);
+    view.rerender(<StitchDialog isOpen={false} onClose={vi.fn()} clouds={WITH_MISSES} onStitch={vi.fn()} />);
+    view.rerender(<StitchDialog isOpen onClose={vi.fn()} clouds={WITH_MISSES}
+      initialSelectedIds={new Set(['a', 'b'])} onStitch={vi.fn()} />);
+    expect(missBox()!.checked).toBe(true);
   });
 });

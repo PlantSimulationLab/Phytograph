@@ -54,6 +54,31 @@ export function abortOnTimeout(
   );
 }
 
+/**
+ * Idle deadline for the whole-cloud session operations (split, extract,
+ * duplicate, transform, rebuild_octree). They are requested with `?keepalive=1`,
+ * so the backend sends a few bytes at least every 5 s while it works and
+ * fetchJsonWithProgress restarts this clock on each one. The request is cut off
+ * only if the backend goes silent for this long, never because a big cloud
+ * simply takes a while. These used to be fixed 5- and 10-minute limits on the
+ * WHOLE request, which is how issue #7's stitch failed with its work done.
+ */
+export const SESSION_OP_IDLE_TIMEOUT_MS = 300000;
+
+/**
+ * Make `controller` abort when the caller's `signal` does, INCLUDING when it
+ * already has. `addEventListener('abort', …)` never fires for a signal that was
+ * aborted before the listener was attached, so a Cancel clicked just before a
+ * request started was silently ignored and the request ran to completion: a
+ * stitch canceled while it was still re-creating its inputs went on to merge
+ * and commit.
+ */
+export function linkAbort(signal: AbortSignal | undefined, controller: AbortController): void {
+  if (!signal) return;
+  if (signal.aborted) controller.abort();
+  else signal.addEventListener('abort', () => controller.abort(), { once: true });
+}
+
 // ==================== SHARED POINT SOURCE ====================
 
 /**
@@ -95,6 +120,9 @@ export interface TreeCostWarning {
   points: number;          // non-ground input points
   decimate_res1: number;   // resolved stage-1 voxel size, meters
   message: string;         // ready-to-display copy
+  // Stitch only: how many of the merged points are sky/miss points, so the
+  // prompt can offer to leave them out.
+  misses?: number;
 }
 
 /** Thrown when a segmentation endpoint wants explicit confirmation before
@@ -131,12 +159,12 @@ async function postSegment<T>(path: string, request: unknown, signal?: AbortSign
     else signal.addEventListener('abort', onExternalAbort, { once: true });
   }
   try {
-    const response = await fetch(`${baseUrl}${path}`, {
+    const response = await keepaliveFetch(`${baseUrl}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs, endpoint: path });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       const detail = errorData?.detail;
@@ -1260,12 +1288,12 @@ export async function exportDemRaster(
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 120000, '/api/dem/export-raster');
   try {
-    const response = await fetch(`${baseUrl}/api/dem/export-raster`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/dem/export-raster`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 120000, endpoint: '/api/dem/export-raster' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -1356,24 +1384,10 @@ export interface LADExportResponse {
 }
 
 export async function exportLAD(request: LADExportRequest): Promise<LADExportResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/lad/export');
   try {
-    const response = await fetch(`${baseUrl}/api/lad/export`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    return await fetchJsonWithProgress<LADExportResponse>(
+      '/api/lad/export?keepalive=1', request, undefined, SESSION_OP_IDLE_TIMEOUT_MS);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('LAD export failed:', error);
     throw error;
   }
@@ -1393,7 +1407,7 @@ export async function parseTrajectory(
   const timeoutId = abortOnTimeout(controller, 120000, '/api/trajectory/parse'); // 2 minutes
 
   try {
-    const response = await fetch(`${baseUrl}/api/trajectory/parse`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/trajectory/parse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1402,7 +1416,7 @@ export async function parseTrajectory(
         target_poses: options?.targetPoses,
       }),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 120000, endpoint: '/api/trajectory/parse' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -2335,14 +2349,14 @@ export async function generatePlantModel(
   const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/generate'); // 5 minutes
 
   try {
-    const response = await fetch(`${baseUrl}/api/plant/generate`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/plant/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 300000, endpoint: '/api/plant/generate' });
 
     clearTimeout(timeoutId);
 
@@ -2377,14 +2391,14 @@ export async function generatePlantCanopy(
   const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/canopy/generate'); // 5 minutes
 
   try {
-    const response = await fetch(`${baseUrl}/api/plant/canopy/generate`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/plant/canopy/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 300000, endpoint: '/api/plant/canopy/generate' });
 
     clearTimeout(timeoutId);
 
@@ -2556,12 +2570,12 @@ export async function createPlantSession(
   const timeoutId = abortOnTimeout(controller, 60000, '/api/plant/session/create');
 
   try {
-    const response = await fetch(`${baseUrl}/api/plant/session/create`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/plant/session/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 60000, endpoint: '/api/plant/session/create' });
 
     clearTimeout(timeoutId);
 
@@ -2592,12 +2606,12 @@ export async function advancePlantSession(
   const timeoutId = abortOnTimeout(controller, 60000, '/api/plant/session/:id/advance');
 
   try {
-    const response = await fetch(`${baseUrl}/api/plant/session/${sessionId}/advance`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/plant/session/${sessionId}/advance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dt }),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 60000, endpoint: '/api/plant/session/:id/advance' });
 
     clearTimeout(timeoutId);
 
@@ -2755,12 +2769,12 @@ export async function morphPlant(
   const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/morph'); // 5 minutes
 
   try {
-    const response = await fetch(`${baseUrl}/api/plant/morph`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/plant/morph`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 300000, endpoint: '/api/plant/morph' });
 
     clearTimeout(timeoutId);
 
@@ -3308,7 +3322,7 @@ export async function previewPointCloud(
   if (signal?.aborted) forwardAbort();
   else signal?.addEventListener('abort', forwardAbort, { once: true });
   try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/preview`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/pointcloud/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3317,7 +3331,7 @@ export async function previewPointCloud(
         max_rows: maxRows,
       }),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 60000, endpoint: '/api/pointcloud/preview' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -3354,38 +3368,145 @@ export async function importPointCloudByPath(
   // layout the file fixes. ASCII skips ride `columnPlan` as role 'skip'.
   droppedSlugs?: string[] | null,
 ): Promise<ImportPointCloudByPathResult> {
-  const baseUrl = getBackendUrl();
-  // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
-  // additional time to stream back. Matches the triangulation budget.
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 600000, '/api/pointcloud/import_by_path');
   try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/import_by_path`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // Keepalive mode: the backend sends 4-byte whitespace keepalives while it
+    // parses, then the packed cloud, and the deadline restarts on every chunk.
+    // It used to be a fixed 10 minutes for parse AND transfer together.
+    const bytes = await fetchBytesWithIdleTimeout(
+      '/api/pointcloud/import_by_path?keepalive=1',
+      {
         file_path: filePath,
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
         drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      // The endpoint returns JSON {detail: "..."} on error and octet-stream
-      // on success — only try to parse JSON when the request actually failed.
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    const buf = await response.arrayBuffer();
-    return decodePointCloudBinary(buf);
+      },
+      SESSION_OP_IDLE_TIMEOUT_MS,
+    );
+    return decodePointCloudBinary(stripStreamPreamble(bytes));
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('Point-cloud by-path import failed:', error);
     throw describeBackendError(error, 'Import');
   }
+}
+
+/**
+ * `fetch` for a request that has no progress to stream but may run long: asks
+ * the backend for keepalives (`?keepalive=1`, see KeepaliveResponses in
+ * main.py) and turns the caller's deadline into an IDLE one.
+ *
+ * The caller arms its deadline as before (`abortOnTimeout(controller, ms, …)`)
+ * and passes it here; this restarts that clock on every chunk received, reads
+ * the whole body, and returns an ordinary `Response` holding it. So the call
+ * site's own `.ok` / `.json()` / `.arrayBuffer()` handling is unchanged, and
+ * the request is cut off only if the backend goes SILENT for `timeoutMs`,
+ * never because the work simply takes long (issue #7).
+ *
+ * A quick answer comes back exactly as the endpoint sent it, status included.
+ * A slow one arrives as 200 with keepalive whitespace ahead of the payload,
+ * which is stripped here; a failure reported in that stream is thrown as an
+ * Error carrying the backend's message (or ScanCanceledError).
+ */
+export async function keepaliveFetch(
+  input: string,
+  init: RequestInit,
+  idle: { controller: AbortController; timeoutId: ReturnType<typeof setTimeout>; timeoutMs: number; endpoint: string },
+): Promise<Response> {
+  const url = input + (input.includes('?') ? '&' : '?') + 'keepalive=1';
+  let timer = idle.timeoutId;
+  const restart = () => {
+    clearTimeout(timer);
+    timer = abortOnTimeout(idle.controller, idle.timeoutMs, idle.endpoint);
+  };
+  try {
+    const response = await fetch(url, init);
+    restart();
+    const head = { status: response.status, statusText: response.statusText, headers: response.headers };
+    if (!response.body) return response;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        restart();
+        chunks.push(value);
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    const bytes = concatBytes(chunks);
+    if (!response.ok || response.headers.get('x-phytograph-keepalive') !== '1') {
+      // Passed through untouched by the backend: hand it on the same way.
+      return new Response(bytes.byteLength ? bytes : null, head);
+    }
+    return new Response(stripStreamPreamble(bytes), head);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * POST `request` and return the whole response body, under an IDLE deadline:
+ * the clock restarts on every chunk received, so a response that keeps
+ * arriving (keepalives, then a large payload) is never cut off for being long.
+ * A non-2xx reply throws with the backend's detail.
+ */
+export async function fetchBytesWithIdleTimeout(
+  path: string, request: unknown, timeoutMs: number, signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const controller = new AbortController();
+  let timeoutId = abortOnTimeout(controller, timeoutMs, path);
+  linkAbort(signal, controller);
+  try {
+    const response = await fetch(`${getBackendUrl()}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(
+        formatBackendDetail(errorData.detail) || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    if (!response.body) return new Uint8Array(await response.arrayBuffer());
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        clearTimeout(timeoutId);
+        timeoutId = abortOnTimeout(controller, timeoutMs, path);
+        chunks.push(value);
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    return concatBytes(chunks);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * The payload of a keepalive stream: `bytes` without the whitespace keepalives
+ * and PHP1 markers that precede it. Throws if the stream ended in an `error`
+ * or `canceled` marker instead of a payload. Returns a buffer that starts at
+ * the payload, so typed-array views into it stay 4-byte aligned.
+ */
+export function stripStreamPreamble(bytes: Uint8Array): ArrayBuffer {
+  throwIfTerminalMarker(bytes);
+  const { consumed } = parseProgressMarkers(bytes, 0);
+  let start = consumed;
+  while (start < bytes.length && isWhitespaceByte(bytes[start])) start++;
+  // No preamble and a buffer of its own: hand it over as is (no second copy of
+  // a large cloud).
+  if (start === 0 && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer as ArrayBuffer;
+  }
+  return bytes.buffer.slice(bytes.byteOffset + start, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 // ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
@@ -3786,7 +3907,7 @@ export async function fetchBinaryFrame(
     clearTimeout(timeoutId);
     timeoutId = abortOnTimeout(controller, timeoutMs, path);
   };
-  if (signal) signal.addEventListener('abort', () => controller.abort());
+  linkAbort(signal, controller);
   try {
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
@@ -3889,7 +4010,7 @@ export async function fetchJsonWithProgress<T>(
     clearTimeout(timeoutId);
     timeoutId = abortOnTimeout(controller, timeoutMs, path);
   };
-  if (signal) signal.addEventListener('abort', () => controller.abort());
+  linkAbort(signal, controller);
   try {
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
@@ -3900,10 +4021,26 @@ export async function fetchJsonWithProgress<T>(
     if (!response.ok) {
       clearTimeout(timeoutId);
       const errorData = await response.json().catch(() => ({}));
+      const detail = errorData?.detail;
+      // A 409 carrying a structured `cost_warning` is a CONFIRMATION prompt,
+      // not a failure (same contract as postSegment): surface it typed so the
+      // caller can ask and resend with `acknowledge_cost`. `status` rides along
+      // for callers that branch on the code.
+      if (response.status === 409 && detail && typeof detail === 'object'
+          && (detail as { cost_warning?: TreeCostWarning }).cost_warning) {
+        throw Object.assign(
+          new CostWarningError((detail as { cost_warning: TreeCostWarning }).cost_warning),
+          { status: response.status },
+        );
+      }
       // `status` lets a caller tell a refusal it can route around (a 409) from
-      // a real failure without matching on the message text.
+      // a real failure without matching on the message text. An object detail
+      // is unwrapped to its message rather than stringified to [object Object].
       throw Object.assign(
-        new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`),
+        new Error(
+          (typeof detail === 'string' ? detail : (detail as { message?: string } | undefined)?.message)
+          || `HTTP ${response.status}: ${response.statusText}`,
+        ),
         { status: response.status },
       );
     }
@@ -3965,11 +4102,11 @@ export async function importPointCloudLasLaz(
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(`${baseUrl}/api/pointcloud/import`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/pointcloud/import`, {
       method: 'POST',
       body: formData,
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 120000, endpoint: '/api/pointcloud/import' });
 
     clearTimeout(timeoutId);
 
@@ -5333,24 +5470,11 @@ export async function sessionTransform(
   matrix: number[],
   octreeMode: 'rebuild' | 'pose' = 'rebuild',
 ): Promise<SessionTransformResult> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/transform');
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/transform`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ matrix, octree_mode: octreeMode }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as SessionTransformResult;
+    return await fetchJsonWithProgress<SessionTransformResult>(
+      `/api/cloud/session/${sessionId}/transform?keepalive=1`,
+      { matrix, octree_mode: octreeMode }, undefined, SESSION_OP_IDLE_TIMEOUT_MS);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('session_transform failed:', error);
     throw error;
   }
@@ -5370,22 +5494,11 @@ export async function sessionTransform(
 export async function rebuildSessionOctree(
   sessionId: string,
 ): Promise<CloudSessionBakeResult & { octree_posed?: boolean }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 600000, '/api/cloud/session/:id/rebuild_octree');
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/rebuild_octree`, {
-      method: 'POST',
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionBakeResult & { octree_posed?: boolean };
+    return await fetchJsonWithProgress<CloudSessionBakeResult & { octree_posed?: boolean }>(
+      `/api/cloud/session/${sessionId}/rebuild_octree?keepalive=1`,
+      {}, undefined, SESSION_OP_IDLE_TIMEOUT_MS);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('rebuild_octree failed:', error);
     throw error;
   }
@@ -5416,28 +5529,12 @@ export async function sessionSplit(
     signal?: AbortSignal;
   },
 ): Promise<CloudSessionSplitResult> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/split');
-  if (options.signal) options.signal.addEventListener('abort', () => controller.abort());
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/split`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        region: options.region ?? null,
-        scalar_filters: options.scalarFilters ?? null,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionSplitResult;
+    return await fetchJsonWithProgress<CloudSessionSplitResult>(
+      `/api/cloud/session/${sessionId}/split?keepalive=1`,
+      { region: options.region ?? null, scalar_filters: options.scalarFilters ?? null },
+      options.signal, SESSION_OP_IDLE_TIMEOUT_MS);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('session_split failed:', error);
     throw error;
   }
@@ -5456,25 +5553,12 @@ export async function sessionExtract(
     signal?: AbortSignal;
   },
 ): Promise<{ session_id: string; extracted: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/extract');
-  if (options.signal) options.signal.addEventListener('abort', () => controller.abort());
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ region: options.region ?? null, scalar_filters: options.scalarFilters ?? null }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    return await fetchJsonWithProgress(
+      `/api/cloud/session/${sessionId}/extract?keepalive=1`,
+      { region: options.region ?? null, scalar_filters: options.scalarFilters ?? null },
+      options.signal, SESSION_OP_IDLE_TIMEOUT_MS);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('session_extract failed:', error);
     throw error;
   }
@@ -5617,23 +5701,11 @@ export async function sessionExtractByColumn(
 export async function duplicateCloudSession(
   sessionId: string,
 ): Promise<{ session_id: string; duplicate: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/duplicate');
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/duplicate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    return await fetchJsonWithProgress(
+      `/api/cloud/session/${sessionId}/duplicate?keepalive=1`,
+      {}, undefined, SESSION_OP_IDLE_TIMEOUT_MS);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('duplicate_cloud_session failed:', error);
     throw error;
   }
@@ -5643,30 +5715,47 @@ export async function duplicateCloudSession(
  * and build its octree (the "Stitch Clouds" merge). Reconciles differing global
  * shifts and unions scalar extra-dim columns server-side — no source file read,
  * and (critically) no reliance on the renderer's flat `positions`, which is empty
- * for octree-backed clouds. Returns the merged octree metadata. */
+ * for octree-backed clouds. Returns the merged octree metadata.
+ *
+ * Streams PHP1 progress ahead of its JSON tail and is cancelable (`signal` +
+ * `onRunId` → POST /api/cancel/{runId}). The deadline is an IDLE deadline:
+ * fetchJsonWithProgress refreshes it on every chunk and the backend sends a
+ * keepalive at least every 5 s, so a merge that is still working is never cut
+ * off. It used to be a fixed 5 minutes for the whole request, which issue #7's
+ * 354 M-point stitch (9.3 min) could not meet — the backend finished a result
+ * the renderer had already thrown away.
+ *
+ * Throws CostWarningError when the backend wants confirmation first; resend
+ * with `acknowledgeCost`. */
 export async function sessionMerge(
   sessionIds: string[],
+  options?: {
+    includeMisses?: boolean;
+    acknowledgeCost?: boolean;
+    signal?: AbortSignal;
+    onProgress?: BinaryFrameProgress;
+    onRunId?: (runId: string) => void;
+  },
 ): Promise<{ merged: OctreeMetadata & { session_id: string; point_count: number; cache_id: string; world_shift?: [number, number, number] | null; source_units?: string | null; source_unit_scale?: number | null; has_misses?: boolean; miss_octree_cache_id?: string | null } }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/merge');
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/merge`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_ids: sessionIds }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    return await fetchJsonWithProgress(
+      '/api/cloud/session/merge',
+      {
+        session_ids: sessionIds,
+        include_misses: options?.includeMisses ?? true,
+        acknowledge_cost: options?.acknowledgeCost ?? false,
+      },
+      options?.signal,
+      600000,
+      options?.onProgress,
+      options?.onRunId,
+    );
   } catch (error) {
-    clearTimeout(timeoutId);
+    // A confirmation prompt and a user cancel are not failures to describe.
+    if (error instanceof CostWarningError || error instanceof ScanCanceledError) throw error;
+    if (options?.signal?.aborted) throw error;
     console.error('session_merge failed:', error);
-    throw error;
+    throw describeBackendError(error, 'Stitch');
   }
 }
 
@@ -5914,13 +6003,13 @@ export async function computeScalarField(
     else signal.addEventListener('abort', onExternalAbort, { once: true });
   }
   try {
-    const response = await fetch(
+    const response = await keepaliveFetch(
       `${getBackendUrl()}/api/cloud/session/${sessionId}/scalar_fields/compute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
         signal: controller.signal,
-      });
+      }, { controller, timeoutId, timeoutMs: 600000, endpoint: `/api/cloud/session/${sessionId}/scalar_fields/compute` });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       const detail = errorData?.detail;
@@ -6004,24 +6093,9 @@ export interface DetectedStem {
 export async function detectStems(
   sessionId: string, request: { band_min_m?: number; band_max_m?: number; max_diameter_m?: number } = {},
 ): Promise<{ seeds: DetectedStem[]; layer_points: number }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 600000, 'detect_stems');
-  try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/detect_stems`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  return fetchJsonWithProgress(
+    `/api/cloud/session/${sessionId}/detect_stems?keepalive=1`,
+    request, undefined, SESSION_OP_IDLE_TIMEOUT_MS);
 }
 
 /**
@@ -6169,12 +6243,12 @@ export async function importQSMCsv(filePath: string): Promise<QSMBuildResponse> 
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 120000, '/api/qsm/import');
   try {
-    const response = await fetch(`${baseUrl}/api/qsm/import`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/qsm/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: filePath }),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 120000, endpoint: '/api/qsm/import' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -6580,12 +6654,12 @@ export async function detectPhyllotaxis(
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 60000, '/api/qsm/phyllotaxis'); // 1 minute
   try {
-    const response = await fetch(`${baseUrl}/api/qsm/phyllotaxis`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/qsm/phyllotaxis`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cylinders, shoots }),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 60000, endpoint: '/api/qsm/phyllotaxis' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -6604,12 +6678,12 @@ export async function addQSMLeaves(request: QSMLeavesRequest): Promise<QSMLeaves
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/qsm/leaves'); // 5 minutes
   try {
-    const response = await fetch(`${baseUrl}/api/qsm/leaves`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/qsm/leaves`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 300000, endpoint: '/api/qsm/leaves' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -6781,12 +6855,12 @@ export async function adjustQSMLeafAngles(
       body = JSON.stringify(request);
       contentType = 'application/json';
     }
-    const response = await fetch(`${baseUrl}/api/qsm/adjust-leaf-angles`, {
+    const response = await keepaliveFetch(`${baseUrl}/api/qsm/adjust-leaf-angles`, {
       method: 'POST',
       headers: { 'Content-Type': contentType },
       body,
       signal: controller.signal,
-    });
+    }, { controller, timeoutId, timeoutMs: 300000, endpoint: '/api/qsm/adjust-leaf-angles' });
     clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));

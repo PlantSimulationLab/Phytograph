@@ -13,6 +13,7 @@ real mechanism, not the absence of errors:
 """
 
 import asyncio
+import os
 import time
 
 import numpy as np
@@ -146,21 +147,45 @@ def test_worker_error_surfaces_as_runtimeerror():
 # native crash) left a multi-GB compute running with no parent. They stack
 # across launches.
 
-def test_a_worker_is_spawned_into_its_own_process_group():
+def _spawn_kwargs(monkeypatch, tmp_path):
+    """Construct a real `_SegProc` with `os.posix_spawn` intercepted, and return
+    the keyword arguments the spawn was given. Nothing is actually started, so
+    no child's inherited stdout outlives the test."""
+    seen = {}
+
+    def fake_posix_spawn(path, argv, env, **kwargs):
+        seen.update(kwargs)
+        return 424242
+
+    monkeypatch.setattr(main.os, "posix_spawn", fake_posix_spawn)
+    main._SegProc(["/usr/bin/true"], {}, str(tmp_path / "err.log"))
+    return seen
+
+
+@pytest.mark.skipif(not hasattr(os, "posix_spawn"), reason="POSIX only")
+def test_a_worker_is_spawned_into_its_own_process_group(monkeypatch, tmp_path):
     """Pins the premise: the supervisor signals the BACKEND's group
     (`process.kill(-pid)` in src/main/backend.ts), and `setpgroup=0` puts each
-    worker outside it — which is WHY the watchdog below has to exist. Asserted
-    against the source, since observing it needs a live spawn whose inherited
-    stdout would outlive the test. If this ever stops being true the orphan
-    problem changes shape and the watchdog should be re-justified."""
-    import inspect
-    import re
+    worker outside it — which is WHY the watchdog below has to exist. If this
+    ever stops being true the orphan problem changes shape and the watchdog
+    should be re-justified.
 
-    src = inspect.getsource(main._SegProc.spawn if hasattr(main._SegProc, "spawn")
-                            else main._SegProc)
-    assert re.search(r"posix_spawn\(.*setpgroup=0", src, re.S), (
-        "the worker is no longer spawned into its own process group"
-    )
+    Asserted on what the spawn is actually GIVEN. It used to grep the source
+    for `posix_spawn(... setpgroup=0`, which stopped matching (and so failed
+    for good) when one-shot mode made the argument conditional and it moved
+    into a dict built on the line before the call."""
+    assert main._CHILDREN_OWN_GROUP is True, "the server must give workers their own group"
+    assert _spawn_kwargs(monkeypatch, tmp_path).get("setpgroup") == 0, (
+        "the worker is no longer spawned into its own process group")
+
+
+@pytest.mark.skipif(not hasattr(os, "posix_spawn"), reason="POSIX only")
+def test_one_shot_mode_keeps_workers_in_the_callers_group(monkeypatch, tmp_path):
+    """The one exception, and the reason the argument is conditional: in
+    one-shot mode (`python -m phytograph run`) a harness that kills the group it
+    started must reach the workers too."""
+    monkeypatch.setattr(main, "_CHILDREN_OWN_GROUP", False)
+    assert "setpgroup" not in _spawn_kwargs(monkeypatch, tmp_path)
 
 
 def test_the_worker_exits_when_its_parent_dies():

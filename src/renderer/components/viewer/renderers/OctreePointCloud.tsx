@@ -731,7 +731,11 @@ export function OctreePointCloud({
       })
       .catch((err) => {
         if (canceled) return;
-        console.error(`Octree load failed for ${data.octree?.cacheId}:`, err);
+        // The session id lets this line be matched to the backend's
+        // `rebuild_octree <session>` line, which says what that session held.
+        console.error(
+          `Octree load failed for ${data.octree?.cacheId} ` +
+          `(cloud "${data.fileName ?? '?'}", session ${data.octree?.sessionId ?? 'none'}):`, err);
         // A load rejection here means the octree files are unavailable on disk:
         // the app:// protocol handler 404s and potree-core throws (a JSON-parse
         // error on the 404 body). Don't string-match the message — any failure to

@@ -4,6 +4,7 @@ import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
 import { isTypingTarget } from '../lib/keyboardFocus';
+import { logToSession } from '../lib/logger';
 import { shouldDeferOctreeRebuild } from '../lib/deferOctreeRebuild';
 import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { classViewFilters } from '../lib/octreeFilterSpec';
@@ -568,7 +569,7 @@ interface PointCloudViewerProps {
   onSave: (data: PointCloudData, fileName: string) => void;
   onAddScan?: (scan: Scan) => void;
   onAddScans?: (scans: Scan[]) => void;
-  onStitchScans?: (ids: string[], opts?: { retainOriginals?: boolean }) => void;
+  onStitchScans?: (ids: string[], opts?: { retainOriginals?: boolean; includeMisses?: boolean }) => void;
   className?: string;
   importRefsCallback?: (refs: ImportRefs) => void;
   /** How many clouds have hand labels changed since they were last exported,
@@ -4389,6 +4390,12 @@ export default function PointCloudViewer({
     const octreeInfo = cloud?.data.octree;
     if (!cloud || !octreeInfo) return;
     const fileName = cloud.data.fileName ?? cloud.id;
+    // Every recovery path says which octree went missing, from which cloud and
+    // session, and how it ended. Without these a successful rebuild left no
+    // trace at all, and a log could not say whether the display came back.
+    const recoveryLog = (level: 'info' | 'warn', what: string) => logToSession(level,
+      `[octree-recovery] "${fileName}" (session ${octreeInfo.sessionId ?? 'none'}, ` +
+      `octree ${octreeInfo.cacheId ?? 'none'}, edited=${Boolean(octreeInfo.divergedFromSource)}): ${what}`);
     if (octreeInfo.divergedFromSource) {
       // An edited cloud cannot be rebuilt from its SOURCE FILE — that is the
       // refusal below. It usually can be rebuilt from its SESSION: the backend's
@@ -4406,6 +4413,7 @@ export default function PointCloudViewer({
       // `buildSessionOctreeData` keeps `divergedFromSource` sticky, so the
       // recovered cloud stays correctly marked as edited.
       if (octreeInfo.sessionId) {
+        recoveryLog('info', 'octree missing; rebuilding it from the session');
         try {
           const rebuilt = await rebuildSessionOctree(octreeInfo.sessionId);
           const newData = buildSessionOctreeData(rebuilt, octreeInfo, fileName);
@@ -4414,6 +4422,7 @@ export default function PointCloudViewer({
             ...prev,
             [rebuilt.cache_id]: (prev[rebuilt.cache_id] ?? 0) + 1,
           }));
+          recoveryLog('info', `rebuilt from the session as octree ${rebuilt.cache_id}`);
           return;
         } catch (err) {
           // Session gone (backend restart, idle/over-cap eviction) or the
@@ -4422,6 +4431,7 @@ export default function PointCloudViewer({
           console.error('Session rebuild of an edited cloud failed', err);
         }
       }
+      recoveryLog('warn', 'gave up: edited cloud with no usable session; showed "Edited point cloud unavailable"');
       showToast({
         title: 'Edited point cloud unavailable',
         message:
@@ -4435,6 +4445,7 @@ export default function PointCloudViewer({
       return;
     }
     if (!octreeInfo.sourceXyzPath) {
+      recoveryLog('warn', 'gave up: no source file to rebuild from; showed "Point cloud unavailable"');
       showToast({
         title: 'Point cloud unavailable',
         message: `The cached octree for ${fileName} is missing and there is no source file to rebuild it from. Re-import the cloud.`,
@@ -4443,6 +4454,7 @@ export default function PointCloudViewer({
       });
       return;
     }
+    recoveryLog('info', `octree missing; rebuilding it from the source file ${octreeInfo.sourceXyzPath}`);
     try {
       const rebuilt = await createCloudSession(
         octreeInfo.sourceXyzPath,
@@ -4470,7 +4482,9 @@ export default function PointCloudViewer({
         ...prev,
         [rebuilt.cache_id]: (prev[rebuilt.cache_id] ?? 0) + 1,
       }));
+      recoveryLog('info', `rebuilt from the source file as octree ${rebuilt.cache_id}, session ${rebuilt.session_id}`);
     } catch (err) {
+      recoveryLog('warn', `gave up: rebuilding from ${octreeInfo.sourceXyzPath} failed: ${err instanceof Error ? err.message : String(err)}`);
       showToast({
         title: 'Point cloud unavailable',
         message: `The cached octree for ${fileName} is missing and could not be rebuilt from ${octreeInfo.sourceXyzPath}: ${err instanceof Error ? err.message : String(err)}. Re-import the file.`,
@@ -30710,7 +30724,7 @@ export default function PointCloudViewer({
         onClose={() => setShowStitchDialog(false)}
         clouds={clouds.map(c => {
           const scan = scans.find(s => s.id === c.id)!;
-          return { id: c.id, label: scanDisplayName(scan), color: c.color, pointCount: c.data.pointCount, hasOrigin: scanHasKnownOrigin(scan) };
+          return { id: c.id, label: scanDisplayName(scan), color: c.color, pointCount: c.data.pointCount, hasOrigin: scanHasKnownOrigin(scan), hasMisses: Boolean(c.data.octree?.hasMisses) };
         })}
         initialSelectedIds={selectedIds}
         onStitch={(ids, opts) => { if (ids.length >= 2) onStitchClouds?.(ids, opts); }}

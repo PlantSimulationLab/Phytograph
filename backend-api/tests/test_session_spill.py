@@ -481,6 +481,11 @@ def test_session_reads_go_through_the_lookup_chokepoint():
         # A progress-bar weight: paging a spilled session in off disk to size a
         # slice would read hundreds of MB; a miss falls back to equal weights.
         "_scan_entry_points_estimate",
+        # The merge's pre-flight sizing. It reads a spilled session's recorded
+        # profile instead of paging it in (minutes for a big batch, all before
+        # the response's first byte), and any id it cannot size that way goes
+        # through `_get_cloud_session` after all, which is how a 404 still fires.
+        "_merge_profiles",
         # An IDENTITY test, not a lookup: "is this object still the registered
         # session?" before a compaction installs into it. A spilled session is
         # correctly "no" (installing would delete the store its spilled copy

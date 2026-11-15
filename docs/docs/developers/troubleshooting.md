@@ -258,6 +258,26 @@ The `allow_file_source` flag on `PointSource` / `HeliosScanEntry` /
 live clouds (unit tests driving the loaders, external files). The app never
 sets it.
 
+## A cloud's display went missing ("Octree load failed … no such file")
+
+The renderer asked for an octree that is not in the cache, then (usually)
+rebuilt it. An exported session log says where it went without needing the
+user's project file. Find the octree id in the `Octree load failed for <id>
+(cloud "…", session <sid>)` line and follow it through these lines:
+
+| Line | Written when | What it tells you |
+|---|---|---|
+| `octree cache (startup)` / `(opening <file>)` | Launch, each project open | Entry count, size against the cap, how much open clouds pin, cache root. |
+| `project save: cloud <sid>: octree=<id> (embedded \| rebuilt on open \| MISSING)` | Each project save | Whether the display travelled in the file. **MISSING** means it was already gone when the project was saved. |
+| `project save: scene octrees no saved cloud owns` | Save, if any | The scene pointed at an octree no cloud session holds. |
+| `project open: cloud <key> -> session <sid>: … (from file \| already cached \| rebuilt as <new> \| NONE …)` | Each project open | Where each reopened display came from. **NONE** means it was in neither the file nor the cache. |
+| `octree cache trim after <op>: evicted N entries …: <ids>` | A bake, transform or rebuild trimmed the cache | Which ids were deleted, and what triggered it. |
+| `[octree-recovery] "<cloud>" (session …, octree …, edited=…): …` | The renderer handled a missing octree | Which recovery ran (from the session or the source file) and how it ended, including giving up. |
+| `rebuild_octree <sid>: session held octree=… rendered=… miss=…; rebuilt as …` | A rebuild from the session | What the session held at that moment and which of those ids were on disk. A requested id absent from this line means the scene pointed at an octree the session never had. |
+
+`loaded node with 0 bytes: rN` warnings are unrelated: potree-core notes empty
+nodes in a PotreeConverter hierarchy as it skips them.
+
 ## Stale backend processes
 
 Since ports are resolved per instance, a leftover backend no longer blocks the
