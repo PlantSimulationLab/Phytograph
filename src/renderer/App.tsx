@@ -14,6 +14,13 @@ import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } 
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, OCTREE_PATH_EXTENSIONS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
 import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCanceledError, CostWarningError, type TreeCostWarning, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
+import { HEADER_BYTES, headerOnlyFile, wholeFile } from "./lib/headerOnlyFile";
+
+// All of a File's bytes, for an import that parses in the renderer. File →
+// Import hands over header-only Files (lib/headerOnlyFile.ts); every other File
+// passes through untouched.
+const readWholeFile = (file: File): Promise<File> =>
+  wholeFile(file, (path) => window.electronAPI.fs.readBinary(path));
 import { isIdentityAxes, isMeshAxes, meshAxesRotationDeg, type MeshAxes } from "./lib/meshAxes";
 
 // OCTREE_PATH_EXTENSIONS (imported above) decides whether a dropped file routes
@@ -287,7 +294,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // Returns undefined on failure; the caller then falls back (with a warning).
   const materializeDroppedFile = useCallback(async (file: File): Promise<string | undefined> => {
     try {
-      const buf = await file.arrayBuffer();
+      const buf = await (await readWholeFile(file)).arrayBuffer();
       const path = await window.electronAPI?.fs?.writeTempBinary?.(file.name, buf);
       return path || undefined;
     } catch (err) {
@@ -824,7 +831,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             const texturedLabel = backendMesh.hasTextures ? 'textured mesh' : 'mesh';
             showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.data.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
           } else {
-            const meshData = await parseMesh(file);
+            const meshData = await parseMesh(await readWholeFile(file));
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
               data: {
@@ -861,7 +868,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           title: 'Importing skeleton…', hint: 'Reading skeleton from disk…',
         });
         // Parse as skeleton
-        const skeletonData = await parseSkeleton(file);
+        const skeletonData = await parseSkeleton(await readWholeFile(file));
         if (importRefsRef.current) {
           importRefsRef.current.importSkeleton({
             sourceCloudId: 'imported',
@@ -946,7 +953,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         } else {
           // No on-disk path (Blob/test fixture): the wizard can't preview, so
           // fall back to the in-renderer flat parser with auto-detection.
-          const data = await parsePointCloud(file);
+          const data = await parsePointCloud(await readWholeFile(file));
           const newScan: Scan = {
             id: crypto.randomUUID(),
             label: data.fileName ? baseNameForLabel(data.fileName) : 'Scan',
@@ -1132,7 +1139,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }, meshImportTransform(meshPath));
             meshCount++;
           } else {
-            const meshData = await parseMesh(file);
+            const meshData = await parseMesh(await readWholeFile(file));
             if (importRefsRef.current) {
               importRefsRef.current.importMesh({
                 sourceCloudId: 'imported',
@@ -1157,7 +1164,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         } else if (shouldImportAsSkeleton) {
           setImportProgress(p => (p ? { ...p, title: 'Importing skeleton…' } : p));
           // Parse as skeleton
-          const skeletonData = await parseSkeleton(file);
+          const skeletonData = await parseSkeleton(await readWholeFile(file));
           if (importRefsRef.current) {
             importRefsRef.current.importSkeleton({
               sourceCloudId: 'imported',
@@ -1196,7 +1203,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           if (sourcePath && OCTREE_PATH_EXTENSIONS.has(ext)) {
             wizardFiles.push({ path: sourcePath, fileName: file.name });
           } else {
-            const data = await parsePointCloud(file);
+            const data = await parsePointCloud(await readWholeFile(file));
             newScans.push({
               id: crypto.randomUUID(),
               label: data.fileName ? baseNameForLabel(data.fileName) : 'Scan',
@@ -1530,6 +1537,22 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // and preserving keeps that the caller's invariant instead of this writer's.
   const handleRebuildScanOctree = useCallback((id: string, data: PointCloudData) => {
     setScans(prev => prev.map(s => (s.id === id ? { ...s, data } : s)));
+  }, []);
+
+  // A session edit that leaves the octree alone (an erase or a label stroke,
+  // before "Apply") still makes the source FILE a stale copy of the cloud. Say
+  // so at once: octree recovery reads `divergedFromSource` to decide whether a
+  // missing octree may be rebuilt from that file, and doing so would silently
+  // bring back every erased point. Only the flag changes (functional update, so
+  // a concurrent write of the cloud's data is never overwritten by a stale copy);
+  // `sourcePath` goes with it, as in handleUpdateScanData.
+  const handleMarkScanEdited = useCallback((id: string) => {
+    setScans(prev => prev.map(s => (
+      s.id === id && s.data?.octree && !s.data.octree.divergedFromSource
+        ? { ...s, data: { ...s.data, octree: { ...s.data.octree, divergedFromSource: true } },
+            sourcePath: undefined, asciiFormat: undefined }
+        : s
+    )));
   }, []);
 
   const handleUpdateScanParams = useCallback((id: string, params: ScanParameters | undefined) => {
@@ -2078,9 +2101,14 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const okPaths: string[] = [];
     for (const p of paths) {
       try {
-        const bytes = await window.electronAPI.fs.readBinary(p);
+        // The header only: the import reads the file by path, and only a PLY or
+        // CSV sniff looks at the bytes. A whole-file read here capped imports at
+        // 2 GiB and held a copy of every selected file for the whole import;
+        // the few imports that parse in the renderer fetch the rest themselves
+        // (readWholeFile).
+        const head = await window.electronAPI.fs.readBinary(p, HEADER_BYTES);
         const name = p.split(/[\\/]/).pop() ?? 'file';
-        files.push(new File([bytes], name));
+        files.push(headerOnlyFile(head, name, p));
         okPaths.push(p);
       } catch (err) {
         showToast({ title: `Failed to read ${p}: ${err instanceof Error ? err.message : err}`, type: 'error' });
@@ -2485,6 +2513,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onSetScanSelection={handleSetScanSelection}
           onUpdateScanData={handleUpdateScanData}
           onRebuildScanOctree={handleRebuildScanOctree}
+          onMarkScanEdited={handleMarkScanEdited}
           onUpdateScanParams={handleUpdateScanParams}
           onUpdateScanRegistration={handleUpdateScanRegistration}
           onUpdateScanLabel={handleUpdateScanLabel}

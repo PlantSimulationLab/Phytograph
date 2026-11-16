@@ -55,11 +55,18 @@ def bin_points_to_cells_terrain(points, grid_center, grid_size, nx, ny, nz,
     column, gets ``-1`` (and so does a point in a dropped column when
     ``kept_columns`` is given). Returns the flat cell index ``i + nx*(j + ny*k)``.
 
-    ``column_offsets`` empty/None -> defers to the regular :func:`bin_points_to_cells`.
+    ``column_offsets`` empty/None is a FLAT grid: every column offset is zero. The
+    rotation and ``kept_columns`` still apply to it. Only a grid with nothing to
+    apply at all (no offsets, no rotation, no dropped columns) defers to the
+    regular :func:`bin_points_to_cells`. Deferring on missing offsets alone
+    dropped the rotation of every rotated non-snapped grid, so a 30-degree row grid
+    cropped to the unrotated box and kept about 20% of its points.
     """
     offs = None if column_offsets is None else np.asarray(column_offsets, dtype=np.float64)
     if offs is None or offs.size == 0:
-        return bin_points_to_cells(points, grid_center, grid_size, nx, ny, nz)
+        if abs(float(rotation_deg or 0.0)) <= 1e-9 and kept_columns is None:
+            return bin_points_to_cells(points, grid_center, grid_size, nx, ny, nz)
+        offs = np.zeros(max(1, int(nx)) * max(1, int(ny)), dtype=np.float64)
 
     pts = np.asarray(points, dtype=np.float64)
     n = pts.shape[0] if pts.ndim == 2 else 0

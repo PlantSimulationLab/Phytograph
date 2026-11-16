@@ -25,7 +25,7 @@ import numpy as np
 PROGRESS_MAGIC = b"PHP1"
 FRAME_MAGIC = b"PHB1"
 _WS = (0x20, 0x09, 0x0A, 0x0D)
-_DTYPES = {"f32": np.float32, "u32": np.uint32}
+_DTYPES = {"f32": np.float32, "u32": np.uint32, "f64": np.float64}
 
 
 class StreamParser:
@@ -103,7 +103,7 @@ def decode_frame(payload: bytes) -> Tuple[Dict[str, Any], Dict[str, np.ndarray]]
         dtype = _DTYPES[d["dtype"]]
         n = int(d["length"])
         buffers[d["name"]] = np.frombuffer(payload, dtype=dtype, count=n, offset=off).copy()
-        off += n * 4
+        off += n * np.dtype(dtype).itemsize
     return header["meta"], buffers
 
 

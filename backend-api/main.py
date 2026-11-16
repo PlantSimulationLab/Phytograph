@@ -1,7 +1,7 @@
 # Before numpy/open3d load: PHYTOGRAPH_THREADS pins their native pools.
 import thread_cap
 thread_cap.apply_env()
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
+from fastapi import Depends, FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -4927,9 +4927,9 @@ class TriangulationGrid(BaseModel):
     ny: int = 1
     nz: int = 1
     # Azimuthal rotation about +z (degrees). The renderer crops the ROTATED box
-    # (via crop_box_rotation_deg), so points are confined correctly; the cell
-    # binning here is axis-aligned, but the C++ inversion re-bins each triangle
-    # with a rotation-aware containment test, so a rotated grid is still correct.
+    # (via crop_box_rotation_deg), and the per-triangle cell binning inverse-
+    # rotates into the grid's frame too (qsm.grid.bin_points_to_cells_terrain),
+    # snapped or flat.
     rotation: float = 0.0
     # Per-(x,y)-column vertical offset for a terrain-following ("snapped") grid,
     # row-major [j*nx + i], length nx*ny. Each value is the z shift added to the
@@ -4987,6 +4987,15 @@ class TriangulationRequest(BaseModel):
     # not a second crop. None = not pinned (mesh isn't LAD-reusable).
     grid: Optional[TriangulationGrid] = None
     # Ball pivoting parameters
+    # The frame the returned vertices are in: they come back relative to
+    # `vertex_origin` (world = vertex + vertex_origin), which equals this when
+    # given. The renderer passes the source cloud's world shift, so the mesh
+    # lands in the cloud's STORED frame (lib/meshFrame.ts). When omitted the
+    # backend picks whole metres near the points, or zero for small coordinates.
+    # Vertices travel as float32, which resolves only 0.5 m at a UTM northing, so
+    # world-frame vertices snapped every mesh of a georeferenced cloud onto a
+    # 6 cm x 50 cm lattice. Points, `crop_box` and `grid` stay in world coordinates.
+    frame_origin: Optional[List[float]] = None
     radii: Optional[List[float]] = None  # Ball radii for ball pivoting (auto if None)
     # Poisson parameters
     depth: int = 8  # Octree depth for Poisson reconstruction
@@ -5328,6 +5337,16 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                                   f"removing {duplicates_dropped:,} duplicate coordinate(s) "
                                   "— not enough distinct geometry to triangulate.")}
 
+        # Mesh in a local frame (see `TriangulationRequest.frame_origin`). Every
+        # step below is translation-invariant (normals face the cloud's own
+        # centroid), and subtracting whole metres from nearby coordinates is
+        # exact in float64, so only the float32 packing of the result changes.
+        vertex_origin = (np.asarray(request.frame_origin, dtype=np.float64)
+                         if request.frame_origin is not None
+                         else _helios_local_origin(points.mean(axis=0)))
+        if np.any(vertex_origin):
+            points = points - vertex_origin
+
         # Create Open3D point cloud
         _report(0.15, "Preparing point cloud")
         pcd = o3d.geometry.PointCloud()
@@ -5564,7 +5583,9 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             v = vertices[triangles]  # (T, 3, 3)
             centroids = v.mean(axis=1)  # (T, 3)
             cells = bin_points_to_cells_terrain(
-                centroids, g.center, g.size, g.nx, g.ny, g.nz,
+                # The grid is world-frame; the centroids are relative to vertex_origin.
+                centroids, (np.asarray(g.center, dtype=np.float64) - vertex_origin).tolist(),
+                g.size, g.nx, g.ny, g.nz,
                 column_offsets=g.column_offsets, rotation_deg=g.rotation,
                 kept_columns=g.kept_columns,
             )
@@ -5596,6 +5617,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             "downsampled": was_downsampled,
             "duplicates_dropped": duplicates_dropped,
             "triangle_cell_ids": triangle_cell_ids,
+            "vertex_origin": vertex_origin.tolist(),
         }
 
     except ImportError:
@@ -5699,7 +5721,15 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
     src = request.source
     warnings: list = []
 
-    # Assemble world-frame HIT positions aligned with the label columns we need.
+    # Fit in a LOCAL frame near the data and report world coordinates. Every fit
+    # step is translation-invariant, but at a UTM northing Qhull (behind the
+    # alpha shape and the hull volume) works on coordinates ~1e6 times the crown,
+    # where its precision tolerances are scaled to the coordinates, not the tree:
+    # the alpha crown failed outright there ("produced no triangles").
+    # `frame_origin` is what the local positions are relative to: a session's own
+    # world shift (its stored positions are in that frame) plus whole metres near
+    # what is left (non-zero only for large coordinates, e.g. a session imported
+    # without a shift). Results are returned in world coordinates as before.
     if src.session_id is not None:
         sess = _get_cloud_session(src.session_id)
         with _cloud_session_lock:
@@ -5713,8 +5743,9 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
             tree_vals = tree_col[surv][hit] if tree_col is not None else None
             wood_vals = wood_col[surv][hit] if wood_col is not None else None
             ground_vals = ground_col[surv][hit] if ground_col is not None else None
-        if world_shift is not None:
-            pos = pos.astype(np.float64, copy=False) + world_shift
+        pos = pos.astype(np.float64, copy=False)
+        frame_origin = (np.asarray(world_shift, dtype=np.float64)
+                        if world_shift is not None else np.zeros(3))
     else:
         # File/inline source: no labels, so the whole cloud is one tree.
         # `_read_points_from_source` drops sky/miss points on this branch too
@@ -5722,6 +5753,11 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
         # an alpha-shape crown fit never sees the ~1 km shell.
         pos, _c, _i = _read_points_from_source(src)
         tree_vals = wood_vals = ground_vals = None
+        pos = np.asarray(pos, dtype=np.float64)
+        frame_origin = np.zeros(3)
+    nearby = _registration_frame_origin(pos)
+    pos = _into_frame(pos, nearby)
+    frame_origin = frame_origin + nearby
 
     if len(pos) < 4:
         return {"success": False, "crowns": [], "warnings": warnings,
@@ -5782,13 +5818,22 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
         except Exception as e:  # noqa: BLE001 — surface per-tree, keep others
             warnings.append(f"Tree {tid}: {e}")
             continue
+        # Back to world coordinates: the mesh, and the metrics that are positions
+        # (sizes, heights and volumes are frame-free). JSON carries float64, so
+        # these stay exact; a consumer that packs vertices into float32 must keep
+        # them relative to an origin near the data (the renderer does).
+        metrics = dict(res["metrics"])
+        metrics["crown_center"] = [float(v) for v in
+                                   np.asarray(metrics["crown_center"]) + frame_origin]
+        metrics["crown_base_z"] = float(metrics["crown_base_z"] + frame_origin[2])
+        metrics["crown_top_z"] = float(metrics["crown_top_z"] + frame_origin[2])
         crowns.append({
             "tree_instance_id": int(tid),
             "shape": shape,
-            "vertices": res["vertices"].reshape(-1).tolist(),
+            "vertices": (res["vertices"] + frame_origin).reshape(-1).tolist(),
             "triangles": res["triangles"].reshape(-1).tolist(),
             "normals": res["normals"].reshape(-1).tolist(),
-            "metrics": res["metrics"],
+            "metrics": metrics,
             # The parameters that DEFINE this shape (semi-axes / base radius +
             # height / alpha radius). Shape-dependent keys — see crown_fit.py.
             "params": res["params"],
@@ -6639,6 +6684,22 @@ def _dem_cell_z_order(flat: np.ndarray, z: np.ndarray) -> np.ndarray:
     return order
 
 
+def _dem_in_grid(xy: np.ndarray, minx: float, miny: float, cell: float,
+                 nx: int, ny: int) -> np.ndarray:
+    """Mask of the rows of `xy` inside the DEM grid's extent (edges included).
+
+    `_dem_cell_ids` clips, which is right for a point on the grid's far edge but
+    piles every point OUTSIDE the grid into the edge cells. A grid sized from the
+    points holds them all; a caller's `bbox` smaller than the cloud does not, and
+    then the DTM edge took the low percentile of a whole strip of ground beyond
+    it, the DSM edge the tallest crown beyond it, and the density layers every
+    point beyond it. So every binning site drops what this rejects first."""
+    tol = 1e-9 * max(1.0, abs(minx), abs(miny), cell * max(nx, ny))
+    x, y = xy[:, 0], xy[:, 1]
+    return ((x >= minx - tol) & (x <= minx + nx * cell + tol)
+            & (y >= miny - tol) & (y <= miny + ny * cell + tol))
+
+
 def _dem_cell_ids(xy: np.ndarray, minx: float, miny: float, cell: float,
                   nx: int, ny: int) -> np.ndarray:
     """Flat row-major grid cell id (`cj * nx + ci`, clipped to the grid) for
@@ -6793,6 +6854,16 @@ def _compute_dem(
         return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
                 "num_vertices": 0, "error": "Point cloud has a degenerate XY extent."}
     cell, nx, ny = grid
+    if bbox is not None and len(bbox) == 4:
+        # A caller's bbox can be smaller than the cloud; see `_dem_in_grid`.
+        inside = _dem_in_grid(xy, minx, miny, cell, nx, ny)
+        if not inside.all():
+            pts = pts[inside]
+            xy, z = pts[:, :2], pts[:, 2]
+            if len(pts) < 3:
+                return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                        "num_vertices": 0,
+                        "error": "Fewer than 3 points fall inside the bbox; nothing to build a DEM from."}
 
     _report(0.2, "Binning ground points")
     # --- Per-cell low-percentile pre-bin (robust near-minimum representative) ---
@@ -6939,8 +7010,11 @@ def _dem_surface_from_reps(
         if footprint_grid is not None:
             footprint = np.asarray(footprint_grid, dtype=bool).reshape(ny, nx)
         elif footprint_xy is not None and len(footprint_xy):
-            fci = np.clip(((footprint_xy[:, 0] - minx) / cell).astype(np.int64), 0, nx - 1)
-            fcj = np.clip(((footprint_xy[:, 1] - miny) / cell).astype(np.int64), 0, ny - 1)
+            # Returns outside the grid are not footprint; clipped, they marked
+            # the edge cells as scanned and void-fill extrapolated into them.
+            fxy = footprint_xy[_dem_in_grid(footprint_xy, minx, miny, cell, nx, ny)]
+            fci = np.clip(((fxy[:, 0] - minx) / cell).astype(np.int64), 0, nx - 1)
+            fcj = np.clip(((fxy[:, 1] - miny) / cell).astype(np.int64), 0, ny - 1)
             footprint = np.zeros((ny, nx), dtype=bool)
             footprint[fcj, fci] = True
         else:
@@ -7471,7 +7545,13 @@ _DEM_LAYER_LABELS = {
 def _grid_cell_density(xy: np.ndarray, minx: float, miny: float, cell: float,
                        nx: int, ny: int, values: "Optional[np.ndarray]" = None) -> np.ndarray:
     """Per-cell count (values None) or per-cell mean of `values`, scattered into a
-    (ny, nx) grid aligned to the DTM grid. Unpopulated cells stay NaN."""
+    (ny, nx) grid aligned to the DTM grid. Unpopulated cells stay NaN. Points
+    outside the grid are dropped, not piled into the edge cells (`_dem_in_grid`)."""
+    inside = _dem_in_grid(xy, minx, miny, cell, nx, ny)
+    if not inside.all():
+        xy = xy[inside]
+        if values is not None:
+            values = np.asarray(values)[inside]
     flat = _dem_cell_ids(xy, minx, miny, cell, nx, ny)
     counts = np.bincount(flat, minlength=nx * ny).astype(np.float64)
     populated = counts > 0
@@ -11467,13 +11547,17 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         _report(0.93, "Binning into grid")
         centroids = (v0 + v1 + v2) / 3.0   # local frame, like the grids below
         bg = request.bin_grid if request.bin_grid is not None else request.grid
-        if bg is not None and getattr(bg, "column_offsets", None):
+        if bg is not None:
+            # Snapped or flat, the bin honors the grid's rotation: binning a
+            # rotated flat grid against its unrotated box dropped every triangle
+            # outside the overlap of the two and mis-numbered the rest.
             from qsm.grid import bin_points_to_cells_terrain
             triangle_cell_ids = bin_points_to_cells_terrain(
                 centroids, (np.asarray(bg.center, dtype=np.float64) - local_origin).tolist(),
                 bg.size, bg.nx, bg.ny, bg.nz,
-                column_offsets=bg.column_offsets, rotation_deg=bg.rotation,
-                kept_columns=bg.kept_columns,
+                column_offsets=getattr(bg, "column_offsets", None),
+                rotation_deg=float(getattr(bg, "rotation", 0.0) or 0.0),
+                kept_columns=getattr(bg, "kept_columns", None),
             )
         else:
             triangle_cell_ids = _bin_points_to_cells(
@@ -11857,7 +11941,8 @@ def _directions_from_origin(xyz: "np.ndarray", origin) -> "np.ndarray":
 
 
 def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
-                  expand: float = 0.05, column_offsets=None) -> "np.ndarray":
+                  expand: float = 0.05, column_offsets=None,
+                  rotation_deg: float = 0.0) -> "np.ndarray":
     """Boolean keep-mask for points whose beam (origin -> point) can pass through
     the grid's (expanded) AABB.
 
@@ -11879,13 +11964,35 @@ def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
     (whose lifted voxels sit above the unshifted box) get culled and those voxels
     come back empty. Expand the z-slab by [min(offset), max(offset)] when offsets
     are supplied; without them the box is unchanged (axis-regular grid).
+
+    `rotation_deg` is the grid's azimuthal rotation about +z through its center
+    (the convention `addGrid` uses). Both ends of every segment are rotated into
+    the grid's own frame, where the box is axis-aligned; a rotation maps a
+    segment onto a segment, so the slab test there is exact. Testing the
+    unrotated box dropped up to 40% of a rotated row grid's in-grid hits while
+    keeping the beams that crossed those voxels, biasing their LAD toward zero.
     """
     import numpy as np
 
     o = np.asarray(origin, dtype=np.float64)
+    center = np.asarray(grid_center, dtype=np.float64)
     half = np.asarray(grid_size, dtype=np.float64) / 2.0 + expand
-    lo = np.asarray(grid_center, dtype=np.float64) - half
-    hi = np.asarray(grid_center, dtype=np.float64) + half
+    lo = center - half
+    hi = center + half
+    xyz = np.asarray(xyz, dtype=np.float64)
+    if abs(float(rotation_deg or 0.0)) > 1e-9:
+        theta = -np.radians(float(rotation_deg))
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+
+        def _to_grid_frame(p):
+            q = np.array(p, dtype=np.float64, copy=True)
+            dx = p[..., 0] - center[0]
+            dy = p[..., 1] - center[1]
+            q[..., 0] = cos_t * dx - sin_t * dy + center[0]
+            q[..., 1] = sin_t * dx + cos_t * dy + center[1]
+            return q
+        xyz = _to_grid_frame(xyz)
+        o = _to_grid_frame(o)
     # Terrain following: stretch the z-slab to cover every column's lifted extent.
     # Offsets are added to cell z (see addGrid / _sample_dem_columns), so the
     # snapped grid occupies [base_lo_z + min_off, base_hi_z + max_off].
@@ -11894,7 +12001,7 @@ def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
         lo[2] += float(offs.min())
         hi[2] += float(offs.max())
 
-    d = np.asarray(xyz, dtype=np.float64) - o  # segment vector (length = range)
+    d = xyz - o  # segment vector (length = range)
     with np.errstate(divide="ignore", invalid="ignore"):
         t1 = (lo - o) / d
         t2 = (hi - o) / d
@@ -13685,7 +13792,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # lifted (terrain-following) voxel extent — otherwise beams to the
             # uphill canopy are dropped and those lifted voxels return empty.
             keep = _cull_to_grid(xyz, cull_origin, grid_center, grid_size,
-                                 column_offsets=cull_offsets)
+                                 column_offsets=cull_offsets,
+                                 rotation_deg=grid_rotation_deg)
             if not keep.all():
                 xyz = xyz[keep]
                 dirs = dirs[keep]
@@ -14841,10 +14949,79 @@ def _parse_bin_request_frame(body: bytes) -> "Tuple[dict, dict]":
     off = 8 + header_len
     for d in header.get("buffers", []):
         n = int(d["length"])
-        np_dtype = np.float32 if d["dtype"] == "f32" else np.uint32
+        np_dtype = _BIN_FRAME_DTYPES[d["dtype"]]
         buffers[d["name"]] = np.frombuffer(body, dtype=np_dtype, count=n, offset=off).copy()
-        off += n * 4
+        off += n * np.dtype(np_dtype).itemsize
     return header.get("meta", {}), buffers
+
+
+def _model_with_arrays(model_cls, fields: dict, arrays: dict):
+    """`model_cls(**fields, **arrays)`, with the big arrays kept as numpy.
+
+    Every binary-frame endpoint used to turn its buffers back into Python lists
+    to satisfy a `List[float]` field: ~32 B per value against 8, roughly doubled
+    again by validation (two 2 M-triangle meshes, a 69 MB payload, decoded in
+    10 s to an 847 MB peak), all before the worker turned them back into arrays.
+    The scalar fields are validated as usual (each array field stands in as an
+    empty list), then the arrays go in without a copy (`model_copy` does not
+    validate). Workers read these fields through `np.array` / `np.asarray`."""
+    placeholder = {k: ([] if v is not None else None) for k, v in arrays.items()}
+    model = model_cls(**{**fields, **placeholder})
+    return model.model_copy(update={k: v for k, v in arrays.items() if v is not None})
+
+
+def _mesh_to_cloud_request_from_frame(model_cls, body: bytes):
+    """Decode a PHB1 cloud-to-mesh request (distance or Snap to Fit).
+
+    `mesh_vertices` travel as float32 RELATIVE to `mesh_vertex_origin` (the
+    mesh's own frame offset, float64 in `meta`), and are moved back to world here
+    in float64: float32 world coordinates of a georeferenced mesh would be
+    snapped to the 0.5 m lattice of a UTM northing. Inline target `points`
+    (flat clouds, whose positions are float32 already) ride as a buffer too."""
+    meta, buffers = _parse_bin_request_frame(body)
+    for key in ("mesh_vertices", "mesh_indices"):
+        if key not in buffers:
+            raise ValueError(f"cloud-to-mesh frame missing required buffer '{key}'")
+    origin = np.asarray(meta.pop("mesh_vertex_origin", None) or (0.0, 0.0, 0.0), dtype=np.float64)
+    vertices = buffers["mesh_vertices"].astype(np.float64).reshape(-1, 3)
+    if np.any(origin):
+        vertices += origin
+    arrays = {"mesh_vertices": vertices.ravel(),
+              "mesh_indices": buffers["mesh_indices"].astype(np.int64)}
+    if "points" in buffers:        # else `points` (if any) is in `meta` as JSON
+        arrays["points"] = buffers["points"].astype(np.float64)
+    return _model_with_arrays(model_cls, meta, arrays)
+
+
+def _parse_json_or_frame(body: bytes, content_type: "Optional[str]", model_cls, from_frame):
+    """A request model from either a JSON body or a PHB1 binary frame. A JSON
+    body that fails validation is a 422, as on an ordinary FastAPI route; a
+    malformed frame is a 400. Blocking: call it off the event loop."""
+    from pydantic import ValidationError
+    ctype = (content_type or "").lower()
+    try:
+        if "application/octet-stream" in ctype or body[:4] == _BIN_FRAME_MAGIC:
+            return from_frame(body)
+        return model_cls(**json.loads(body.decode("utf-8")))
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+async def _raw_body(request: "Request") -> bytes:
+    """The request body, for a plain `def` route that accepts JSON or a frame:
+    FastAPI awaits this dependency on the loop (a read, nothing more) and then
+    runs the route itself in the threadpool."""
+    return await request.body()
+
+
+async def _json_or_frame_request(http_request: "Request", model_cls, from_frame):
+    """`_parse_json_or_frame` for an `async def` route: reads the body, decodes in
+    the threadpool."""
+    body = await http_request.body()
+    return await run_in_threadpool(
+        _parse_json_or_frame, body, http_request.headers.get("content-type"), model_cls, from_frame)
 
 
 def _decode_lad_request_frame(body: bytes) -> "Tuple[LADComputeRequest, Tuple[np.ndarray, np.ndarray, np.ndarray]]":
@@ -14870,10 +15047,9 @@ def _decode_lad_request_frame(body: bytes) -> "Tuple[LADComputeRequest, Tuple[np
     off = 8 + header_len
     for d in descs:
         n = int(d["length"])
-        np_dtype = np.float32 if d["dtype"] == "f32" else np.uint32
-        nbytes = n * 4
+        np_dtype = _BIN_FRAME_DTYPES[d["dtype"]]
         buffers[d["name"]] = np.frombuffer(body, dtype=np_dtype, count=n, offset=off).copy()
-        off += nbytes
+        off += n * np.dtype(np_dtype).itemsize
 
     request = LADComputeRequest(**meta)
 
@@ -14912,6 +15088,62 @@ def _decode_lad_request_frame(body: bytes) -> "Tuple[LADComputeRequest, Tuple[np
     return request, (verts, tri_idx, scan_ids)
 
 
+def _lad_cell_number(v) -> float:
+    return math.nan if v is None else v
+
+
+def _lad_cells_frame(result: dict) -> bytes:
+    """A LAD result as a PHB1 frame: every field but `cells` in `meta`, and each
+    per-voxel field as one float64 column (`cells.<name>`).
+
+    The JSON response cost 576 B per voxel (765 with the wood split), and the
+    renderer decodes a response into ONE string before parsing it, so a grid past
+    0.93 M voxels (100 x 100 x 100 is past it) failed after the whole inversion
+    had finished. Columns cost 8 B per field. float64 so nothing is rounded:
+    centers are world coordinates, and the values feed exports.
+
+    `meta.cell_columns` lists each field in record order with its kind, so the
+    renderer rebuilds exactly the records JSON would have given: "number" (NaN
+    stands for null; JSON never carried NaN, `_clean` maps it to null), "bool"
+    (0/1, NaN for null), "vec3" (n x 3). A field missing from some records gets a
+    `cells.<name>.present` u32 mask."""
+    import itertools
+    cells = result.get("cells") or []
+    meta = {k: v for k, v in result.items() if k != "cells"}
+    n = len(cells)
+    keys: dict = dict.fromkeys(cells[0]) if n else {}
+    uniform = True
+    for c in cells:
+        if c.keys() != keys.keys():
+            uniform = False
+            keys.update(dict.fromkeys(c))
+    columns, buffers = [], []
+    for k in keys:
+        sample = next((c[k] for c in cells if c.get(k) is not None), None)
+        if isinstance(sample, (list, tuple)) and len(sample) == 3:
+            kind = "vec3"
+            nan3 = (math.nan, math.nan, math.nan)
+            arr = np.fromiter(itertools.chain.from_iterable(
+                (c.get(k) or nan3) for c in cells), dtype=np.float64, count=3 * n)
+        elif sample is None or isinstance(sample, (bool, int, float, np.number, np.bool_)):
+            kind = "bool" if isinstance(sample, (bool, np.bool_)) else "number"
+            arr = np.fromiter((_lad_cell_number(c.get(k)) for c in cells),
+                              dtype=np.float64, count=n)
+        else:
+            raise TypeError(
+                f"LAD cell field {k!r} holds {type(sample).__name__}; the column "
+                "transport carries numbers, booleans and 3-vectors")
+        columns.append({"name": k, "kind": kind})
+        buffers.append((f"cells.{k}", arr, "f64"))
+        if not uniform:
+            present = np.fromiter((k in c for c in cells), dtype=np.uint32, count=n)
+            if not present.all():
+                buffers.append((f"cells.{k}.present", present, "u32"))
+    meta["cell_columns"] = columns
+    meta["cell_count"] = n
+    return _bin_frame_bytes(meta, buffers)
+
+
 @app.post("/api/lad/compute")
 async def lad_compute(http_request: Request):
     """Compute per-voxel leaf area density via PyHelios.
@@ -14927,6 +15159,10 @@ async def lad_compute(http_request: Request):
     _bin_frame_streaming_response) ahead of the JSON result so the renderer shows a
     real per-stage progress bar and the keepalive survives WebKit's ~60s stall
     timeout. The renderer drains the markers and parses the JSON tail.
+
+    `?voxel_columns=1` (the renderer) returns the result as a PHB1 frame of
+    per-voxel columns instead of JSON (`_lad_cells_frame`): JSON past ~0.93 M
+    voxels is a string the renderer cannot build. Without it, JSON as before.
     """
     content_type = (http_request.headers.get("content-type") or "").lower()
     reuse_mesh = None
@@ -14935,13 +15171,15 @@ async def lad_compute(http_request: Request):
     else:
         body = await http_request.body()
         request, reuse_mesh = _decode_lad_request_frame(body)
+    as_columns = http_request.query_params.get("voxel_columns") in ("1", "true")
+
+    def _run(progress):
+        result = _do_lad_computation(request, progress=progress, reuse_mesh=reuse_mesh)
+        return _lad_cells_frame(result) if as_columns else json.dumps(result).encode("utf-8")
 
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
-        lambda progress: json.dumps(
-            _do_lad_computation(request, progress=progress, reuse_mesh=reuse_mesh)
-        ).encode("utf-8"),
-        request=http_request, cancel_event=cancel_event, run_id=run_id)
+        _run, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 class SnapGridRequest(BaseModel):
@@ -15576,8 +15814,14 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             header += ["property uchar red", "property uchar green", "property uchar blue"]
         if intensity is not None:
             header += ["property float intensity"]
+        # Each column typed and printed by the rule the other PLY writer uses
+        # (`_export_value_format`): a float64 column, the GPS time above all,
+        # is `double` with round-trip digits. Declaring every column `float`
+        # and printing 9 digits collapsed a second's pulses onto one timestamp,
+        # which wrecks pulse grouping (multi-return LAD, backfill) on re-import.
+        col_fmt = {s: _export_value_format(scalars[s]) for s in ordered}
         for s in ordered:
-            header += [f"property float {s}"]
+            header += [f"property {_ply_scalar_type(*col_fmt[s])} {s}"]
         header.append("end_header")
         rgb = (np.clip(np.rint(colors * 255.0), 0, 255).astype(int)
                if colors is not None else None)
@@ -15589,7 +15833,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             if intensity is not None:
                 row += f" {float(intensity[i]):.9g}"
             for s in ordered:
-                row += f" {float(scalars[s][i]):.9g}"
+                vals, f = col_fmt[s]
+                row += " " + (f % vals[i])
             lines.append(row)
             if progress is not None and (i & 0xFFFF) == 0xFFFF:
                 progress(i / n, f"formatting {i:,} / {n:,} points")
@@ -17607,10 +17852,18 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 scan_grid_only = bool(request.scan_grid_only and request.grid is not None)
                 if scan_grid_only:
                     g = request.grid
+                    # Helios skips every ray that misses the grid's bounding box,
+                    # and the rotation and terrain offsets decide that box. Without
+                    # them a rotated grid was boxed as if unrotated, and rays into
+                    # the grid outside that box were never cast.
+                    _grid_kw = {"rotation": float(g.rotation or 0.0)}
+                    if g.column_offsets:
+                        _grid_kw["column_z_offsets"] = [float(v) for v in g.column_offsets]
                     lidar.addGrid(
                         center=[float(g.center[0]), float(g.center[1]), float(g.center[2])],
                         size=[float(g.size[0]), float(g.size[1]), float(g.size[2])],
                         ndiv=[int(g.nx), int(g.ny), int(g.nz)],
+                        **_grid_kw,
                     )
 
                 # One ray pass for all scanners (one BVH build). append=False clears
@@ -19867,14 +20120,51 @@ def segment_wood(
     from scipy.spatial import cKDTree
 
     nn_tree = cKDTree(pts)
-    _, nn = nn_tree.query(pts_full, k=1, workers=thread_cap.kd_workers())
-    labels_full = labels_down[nn].astype(np.int32)
-    full_tree = cKDTree(pts_full)
-    _, full_idx = full_tree.query(pts_full, k=int(min(reg_k, n_full)), workers=thread_cap.kd_workers())
-    if full_idx.ndim == 1:
-        full_idx = full_idx[:, None]
-    labels_full = _wood_regularize(labels_full, full_idx.astype(np.int32), reg_k, max(1, reg_iters))
-    return labels_full
+    labels_full = np.empty(n_full, dtype=np.int32)
+    for a in range(0, n_full, _WOOD_FULL_RES_BLOCK):
+        _, nn = nn_tree.query(pts_full[a:a + _WOOD_FULL_RES_BLOCK], k=1,
+                              workers=thread_cap.kd_workers())
+        labels_full[a:a + len(nn)] = labels_down[nn]
+    del nn_tree
+    return _wood_regularize_full_res(labels_full, pts_full, int(min(reg_k, n_full)),
+                                     max(1, reg_iters))
+
+
+# Rows per block of the full-resolution pass after a downsampled segmentation.
+_WOOD_FULL_RES_BLOCK = 262_144
+
+
+def _wood_regularize_full_res(labels: np.ndarray, pts: np.ndarray, k: int,
+                              iters: int) -> np.ndarray:
+    """`_wood_regularize` (unweighted) over a cloud that may be far past the
+    downsample cap, without ever holding a cloud-sized float matrix.
+
+    One whole-cloud `cKDTree.query(k)` returned float64 distances and int64
+    indices (N x k x 16 B), cast a third copy to int32, and the vote then gathered
+    an (N, k) float64 per iteration: a measured 300 B per point, against the
+    56 B per point the memory admission charged, so a 25 M-point plot needed
+    ~7.5 GB while admitted as 1.4 GB. Here the neighbor table is int32, filled
+    one block at a time, and each vote counts boolean neighbors one block at a
+    time. `2 * count >= k` is exactly the reference's `mean >= 0.5`."""
+    from scipy.spatial import cKDTree
+
+    n = int(len(pts))
+    if iters <= 0 or k < 2 or n == 0:
+        return labels.astype(np.int32, copy=True)
+    tree = cKDTree(pts)
+    idx = np.empty((n, k), dtype=np.int32)
+    for a in range(0, n, _WOOD_FULL_RES_BLOCK):
+        _, nb = tree.query(pts[a:a + _WOOD_FULL_RES_BLOCK], k=k, workers=thread_cap.kd_workers())
+        idx[a:a + len(nb)] = nb
+    del tree
+    is_wood = labels == WOOD_CLASS_WOOD
+    for _ in range(int(iters)):
+        nxt = np.empty(n, dtype=bool)
+        for a in range(0, n, _WOOD_FULL_RES_BLOCK):
+            count = np.count_nonzero(is_wood[idx[a:a + _WOOD_FULL_RES_BLOCK]], axis=1)
+            nxt[a:a + len(count)] = 2 * count >= k
+        is_wood = nxt
+    return np.where(is_wood, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
 
 
 # ==================== BFS SKELETON HELPER FUNCTIONS (Li et al. 2017) ====================
@@ -21960,14 +22250,15 @@ def _adjust_leaf_angles_request_from_frame(body: bytes) -> "QSMAdjustLeafAnglesR
     cell_ids[cell_ids == 0xFFFFFFFF] = -1
     scan_ids = buffers.get("tin_scan_ids")
     origins = buffers.get("tin_scan_origins")
-    meta["triangulation"] = {
-        "vertices": buffers["tin_vertices"].astype(np.float64).tolist(),
-        "indices": buffers["tin_indices"].astype(np.int64).tolist(),
-        "triangle_cell_ids": cell_ids.tolist(),
-        "triangle_scan_ids": None if scan_ids is None else scan_ids.astype(np.int64).tolist(),
-        "scan_origins": None if origins is None else origins.astype(np.float64).tolist(),
-        "grid": grid,
-    }
+    # Arrays, not lists (see `_model_with_arrays`): at the 12 M-triangle size
+    # this endpoint exists for, the list conversion alone was gigabytes.
+    meta["triangulation"] = _model_with_arrays(QSMTriangulationInput, {"grid": grid}, {
+        "vertices": buffers["tin_vertices"].astype(np.float64),
+        "indices": buffers["tin_indices"].astype(np.int64),
+        "triangle_cell_ids": cell_ids,
+        "triangle_scan_ids": None if scan_ids is None else scan_ids.astype(np.int64),
+        "scan_origins": None if origins is None else origins.astype(np.float64),
+    })
     return QSMAdjustLeafAnglesRequest(**meta)
 
 
@@ -21979,12 +22270,8 @@ async def adjust_qsm_leaf_angles_route(http_request: Request):
     threadpool, so this does not hold the event loop (see the module note on
     `def` handlers).
     """
-    ctype = (http_request.headers.get("content-type") or "").lower()
-    body = await http_request.body()
-    if "application/octet-stream" in ctype or body[:4] == _BIN_FRAME_MAGIC:
-        request = await run_in_threadpool(_adjust_leaf_angles_request_from_frame, body)
-    else:
-        request = QSMAdjustLeafAnglesRequest(**json.loads(body.decode("utf-8")))
+    request = await _json_or_frame_request(
+        http_request, QSMAdjustLeafAnglesRequest, _adjust_leaf_angles_request_from_frame)
     return await run_in_threadpool(adjust_qsm_leaf_angles, request)
 
 
@@ -22031,10 +22318,12 @@ def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
             verts = np.array(tin.vertices, dtype=np.float64).reshape(-1, 3)
             tris = np.array(tin.indices, dtype=np.int64).reshape(-1, 3)
             cell_ids = np.array(tin.triangle_cell_ids, dtype=np.int64)
+            # `len`, not truthiness: from a binary frame these are numpy arrays.
             scan_ids = (np.array(tin.triangle_scan_ids, dtype=np.int64)
-                        if tin.triangle_scan_ids else None)
+                        if tin.triangle_scan_ids is not None and len(tin.triangle_scan_ids)
+                        else None)
             scan_origins = (np.array(tin.scan_origins, dtype=np.float64).reshape(-1, 3)
-                            if tin.scan_origins else None)
+                            if tin.scan_origins is not None and len(tin.scan_origins) else None)
             cell_targets = compute_cell_targets(
                 verts, tris, cell_ids, grid,
                 triangle_scan_ids=scan_ids, scan_origins=scan_origins,
@@ -24223,6 +24512,23 @@ _PLY_PROPERTY_TYPES = {
 }
 
 
+def _export_value_format(arr: np.ndarray) -> "tuple[np.ndarray, str]":
+    """(values, printf format) for an exported scalar column. Every text writer
+    goes through this, so a column round-trips the same way in every format.
+
+    Integer-valued scalars (class labels, target_index, is_miss) print as ints
+    so a `ground_class` column reads `2`, not `2.000000`. Other floats print
+    with the digits that round-trip their type (9 significant for float32, 17
+    for float64): a fixed "%.6f" printed a 1e-7 value as 0 and cut a float64 to
+    six decimals, and "%.9g" on a GPS time merged every pulse of a second."""
+    arr = np.asarray(arr)
+    is_int = np.issubdtype(arr.dtype, np.integer) or (
+        arr.size > 0 and np.all(np.isfinite(arr)) and np.all(arr == np.rint(arr))
+    )
+    float_fmt = "%.17g" if arr.dtype == np.float64 else "%.9g"
+    return (arr.astype(np.int64), "%d") if is_int else (arr.astype(np.float64), float_fmt)
+
+
 def _ply_scalar_type(values: np.ndarray, fmt: str) -> str:
     """The PLY property type for an exported scalar column: `int` for whole
     numbers that fit it, `double` for a float64 column (printed `%.17g`) or
@@ -24282,18 +24588,7 @@ def _resolve_export_columns(
         # not shadow it.
         if slug in available:
             continue
-        # Integer-valued scalars (class labels, target_index, is_miss) print as
-        # ints so a `ground_class` column reads `2`, not `2.000000`.
-        is_int = np.issubdtype(arr.dtype, np.integer) or (
-            arr.size > 0 and np.all(np.isfinite(arr)) and np.all(arr == np.rint(arr))
-        )
-        # Other floats print with the digits that round-trip their type
-        # (9 significant for float32, 17 for float64): a fixed "%.6f" printed a
-        # 1e-7 value as 0 and cut a float64 to six decimals.
-        float_fmt = "%.17g" if arr.dtype == np.float64 else "%.9g"
-        available[slug] = (
-            (arr.astype(np.int64), "%d") if is_int else (arr.astype(np.float64), float_fmt)
-        )
+        available[slug] = _export_value_format(arr)
 
     requested = columns if columns else (default_slugs or ["x", "y", "z"])
     slugs = [s for s in requested if s in available]
@@ -27407,14 +27702,19 @@ def _json_safe(o):
     raise TypeError(f"not JSON-serializable: {type(o)}")
 
 
+_BIN_FRAME_DTYPES = {"f32": np.float32, "u32": np.uint32, "f64": np.float64}
+
+
 def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
     """Pack a PHB1 frame. `buffers` is a list of (name, array, dtype) where dtype
-    is 'f32' or 'u32'; arrays are raveled to little-endian contiguous bytes."""
+    is 'f32', 'u32' or 'f64'; arrays are raveled to little-endian contiguous
+    bytes. Offsets stay 4-byte aligned, not 8: a reader views an f64 buffer
+    only when its offset happens to be aligned, else copies it."""
     import struct
     descs = []
     payloads = []
     for name, arr, dtype in buffers:
-        np_dtype = np.float32 if dtype == "f32" else np.uint32
+        np_dtype = _BIN_FRAME_DTYPES[dtype]
         a = np.ascontiguousarray(arr, dtype=np_dtype).ravel()
         payloads.append(a.tobytes())
         descs.append({"name": name, "dtype": dtype, "length": int(a.size)})
@@ -27805,7 +28105,30 @@ def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
 _KILLABLE_BYTES_PER_POINT = 24 + 24 + 8
 
 
-def _killable_worker_bytes(n_points: int, *, reflectance=None, extra_bytes: int = 0) -> int:
+# Wood/leaf segmentation's own working set, on top of the generic one above.
+# Measured with tracemalloc (exact NumPy allocations; process RSS undercounts on
+# macOS, which compresses large arrays): the multi-scale feature core holds
+# ~400 MB of fixed buffers plus ~470 B per point it classifies (at most the
+# downsample cap, `_WOOD_SEGMENT_MAX_POINTS`), and the full-resolution pass over
+# a cloud past the cap ~150 B per point. Admitted at the generic 56 B per point,
+# the core alone at the 1.5 M cap (~1.1 GB) was charged 84 MB.
+_WOOD_CORE_FIXED_BYTES = 400 * 2 ** 20
+_WOOD_CORE_BYTES_PER_POINT = 470
+_WOOD_FULL_RES_BYTES_PER_POINT = 150
+
+
+def _wood_compute_bytes(n_points: int, params: "Optional[dict]" = None) -> int:
+    """Wood segmentation's compute working set on `n_points` (see above)."""
+    n = max(0, int(n_points))
+    cap = int((params or {}).get("max_points") or _WOOD_SEGMENT_MAX_POINTS)
+    core_n = min(n, cap) if cap > 0 else n
+    full_n = n if n > core_n else 0
+    return (_WOOD_CORE_FIXED_BYTES + _WOOD_CORE_BYTES_PER_POINT * core_n
+            + _WOOD_FULL_RES_BYTES_PER_POINT * full_n)
+
+
+def _killable_worker_bytes(n_points: int, *, reflectance=None, extra_bytes: int = 0,
+                           tool: str = "", params: "Optional[dict]" = None) -> int:
     """Working set of a `_run_killable` worker on `n_points`.
 
     Shared by the admission in `_run_killable` and by the cost advisories that
@@ -27818,7 +28141,10 @@ def _killable_worker_bytes(n_points: int, *, reflectance=None, extra_bytes: int 
     """
     n = max(0, int(n_points))
     extra = int(reflectance.nbytes) if reflectance is not None else 0
-    return n * _KILLABLE_BYTES_PER_POINT + extra + max(0, int(extra_bytes))
+    total = n * _KILLABLE_BYTES_PER_POINT + extra + max(0, int(extra_bytes))
+    if tool == "wood":
+        total += _wood_compute_bytes(n, params)
+    return total
 
 
 async def _run_killable(
@@ -27858,8 +28184,11 @@ async def _run_killable(
     # Declare the working set to the memory budget. Acquired off the event loop -
     # a queued job must not stall unrelated requests while it waits.
     n_pts = int(len(points))
-    estimate = _killable_worker_bytes(n_pts, reflectance=reflectance, extra_bytes=extra_bytes)
-    admitted = _ADMISSION.admit(estimate, f"{tool} worker on {n_pts:,} pts")
+    estimate = _killable_worker_bytes(n_pts, reflectance=reflectance, extra_bytes=extra_bytes,
+                                      tool=tool, params=params)
+    # Entered on a pool thread that goes straight back to serving other
+    # requests while this one awaits the worker: not that thread's admission.
+    admitted = _ADMISSION.admit(estimate, f"{tool} worker on {n_pts:,} pts", thread_owned=False)
     await run_in_threadpool(admitted.__enter__)
     try:
         return await _run_killable_admitted(
@@ -34214,13 +34543,18 @@ def _project_block_to_pixel(
     clip = homo @ M.T  # Nx4 = (4x4 @ 4xN).T -> Nx4
 
     w = clip[:, 3]
-    # Avoid division by zero — these points are behind the camera plane;
-    # mark them as outside polygon space.
-    safe = np.abs(w) > 1e-12
+    # Only points in front of the eye (w > 0) project. A point BEHIND a
+    # perspective camera has w < 0, and dividing through by it lands it on the
+    # pixel of its reflection through the eye — inside any lasso drawn around
+    # what is in front, so "delete inside" would also delete a cone of points
+    # nobody saw selected. The renderer's twin returns null for `cw <= 0`
+    # (`projectWorldToCanvasPixel`), and its preview depends on the two agreeing.
+    # An orthographic camera always has w = 1.
+    safe = w > 0
     ndc = np.zeros((n, 2), dtype=np.float64)
     ndc[safe, 0] = clip[safe, 0] / w[safe]
     ndc[safe, 1] = clip[safe, 1] / w[safe]
-    # Points with w<=0 are behind the camera; push them well outside canvas.
+    # Push everything else well outside the canvas.
     ndc[~safe, 0] = -1e9
     ndc[~safe, 1] = -1e9
 
@@ -36891,11 +37225,11 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     # that fix still carries one — rewriting it as float32 here would re-quantize
     # the times on every bake/rebuild. `sess.timestamps` holds the same column at
     # full precision, so the standard field is strictly the better copy.
-    _extra_dims_out, _ts_extra = _split_timestamp_extra_dim(list(sess.extra_dims_meta))
+    _extra_dims_out, _ts_extra = _split_timestamp_extra_dim(_copy_extra_dims_meta(sess.extra_dims_meta))
     if _ts_extra is not None and sess.timestamps is None:
         # No float64 copy to fall back on: keep the float32 dim rather than lose
         # the column outright. Already-degraded values, faithfully preserved.
-        _extra_dims_out, _ts_extra = list(sess.extra_dims_meta), None
+        _extra_dims_out, _ts_extra = _copy_extra_dims_meta(sess.extra_dims_meta), None
     for ed in _extra_dims_out:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
     if row_ids is not None:
@@ -39630,7 +39964,7 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "baked.las"
         with _cloud_session_lock:
-            extra_dims_meta = list(sess.extra_dims_meta)
+            extra_dims_meta = _copy_extra_dims_meta(sess.extra_dims_meta)
             # The mask this octree is built from, and the edit generation at
             # that moment. Both modes compare BOTH after the build to tell
             # whether an edit raced it. The generation is needed now that the
@@ -39998,39 +40332,83 @@ def _session_observed_classes_locked(sess: "CloudSession") -> dict:
     return _observed_classes(_session_editable_mask_locked(sess), sess.extras)
 
 
+# Display metadata is measured block by block over the survivors, so it never
+# holds a full-cloud gather (see `_session_display_stats`).
+_DISPLAY_STATS_BLOCK = 4_000_000
+# Above this many survivors the percentile domains (robust bounds, colorbar
+# ranges) are measured on an evenly spaced sample of this size. A percentile's
+# rank error from n samples is ~sqrt(p(1-p)/n): ~1e-4 here, invisible on a
+# colorbar or a camera frame. Exact quantities (class lists, min/max) still see
+# every survivor.
+_DISPLAY_STATS_SAMPLE = 2_000_000
+
+
+def _survivor_blocks(editable: np.ndarray):
+    """(start, stop, mask) over `editable` in `_DISPLAY_STATS_BLOCK` rows."""
+    n = int(editable.shape[0])
+    for a in range(0, n, _DISPLAY_STATS_BLOCK):
+        b = min(n, a + _DISPLAY_STATS_BLOCK)
+        yield a, b, editable[a:b]
+
+
+def _survivor_sample(editable: np.ndarray, cap: int) -> np.ndarray:
+    """Row indices of an evenly spaced sample of at most ~`cap` survivors, found
+    block by block (never an index of every survivor)."""
+    n_edit = int(np.count_nonzero(editable))
+    step = max(1, -(-n_edit // max(1, cap)))
+    picked, seen = [], 0
+    for a, _b, m in _survivor_blocks(editable):
+        local = np.flatnonzero(m)
+        first = (-seen) % step
+        if first < len(local):
+            picked.append(local[first::step] + a)
+        seen += len(local)
+    return np.concatenate(picked) if picked else np.zeros(0, dtype=np.int64)
+
+
 def _observed_classes(editable: np.ndarray, extras: dict) -> dict:
     """`_session_observed_classes_locked` on arrays, so it can run outside the
-    session lock on references captured under it (`_session_display_stats`)."""
+    session lock on references captured under it (`_session_display_stats`).
+
+    Exact, and block by block: the union of each block's classes is the whole
+    column's, so a rare class is never missed and no full-cloud gather is held."""
     out: dict = {}
     if not editable.any():
         return out
     for slug, col in extras.items():
         if slug == _MISS_SLUG or col is None:
             continue
-        vals = col[editable]
-        if vals.dtype.kind in "iu":
-            # A compacted integer column (see _compact_column): whole numbers by
-            # construction, and a bincount beats a sort for small unsigned ranges.
+        col = np.asarray(col)
+        classes: set = set()
+        usable = True
+        any_rows = False
+        for a, b, m in _survivor_blocks(editable):
+            vals = col[a:b][m]
             if vals.size == 0:
                 continue
-            if vals.dtype.kind == "u" and vals.dtype.itemsize <= 2:
-                uniq = np.flatnonzero(np.bincount(vals))
+            any_rows = True
+            if vals.dtype.kind in "iu":
+                # A compacted integer column (see _compact_column): whole numbers
+                # by construction, and a bincount beats a sort for small unsigned
+                # ranges.
+                if vals.dtype.kind == "u" and vals.dtype.itemsize <= 2:
+                    uniq = np.flatnonzero(np.bincount(vals))
+                else:
+                    uniq = np.unique(vals)
             else:
-                uniq = np.unique(vals)
-            if len(uniq) <= _OBSERVED_CLASSES_MAX:
-                out[slug] = [int(v) for v in uniq]
-            continue
-        # Integer-valued only: a continuous column (reflectance, timestamp) has
-        # no class list, and `np.unique` over millions of floats is wasted work.
-        finite = np.isfinite(vals)
-        if not finite.all() or vals.size == 0:
-            continue
-        if not np.array_equal(vals, np.rint(vals)):
-            continue
-        uniq = np.unique(vals.astype(np.int64))
-        if len(uniq) > _OBSERVED_CLASSES_MAX:
-            continue
-        out[slug] = [int(v) for v in uniq]
+                # Integer-valued only: a continuous column (reflectance,
+                # timestamp) has no class list, and `np.unique` over millions of
+                # floats is wasted work.
+                if not np.isfinite(vals).all() or not np.array_equal(vals, np.rint(vals)):
+                    usable = False
+                    break
+                uniq = np.unique(vals.astype(np.int64))
+            classes.update(int(v) for v in uniq)
+            if len(classes) > _OBSERVED_CLASSES_MAX:
+                usable = False
+                break
+        if usable and any_rows:
+            out[slug] = sorted(classes)
     return out
 
 
@@ -40107,9 +40485,27 @@ def _session_display_stats(sess: "CloudSession") -> dict:
         labels = {ed["slug"]: ed.get("label") for ed in sess.extra_dims_meta}
     return {
         "observed_classes": _observed_classes(editable, extras),
-        **_robust_color_stats(editable, positions, intensity, extras),
+        **_sampled_robust_color_stats(editable, positions, intensity, extras),
         "overlay_columns": _overlay_column_info(sess.session_id, overlay, labels, editable, extras),
     }
+
+
+def _sampled_robust_color_stats(editable: np.ndarray, positions: np.ndarray,
+                                intensity: "Optional[np.ndarray]", extras: dict) -> dict:
+    """`_robust_color_stats` without a full-cloud gather. Up to
+    `_DISPLAY_STATS_SAMPLE` survivors it is exactly that; above, it measures an
+    evenly spaced sample of that many. Gathering every survivor's positions and
+    every column at once peaked at ~57 B per point (12.6 GB on a 222 M-point
+    merged cloud) and ran after every rebuild, overlay update and rename."""
+    if int(np.count_nonzero(editable)) <= _DISPLAY_STATS_SAMPLE:
+        return _robust_color_stats(editable, positions, intensity, extras)
+    rows = _survivor_sample(editable, _DISPLAY_STATS_SAMPLE)
+    n = editable.shape[0]
+    return _robust_color_stats(
+        np.ones(len(rows), dtype=bool), np.asarray(positions)[rows],
+        np.asarray(intensity)[rows] if intensity is not None else None,
+        {k: np.asarray(v)[rows] for k, v in extras.items()
+         if v is not None and np.asarray(v).ndim == 1 and np.asarray(v).shape[0] == n})
 
 
 def _overlay_whole_max_bytes() -> int:
@@ -40130,16 +40526,29 @@ def _overlay_column_info(session_id: str, overlay: "Dict[str, str]", labels: dic
     reads as new values to fetch, not as a column that is gone."""
     out: List[dict] = []
     whole_max = _overlay_whole_max_bytes()
+    any_editable = bool(editable.any())
     for slug, token in overlay.items():
         col = extras.get(slug)
         if col is None:
             continue
-        vals = np.asarray(col)[editable] if editable.any() else np.zeros(1, dtype=np.float32)
         nbytes = int(getattr(col, "nbytes", np.asarray(col).nbytes))
+        # Exact min / max, block by block: a full `col[editable]` per column was
+        # a cloud-sized gather each time an overlay column was shown.
+        lo, hi = (0.0, 0.0) if not any_editable else (math.inf, -math.inf)
+        if any_editable:
+            arr = np.asarray(col)
+            for a, b, m in _survivor_blocks(editable):
+                vals = arr[a:b][m]
+                if vals.dtype.kind == "f":
+                    vals = vals[~np.isnan(vals)]
+                if vals.size:
+                    lo = min(lo, float(vals.min()))
+                    hi = max(hi, float(vals.max()))
+            if lo > hi:            # every value NaN, as np.nanmin would report
+                lo = hi = math.nan
         out.append({"slug": slug, "token": token, "session_id": session_id,
                     "label": labels.get(slug) or slug,
-                    "min": float(np.nanmin(vals)) if vals.size else 0.0,
-                    "max": float(np.nanmax(vals)) if vals.size else 0.0,
+                    "min": lo, "max": hi,
                     "fetch": "tile" if nbytes > whole_max else "whole"})
     return out
 
@@ -40542,7 +40951,7 @@ def _session_rebuild(
                             block_lock=None if private else _cloud_session_lock,
                             row_ids="absolute")
         with _cloud_session_lock:
-            extra_dims_meta = list(sess.extra_dims_meta)
+            extra_dims_meta = _copy_extra_dims_meta(sess.extra_dims_meta)
         cache_key, cache_dir, meta = _build_octree_from_las(
             las_path, extra_dims_meta,
             progress=progress, cancel_event=cancel_event, span=span,
@@ -40586,6 +40995,20 @@ def _session_rebuild(
         # (Measured after the lock is released: see `_session_display_stats`.)
     meta = {**meta, **_session_display_stats(sess), "octree_stale": not current}
     return cache_key, cache_dir, meta
+
+
+def _copy_extra_dims_meta(meta) -> "List[dict]":
+    """`extra_dims_meta` with its entry dicts copied, not just the list.
+
+    Renaming a field, relabeling it or recording its dtype edits these dicts IN
+    PLACE. A `list(...)` copy shares them, so split, extract and duplicate gave
+    the child the parent's very dicts: renaming a field on one cloud renamed the
+    other's meta while its `extras` kept the old key, so the other cloud's next
+    rebuild hit a KeyError and its export silently dropped the column (and the
+    project save kept both). The same applies to a snapshot taken under the lock
+    and read after it (bake, rebuild, export): a rename meanwhile would change
+    it mid-build."""
+    return _copy.deepcopy(list(meta or []))
 
 
 def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) -> "CloudSession":
@@ -40658,7 +41081,7 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         colors=colors,
         intensity=intensity,
         extras=extras,
-        extra_dims_meta=list(sess.extra_dims_meta),
+        extra_dims_meta=_copy_extra_dims_meta(sess.extra_dims_meta),
         # Carry the float64 timestamps onto the subset so the moving-platform LAD
         # join key survives a split/crop with full precision (and stays aligned).
         timestamps=timestamps,
@@ -41466,7 +41889,7 @@ def session_info(session_id: str):
         hit_count = (int(np.count_nonzero(live & (np.asarray(miss) == 0)))
                      if miss is not None else live_count)
         shift = sess.world_shift
-        meta = list(sess.extra_dims_meta or [])
+        meta = _copy_extra_dims_meta(sess.extra_dims_meta)
         extra_slugs = list(sess.extras)
         has_colors = sess.colors is not None
         has_intensity = sess.intensity is not None
@@ -44020,6 +44443,20 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
             return {"all": None, "ground": ground,
                     "first": (ti == first_val) if ssel == "first" else None}
 
+        def _grid_blocks():
+            """`_session_dem_blocks` with each block cut to the grid (`_dem_in_grid`):
+            a bbox smaller than the cloud, or a grid sized from one subset while the
+            density/footprint counts bin every point, otherwise piles the rest into
+            the edge cells."""
+            for surv, hit, pos, ground, ti, inten in _session_dem_blocks(snap):
+                keep = _dem_in_grid(pos[:, :2], minx, miny, cell, nx, ny)
+                if not keep.all():
+                    pos = pos[keep]
+                    ground = None if ground is None else ground[keep]
+                    ti = None if ti is None else ti[keep]
+                    inten = None if inten is None else np.asarray(inten)[keep]
+                yield surv, hit, pos, ground, ti, inten
+
         # ---- pass 2: per-row counts, density, intensity and footprint grids
         _report(0.2, "Binning points")
         row_counts = {key: np.zeros(ny, dtype=np.int64) for key, _sel, _pct in grids}
@@ -44027,7 +44464,7 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
         inten_tot = (np.zeros(n_cells, dtype=np.float64)
                      if surface == "dtm" and intensity_col is not None else None)
         surf_counts = np.zeros(n_cells, dtype=np.int64) if surface in ("dtm", "chm") else None
-        for _surv, _hit, pos, ground, ti, inten in _session_dem_blocks(snap):
+        for _surv, _hit, pos, ground, ti, inten in _grid_blocks():
             _cancel_checkpoint(progress)
             ids = _dem_cell_ids(pos[:, :2], minx, miny, cell, nx, ny)
             masks = _masks(ground, ti)
@@ -44055,7 +44492,7 @@ def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
             tmpdir = _Path(tmp)
             handles = {}
             try:
-                for _surv, _hit, pos, ground, ti, _inten in _session_dem_blocks(snap):
+                for _surv, _hit, pos, ground, ti, _inten in _grid_blocks():
                     _cancel_checkpoint(progress)
                     ids = _dem_cell_ids(pos[:, :2], minx, miny, cell, nx, ny)
                     masks = _masks(ground, ti)
@@ -46497,7 +46934,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             # and a centroid kilometers off — a confident wrong answer, not an
             # error. See _drop_far_outliers.
             points = _drop_far_outliers(
-                np.array(request.points or [], dtype=np.float64).reshape(-1, 3))
+                np.array(request.points if request.points is not None else [], dtype=np.float64).reshape(-1, 3))
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
@@ -46629,7 +47066,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2m/distance")
-def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
+def compute_c2m_distance(http_request: Request, body: bytes = Depends(_raw_body)):
     """
     Compute Cloud-to-Mesh (C2M) distance statistics.
 
@@ -46637,7 +47074,16 @@ def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
     Returns comprehensive statistics about how well the mesh fits the point cloud.
     Streams PHP1 progress markers (see _bin_frame_streaming_response) ahead of the
     JSON result so the renderer shows a cancelable progress pill.
+
+    Accepts JSON or a PHB1 binary frame (`_mesh_to_cloud_request_from_frame`):
+    the mesh can be a full-resolution Helios triangulation, and as JSON numbers
+    one past ~11.7 M triangles is a body V8 cannot even build. A plain `def`:
+    the body is read by the `_raw_body` dependency, and this runs in the
+    threadpool.
     """
+    request = _parse_json_or_frame(
+        body, http_request.headers.get("content-type"), C2MDistanceRequest,
+        functools.partial(_mesh_to_cloud_request_from_frame, C2MDistanceRequest))
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(_do_c2m_distance(request, progress=progress)).encode("utf-8"),
@@ -46946,7 +47392,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             # and a centroid kilometers off — a confident wrong answer, not an
             # error. See _drop_far_outliers.
             points = _drop_far_outliers(
-                np.array(request.points or [], dtype=np.float64).reshape(-1, 3))
+                np.array(request.points if request.points is not None else [], dtype=np.float64).reshape(-1, 3))
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
@@ -46955,6 +47401,16 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
 
         if len(vertices) == 0 or len(triangles) == 0:
             return dict(success=False, error="No mesh data provided")
+
+        # Align in a LOCAL frame, as cloud-to-cloud registration does. Point-to-
+        # plane ICP linearizes a rotation about the coordinate origin, so at a
+        # UTM northing (~4.3e6 m) a micro-radian of rotation error is meters of
+        # translation: a mesh lying on its cloud came back "no overlapping
+        # points", fitness 0, moved 15 m. Float64 everywhere; the transform is
+        # conjugated back to world below.
+        frame_origin = _registration_frame_origin(points)
+        points = _into_frame(points, frame_origin)
+        vertices = _into_frame(vertices, frame_origin)
 
         # Create point cloud (TARGET - stays fixed)
         target_pcd = o3d.geometry.PointCloud()
@@ -47035,7 +47491,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
 
         # Compose transformations: T_icp @ T_center
         # This correctly handles rotation - ICP transform is applied AFTER center alignment
-        combined_transform = icp_transform @ T_center
+        combined_transform = _frame_to_world(icp_transform @ T_center, frame_origin)
 
         # Extract translation for convenience (this is the total translation to apply to original source)
         translation = [float(combined_transform[0, 3]), float(combined_transform[1, 3]), float(combined_transform[2, 3])]
@@ -47070,14 +47526,19 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2m/icp-register")
-def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Request):
+def icp_register_mesh_to_cloud(http_request: Request, body: bytes = Depends(_raw_body)):
     """
     Perform ICP (Iterative Closest Point) registration to align a mesh to a point cloud.
 
     The point cloud is the TARGET (stays fixed), the mesh is the SOURCE (will be transformed).
     Pre-aligns by moving source center to target center, then runs ICP until convergence.
     Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
+
+    Accepts JSON or a PHB1 binary frame, for the same reason as /api/c2m/distance.
     """
+    request = _parse_json_or_frame(
+        body, http_request.headers.get("content-type"), ICPRegistrationRequest,
+        functools.partial(_mesh_to_cloud_request_from_frame, ICPRegistrationRequest))
     run_id, cancel_event = _new_cancel_token()
     # The cloud, Open3D's copy of it, its KD-tree and the mesh-sampled cloud are
     # all live at once. Admitted around the worker call rather than inside it:
@@ -47809,6 +48270,15 @@ def _do_global_register_once(request: "GlobalRegisterRequest", progress=None) ->
         target_points = target_points[np.isfinite(target_points).all(axis=1)]
         source_points = source_points[np.isfinite(source_points).all(axis=1)]
 
+        # Register in a local frame near the target, as multi-scan registration
+        # does (see `_registration_frame_origin`), and return the matrix in world
+        # coordinates. At a UTM northing Open3D's ranking ICP found no
+        # correspondences at all, so the shortlist was never ranked and the top
+        # raster peak was returned unchecked.
+        frame_origin = _registration_frame_origin(target_points)
+        target_points = _into_frame(target_points, frame_origin)
+        source_points = _into_frame(source_points, frame_origin)
+
         # Inline arrays bypass the reader's miss filter, so guard here too: a
         # single ~1 km sky return inflates the extent ~1000x and turns the
         # gridding/KD-tree work below into a hang rather than an error.
@@ -48061,6 +48531,7 @@ def _do_global_register_once(request: "GlobalRegisterRequest", progress=None) ->
         if progress is not None:
             progress(1.0, "Done")
 
+        transform = _frame_to_world(transform, frame_origin)
         translation = [float(transform[0, 3]), float(transform[1, 3]), float(transform[2, 3])]
         logger.debug(
             "Global registration complete - method: %s, anchors: %s/%s, "
@@ -48299,6 +48770,42 @@ _INGEST_WORKERS = thread_cap.pool_size(3)
 _FINE_ALIGN_WORKERS = thread_cap.pool_size(2)
 
 
+def _registration_frame_origin(X: "np.ndarray") -> "np.ndarray":
+    """Whole metres near a scan's median: the local frame multi-scan
+    registration works in. Zero for small coordinates (see `_helios_local_origin`).
+    A sample is enough to place the frame, and the median ignores misses."""
+    X = np.asarray(X)
+    if len(X) == 0:
+        return np.zeros(3)
+    sample = X[np.linspace(0, len(X) - 1, min(len(X), 20_000)).astype(int)]
+    sample = sample[np.isfinite(sample).all(axis=1)]
+    if len(sample) == 0:
+        return np.zeros(3)
+    return _helios_local_origin(np.median(sample, axis=0))
+
+
+def _into_frame(X: "np.ndarray", origin: "Optional[np.ndarray]") -> "np.ndarray":
+    """X - origin, in place when X is a float64 array the caller owns (every
+    registration loader returns a fresh one), so a scan never exists twice."""
+    if origin is None or not np.any(origin):
+        return X
+    if isinstance(X, np.ndarray) and X.dtype == np.float64 and X.flags.writeable:
+        X -= origin
+        return X
+    return np.asarray(X, dtype=np.float64) - origin
+
+
+def _frame_to_world(M: "np.ndarray", origin: "Optional[np.ndarray]") -> "np.ndarray":
+    """A transform found in a frame `origin` below world, in world coordinates:
+    T(origin) . M . T(-origin). The rotation is unchanged."""
+    M = np.asarray(M, dtype=np.float64)
+    if origin is None or not np.any(origin):
+        return M
+    out = M.copy()
+    out[:3, 3] = M[:3, 3] + np.asarray(origin) - M[:3, :3] @ np.asarray(origin)
+    return out
+
+
 def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) -> dict:
     """Worker for /api/multi/register. See _do_c2m_distance for the contract."""
     feed = None
@@ -48415,6 +48922,17 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         # bounds peak memory to `_INGEST_WORKERS` full clouds.
         from concurrent.futures import ThreadPoolExecutor
 
+        # Register in ONE local frame near the data, shared by every scan, and
+        # hand the matrices back in world coordinates. Several stages measure
+        # about the coordinate origin: a loop's closure error is the translation
+        # of its composed transform, which a yaw residual of d radians inflates
+        # by d x (distance to the origin). At a UTM northing a consistent loop
+        # with a 0.01 degree residual read 738 m against a 0.5 m tolerance, every
+        # loop failed, and every scan but the reference was withheld as
+        # unresolved. Chosen from the first scan read (scans of one set overlap);
+        # zero for small coordinates, which therefore run exactly as before.
+        frame_origin: Optional[np.ndarray] = None
+
         ingested: dict = {}
         pending: List[tuple] = []
 
@@ -48433,7 +48951,11 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                     while len(pending) >= _INGEST_WORKERS:
                         _collect(*pending.pop(0))
                     _cancel_checkpoint(progress)
-                    pending.append((k, pool.submit(_ingest, load())))
+                    X = load()
+                    if frame_origin is None:
+                        frame_origin = _registration_frame_origin(X)
+                    pending.append((k, pool.submit(_ingest, _into_frame(X, frame_origin))))
+                    del X
                 while pending:
                     _collect(*pending.pop(0))
             except BaseException:
@@ -48787,8 +49309,9 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         return dict(
             success=True,
             reference=ref,
-            transformation_matrices={str(i): transforms[i].flatten().tolist()
-                                     for i in sorted(transforms)},
+            transformation_matrices={
+                str(i): _frame_to_world(transforms[i], frame_origin).flatten().tolist()
+                for i in sorted(transforms)},
             unresolved_scans=unresolved,
             # Scan index -> the chain of scans it was placed through, reference
             # first. Longer than [reference, i] when its direct pair was not
@@ -49030,6 +49553,12 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         if len(source_verts) == 0 or len(source_tris) == 0:
             return dict(success=False, error="No source mesh data provided")
 
+        # A local frame, for the reason _do_c2m_icp gives (rotation linearized
+        # about the origin diverges at UTM magnitudes); conjugated back below.
+        frame_origin = _registration_frame_origin(target_verts)
+        target_verts = _into_frame(target_verts, frame_origin)
+        source_verts = _into_frame(source_verts, frame_origin)
+
         # Create target mesh and sample points
         target_mesh = o3d.geometry.TriangleMesh()
         target_mesh.vertices = o3d.utility.Vector3dVector(target_verts)
@@ -49123,7 +49652,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
 
         # Compose transformations: T_icp @ T_center
         # This correctly handles rotation - ICP transform is applied AFTER center alignment
-        combined_transform = icp_transform @ T_center
+        combined_transform = _frame_to_world(icp_transform @ T_center, frame_origin)
 
         # Extract translation for convenience (this is the total translation to apply to original source)
         translation = [float(combined_transform[0, 3]), float(combined_transform[1, 3]), float(combined_transform[2, 3])]
@@ -49170,11 +49699,12 @@ def _m2m_request_from_frame(body: bytes) -> "MeshToMeshICPRequest":
     for key in ("target_vertices", "target_indices", "source_vertices", "source_indices"):
         if key not in buffers:
             raise ValueError(f"m2m ICP frame missing required buffer '{key}'")
-    meta["target_vertices"] = buffers["target_vertices"].astype(np.float64).tolist()
-    meta["target_indices"] = buffers["target_indices"].astype(np.int64).tolist()
-    meta["source_vertices"] = buffers["source_vertices"].astype(np.float64).tolist()
-    meta["source_indices"] = buffers["source_indices"].astype(np.int64).tolist()
-    return MeshToMeshICPRequest(**meta)
+    return _model_with_arrays(MeshToMeshICPRequest, meta, {
+        "target_vertices": buffers["target_vertices"].astype(np.float64),
+        "target_indices": buffers["target_indices"].astype(np.int64),
+        "source_vertices": buffers["source_vertices"].astype(np.float64),
+        "source_indices": buffers["source_indices"].astype(np.int64),
+    })
 
 
 @app.post("/api/m2m/icp-register")
@@ -49189,12 +49719,7 @@ async def icp_register_mesh_to_mesh(http_request: Request):
     Accepts JSON or a PHB1 binary frame; `async def` only to read the body, with
     the decode pushed to the threadpool so the loop is never held.
     """
-    ctype = (http_request.headers.get("content-type") or "").lower()
-    body = await http_request.body()
-    if "application/octet-stream" in ctype or body[:4] == _BIN_FRAME_MAGIC:
-        request = await run_in_threadpool(_m2m_request_from_frame, body)
-    else:
-        request = MeshToMeshICPRequest(**json.loads(body.decode("utf-8")))
+    request = await _json_or_frame_request(http_request, MeshToMeshICPRequest, _m2m_request_from_frame)
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(_do_m2m_icp(request, progress=progress)).encode("utf-8"),

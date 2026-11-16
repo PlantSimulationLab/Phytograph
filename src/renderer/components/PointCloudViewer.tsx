@@ -11,7 +11,7 @@ import { classViewFilters } from '../lib/octreeFilterSpec';
 import { octreeMaskStatsKey } from './viewer/renderers/octreeCropMask';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { commitStoredPose, composeCloudPose, hasStoredPose, movedGroundZ, poseMatrixOf, poseToMatrix, transformAabbByMatrix, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
-import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields, transformScanParamsToWorld } from '../lib/affineDelta';
+import { type AffineDelta, IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields, transformScanParamsToWorld, worldToStoredMatrix } from '../lib/affineDelta';
 import { diffTargets, exclusiveFlatTargets, idsOfKind, parseTargetKey, pruneTargets, seedFromSelection, seedTransformTargets, targetKey, transformPickerItems } from '../lib/transformTargets';
 import { bakeResidualIntoMeshData, bakeTransformIntoMeshData, composeMeshDelta, forEachWorldVertex, matrix4FromRowMajor, meshWorldMatrix, meshWorldVertices } from '../lib/meshTransform';
 import { mergeMeshData, mergedMeshName, meshMergeBlockReason, meshMergeSetBlockReason } from '../lib/meshMerge';
@@ -20,7 +20,7 @@ import { groupDisplayColor, groupLocalCentroid, groupTriangleMask, hasGroups, in
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList, Clover} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionResample, type ResampleSpec, type SessionResampleResult, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, waitForBackendHealthy, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionResample, type ResampleSpec, type SessionResampleResult, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionSegmentOrgans, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, segmentOrgans, type OrganSegmentationCounts, type OrganUnits, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCanceledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, deleteCloudSession, waitForBackendHealthy, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -69,6 +69,7 @@ import { type HeliosXmlScan, type HeliosXmlGrid } from '../lib/heliosScanXml';
 import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
 import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
 import { SCAN_HIT_FIELDS, STANDARD_HIT_FIELD_SLUGS, effectiveRetainedFields } from '../lib/scanHitFields';
+import { buildScanCloudData } from '../lib/scanCloudData';
 import { ScanMarkerEntry, EditableTrajectoryPoses, TrajectoryPreviewScanner, TrajectoryPath as TrajectoryEditorPath } from './ScannerMarker';
 import { TrajectoryTablePanel } from './TrajectoryTablePanel';
 import {
@@ -94,7 +95,9 @@ import { BulkImportProgress, type BulkImportProgressState } from './BulkImportPr
 import StatusPill, { ChannelStatusPill } from './StatusPill';
 import { createProgressChannel } from '../lib/progressChannel';
 import { createDisplayIndicesCache } from '../lib/displayIndicesCache';
-import { meshVertexOffset, rebaseVec3s, shiftToStored } from '../lib/meshFrame';
+import { meshRenderShift, meshVertexOffset, nearbyOrigin, rebaseVec3s, shiftToStored, vec3sRelativeTo } from '../lib/meshFrame';
+import { plantSessionCreateRequest, seedForNewPlant } from '../lib/plantRegeneration';
+import { columnsToSourceRows, gatherScalarFields, recordDisplayRows } from '../lib/displayRows';
 import { type ScanParameters, BLANK_ORIGIN, hasOrigin, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
@@ -171,7 +174,6 @@ import {
   octreeScalarFieldOptions,
   partitionImportedColumns,
   displayLabelFor,
-  assembleScanScalarFields,
   voxelMeshToHeliosGrid,
   gridSnapSignature,
   gridColumnLocalOffsets,
@@ -194,6 +196,7 @@ import {
   ladReuseGrid,
   extractReuseMeshPayload,
   collectHitPoints,
+  flatFloat32,
   collectHitPointsCapped,
   extentForParameterSeeding,
   eraseDiagonal,
@@ -221,7 +224,7 @@ import {
 import { categoricalSchemeForCloud, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, PLANT_ORGAN_ATTRIBUTE, LEAFLET_ID_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE, NORMAL_ATTRIBUTES, CURVATURE_ATTRIBUTE } from '../lib/classification';
 import { robustScalarRange } from '../lib/robustColorRange';
 import { buildNoiseParams, formatFlaggedSummary, formatMultiScanSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
-import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
+import { exportScanXml, type ScanExportEntry, type MeshToCloudBuffers } from '../utils/backendApi';
 import { denoisePoints, sessionDenoise, type DenoiseStats, type NoiseMethod, type NoiseParams } from '../utils/backendApi';
 import { CURATED_BARK_TEXTURES, getBarkTextures, getBarkTexture } from '../utils/backendApi';
 import { DEFAULT_TEXTURE_TILE_SIZE } from '../lib/qsmTube';
@@ -558,6 +561,9 @@ interface PointCloudViewerProps {
   // a faithful rebuild is a lie that poisons the NEXT recovery attempt. See
   // handleRebuildScanOctree in App.
   onRebuildScanOctree: (id: string, data: PointCloudData) => void;
+  // Mark a cloud edited since import the moment a session edit commits, even
+  // one that leaves the octree alone (handleMarkScanEdited in App).
+  onMarkScanEdited: (id: string) => void;
   onUpdateScanParams: (id: string, params: ScanParameters | undefined) => void;
   // Record (or, with `undefined`, clear) a scan's Auto-Register provenance.
   // Separate from onUpdateScanData because the two must not travel together:
@@ -705,6 +711,7 @@ export default function PointCloudViewer({
   onSetScanSelection,
   onUpdateScanData,
   onRebuildScanOctree,
+  onMarkScanEdited,
   onUpdateScanParams,
   onUpdateScanRegistration,
   onUpdateScanLabel,
@@ -2961,7 +2968,11 @@ export default function PointCloudViewer({
       next.set(cloudId, new Set([...(prev.get(cloudId) ?? []), slug]));
       return next;
     });
-  }, []);
+    // Every label write lands here. The strokes live in the session (and in the
+    // overlay) until the column is baked; the source file has none of them, so
+    // a missing octree must no longer be rebuilt from it.
+    onMarkScanEdited(cloudId);
+  }, [onMarkScanEdited]);
   /** An export of `cloudId` succeeded, writing `columns` (null = every column). */
   const markLabelsExported = useCallback((cloudId: string, columns: string[] | null) => {
     setLabelsUnexported((prev) => {
@@ -3645,7 +3656,7 @@ export default function PointCloudViewer({
     const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
     const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
     const t = sourceCloud ? getEditState(sourceCloud.id).translation : { x: 0, y: 0, z: 0 };
-    const ws = mesh.method === 'dem' ? [0, 0, 0] : (sourceCloud?.data?.octree?.worldShift ?? [0, 0, 0]);
+    const ws = meshRenderShift(mesh, sourceCloud?.data?.octree?.worldShift);
     return meshWorldMatrix(
       { x: p.x + t.x - ws[0], y: p.y + t.y - ws[1], z: p.z + t.z - ws[2] },
       meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 },
@@ -5745,6 +5756,10 @@ export default function PointCloudViewer({
           const result = await deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion);
           if (result.remaining_count === 0) emptied.push(cloud);
           deletedCount = result.pending_deleted_count ?? result.deleted_count;
+          // The erase lives in the session only until "Apply deletions", and the
+          // source file still holds every erased point: from now on a missing
+          // octree must not be rebuilt from that file, exactly as after a crop.
+          onMarkScanEdited(cloud.id);
         } catch (err) {
           failures.push(`${cloud.data.fileName || cloud.id} (${err instanceof Error ? err.message : String(err)})`);
           continue;
@@ -5909,7 +5924,7 @@ export default function PointCloudViewer({
     scene.boundary([cloud.id]);
 
     setEditMode('none');
-  }, [editMode, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
+  }, [editMode, clouds, editStates, onUpdateCloud, onMarkScanEdited, eraseFrame, eraseBrushPx]);
 
   // ── Cross-section derived state ───────────────────────────────────────────
 
@@ -7983,33 +7998,17 @@ export default function PointCloudViewer({
         }),
         onRunId: (runId) => { bakeRunIdRef.current = runId; },
       });
-      const newData = buildPointCloudFromOctree(
-        {
-          cache_id: baked.cache_id,
-          cache_dir: baked.cache_dir ?? '',
-          cached: baked.cached,
-          version: baked.version,
-          point_count: baked.point_count,
-          spacing: baked.spacing,
-          scale: baked.scale,
-          offset: baked.offset,
-          bounds: baked.bounds,
-          tight_bounds: baked.tight_bounds,
-          attributes: baked.attributes,
-        },
-        octreeInfo.sourceXyzPath,
-        cloud.data.fileName ?? cloud.id,
-        {
-          asciiFormat: octreeInfo.asciiFormat ?? null,
-          columnPlan: octreeInfo.columnPlan ?? null,
-          categoricalAttributes: octreeInfo.categoricalAttributes,
-          sessionId,
-          worldShift: octreeInfo.worldShift ?? null,
-          continuousAttributes: octreeInfo.continuousAttributes,
-          classPalettes: octreeInfo.classPalettes,
-        },
-      );
-      // The old octree stays drawn while this one stages, so keep hiding the
+      // Through the one rebuild builder, like every other rebuild. A hand-built
+      // meta here dropped the cloud's scan-level facts (hasMisses, scanOrigin,
+      // scanParams, the miss octree, source units, display stats): after "Apply
+      // deletions" the misses toggle vanished and LAD refused to compute until
+      // the recorded misses were replaced by synthesized ones. Re-read the
+      // cloud first: the bake can take minutes, and a palette binding written
+      // meanwhile would be lost from the stale capture.
+      const current = cloudsRef.current.find(c => c.id === cloud.id)?.data.octree ?? octreeInfo;
+      const newData = buildSessionOctreeData(
+        baked, current, cloud.data.fileName ?? cloud.id, sessionId, { diverged: true },
+      );      // The old octree stays drawn while this one stages, so keep hiding the
       // stack it is about to drop until the swap (see `handoverMasks`).
       beginMaskHandover(
         cloud.id, baked.cache_id,
@@ -8049,7 +8048,7 @@ export default function PointCloudViewer({
       bakeAbortRef.current = null;
       bakeRunIdRef.current = null;
     }
-  }, [onUpdateCloud, bakingCloudId, beginMaskHandover]);
+  }, [onUpdateCloud, bakingCloudId, beginMaskHandover, buildSessionOctreeData]);
 
   // ── Resample ───────────────────────────────────────────────────────────
   // What the current method keeps of one cloud. Streamed clouds ask the backend
@@ -11624,6 +11623,10 @@ export default function PointCloudViewer({
     let colors = data.colors;
     let intensities = data.intensities;
     let pointCount = data.pointCount;
+    // Source row of each display row, once a compaction drops any (see
+    // lib/displayRows.ts): the scalar fields are gathered by it below, and tools
+    // write their results back onto the source cloud through it.
+    let rows: Uint32Array | undefined;
 
     // Apply erasing first (uses original indices).
     //
@@ -11644,10 +11647,12 @@ export default function PointCloudViewer({
       const newPositions = new Float32Array(kept * 3);
       const newColors = src.colors ? new Float32Array(kept * 3) : null;
       const newIntensities = src.intensities ? new Float32Array(kept) : null;
+      const newRows = new Uint32Array(kept);
 
       let w = 0;
       for (let i = 0; i < src.pointCount; i++) {
         if (erased.has(i)) continue;
+        newRows[w] = i;
         newPositions[w * 3] = src.positions[i * 3];
         newPositions[w * 3 + 1] = src.positions[i * 3 + 1];
         newPositions[w * 3 + 2] = src.positions[i * 3 + 2];
@@ -11666,6 +11671,7 @@ export default function PointCloudViewer({
       positions = newPositions;
       if (newColors) colors = newColors;
       if (newIntensities) intensities = newIntensities;
+      rows = newRows;
     }
 
     // Apply crop preview (when in crop mode). Two-pass for the same reason
@@ -11714,6 +11720,7 @@ export default function PointCloudViewer({
         const newPositions = new Float32Array(kept * 3);
         const newColors = colors ? new Float32Array(kept * 3) : null;
         const newIntensities = intensities ? new Float32Array(kept) : null;
+        const newRows = new Uint32Array(kept);
 
         let w = 0;
         for (let i = 0; i < pointCount; i++) {
@@ -11722,6 +11729,7 @@ export default function PointCloudViewer({
           const z = positions[i * 3 + 2];
           const inside = cropPredicate(x + tx, y + ty, z + tz);
           if (!(invert ? !inside : inside)) continue;
+          newRows[w] = rows ? rows[i] : i;
           newPositions[w * 3] = x;
           newPositions[w * 3 + 1] = y;
           newPositions[w * 3 + 2] = z;
@@ -11740,6 +11748,7 @@ export default function PointCloudViewer({
         positions = newPositions;
         if (newColors) colors = newColors;
         if (newIntensities) intensities = newIntensities;
+        rows = newRows;
       }
     }
 
@@ -11791,8 +11800,37 @@ export default function PointCloudViewer({
       size = new THREE.Vector3(0, 0, 0);
     }
 
-    return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
+    // The scalar fields ride along, gathered by the same rows: without them a
+    // tool could not see this cloud's `is_miss` column (misses went to compute
+    // as hits) nor any other per-point attribute. See lib/displayRows.ts.
+    const display: PointCloudData = {
+      positions, colors, intensities, pointCount, bounds: { min, max, center, size },
+      fileName: data.fileName,
+      scalarFields: rows ? gatherScalarFields(data.scalarFields, rows) : data.scalarFields,
+    };
+    if (rows) recordDisplayRows(display, rows);
+    return display;
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
+
+  // Write per-point results computed on a flat cloud's DISPLAY copy back onto
+  // the cloud itself: its own positions, its other columns and its pending
+  // edits untouched, the new columns expanded to its full length (rows the copy
+  // dropped take 0). Writing `{ ...displayCopy, scalarFields }` instead replaced
+  // the cloud with the compacted, translated copy while the edit state still
+  // held the erase and the translation (lib/displayRows.ts).
+  const writeFlatColumns = useCallback((
+    id: string, display: PointCloudData, columns: Record<string, ScalarField>, fill = 0,
+  ) => {
+    const source = cloudsRef.current.find(c => c.id === id)?.data;
+    if (!source) return;
+    onUpdateCloud(id, {
+      ...source,
+      scalarFields: {
+        ...(source.scalarFields ?? {}),
+        ...columnsToSourceRows(columns, display, source.pointCount, fill),
+      },
+    });
+  }, [onUpdateCloud]);
 
   // BAKE a cloud's pending Transformation-tool draft (translation AND rotation)
   // into its real geometry, then reset the local (render-only) draft to identity.
@@ -12180,7 +12218,7 @@ export default function PointCloudViewer({
       position: meshPositionsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 },
       rotation: meshRotationsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 },
       scale: meshScalesRef.current.get(mesh.id) || { x: 1, y: 1, z: 1 },
-      worldShift: mesh.method === 'dem' ? null : (sourceCloud?.data?.octree?.worldShift ?? null),
+      worldShift: meshRenderShift(mesh, sourceCloud?.data?.octree?.worldShift),
       kind: mesh.gridSubdivisions ? 'grid' as const : mesh.isPlant ? 'plant' as const : 'mesh' as const,
     };
   }, []);
@@ -13877,103 +13915,6 @@ export default function PointCloudViewer({
     return { vertices, triangles, colors, uv_coordinates, materials, organ_codes };
   }, [meshPositions, meshScales, meshRotations, isTexturedMesh]);
 
-  // Build PointCloudData from one scanner's scan result: positions, RGB colors,
-  // a dedicated `intensities` array (so "color by intensity" works), and the rest
-  // of the per-hit scalars as named scalarFields (each with min/max), plus bounds.
-  const buildScanCloudData = useCallback((result: LidarScanResult, fileName: string, retainedFields: string[]): PointCloudData | null => {
-    const n = result.numPoints;
-    if (n === 0) return null;
-
-    // Points arrive as a flat xyz Float32Array (zero-copy from the binary frame).
-    const positions = result.points;
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let i = 0; i < n; i++) {
-      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-    }
-
-    const colors = result.colors && result.colors.length === n * 3 ? result.colors : undefined;
-
-    // Turn each returned scalar list into a ScalarField, honoring the user's
-    // retained-fields selection: unchecked standard fields are pruned, and
-    // checked fields are kept even when constant (so e.g. a single-sweep
-    // `timestamp` still shows in Color by). `intensity` also populates the
-    // dedicated `intensities` array used by the intensity color mode + filter.
-    const { scalarFields, intensities } = assembleScanScalarFields(
-      result.scalars, n, retainedFields, STANDARD_HIT_FIELD_SLUGS,
-    );
-
-    // Every synthetic scan with hits is routed through an octree-backed cloud
-    // session (like an imported cloud); attach the octree ref carrying the cache
-    // id + session id + miss flag + projected-miss octree id so it renders via
-    // OctreePointCloud and session-backed ops (triangulation, LAD, crop, the
-    // MissOctree overlay) read the points by session_id instead of serializing
-    // the whole cloud inline. `result.session` is absent only when the scan
-    // returned no hits or the octree build failed, leaving a plain flat cloud.
-    let octree: PointCloudData['octree'];
-    const session = result.session;
-    if (session?.session_id) {
-      // Surface the octree's per-attribute ranges + labels so the Color-by
-      // dropdown can offer the retained per-hit scalar fields (timestamp,
-      // target_index, …). The picker reads these off the octree ref for octree-
-      // backed clouds (octreeScalarFieldOptions) rather than the flat
-      // scalarFields map, so without them a synthetic-scan cloud shows no scalar
-      // options at all — including constant-valued retained fields. Mirrors the
-      // meta.attributes → attributeRanges/labels conversion in pointCloudParsers.
-      const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
-      const attributeLabels: Record<string, string> = {};
-      for (const a of session.attributes ?? []) {
-        if (Array.isArray(a.min) && Array.isArray(a.max)) {
-          attributeRanges[a.name] = { min: a.min, max: a.max };
-        }
-        if (a.label) attributeLabels[a.name] = a.label;
-      }
-      octree = {
-        cacheId: session.cache_id ?? session.session_id,
-        sourceXyzPath: session.cache_dir ?? '',
-        sessionId: session.session_id,
-        hasMisses: Boolean(session.has_misses),
-        scanOrigin: session.scan_origin ?? null,
-        missOctreeCacheId: session.miss_octree_cache_id ?? null,
-        ...(Object.keys(attributeRanges).length > 0 ? { attributeRanges } : {}),
-        ...(Object.keys(attributeLabels).length > 0 ? { attributeLabels } : {}),
-        // The colorbar's outlier-resistant per-attribute domains. Carried for
-        // the same reason attributeRanges is: this literal is hand-built rather
-        // than produced by buildPointCloudFromOctree, so anything it forgets is
-        // simply absent — and an absent robust range silently reverts a
-        // synthetic scan's scalar colorbars to raw extrema.
-        ...(session.robust_attribute_ranges
-          ? { robustAttributeRanges: session.robust_attribute_ranges }
-          : {}),
-      };
-    }
-
-    return {
-      positions,
-      colors,
-      intensities,
-      scalarFields: Object.keys(scalarFields).length ? scalarFields : undefined,
-      pointCount: n,
-      bounds: {
-        min: new THREE.Vector3(minX, minY, minZ),
-        max: new THREE.Vector3(maxX, maxY, maxZ),
-        center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
-        size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
-      },
-      fileName,
-      // Same provenance as the octree ref above: present on the cloud-session
-      // create response, and the height/X/Y colorbar falls back to the raw
-      // (outlier-set) box without it.
-      ...(session?.robust_bounds
-        ? { robustBounds: { min: session.robust_bounds.min, max: session.robust_bounds.max } }
-        : {}),
-      octree,
-    };
-  }, []);
-
   // Execute the scan and write each scanner's hits back into ITS OWN scan.
   // `overwriteMode` decides what to do for scanners that already carry point data:
   //   'overwrite' — replace the existing data in place
@@ -14292,7 +14233,7 @@ export default function PointCloudViewer({
       setIsScanning(false);
       setScanProgress(null);
     }
-  }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales, syntheticScanMemoryBudgetMb]);
+  }, [extractMeshWorldGeometry, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales, syntheticScanMemoryBudgetMb]);
 
   // Entry point: validate the targets, then open the Synthetic Scan Options popup
   // (the actual run happens from handleScanOptionsRun once the user confirms).
@@ -14579,6 +14520,14 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     triAbortRef.current = abort;
 
+    // The mesh is kept in its source cloud's STORED frame, the frame the cloud
+    // draws in (lib/meshFrame.ts): float32 world coordinates of a georeferenced
+    // cloud snap to a 0.5 m lattice. Null for an unshifted cloud, whose world
+    // and stored frames coincide, so its mesh stays a legacy world-frame mesh.
+    const meshFrameOf = (cloud: PointCloudEntry): [number, number, number] | null => {
+      const ws = cloud.data.octree?.worldShift;
+      return ws && (ws[0] || ws[1] || ws[2]) ? [ws[0], ws[1], ws[2]] : null;
+    };
     // Method-specific request fields, applied identically to every request.
     const applyMethodParams = (request: Parameters<typeof triangulatePointCloud>[0]) => {
       if (method === 'poisson' && depth != null) request.depth = depth;
@@ -14612,6 +14561,9 @@ export default function PointCloudViewer({
           }
         }
 
+        // The merged mesh is drawn with the first cloud (sourceCloudId), so it
+        // takes that cloud's frame.
+        const frame = meshFrameOf(targets[0]);
         const request: Parameters<typeof triangulatePointCloud>[0] = {
           method,
           estimate_normals: true,
@@ -14621,6 +14573,7 @@ export default function PointCloudViewer({
           ...(points.length > 0 ? { points } : {}),
           ...(cropBoxArr ? { crop_box: cropBoxArr } : {}),
           ...(cropBoxRotationDeg ? { crop_box_rotation_deg: cropBoxRotationDeg } : {}),
+          ...(frame ? { frame_origin: frame } : {}),
         };
         applyMethodParams(request);
 
@@ -14639,7 +14592,8 @@ export default function PointCloudViewer({
         if (!response.success) throw new Error(response.error || 'Triangulation failed');
 
         const meshData: MeshData = {
-          vertices: response.vertices,
+          // A pass-through when the backend honored frame_origin.
+          vertices: rebaseVec3s(response.vertices, response.vertexOrigin, frame ?? [0, 0, 0]),
           indices: response.triangles,
           normals: response.normals,
           vertexCount: response.numVertices,
@@ -14662,6 +14616,7 @@ export default function PointCloudViewer({
           color: targets[0].color,
           method,
           triangulationParams,
+          ...(frame ? { vertexOffset: frame } : {}),
         };
         addMesh(meshEntry, undefined, 'Triangulate');
         setShowTriangulationPopup(false);
@@ -14701,6 +14656,7 @@ export default function PointCloudViewer({
       for (let cloudIdx = 0; cloudIdx < targets.length; cloudIdx++) {
         const cloud = targets[cloudIdx];
         const ps = await buildPointSource(cloud);
+        const frame = meshFrameOf(cloud);
         const request: Parameters<typeof triangulatePointCloud>[0] = {
           method,
           estimate_normals: true,
@@ -14711,6 +14667,7 @@ export default function PointCloudViewer({
           // Grid pin (per-scan ball-pivot): drives the backend's per-triangle cell
           // binning so this mesh can later be re-used for the LAD inversion.
           ...(grid ? { grid } : {}),
+          ...(frame ? { frame_origin: frame } : {}),
         };
         if (ps.kind === 'source') {
           request.source = { ...ps.source, max_points: triangulateMaxPoints };
@@ -14736,7 +14693,8 @@ export default function PointCloudViewer({
         if (!response.success) throw new Error(response.error || 'Triangulation failed');
 
         const meshData: MeshData = {
-          vertices: response.vertices,
+          // A pass-through when the backend honored frame_origin.
+          vertices: rebaseVec3s(response.vertices, response.vertexOrigin, frame ?? [0, 0, 0]),
           indices: response.triangles,
           normals: response.normals,
           vertexCount: response.numVertices,
@@ -14768,6 +14726,7 @@ export default function PointCloudViewer({
           color: cloud.color,
           method,
           triangulationParams,
+          ...(frame ? { vertexOffset: frame } : {}),
         });
         totalTriangles += meshData.triangleCount;
 
@@ -14948,13 +14907,9 @@ export default function PointCloudViewer({
       // ever sweep it into a noise cloud and cost this cloud its Beer's-law
       // transmission denominator for LAD.
       const labels = scatterToFullLength(response.labels, hitIndices, count, NOISE_CLEAN);
-      onUpdateCloud(cloud.id, {
-        ...displayData,
-        scalarFields: {
-          ...(displayData.scalarFields ?? {}),
-          [NOISE_CLASS_ATTRIBUTE]: { values: labels, min: NOISE_CLEAN, max: NOISE_NOISE },
-        },
-      });
+      writeFlatColumns(cloud.id, displayData, {
+        [NOISE_CLASS_ATTRIBUTE]: { values: labels, min: NOISE_CLEAN, max: NOISE_NOISE },
+      }, NOISE_CLEAN);
       return response;
     };
 
@@ -15031,7 +14986,7 @@ export default function PointCloudViewer({
       });
     }
   }, [filterTargetClouds, noiseBusy, noiseMethod, noiseAutoParams, noiseParams,
-      buildPointSource, onUpdateCloud, setCloudColorMode, defaultFiltersFor]);
+      buildPointSource, onUpdateCloud, writeFlatColumns, setCloudColorMode, defaultFiltersFor]);
 
   // Drop the detection for the given clouds: clears the result box, the
   // noise_class filter and the noise coloring. The `noise_class` COLUMN stays
@@ -15129,6 +15084,9 @@ export default function PointCloudViewer({
           const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
           const meta = await sessionComputeNormals(
             sessionId, { ...params, defer_octree: willDefer }, abort.signal);
+          // The session now holds columns its source file lacks, even while the
+          // octree rebuild is deferred (see handleMarkScanEdited).
+          onMarkScanEdited(id);
           for (const slug of NORMAL_ATTRIBUTES) retireLabelColumn(id, slug);
 
           if (!meta.octree_deferred) {
@@ -15201,7 +15159,7 @@ export default function PointCloudViewer({
       setNormalsProgress(null);
       normalsAbortRef.current = null;
     }
-  }, [normalsTargets, buildPointSource, onUpdateCloud, setCloudColorMode, showToast,
+  }, [normalsTargets, buildPointSource, onUpdateCloud, onMarkScanEdited, setCloudColorMode, showToast,
       normalsNeighbors, normalsUseRadius, normalsRadius, normalsOrientation]);
 
   const cancelComputeNormals = useCallback(() => {
@@ -15480,6 +15438,9 @@ export default function PointCloudViewer({
             defer_octree: willDefer,
             acknowledge_cost: acknowledgeCost,
           }, abort.signal);
+          // A computed column the source file lacks, even while the octree
+          // rebuild is deferred (see handleMarkScanEdited).
+          onMarkScanEdited(id);
 
           const baseName = cloud.data.fileName ?? id;
           if (!result.octree_deferred && result.cache_id) {
@@ -15584,7 +15545,7 @@ export default function PointCloudViewer({
       scalarAbortRef.current = null;
     }
   }, [scalarInProgress, scalarTargets, scalarIntersection, scalarExpression,
-      scalarNewSlug, scalarSlugTouched, onUpdateCloud, setCloudColorMode, scene,
+      scalarNewSlug, scalarSlugTouched, onUpdateCloud, onMarkScanEdited, setCloudColorMode, scene,
       showToast, refreshScalarFields]);
 
   const cancelComputeScalarField = useCallback(() => {
@@ -16013,11 +15974,9 @@ export default function PointCloudViewer({
       // of 0, which is outside the 1=Ground / 2=Non-ground range, so they are
       // neither -- the same convention the tree/wood siblings use.
       const labels = scatterToFullLength(response.labels, hitIndices, count);
-      const newScalarFields = {
-        ...(displayData.scalarFields ?? {}),
+      writeFlatColumns(id, displayData, {
         [GROUND_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
-      };
-      onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
+      });
       setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
       classified();
 
@@ -16157,7 +16116,7 @@ export default function PointCloudViewer({
       groundSegmentAbortRef.current = null;
       groundSplitRunIdRef.current = null;
     }
-  }, [groundTargets, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
+  }, [groundTargets, buildPointSource, onUpdateCloud, writeFlatColumns, onAddCloud, onHideScan, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
 
   // Generate a DEM (Digital Elevation Model) from the selected cloud's ground
   // points. The bare-earth surface comes back as a heightmap mesh (stored as a
@@ -16338,12 +16297,8 @@ export default function PointCloudViewer({
           if (!Number.isFinite(hmin)) { hmin = 0; hmax = 1; }
           if (f.count < f.rawCount) { hmin = Math.min(hmin, 0); hmax = Math.max(hmax, 0); }
           registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
-          onUpdateCloud(id, {
-            ...f.displayData,
-            scalarFields: {
-              ...(f.displayData.scalarFields ?? {}),
-              [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
-            },
+          writeFlatColumns(id, f.displayData, {
+            [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
           });
           setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
         }
@@ -16423,7 +16378,7 @@ export default function PointCloudViewer({
       demAbortRef.current = null;
       demRunIdRef.current = null;
     }
-  }, [demTargets, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demSurfaces, demCellSize, demMethod, demFillVoids, demComputeHAG]);
+  }, [demTargets, buildPointSource, addMesh, onUpdateCloud, writeFlatColumns, buildSessionOctreeData, demSurfaces, demCellSize, demMethod, demFillVoids, demComputeHAG]);
 
   // "Snap to ground": displace a voxel grid's columns to follow a DEM. The backend
   // (/api/lad/snap-grid) computes the per-column offsets ONCE from the DEM; we
@@ -16528,16 +16483,23 @@ export default function PointCloudViewer({
   }, []);
 
   // True when the (single) selected cloud carries a reflectance/intensity scalar
-  // — gates the assist toggle in the panel. Octree/session clouds expose it via
-  // a scalar field or the source's intensity, which the backend re-reads.
+  // — gates the assist toggle in the panel. A flat cloud carries it in its
+  // scalarFields / intensities; an octree/session cloud names it among its octree
+  // attributes, and the backend re-reads the column itself
+  // (_session_reflectance_scalar: the same names, case-insensitive). Checking
+  // only the flat arrays hid the toggle on every session cloud, while the assist
+  // still ran (the toggle defaults on), so it could not be turned off.
   const woodReflectanceAvailable = useMemo(() => {
     const ids = Array.from(woodTargets);
+    const isRefl = (k: string) => /^(reflectance|intensity)$/i.test(k);
     return ids.some(tid => {
       const c = clouds.find(x => x.id === tid);
       if (!c) return false;
       const sf = c.data.scalarFields;
-      const hasField = !!sf && Object.keys(sf).some(k => /^(reflectance|intensity)$/i.test(k));
-      return hasField || !!(c.data.intensities && c.data.intensities.length > 0);
+      const hasField = !!sf && Object.keys(sf).some(isRefl);
+      return hasField
+        || !!(c.data.intensities && c.data.intensities.length > 0)
+        || Object.keys(c.data.octree?.attributeRanges ?? {}).some(isRefl);
     });
   }, [woodTargets, clouds]);
 
@@ -16630,7 +16592,6 @@ export default function PointCloudViewer({
           for (const { cloud, ps } of resolved) {
             const inline = ps as Extract<PointSourcePayload, { kind: 'inline' }>;
             const d = inline.data;
-            const t = getEditState(cloud.id).translation;
             // Hit points only, with reflectance filtered in LOCKSTEP -- the
             // backend's all-or-nothing rule needs reflectance to align 1:1 with
             // the points actually sent, not with the unfiltered cloud.
@@ -16650,9 +16611,10 @@ export default function PointCloudViewer({
               anyLacksGround = true;
               for (let i = 0; i < hits.points.length; i++) groundParts.push(2);
             }
-            for (const pt of hits.points) {
-              inlineParts.push([pt[0] + t.x, pt[1] + t.y, pt[2] + t.z]);
-            }
+            // `d` is the display copy, which already carries any pending
+            // translation (getDisplayData); adding it again moved this cloud
+            // twice as far as drawn before segmenting it against the others.
+            for (const pt of hits.points) inlineParts.push(pt);
             const r = hits.aligned.reflectance;
             if (allHaveRefl && r && r.length === hits.points.length) reflParts.push(...r);
             else allHaveRefl = false;
@@ -16684,11 +16646,9 @@ export default function PointCloudViewer({
             // after the first and mislabel points after each cloud's first miss.
             const slice = labels.slice(cursor, cursor + o.hitCount);
             cursor += o.hitCount;
-            const cd = o.displayData;
             const values = scatterToFullLength(slice, o.hitIndices, o.fullCount);
-            onUpdateCloud(o.id, {
-              ...cd,
-              scalarFields: { ...(cd.scalarFields ?? {}), [WOOD_CLASS_ATTRIBUTE]: { values, min: 1, max: 2 } },
+            writeFlatColumns(o.id, o.displayData, {
+              [WOOD_CLASS_ATTRIBUTE]: { values, min: 1, max: 2 },
             });
           }
 
@@ -16739,7 +16699,7 @@ export default function PointCloudViewer({
       woodSegmentAbortRef.current = null;
       woodSplitRunIdRef.current = null;
     }
-  }, [woodTargets, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodModelId, woodUseReflectance, inlineReflectance]);
+  }, [woodTargets, clouds, buildPointSource, getEditState, onUpdateCloud, writeFlatColumns, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodModelId, woodUseReflectance, inlineReflectance]);
 
   // Segment a single cloud and apply the result per `woodMode` (label / split /
   // remove). Used by the per-scan path (and single selection).
@@ -16940,7 +16900,21 @@ export default function PointCloudViewer({
           fileName: replaceParent ? baseName : `${baseName} (${suffix})`,
         };
         if (replaceParent) {
-          onUpdateCloud(id, childData);
+          // The replacement is built from the display copy, so the pending
+          // erase and translation are already IN it: clear them, or the erase
+          // indices hide rows that now mean other points and the translation is
+          // applied a second time. Its remaining points keep their columns.
+          onUpdateCloud(id, {
+            ...childData,
+            scalarFields: gatherScalarFields(displayData.scalarFields, Uint32Array.from(idxs)),
+          });
+          setEditStates(prev => {
+            const cur = prev.get(id);
+            if (!cur) return prev;
+            const next = new Map(prev);
+            next.set(id, { ...cur, translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() });
+            return next;
+          });
         } else if (onAddCloud) {
           onAddCloud({ id: crypto.randomUUID(), data: childData, visible: true, color });
           splitChildren++;
@@ -16953,11 +16927,9 @@ export default function PointCloudViewer({
       } else {
         // Full-length (misses = 0, outside the 1..2 wood/leaf range) so the
         // scalar field stays aligned to positions.
-        const newScalarFields = {
-          ...(displayData.scalarFields ?? {}),
+        writeFlatColumns(id, displayData, {
           [WOOD_CLASS_ATTRIBUTE]: { values: woodLabels, min: 1, max: 2 },
-        };
-        onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
+        });
         setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         if (woodMode === 'split') {
           // Scheme-derived swatches — see the session path above.
@@ -16975,7 +16947,7 @@ export default function PointCloudViewer({
         message: `${response.num_wood.toLocaleString()} wood, ${response.num_leaf.toLocaleString()} leaf`,
       });
     }
-  }, [buildPointSource, onUpdateCloud, onAddCloud, onHideScan, woodMode, inlineReflectance]);
+  }, [buildPointSource, onUpdateCloud, writeFlatColumns, onAddCloud, onHideScan, woodMode, inlineReflectance]);
   // Keep a ref to the latest worker so the memoised handleWoodSegment dispatcher
   // (which excludes it from deps to avoid a use-before-declaration cycle) always
   // invokes the current-woodMode version.
@@ -17013,16 +16985,12 @@ export default function PointCloudViewer({
     }
     const organ = scatterToFullLength(response.organ, hitIndices, d.pointCount);
     const leaflet = scatterToFullLength(response.leaflet, hitIndices, d.pointCount);
-    onUpdateCloud(id, {
-      ...d,
-      scalarFields: {
-        ...(d.scalarFields ?? {}),
-        [PLANT_ORGAN_ATTRIBUTE]: { values: organ, min: 1, max: 3 },
-        [LEAFLET_ID_ATTRIBUTE]: { values: leaflet, min: 0, max: Math.max(1, response.num_leaflets) },
-      },
+    writeFlatColumns(id, d, {
+      [PLANT_ORGAN_ATTRIBUTE]: { values: organ, min: 1, max: 3 },
+      [LEAFLET_ID_ATTRIBUTE]: { values: leaflet, min: 0, max: Math.max(1, response.num_leaflets) },
     });
     return response;
-  }, [buildPointSource, onUpdateCloud]);
+  }, [buildPointSource, onUpdateCloud, writeFlatColumns]);
 
   const handleOrganSegment = useCallback(async () => {
     // The clouds checked in the panel, in scene order.
@@ -17290,11 +17258,9 @@ export default function PointCloudViewer({
       // Backend labels are indexed against the HIT subset — scatter to full
       // length (misses get 0 = unassigned) before anything indexes by cloud i.
       const labels = scatterToFullLength(response.labels, hitIndices, count);
-      const newScalarFields = {
-        ...(displayData.scalarFields ?? {}),
+      writeFlatColumns(id, displayData, {
         [TREE_INSTANCE_ATTRIBUTE]: { values: labels, min: 0, max: response.num_trees },
-      };
-      onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
+      });
       setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
       segmented();
 
@@ -17432,7 +17398,7 @@ export default function PointCloudViewer({
       treeSegmentAbortRef.current = null;
       treeSplitRunIdRef.current = null;
     }
-  }, [treeTargets, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmCrownScale, treeChmMinHeight, treeChmCell]);
+  }, [treeTargets, buildPointSource, onUpdateCloud, writeFlatColumns, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmCrownScale, treeChmMinHeight, treeChmCell]);
 
   // Fill the seed list with one seed per trunk found in the breast-height
   // layer, and turn seed mode on so they are drawn for review before running.
@@ -17538,27 +17504,29 @@ export default function PointCloudViewer({
       const ps = await buildPointSource(cloud);
       const meshTransform = meshDeltaInput(mesh);
       // The backend measures in WORLD coordinates; a mesh kept relative to an
-      // offset (lib/meshFrame.ts) gets it back here, in double precision.
-      const [mox, moy, moz] = meshVertexOffset(mesh);
-      const meshVertices: number[] = Array.from(meshWorldVertices(
-        mesh.data.vertices, mesh.data.vertexCount,
-        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)),
-        (v, i) => v + (i % 3 === 0 ? mox : i % 3 === 1 ? moy : moz));
-      const meshIndices: number[] = Array.from(mesh.data.indices);
+      // offset (lib/meshFrame.ts) travels relative to it and the backend adds it
+      // back in double precision. Binary, not JSON: see MeshToCloudBuffers.
+      const meshBuffers: MeshToCloudBuffers = {
+        meshVertices: meshWorldVertices(
+          mesh.data.vertices, mesh.data.vertexCount,
+          meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)),
+        meshVertexOrigin: meshVertexOffset(mesh),
+        meshIndices: mesh.data.indices,
+        // Hit points only: a miss sits ~1 km out, and BOTH the coverage
+        // threshold and the ICP centroid pre-alignment scale off the cloud's
+        // extent. Measured on a real scan, misses inflated the robust diagonal
+        // 2,192x (29 m -> 64 km), so the 5% correspondence distance became
+        // 3,210 m instead of 1.47 m and the centroid sat 5 km off in Z --
+        // silently confident, entirely wrong answers rather than an error.
+        ...(ps.kind === 'source' ? {} : { points: flatFloat32(ps.hits.points) }),
+      };
 
       const response = await computeAlignmentDistance(
-        ps.kind === 'source'
-          ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
-          // Hit points only: a miss sits ~1 km out, and BOTH the coverage
-          // threshold and the ICP centroid pre-alignment scale off the cloud's
-          // extent. Measured on a real scan, misses inflated the robust diagonal
-          // 2,192x (29 m -> 64 km), so the 5% correspondence distance became
-          // 3,210 m instead of 1.47 m and the centroid sat 5 km off in Z --
-          // silently confident, entirely wrong answers rather than an error.
-          : { points: ps.hits.points.flat(), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+        ps.kind === 'source' ? { source: ps.source } : {},
         ctrl.signal,
         (p, msg) => setAlignDistProgress({ label: msg, value: p }),
         (runId) => { alignDistRunIdRef.current = runId; },
+        meshBuffers,
       );
 
       if (!response.success) {
@@ -17617,25 +17585,29 @@ export default function PointCloudViewer({
         ...meshDeltaInput(mesh),
         worldShift: (mox || moy || moz) ? [-mox, -moy, -moz] as [number, number, number] : null,
       };
-      const meshVertices: number[] = Array.from(meshWorldVertices(
-        mesh.data.vertices, mesh.data.vertexCount,
-        meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)),
-        (v, i) => v + (i % 3 === 0 ? mox : i % 3 === 1 ? moy : moz));
-      const meshIndices: number[] = Array.from(mesh.data.indices);
+      // Binary, not JSON (see MeshToCloudBuffers); the vertices travel relative
+      // to the mesh's own offset, which the backend adds back in float64.
+      const meshBuffers: MeshToCloudBuffers = {
+        meshVertices: meshWorldVertices(
+          mesh.data.vertices, mesh.data.vertexCount,
+          meshWorldMatrix(meshTransform.position, meshTransform.rotation, meshTransform.scale)),
+        meshVertexOrigin: [mox, moy, moz],
+        meshIndices: mesh.data.indices,
+        // Hit points only: a miss sits ~1 km out, and BOTH the coverage
+        // threshold and the ICP centroid pre-alignment scale off the cloud's
+        // extent. Measured on a real scan, misses inflated the robust diagonal
+        // 2,192x (29 m -> 64 km), so the 5% correspondence distance became
+        // 3,210 m instead of 1.47 m and the centroid sat 5 km off in Z --
+        // silently confident, entirely wrong answers rather than an error.
+        ...(ps.kind === 'source' ? {} : { points: flatFloat32(ps.hits.points) }),
+      };
 
       const response = await icpRegisterMeshToCloud(
-        ps.kind === 'source'
-          ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
-          // Hit points only: a miss sits ~1 km out, and BOTH the coverage
-          // threshold and the ICP centroid pre-alignment scale off the cloud's
-          // extent. Measured on a real scan, misses inflated the robust diagonal
-          // 2,192x (29 m -> 64 km), so the 5% correspondence distance became
-          // 3,210 m instead of 1.47 m and the centroid sat 5 km off in Z --
-          // silently confident, entirely wrong answers rather than an error.
-          : { points: ps.hits.points.flat(), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+        ps.kind === 'source' ? { source: ps.source } : {},
         ctrl.signal,
         (p, msg) => setIcpProgress({ label: msg, value: p }),
         (runId) => { icpRunIdRef.current = runId; },
+        meshBuffers,
       );
 
       if (!response.success) {
@@ -17915,7 +17887,11 @@ export default function PointCloudViewer({
           const moveScanOrigin = transformSourceOrigin(sessionMatrix, quaternion);
           const movedOctree = { ...sourceOctree, scanOrigin: moveScanOrigin(sourceOctree.scanOrigin) };
           const pivot = renderPivot(sceneOrigin, sourceCloud.data.bounds.center);
-          const posed = poseFromMatrix(sessionMatrix, pivot);
+          // `sessionMatrix` is TRUE-WORLD; the pivot, the bounds and the octree
+          // are in the STORED frame, so the drawn pose takes the matrix
+          // re-expressed there (the bake path's conjugateByShift, in reverse).
+          const posed = poseFromMatrix(
+            worldToStoredMatrix(sessionMatrix, sourceOctree.worldShift), pivot);
 
           if (result.octree_posed) {
             const moved = transformBoundsAabb(
@@ -18498,7 +18474,9 @@ export default function PointCloudViewer({
               // at. `handleResetRegistration` already cleared any prior pose
               // before this loop, so there is nothing to compose onto.
               const pivot = renderPivot(sceneOriginRef.current, live.data.bounds.center);
-              const posed = poseFromMatrix(inv, pivot);
+              // `inv` is TRUE-WORLD, like the forward matrix; draw it in the
+              // stored frame the pivot and bounds are in.
+              const posed = poseFromMatrix(worldToStoredMatrix(inv, octreeInfo.worldShift), pivot);
               const liveCenter = live.data.bounds.center;
               const moved = transformBoundsAabb(
                 live.data.bounds, posed.translation, posed.rotation, pivot);
@@ -19194,19 +19172,17 @@ export default function PointCloudViewer({
           targets.map(async c => ({ cloud: c, ps: await buildPointSource(c) })));
         const sources: BackendPointSource[] = [];
         const inlineParts: number[][] = [];
-        for (const { cloud, ps } of resolved) {
+        for (const { ps } of resolved) {
           if (ps.kind === 'source') {
             sources.push({ ...ps.source, max_points: MAX_QSM_POINTS });
           } else {
-            // Flat cloud: concatenate its HIT points in WORLD space
-            // (translation applied here — getDisplayData leaves it to the parent
-            // group). Scans are assumed pre-registered (e.g. ICP-aligned).
-            // Misses are dropped per-cloud, before the concat, so the shared
-            // budget below is spent entirely on real returns.
-            const t = getEditState(cloud.id).translation;
-            for (const pt of ps.hits.points) {
-              inlineParts.push([pt[0] + t.x, pt[1] + t.y, pt[2] + t.z]);
-            }
+            // Flat cloud: concatenate its HIT points. They come from the display
+            // copy, which already carries any pending translation
+            // (getDisplayData applies it); adding it here as well moved the
+            // cloud twice as far as drawn. Scans are assumed pre-registered
+            // (e.g. ICP-aligned). Misses are dropped per-cloud, before the
+            // concat, so the shared budget below is spent entirely on real returns.
+            for (const pt of ps.hits.points) inlineParts.push(pt);
           }
         }
 
@@ -21964,8 +21940,11 @@ export default function PointCloudViewer({
   }, [isLadRunning, handleHeliosTriangulate, handleHeliosFilterChange]);
 
   // Build one MeshData from a returned crown's flat vertex/index/normal arrays.
-  const crownToMeshData = useCallback((crown: CrownFitCrown): MeshData => {
-    const vertices = Float32Array.from(crown.vertices);
+  // The crown arrives in world coordinates (float64 JSON); its vertices are kept
+  // relative to `frame` (world = vertex + frame), subtracted in double precision,
+  // because float32 world coordinates of a georeferenced crown snap to 0.5 m.
+  const crownToMeshData = useCallback((crown: CrownFitCrown, frame: readonly number[]): MeshData => {
+    const vertices = vec3sRelativeTo(crown.vertices, frame);
     const indices = Uint32Array.from(crown.triangles);
     const normals = crown.normals.length === crown.vertices.length
       ? Float32Array.from(crown.normals) : undefined;
@@ -22030,16 +22009,19 @@ export default function PointCloudViewer({
     if (!dir) return ''; // canceled
 
     for (const r of alphaRows) {
-      const data = crownToMeshData(r.crown);
+      // Relative to whole metres near the crown; the serializers add it back as
+      // they format each coordinate, in double precision.
+      const origin = nearbyOrigin(r.crown.metrics.crown_center);
+      const data = crownToMeshData(r.crown, origin);
       let content: string;
       if (args.meshFormat === 'ply') {
-        content = serializeMeshPly(data);
+        content = serializeMeshPly(data, { origin });
       } else if (args.meshFormat === 'stl') {
-        content = serializeMeshStl(data);
+        content = serializeMeshStl(data, { origin });
       } else {
         // A fitted crown carries no materials, so serializeMeshObj emits just the
         // .obj — no .mtl sibling to write.
-        const files = serializeMeshObj(data, { baseName: r.meshFile!.replace(/\.obj$/, '') });
+        const files = serializeMeshObj(data, { baseName: r.meshFile!.replace(/\.obj$/, ''), origin });
         content = files.find(f => f.name.endsWith('.obj'))?.text ?? '';
       }
       await window.electronAPI.fs.writeText(joinExportPath(dir, r.meshFile!), content);
@@ -22126,10 +22108,16 @@ export default function PointCloudViewer({
           const treeColor = crownColorForTreeId(crown.tree_instance_id);
           const color = treeColor ?? allocateCrownColor(usedCrownColors);
           usedCrownColors.add(color);
+          // Kept in the cloud's STORED frame, like a triangulation of it
+          // (lib/meshFrame.ts), so it draws on the cloud with no further shift.
+          const ws = cloud.data.octree?.worldShift;
+          const frame: [number, number, number] | null =
+            ws && (ws[0] || ws[1] || ws[2]) ? [ws[0], ws[1], ws[2]] : null;
           const mesh: MeshEntry = {
             id: crypto.randomUUID(),
             sourceCloudId: scanId,
-            data: crownToMeshData(crown),
+            data: crownToMeshData(crown, frame ?? [0, 0, 0]),
+            ...(frame ? { vertexOffset: frame } : {}),
             visible: true,
             color,
             method: 'crown',
@@ -23079,11 +23067,14 @@ export default function PointCloudViewer({
 
     const abort = new AbortController();
     plantAbortRef.current = abort;
+    // Generate WITH the seed the mesh will record (lib/plantRegeneration.ts).
+    const seed = seedForNewPlant(requestedSeed);
+    const seededPayload = { ...payload, request: { ...payload.request, random_seed: seed } } as typeof payload;
 
     try {
       // Stream the build so the popup shows live progress (and can cancel).
       const response = await generatePlantStreaming(
-        payload,
+        seededPayload,
         (p, msg) => { setPlantProgress(p); setPlantProgressMsg(msg); },
         abort.signal,
         (runId) => { plantRunIdRef.current = runId; },
@@ -23125,8 +23116,6 @@ export default function PointCloudViewer({
       const { data: meshData, plantMaterials } = plantResponseToMeshData(response);
 
       const newMeshId = crypto.randomUUID();
-      // Generate a random seed if not provided, for reproducible regeneration
-      const seed = requestedSeed ?? Math.floor(Math.random() * 1000000);
       const newMesh: MeshEntry = {
         id: newMeshId,
         sourceCloudId: `plant-${response.plant_type}-${shapeCounter}`,
@@ -23306,7 +23295,16 @@ export default function PointCloudViewer({
         // Use existing session to advance time
         console.log(`[Plant] Advancing session ${mesh.plantSessionId} by ${dt} days`);
 
-        const response = await advancePlantSession(mesh.plantSessionId, dt);
+        // A session the backend no longer holds (evicted past its plant-session
+        // cap, swept idle, or lost to a restart) answers 404, which throws. Treat
+        // that like any failed advance and regrow from the seed below, instead of
+        // ending in a console error after the undo history was already cleared.
+        let response: Awaited<ReturnType<typeof advancePlantSession>>;
+        try {
+          response = await advancePlantSession(mesh.plantSessionId, dt);
+        } catch (err) {
+          response = { success: false, error: err instanceof Error ? err.message : String(err) } as typeof response;
+        }
 
         if (!response.success) {
           console.error('Plant session advance failed:', response.error);
@@ -23340,14 +23338,16 @@ export default function PointCloudViewer({
       // Create a new session at the target age
       console.log(`[Plant] Creating new session at age ${newAge}`);
 
-      const sessionResponse = await createPlantSession({
-        plant_type: mesh.plantType,
-        initial_age: newAge,
-        position_x: mesh.plantPosition?.x ?? 0,
-        position_y: mesh.plantPosition?.y ?? 0,
-        position_z: mesh.plantPosition?.z ?? 0,
-        leaf_inclination: mesh.plantLeafInclination,
-      });
+      // Seeded with the plant's own seed, or this regrows a different plant.
+      const sessionResponse = await createPlantSession(plantSessionCreateRequest(mesh, newAge));
+      // The session this mesh held is replaced below (or dropped by the
+      // stateless fallback); free it, or orphans push live plants' sessions out
+      // of the backend's small plant-session cap.
+      const releaseOldSession = () => {
+        if (mesh.plantSessionId && mesh.plantSessionId !== sessionResponse.session_id) {
+          void deletePlantSession(mesh.plantSessionId).catch(() => {});
+        }
+      };
 
       if (!sessionResponse.success || !sessionResponse.session_id) {
         console.error('Failed to create plant session:', sessionResponse.error);
@@ -23364,8 +23364,10 @@ export default function PointCloudViewer({
 
         if (!response.success) {
           console.error('Plant regeneration failed:', response.error);
+          showToast({ type: 'error', title: 'Could not change plant age', message: response.error || 'Plant regeneration failed' });
           return;
         }
+        releaseOldSession();
 
         // Convert and update (stateless fallback)
         const { data: regenData, plantMaterials } = plantResponseToMeshData(response);
@@ -23393,8 +23395,11 @@ export default function PointCloudViewer({
 
       if (!advanceResponse.success) {
         console.error('Failed to get geometry from new session:', advanceResponse.error);
+        void deletePlantSession(sessionResponse.session_id).catch(() => {});
+        showToast({ type: 'error', title: 'Could not change plant age', message: advanceResponse.error || 'The new plant session returned no geometry' });
         return;
       }
+      releaseOldSession();
 
       // Convert response data (+ real Helios UVs / textures) to MeshData.
       const { data: newSessionData, plantMaterials } = plantResponseToMeshData(advanceResponse);
@@ -23418,10 +23423,14 @@ export default function PointCloudViewer({
 
     } catch (error) {
       console.error('Plant age advancement failed:', error);
+      showToast({
+        type: 'error', title: 'Could not change plant age',
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setIsAdvancingAge(false);
     }
-  }, [meshes, isAdvancingAge, scene]);
+  }, [meshes, isAdvancingAge, scene, showToast]);
 
   // Handle growth animation - steps from start age to end age
   const handleStartGrowthAnimation = useCallback(async (meshId: string) => {
@@ -23454,15 +23463,7 @@ export default function PointCloudViewer({
     try {
       // First, create a new session at the start age
       // Use the same seed as the original plant to ensure identical geometry
-      const sessionResponse = await createPlantSession({
-        plant_type: mesh.plantType,
-        initial_age: startAge,
-        position_x: mesh.plantPosition?.x ?? 0,
-        position_y: mesh.plantPosition?.y ?? 0,
-        position_z: mesh.plantPosition?.z ?? 0,
-        random_seed: mesh.plantSeed,
-        leaf_inclination: mesh.plantLeafInclination,
-      });
+      const sessionResponse = await createPlantSession(plantSessionCreateRequest(mesh, startAge));
 
       if (!sessionResponse.success || !sessionResponse.session_id) {
         showToast({ title: 'Failed to create plant session', type: 'error' });
@@ -23503,6 +23504,11 @@ export default function PointCloudViewer({
 
       // Update with initial geometry
       updateMeshGeometry(advanceResponse);
+      // The mesh now runs on the animation's session; free the one it replaced,
+      // or each animation leaves an orphan in the backend's small plant-session cap.
+      if (mesh.plantSessionId && mesh.plantSessionId !== sessionId) {
+        void deletePlantSession(mesh.plantSessionId).catch(() => {});
+      }
 
       // Now step through each day from start to end
       let currentAge = startAge;
@@ -23731,15 +23737,7 @@ export default function PointCloudViewer({
 
       // First, create a new session at the start age
       // Use the same seed as the original plant to ensure identical geometry
-      const sessionResponse = await createPlantSession({
-        plant_type: mesh.plantType,
-        initial_age: startAge,
-        position_x: mesh.plantPosition?.x ?? 0,
-        position_y: mesh.plantPosition?.y ?? 0,
-        position_z: mesh.plantPosition?.z ?? 0,
-        random_seed: mesh.plantSeed,
-        leaf_inclination: mesh.plantLeafInclination,
-      });
+      const sessionResponse = await createPlantSession(plantSessionCreateRequest(mesh, startAge));
 
       if (!sessionResponse.success || !sessionResponse.session_id) {
         showToast({ title: 'Failed to create plant session', type: 'error' });
@@ -24909,15 +24907,13 @@ export default function PointCloudViewer({
           const cloudOffset = editState && !isTransformTarget
             ? { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z }
             : { x: 0, y: 0, z: 0 };
-          // A mesh triangulated/derived from a worldShift-imported cloud has WORLD-frame
-          // vertices (triangulation/skeleton readers add worldShift back), but the cloud
-          // renders in its STORED frame; subtract the source cloud's worldShift so the
-          // mesh lands on the cloud. EXCEPTION: DEM meshes are built STORED-frame
-          // (_do_session_dem keeps stored and carries worldShift in metadata), so they
-          // need no shift. No-op for meshes with no shifted source cloud (plant/imported).
-          const meshWs = mesh.method === 'dem'
-            ? [0, 0, 0]
-            : (sourceCloud?.data?.octree?.worldShift ?? [0, 0, 0]);
+          // The cloud renders in its STORED frame, so a mesh is drawn minus
+          // whatever separates its vertex frame from that one: nothing for a DEM
+          // or a mesh already kept in the cloud's frame (`vertexOffset`, as
+          // Helios and Open3D triangulations are), the whole worldShift for a
+          // legacy world-frame mesh. One rule, shared with the crop matrix and
+          // the Transformation tool (lib/meshFrame.ts).
+          const meshWs = meshRenderShift(mesh, sourceCloud?.data?.octree?.worldShift);
 
           // Preview of the Transformation tool's delta D (render frame, about
           // the scene origin): the drawn group already sits at −displayOffset,

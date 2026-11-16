@@ -307,6 +307,16 @@ class Admission:
     else is running, and a warning is logged - the budget is advisory for a
     lone job and a hard cap only on CONCURRENCY. Waiting jobs are logged once
     they have waited `log_after_s`, so a queue is visible in the backend log.
+
+    A NESTED request (from a thread that already holds an admission) never
+    waits: it is admitted at once and still counted against everyone else. A
+    thread holding admitted memory cannot free any of it by waiting, so blocking
+    it is hold-and-wait: with its own outer admission in the table, a nested
+    request that does not fit beside it waited forever (DEM's height column,
+    split, extract, duplicate and merge all build an octree, which admits
+    itself, inside their own admission), and two threads each holding one and
+    wanting a second would wait on each other. The nested work is part of a job
+    that was already let in.
     """
 
     def __init__(self, budget_fn: Callable[[], int], log: Optional[Callable[[str], None]] = None,
@@ -315,39 +325,53 @@ class Admission:
         self._log = log or (lambda msg: print(msg, flush=True))
         self._log_after_s = log_after_s
         self._cond = threading.Condition()
-        self._admitted: Dict[int, tuple] = {}   # token -> (estimate, label, since)
+        # token -> (estimate, label, since, thread ident)
+        self._admitted: Dict[int, tuple] = {}
         self._next_token = 1
 
     def admitted_bytes(self) -> int:
         with self._cond:
-            return sum(e for e, _l, _s in self._admitted.values())
+            return sum(entry[0] for entry in self._admitted.values())
 
     def in_flight(self) -> List[Dict[str, object]]:
         with self._cond:
             return [
                 {"label": label, "bytes": est, "seconds": round(time.time() - since, 1)}
-                for est, label, since in self._admitted.values()
+                for est, label, since, _thread in self._admitted.values()
             ]
 
-    def admit(self, estimate: int, label: str) -> "_Admitted":
-        return _Admitted(self, max(0, int(estimate)), str(label))
+    def admit(self, estimate: int, label: str, thread_owned: bool = True) -> "_Admitted":
+        """`thread_owned=False` for an admission entered on one thread and held
+        while that thread goes on to other work (a threadpool thread entering it
+        for async code, as `_run_killable` does): it must not make that thread's
+        later, unrelated requests count as nested and skip the queue."""
+        return _Admitted(self, max(0, int(estimate)), str(label), thread_owned)
 
-    def _acquire(self, estimate: int, label: str) -> int:
+    def _acquire(self, estimate: int, label: str, thread_owned: bool = True) -> int:
         started = time.time()
         logged = False
+        me = threading.get_ident()
         with self._cond:
             while True:
                 budget = max(0, int(self._budget_fn()))
-                used = sum(e for e, _l, _s in self._admitted.values())
-                if not self._admitted or used + estimate <= budget:
-                    if estimate > budget and budget > 0:
+                used = sum(entry[0] for entry in self._admitted.values())
+                nested = any(entry[3] == me for entry in self._admitted.values())
+                if not self._admitted or nested or used + estimate <= budget:
+                    if nested and used + estimate > budget and budget > 0:
+                        self._log(
+                            f"[memory] {label}: nested inside an admitted operation, so "
+                            f"admitted without waiting; {(used + estimate) / GiB:.1f} GiB "
+                            f"now admitted against a {budget / GiB:.1f} GiB budget"
+                        )
+                    elif estimate > budget and budget > 0:
                         self._log(
                             f"[memory] {label}: estimated {estimate / GiB:.1f} GiB exceeds the "
                             f"{budget / GiB:.1f} GiB budget; running it alone"
                         )
                     token = self._next_token
                     self._next_token += 1
-                    self._admitted[token] = (estimate, label, time.time())
+                    self._admitted[token] = (estimate, label, time.time(),
+                                             me if thread_owned else None)
                     return token
                 if not logged and time.time() - started >= self._log_after_s:
                     logged = True
@@ -365,14 +389,15 @@ class Admission:
 
 
 class _Admitted:
-    def __init__(self, admission: Admission, estimate: int, label: str):
+    def __init__(self, admission: Admission, estimate: int, label: str, thread_owned: bool = True):
         self._admission = admission
         self._estimate = estimate
         self._label = label
+        self._thread_owned = thread_owned
         self._token: Optional[int] = None
 
     def __enter__(self):
-        self._token = self._admission._acquire(self._estimate, self._label)
+        self._token = self._admission._acquire(self._estimate, self._label, self._thread_owned)
         return self
 
     def __exit__(self, *exc):

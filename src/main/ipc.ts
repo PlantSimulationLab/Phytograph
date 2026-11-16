@@ -22,6 +22,7 @@ import { getBackendToken } from './backendToken.js';
 import { allowPath, isPathAllowed, isWriteAllowed } from './fsAllowlist.js';
 import { grant as browserGrant, listDir, listPlaces } from './fileBrowser.js';
 import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
+import { readFileHead } from './readFileHead.js';
 // Generated at build time by scripts/gen-version-info.mjs (gitignored).
 import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
 
@@ -187,8 +188,10 @@ export function registerIpc(): void {
     denyRead(path);
     return readFile(path, 'utf-8');
   });
-  ipcMain.handle(IPC.FsReadBinary, async (_e, path: string) => {
+  ipcMain.handle(IPC.FsReadBinary, async (_e, path: string, maxBytes?: number) => {
     denyRead(path);
+    // A header sniff needs the first bytes only (see readFileHead.ts).
+    if (maxBytes !== undefined && maxBytes !== null) return readFileHead(path, Number(maxBytes));
     const buf = await readFile(path);
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   });

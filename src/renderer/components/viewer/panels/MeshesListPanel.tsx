@@ -11,6 +11,7 @@ import type { TriangleFilterEstimate } from '../../../lib/triangleFilter';
 import { ColormapName } from '../../../lib/colormaps';
 import { ColormapOptions } from '../../ColormapOptions';
 import { stopClickAfterTextSelection } from '../../../lib/textSelection';
+import { meshExtentAttr } from '../../../lib/plantRegeneration';
 
 // How long to wait after the last keystroke before re-deriving the filtered
 // mesh. Re-filtering walks every candidate triangle, so firing on each
@@ -634,6 +635,7 @@ export function MeshesListPanel({
               data-mesh-id={mesh.id}
               data-mesh-name={displayName}
               data-triangle-count={mesh.data.triangleCount}
+              data-mesh-extent={mesh.isPlant ? meshExtentAttr(mesh.data) : undefined}
               data-is-plant={mesh.isPlant ? 'true' : 'false'}
               data-textured-materials={mesh.plantMaterials?.filter(m => m.textureData).length ?? 0}
               data-has-vertex-colors={mesh.data.vertexColors && mesh.data.vertexColors.length > 0 ? 'true' : 'false'}

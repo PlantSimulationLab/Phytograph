@@ -345,25 +345,53 @@ function restoreSidecarsForUndo(state: SceneState, action: SceneAction): SceneSt
 // import), and freeing then would pull the session out from under a live cloud.
 // Keying on "is this id still in state.scans" collapses both cases to the real
 // question — can anything still reach this session?
+//
+// "On screen" is not the whole answer, though: the history that REMAINS can
+// reach it too. Import a cloud, work past the history cap, then delete it: the
+// import's `add` is evicted while the scan is off screen, but the delete is
+// still in `past`, and undoing it restores the cloud. Freeing on the add's
+// eviction handed that undo a cloud with no session, and every tool on it
+// failed. So a session is freed only when no live scan holds it AND no retained
+// transaction (past or future) names it.
+function sessionIdsOf(action: SceneAction): string[] {
+  if (action.t !== 'add' && action.t !== 'remove') return [];
+  if (action.kind !== 'scan') return [];
+  const ids: string[] = [];
+  if (action.sessionId) ids.push(action.sessionId);
+  const own = (action.object as Scan | undefined)?.data?.octree?.sessionId;
+  if (own && own !== action.sessionId) ids.push(own);
+  return ids;
+}
+
 function freeEvictedSessions(
   evicted: HistoryTransaction[],
   freeSession: SessionFreeFn | undefined,
-  liveScanIds: Set<string>,
+  liveScans: Scan[],
+  retained: HistoryTransaction[],
 ) {
   if (!freeSession) return;
+  const liveScanIds = new Set(liveScans.map((s) => s.id));
+  const reachable = new Set<string>();
+  for (const s of liveScans) {
+    const sid = s.data?.octree?.sessionId;
+    if (sid) reachable.add(sid);
+  }
+  for (const tx of retained) {
+    for (const action of tx.actions) for (const sid of sessionIdsOf(action)) reachable.add(sid);
+  }
   const freed = new Set<string>();
   for (const tx of evicted) {
     for (const action of tx.actions) {
-      // Narrow on `t` first — only add/remove carry `kind` and `sessionId`.
-      if (action.t !== 'add' && action.t !== 'remove') continue;
-      if (action.kind !== 'scan') continue;
-      const sessionId = action.sessionId;
       // Still on screen → the live cloud owns it; never free.
-      if (!sessionId || liveScanIds.has(action.id)) continue;
-      // De-dupe: an id can appear in several evicted transactions.
-      if (freed.has(sessionId)) continue;
-      freed.add(sessionId);
-      freeSession(sessionId);
+      if (action.t !== 'add' && action.t !== 'remove') continue;
+      if (liveScanIds.has(action.id)) continue;
+      for (const sessionId of sessionIdsOf(action)) {
+        // Reachable by a live cloud or an undo/redo still in history; or
+        // already freed (an id can appear in several evicted transactions).
+        if (reachable.has(sessionId) || freed.has(sessionId)) continue;
+        freed.add(sessionId);
+        freeSession(sessionId);
+      }
     }
   }
 }
@@ -403,7 +431,8 @@ export function sceneReducer(
       freeEvictedSessions(
         [...evicted, ...state.future],
         ctx?.freeSession,
-        new Set(next.scans.map((s) => s.id)),
+        next.scans,
+        past,
       );
       return { ...next, past, future: [] };
     }
@@ -448,12 +477,10 @@ export function sceneReducer(
       const idset = new Set(command.ids);
       const touches = (tx: HistoryTransaction) => tx.actions.some((a) => idset.has(a.id));
       const evicted = [...state.past.filter(touches), ...state.future.filter(touches)];
-      freeEvictedSessions(evicted, ctx?.freeSession, new Set(state.scans.map((s) => s.id)));
-      return {
-        ...state,
-        past: state.past.filter((tx) => !touches(tx)),
-        future: state.future.filter((tx) => !touches(tx)),
-      };
+      const past = state.past.filter((tx) => !touches(tx));
+      const future = state.future.filter((tx) => !touches(tx));
+      freeEvictedSessions(evicted, ctx?.freeSession, state.scans, [...past, ...future]);
+      return { ...state, past, future };
     }
     case 'labelBoundary': {
       // A label Commit ends the undo history of ONE column on ONE cloud: the

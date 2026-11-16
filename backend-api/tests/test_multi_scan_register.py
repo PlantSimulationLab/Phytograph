@@ -342,3 +342,64 @@ def test_a_scan_unregisterable_against_the_reference_is_placed_through_a_neighbo
     M = np.asarray(result["transformation_matrices"]["3"]).reshape(4, 4)
     assert np.linalg.norm(M[:2, 3] - poses[3][:2, 3]) < 1.0, (
         f"scan 3 placed {np.linalg.norm(M[:2, 3] - poses[3][:2, 3]):.2f} m out")
+
+
+UTM = np.array([512_345.0, 4_271_234.0, 87.0])
+
+
+def _shifted(P, offset):
+    """A transform `P` re-expressed for clouds moved by `offset`."""
+    out = P.copy()
+    out[:3, 3] = P[:3, 3] + offset - P[:3, :3] @ offset
+    return out
+
+
+def test_a_georeferenced_set_registers_as_it_does_near_the_origin():
+    """The same three scans, moved to UTM coordinates, must register to the same
+    poses. A loop's closure error is the translation of its composed transform,
+    so measured about a far origin a hair of yaw residual read as hundreds of
+    metres: every loop failed and every scan but the reference was withheld."""
+    poses = [np.eye(4), _rigid(12.0, [3.0, -2.0, 0.1]), _rigid(-9.0, [-4.0, 3.0, -0.2])]
+    views = _views(_scene(), poses, seed=1)
+    near = main._do_multi_scan_register(_request(views), progress=None)
+    far = main._do_multi_scan_register(_request([v + UTM for v in views]), progress=None)
+    assert near["success"] and far["success"], (near.get("error"), far.get("error"))
+    assert far["loops_checked"]
+    assert all(lp["closed"] for lp in far["loops"]), far["loops"]
+    assert far["unresolved_scans"] == near["unresolved_scans"] == []
+    for i in (1, 2):
+        M = np.asarray(far["transformation_matrices"][str(i)], dtype=np.float64).reshape(4, 4)
+        moved = (views[i] + UTM) @ M[:3, :3].T + M[:3, 3]
+        want = (views[i] @ poses[i][:3, :3].T + poses[i][:3, 3]) + UTM
+        err = float(np.mean(np.linalg.norm(moved - want, axis=1)))
+        assert err < 1.0, f"scan {i} landed {err:.2f} m from its true pose"
+        # And it puts the scan where the near-origin run does. (Compared by the
+        # points, not the translation column: that column is where the pose
+        # sends the coordinate origin, so a hair of rotation moves it metres.)
+        M_near = np.asarray(near["transformation_matrices"][str(i)]).reshape(4, 4)
+        near_moved = views[i] @ M_near[:3, :3].T + M_near[:3, 3] + UTM
+        assert float(np.mean(np.linalg.norm(moved - near_moved, axis=1))) < 0.05
+
+
+def test_converged_candidates_are_one_pose_wherever_the_origin_is():
+    """`_best_by_icp` treats candidates that put the cloud in the same place as
+    one answer. Comparing translation columns compared where each pose sends the
+    COORDINATE ORIGIN, so at UTM coordinates converged candidates differing by a
+    hair of rotation read as rivals and the pair was flagged ambiguous.
+
+    Measured 30 km out (a local survey grid): far enough that the old test saw
+    rivals (margin 1.2e-4), near enough that Open3D's ICP still runs. At a UTM
+    northing it finds no correspondences at all, which is why both registration
+    endpoints now work in a local frame."""
+    from raster_correlation import _MIN_RIVAL_CANDIDATES, _best_by_icp
+    poses = [np.eye(4), _rigid(12.0, [3.0, -2.0, 0.1])]
+    tgt, src = _views(_scene(), poses, seed=5)
+    rng = np.random.default_rng(0)
+    for offset in (np.zeros(3), np.array([30_000.0, 24_000.0, 0.0])):
+        cands = []
+        for _ in range(_MIN_RIVAL_CANDIDATES):
+            jitter = _rigid(rng.uniform(-0.3, 0.3), [*rng.uniform(-0.15, 0.15, 2), 0.0])
+            cands.append(_shifted(poses[1] @ jitter, offset))
+        _, rmse, M, margin = _best_by_icp(cands, tgt + offset, src + offset)
+        assert rmse is not None
+        assert margin == float("inf"), f"offset {offset.tolist()}: margin {margin}"

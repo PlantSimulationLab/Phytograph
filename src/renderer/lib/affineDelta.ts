@@ -77,6 +77,24 @@ export function conjugateByShift(
 }
 
 /**
+ * The inverse of `conjugateByShift`: a TRUE-WORLD matrix (what registration
+ * returns, since the backend reads points with the shift added back) re-expressed
+ * in the STORED frame the octree, its bounds and the render pivot live in:
+ *
+ *     M_stored = T(−shift) · M_world · T(shift)
+ *
+ * Decomposing a world matrix about a stored-frame pivot without this drew a
+ * rotated UTM-shifted scan (R − I)·shift away from its data: ~7 km per 0.1°.
+ */
+export function worldToStoredMatrix(
+  m: THREE.Matrix4,
+  shift: readonly [number, number, number] | null | undefined,
+): THREE.Matrix4 {
+  if (!shift || (shift[0] === 0 && shift[1] === 0 && shift[2] === 0)) return m.clone();
+  return conjugateByShift(m, [-shift[0], -shift[1], -shift[2]]);
+}
+
+/**
  * Move a scan's WORLD-frame position data (the scanner origin, plus a moving
  * platform's trajectory poses and their attitudes) by a TRUE-WORLD matrix.
  *

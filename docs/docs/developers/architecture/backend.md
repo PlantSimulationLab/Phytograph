@@ -165,11 +165,14 @@ magic 'PHB1' | uint32 header_len | JSON header (space-padded to 4 bytes) | buffe
 ```
 
 The JSON header carries the scalar metadata (`meta`) plus a descriptor list for
-the buffers (name, `f32`/`u32`, length); the buffers (vertices, indices,
+the buffers (name, `f32`/`u32`/`f64`, length); the buffers (vertices, indices,
 points, scalars…) follow concatenated, 4-byte aligned. The renderer reads them
 as **zero-copy `Float32Array`/`Uint32Array` views** — no `JSON.parse`, no
 `.flat()`, and no V8 ~512 MB string-length ceiling (a full-resolution tree
-triangulation is hundreds of MB). Long computations stream 4-byte whitespace
+triangulation is hundreds of MB). An `f64` buffer is viewed when its offset
+happens to be 8-byte aligned and copied otherwise, since the layout promises
+only 4. The renderer's LAD result uses `f64` (`/api/lad/compute?voxel_columns=1`:
+one column per voxel field, centers in world coordinates). Long computations stream 4-byte whitespace
 keepalives ahead of the frame so WebKit's stall timeout doesn't fire; the
 decoder skips them. Helpers: `_bin_frame_bytes` / `_bin_frame_streaming_response`
 (backend) and `decodeBinaryFrame` / `fetchBinaryFrame` (renderer). The older

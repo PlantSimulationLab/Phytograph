@@ -192,3 +192,61 @@ def test_bake_fast_path_carries_the_robust_domains(monkeypatch, tmp_path):
     finally:
         with main._cloud_session_lock:
             main._cloud_sessions.pop(sess.session_id, None)
+
+
+def _stats_session(n, seed=0):
+    import time
+    rng = np.random.default_rng(seed)
+    gc = rng.integers(1, 3, n).astype(np.float32)
+    gc[n // 2] = 7.0                                  # a class held by ONE point
+    extras = {
+        "ground_class": gc,
+        "reflectance": rng.normal(-10, 5, n).astype(np.float32),
+        "tree_instance": rng.integers(0, 50, n).astype(np.int32),
+    }
+    deleted = rng.random(n) < 0.1
+    deleted[n // 2] = False
+    sess = main.CloudSession(
+        session_id="statsblocks", source_path="mem", ascii_format=None, column_plan=None,
+        positions=rng.normal(0, 10, (n, 3)), colors=None,
+        intensity=rng.integers(0, 60000, n).astype(np.uint16), extras=extras,
+        extra_dims_meta=[{"slug": k, "label": k} for k in extras],
+        deleted=deleted, deleted_history=[], octree_cache_id=None, created_at=time.time())
+    return sess
+
+
+def test_display_stats_over_blocks_and_a_sample_match_the_whole_cloud(monkeypatch):
+    """Display stats are measured block by block, and the percentile domains on a
+    sample past `_DISPLAY_STATS_SAMPLE`, so they never hold a full-cloud gather.
+    Class lists and min/max stay exact (a class with a single point included);
+    the percentile domains agree with the whole cloud's to well within display
+    precision."""
+    sess = _stats_session(200_000)
+    with main._cloud_session_lock:
+        editable = main._session_editable_mask_locked(sess)
+    whole_classes = main._observed_classes(editable, sess.extras)   # one block
+    whole = main._robust_color_stats(editable, sess.positions, sess.intensity, sess.extras)
+
+    monkeypatch.setattr(main, "_DISPLAY_STATS_BLOCK", 7_777)
+    monkeypatch.setattr(main, "_DISPLAY_STATS_SAMPLE", 20_000)
+    blocked = main._session_display_stats(sess)
+    assert blocked["observed_classes"] == whole_classes
+    assert 7 in blocked["observed_classes"]["ground_class"]
+    # A percentile's standard error from n samples is ~sqrt(p(1-p)/n) / pdf: about
+    # 0.26 m for this test's 20 k sample of N(0, 10 m) at the 1st percentile (the
+    # real cap of 2 M is ten times tighter). Allow three of them on a ~46 m span.
+    for key in ("min", "max"):
+        np.testing.assert_allclose(blocked["robust_bounds"][key], whole["robust_bounds"][key],
+                                   rtol=0, atol=0.8)
+    for slug, rng_whole in whole["robust_attribute_ranges"].items():
+        np.testing.assert_allclose(blocked["robust_attribute_ranges"][slug], rng_whole,
+                                   rtol=0, atol=0.05 * (rng_whole[1] - rng_whole[0]) + 1e-6)
+
+
+def test_survivor_sample_is_even_and_bounded():
+    editable = np.zeros(1_000_003, dtype=bool)
+    editable[::3] = True
+    rows = main._survivor_sample(editable, 10_000)
+    assert 9_000 <= len(rows) <= 10_001
+    assert editable[rows].all()
+    assert np.all(np.diff(rows) > 0)

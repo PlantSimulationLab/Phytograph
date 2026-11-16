@@ -34,7 +34,9 @@ const api = {
   },
   fs: {
     readText: (path: string): Promise<string> => ipcRenderer.invoke(IPC.FsReadText, path),
-    readBinary: (path: string): Promise<ArrayBuffer> => ipcRenderer.invoke(IPC.FsReadBinary, path),
+    // `maxBytes` reads only the file's first bytes (a header sniff).
+    readBinary: (path: string, maxBytes?: number): Promise<ArrayBuffer> =>
+      ipcRenderer.invoke(IPC.FsReadBinary, path, maxBytes),
     writeText: (path: string, contents: string): Promise<void> =>
       ipcRenderer.invoke(IPC.FsWriteText, path, contents),
     writeBinary: (path: string, contents: ArrayBuffer): Promise<void> =>

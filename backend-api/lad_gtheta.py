@@ -171,6 +171,14 @@ def g_of_theta(g_L_density: np.ndarray, theta_L: np.ndarray,
     return g
 
 
+# Zenith bins for G_eff. G is a smooth function of the beam zenith alone, so the
+# mean over N beams equals the count-weighted mean over bins of their zeniths, to
+# within the curvature of G across one bin (~1e-8 at this width). Integrating every
+# beam instead cost ~21 us each: 3.6 min for a 10 M-hit scan, ~72 min for a
+# 20-level profile, with no cancel point inside.
+_ZENITH_BINS = 8192
+
+
 def _gtheta_eff(g_L_density: np.ndarray, beam_zenith_samples: np.ndarray) -> float:
     """Mean G over the fired beams: G_eff = mean_b G(theta_beam_b). Falls back to the
     nadir-ish single angle when no beam zeniths are available."""
@@ -181,8 +189,17 @@ def _gtheta_eff(g_L_density: np.ndarray, beam_zenith_samples: np.ndarray) -> flo
         # No beam directions: evaluate at a representative oblique zenith (57.3 deg,
         # the angle where G is least sensitive to leaf inclination).
         samples = np.array([math.radians(57.3)])
-    g = g_of_theta(g_L_density, tl, samples)
-    val = float(np.mean(g))
+    if samples.size > _ZENITH_BINS:
+        counts, edges = np.histogram(_fold_beam_zenith(samples), bins=_ZENITH_BINS,
+                                     range=(0.0, 0.5 * math.pi))
+        populated = counts > 0
+        centers = 0.5 * (edges[:-1] + edges[1:])[populated]
+        weights = counts[populated].astype(float)
+        g = g_of_theta(g_L_density, tl, centers)
+        val = float(np.sum(g * weights) / np.sum(weights))
+    else:
+        g = g_of_theta(g_L_density, tl, samples)
+        val = float(np.mean(g))
     # Numerical guard: keep strictly within (0, 1] so the native inversion accepts it.
     return float(min(1.0, max(1e-4, val)))
 

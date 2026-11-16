@@ -942,3 +942,70 @@ def test_session_dem_is_admitted_against_the_memory_budget(monkeypatch):
     assert r["success"], r.get("error")
     n = len(sess.positions)
     assert (n * main._DEM_BYTES_PER_POINT, f"DEM on {n:,} pts") in seen
+
+
+def test_dem_with_a_height_column_finishes_when_its_octree_does_not_fit_beside_it(
+        monkeypatch, tmp_path):
+    """The reported hang, end to end. The DEM holds its admission while writing
+    the height column rebuilds the octree, which asks for a second one on the
+    same thread. With the two together over budget (here: a 1-byte budget, so
+    the DEM is admitted only as a lone job) that second wait never ended."""
+    import threading
+    # An empty cache, so the octree is really built (a cached one skips the
+    # build and its admission, and the test would pass with the bug in place).
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+    pts, _ = _plane_cloud(n=3000)
+    sess = _make_session(pts)
+    monkeypatch.setattr(main._ADMISSION, "_budget_fn", lambda: 1)
+    octree_admissions = []
+    real_admit = main._ADMISSION.admit
+    monkeypatch.setattr(main._ADMISSION, "admit", lambda est, label, **kw: (
+        octree_admissions.append(label) if label.startswith("octree build") else None,
+        real_admit(est, label, **kw))[1])
+    out = {}
+
+    def run():
+        out["r"] = main._do_session_dem(sess, main.SessionDemRequest(
+            cell_size=0.5, auto_segment_ground=False, add_height_column=True))
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(120)
+    assert not t.is_alive(), "DEM with add_height_column deadlocked on its octree admission"
+    assert out["r"]["success"], out["r"].get("error")
+    assert octree_admissions, "no octree was built, so nothing was nested"
+    assert main.HEIGHT_ABOVE_GROUND_SLUG in sess.extras
+    assert main._ADMISSION.in_flight() == []
+
+
+@pytest.mark.parametrize("surface,outside_z,pct", [
+    ("dtm, ground falling away beyond the box", (-3.0, -1.0), 5.0),
+    ("dsm, taller crowns beyond the box", (8.0, 8.0), 95.0),
+])
+def test_a_bbox_smaller_than_the_cloud_ignores_points_outside_it(surface, outside_z, pct):
+    """Points outside a caller's bbox used to be clipped into the edge cells: on
+    flat ground at z=0 the DTM's east column read -2.89 m and the DSM's 8.0 m."""
+    rng = np.random.default_rng(0)
+    inside = np.c_[rng.uniform(0, 10, (20000, 2)), np.zeros(20000)]
+    outside = np.c_[rng.uniform(10.5, 20, (20000, 1)), rng.uniform(0, 10, (20000, 1)),
+                    rng.uniform(*outside_z, 20000) if outside_z[0] != outside_z[1]
+                    else np.full(20000, outside_z[0])]
+    kw = dict(cell_size=1.0, bbox=[0, 0, 10, 10], method="tin", ground_percentile=pct)
+    with_outside = main._compute_dem(np.vstack([inside, outside]), **kw)
+    alone = main._compute_dem(inside, **kw)
+    assert with_outside["success"] and alone["success"]
+    np.testing.assert_array_equal(with_outside["grid_z"], alone["grid_z"])
+    assert np.nanmax(np.abs(np.asarray(with_outside["grid_z"], dtype=float))) < 1e-9
+
+
+def test_a_bbox_holding_fewer_than_three_points_says_so():
+    pts = np.c_[np.random.default_rng(1).uniform(50, 60, (100, 2)), np.zeros(100)]
+    r = main._compute_dem(pts, cell_size=1.0, bbox=[0, 0, 10, 10])
+    assert not r["success"] and "inside the bbox" in r["error"]
+
+
+def test_density_layers_ignore_points_outside_the_grid():
+    rng = np.random.default_rng(2)
+    xy = np.r_[rng.uniform(0, 4, (400, 2)), rng.uniform(4.5, 9, (400, 2))]
+    grid = main._grid_cell_density(xy, 0.0, 0.0, 1.0, 4, 4)
+    assert np.nansum(grid) == 400   # only the points inside the 4 x 4 grid

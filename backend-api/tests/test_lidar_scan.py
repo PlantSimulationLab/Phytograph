@@ -311,6 +311,25 @@ class TestScanOptions:
         assert body["success"] is True, body.get("error")
         return body
 
+    def test_scan_grid_only_keeps_every_hit_inside_a_rotated_grid(self, client):
+        # Helios culls rays against the grid's bounding box (it does not crop hits
+        # to cells), so the contract is: no hit inside the grid is lost. Without
+        # the rotation the box was the UNROTATED strip |y| <= 0.1, and every ray
+        # into the 45-degree strip away from its center was never cast.
+        rot = 45.0
+        grid = {"center": [0.0, 0.0, 0.3], "size": [1.4, 0.2, 0.8],
+                "nx": 1, "ny": 1, "nz": 1, "rotation": rot}
+        full = np.array(self._scan_full(client, [_scanner("g")])["results"][0]["points"])
+        cropped = np.array(self._scan_full(
+            client, [_scanner("g")], scan_grid_only=True, grid=grid)["results"][0]["points"])
+        th = -np.radians(rot)
+        gx = np.cos(th) * full[:, 0] - np.sin(th) * full[:, 1]
+        gy = np.sin(th) * full[:, 0] + np.cos(th) * full[:, 1]
+        in_grid = full[(np.abs(gx) <= 0.7) & (np.abs(gy) <= 0.1)]
+        assert len(in_grid) > 20, "the strip crosses the pyramid, so it holds hits"
+        gap = np.min(np.linalg.norm(in_grid[:, None, :] - cropped[None, :, :], axis=2), axis=1)
+        assert gap.max() < 1e-5, f"{int((gap >= 1e-5).sum())} in-grid hit(s) were never scanned"
+
     def test_range_noise_perturbs_along_beam_distance(self, client):
         # Same scanner + identical grid → the same beams fire in the same order, so
         # we can pair each noised hit's range against its noise-free counterpart.

@@ -242,3 +242,26 @@ def test_g_of_theta_memory_does_not_scale_with_beams_times_leaf_angles():
     tb = L._fold_beam_zenith(few)
     whole = np.sum(L._A_kernel(tb[:, None], tl[None, :]) * norm[None, :], axis=1) * dtheta
     np.testing.assert_allclose(g[:500], whole, rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("spec", [("dewit", "planophile"), ("dewit", "erectophile"), ("beta", (2.77, 1.172))])
+def test_binned_g_eff_matches_the_per_beam_integral(spec, monkeypatch):
+    """Past `_ZENITH_BINS` beams, G_eff is the count-weighted mean over zenith bins.
+    It must equal the per-beam mean it replaces (which cost ~21 us per beam)."""
+    rng = np.random.default_rng(3)
+    zen = np.r_[rng.uniform(0.05, 1.5, 60_000), rng.normal(1.0, 0.2, 40_000)]
+    kind, arg = spec
+    fn = (lambda z: L.gtheta_from_dewit(arg, z)) if kind == "dewit" \
+        else (lambda z: L.gtheta_from_beta(arg[0], arg[1], z))
+    binned = fn(zen)
+    monkeypatch.setattr(L, "_ZENITH_BINS", 10 ** 9)   # force per-beam
+    per_beam = fn(zen)
+    assert binned == pytest.approx(per_beam, abs=1e-7)
+
+
+def test_g_eff_on_millions_of_beams_takes_well_under_a_second():
+    import time
+    zen = np.random.default_rng(4).uniform(0.05, 1.5, 5_000_000)
+    t = time.perf_counter()
+    L.gtheta_from_dewit("planophile", zen)
+    assert time.perf_counter() - t < 2.0   # per-beam: ~105 s

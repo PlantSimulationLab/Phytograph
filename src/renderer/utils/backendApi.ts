@@ -217,6 +217,10 @@ export interface TriangulationRequest {
   // (triangleCellIds), which the LAD reuse path uses to keep only in-grid
   // triangles. Omit = not pinned (mesh isn't LAD-reusable).
   grid?: HeliosGrid;
+  // The frame the returned vertices are in (world = vertex + vertexOrigin, which
+  // then equals this): the source cloud's worldShift, so the mesh lands in the
+  // cloud's STORED frame (lib/meshFrame.ts). Points, crop_box and grid stay world.
+  frame_origin?: [number, number, number];
   // Ball pivoting parameters
   radii?: number[];
   // Poisson parameters
@@ -234,7 +238,8 @@ export interface TriangulationRequest {
 export interface TriangulationResult {
   success: boolean;
   error?: string;
-  vertices: Float32Array;   // flat xyz (numVertices*3)
+  vertices: Float32Array;   // flat xyz (numVertices*3), relative to vertexOrigin
+  vertexOrigin: [number, number, number]; // world = vertex + vertexOrigin (float64)
   triangles: Uint32Array;   // flat indices (numTriangles*3)
   normals?: Float32Array;   // flat per-vertex xyz
   surfaceArea?: number;
@@ -922,6 +927,7 @@ export async function triangulatePointCloud(
       success: false,
       error: (meta.error as string) ?? 'Triangulation failed',
       vertices: new Float32Array(0),
+      vertexOrigin: [0, 0, 0],
       triangles: new Uint32Array(0),
       numTriangles: 0,
       numVertices: 0,
@@ -932,6 +938,7 @@ export async function triangulatePointCloud(
   return {
     success: true,
     vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+    vertexOrigin: (meta.vertex_origin as [number, number, number] | undefined) ?? [0, 0, 0],
     triangles: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
     normals: buffers.normals as Float32Array | undefined,
     surfaceArea: meta.surface_area as number | undefined,
@@ -2057,6 +2064,42 @@ export interface LADResponse {
  * leading PHP1 progress markers (reported via `onProgress`) followed by the JSON
  * result. See fetchJsonWithProgress.
  */
+/**
+ * A LAD result from the backend's column frame (`_lad_cells_frame`): `meta` is
+ * every response field but `cells`, and each per-voxel field is one float64
+ * column. JSON cost 576 B per voxel and is decoded into ONE string before
+ * parsing, so a grid past ~0.93 M voxels failed after the whole inversion had
+ * finished. The records rebuilt here are the ones JSON gave: NaN is null, a
+ * "bool" column is true/false, a "vec3" column is [x, y, z], and a field with a
+ * `.present` mask is left off the records it was missing from.
+ */
+export function ladResponseFromFrame(frame: BinaryFrame): LADResponse {
+  const { cell_columns, cell_count, ...rest } = frame.meta as Record<string, unknown> & {
+    cell_columns?: Array<{ name: string; kind: 'number' | 'bool' | 'vec3' }>;
+    cell_count?: number;
+  };
+  const n = cell_count ?? 0;
+  const cells: Record<string, unknown>[] = new Array(n);
+  for (let i = 0; i < n; i++) cells[i] = {};
+  // Column by column, so every record gains its fields in the same order and
+  // they share one hidden class.
+  for (const { name, kind } of cell_columns ?? []) {
+    const data = frame.buffers[`cells.${name}`];
+    const present = frame.buffers[`cells.${name}.present`];
+    if (!data) throw new Error(`LAD result frame is missing column "${name}"`);
+    for (let i = 0; i < n; i++) {
+      if (present && !present[i]) continue;
+      if (kind === 'vec3') {
+        cells[i][name] = [data[3 * i], data[3 * i + 1], data[3 * i + 2]];
+      } else {
+        const x = data[i];
+        cells[i][name] = Number.isNaN(x) ? null : kind === 'bool' ? x !== 0 : x;
+      }
+    }
+  }
+  return { ...rest, cells } as unknown as LADResponse;
+}
+
 export async function computeLAD(
   request: LADRequest,
   signal?: AbortSignal,
@@ -2072,19 +2115,19 @@ export async function computeLAD(
     'grid:', `${request.grid.nx}×${request.grid.ny}×${request.grid.nz}`,
     reuseMesh ? `(reuse ${reuseMesh.indices.length / 3} tris)` : '');
   try {
-    if (reuseMesh) {
-      // The PHB1 frame format carries f32/u32 buffers; scan ids are non-negative
-      // small ints, so send them as u32 (the backend reads them back as int32).
-      const frame = encodeBinaryFrame(request as unknown as Record<string, unknown>, [
+    // The PHB1 frame format carries f32/u32 buffers; scan ids are non-negative
+    // small ints, so send them as u32 (the backend reads them back as int32).
+    const body = reuseMesh
+      ? encodeBinaryFrame(request as unknown as Record<string, unknown>, [
         { name: 'mesh_vertices', data: reuseMesh.vertices },
         { name: 'mesh_indices', data: reuseMesh.indices },
         { name: 'mesh_scan_ids', data: new Uint32Array(reuseMesh.scanIds.buffer, reuseMesh.scanIds.byteOffset, reuseMesh.scanIds.length) },
-      ]);
-      return await fetchJsonWithProgress<LADResponse>(
-        '/api/lad/compute', request, signal, 600000, onProgress, onRunId, frame);
-    }
-    return await fetchJsonWithProgress<LADResponse>(
-      '/api/lad/compute', request, signal, 600000, onProgress, onRunId);
+      ])
+      : undefined;
+    // The result comes back as per-voxel columns, not JSON (see ladResponseFromFrame).
+    const frame = await fetchBinaryFrame(
+      '/api/lad/compute?voxel_columns=1', request, signal, 600000, onProgress, onRunId, body);
+    return ladResponseFromFrame(frame);
   } catch (error) {
     console.error('LAD computation failed:', error);
     throw error;
@@ -3678,7 +3721,7 @@ function decodePointCloudBinary(buf: ArrayBuffer): ImportPointCloudByPathResult 
 // JSON — ~3-4x smaller, parsed as zero-copy typed-array views (no .flat() /
 // JSON.parse), and immune to V8's ~512 MB string-length limit.
 
-export type BinBuffer = Float32Array | Uint32Array;
+export type BinBuffer = Float32Array | Uint32Array | Float64Array;
 export interface BinaryFrame {
   meta: Record<string, unknown>;
   buffers: Record<string, BinBuffer>;
@@ -3754,6 +3797,47 @@ export function parseProgressMarkers(
   return { markers, consumed: o - offset };
 }
 
+/** True once `bytes` (what follows the parsed markers) holds the start of the
+ *  payload: a non-whitespace byte that cannot begin a PHP1 marker. */
+function payloadHasBegun(bytes: Uint8Array): boolean {
+  let o = 0;
+  while (o < bytes.length && isWhitespaceByte(bytes[o])) o++;
+  const n = Math.min(4, bytes.length - o);
+  for (let k = 0; k < n; k++) {
+    if (bytes[o + k] !== PROGRESS_MARKER_MAGIC.charCodeAt(k)) return true;
+  }
+  return false;   // nothing yet, or a marker (possibly partial)
+}
+
+/**
+ * Read a streamed body of leading PHP1 markers (and keepalive whitespace)
+ * followed by one payload, reporting each marker as it completes; returns the
+ * bytes after the last marker. Linear in the body: once the payload has begun,
+ * chunks are only collected and joined once at the end. Both readers used to
+ * re-merge everything after the markers with every chunk, which is quadratic in
+ * the payload: a 200 MB result in 64 KB chunks copied ~300 GB.
+ */
+export async function drainMarkerStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onChunk: () => void,
+  onMarker: (m: ProgressMarker) => void,
+): Promise<Uint8Array> {
+  let head: Uint8Array = new Uint8Array(0);   // bytes not yet known to be payload
+  const payload: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onChunk();
+    if (payload.length) { payload.push(value); continue; }
+    const merged = head.length ? concatBytes([head, value]) : value;
+    const { markers, consumed } = parseProgressMarkers(merged, 0);
+    for (const m of markers) onMarker(m);
+    const rest = merged.subarray(consumed);
+    if (payloadHasBegun(rest)) payload.push(rest); else head = rest;
+  }
+  return payload.length ? concatBytes(payload) : head;
+}
+
 /**
  * Throw if a buffered (non-streaming) response body carries a terminal
  * `canceled` / `error` marker in place of its payload.
@@ -3801,6 +3885,16 @@ export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
   const buffers: Record<string, BinBuffer> = {};
   let o = payloadStart;
   for (const d of header.buffers as Array<{ name: string; dtype: string; length: number }>) {
+    if (d.dtype === 'f64') {
+      // A Float64Array view needs an 8-byte-aligned offset, which the 4-byte
+      // padded layout does not promise: view when aligned, else copy just this.
+      if (o + d.length * 8 > src.byteLength) throw new Error('Binary frame shorter than declared');
+      buffers[d.name] = o % 8 === 0
+        ? new Float64Array(src, o, d.length)
+        : new Float64Array(src.slice(o, o + d.length * 8));
+      o += d.length * 8;
+      continue;
+    }
     buffers[d.name] = d.dtype === 'f32'
       ? new Float32Array(src, o, d.length)
       : new Uint32Array(src, o, d.length);
@@ -3817,11 +3911,11 @@ export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
 // padded to a 4-byte multiple so payloads stay aligned) + concatenated payloads.
 export function encodeBinaryFrame(
   meta: Record<string, unknown>,
-  buffers: Array<{ name: string; data: Float32Array | Uint32Array }>,
+  buffers: Array<{ name: string; data: BinBuffer }>,
 ): Uint8Array {
   const descs = buffers.map(b => ({
     name: b.name,
-    dtype: b.data instanceof Float32Array ? 'f32' : 'u32',
+    dtype: b.data instanceof Float32Array ? 'f32' : b.data instanceof Float64Array ? 'f64' : 'u32',
     length: b.data.length,
   }));
   let header = new TextEncoder().encode(JSON.stringify({ meta, buffers: descs }));
@@ -3899,6 +3993,9 @@ export async function fetchBinaryFrame(
   timeoutMs = 600000,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  // When supplied, sent as the raw (octet-stream) body instead of `request`
+  // as JSON, as in fetchJsonWithProgress.
+  binaryBody?: ArrayBuffer | Uint8Array,
 ): Promise<BinaryFrame> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -3911,8 +4008,8 @@ export async function fetchBinaryFrame(
   try {
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
+      headers: { 'Content-Type': binaryBody ? 'application/octet-stream' : 'application/json' },
+      body: binaryBody ? toRequestBody(binaryBody) : JSON.stringify(request),
       signal: controller.signal,
     });
     if (!response.ok) {
@@ -3933,37 +4030,28 @@ export async function fetchBinaryFrame(
     // Streaming path: accumulate bytes, draining leading PHP1 markers as they
     // arrive, then decode the PHB1 frame from the full buffer.
     const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let pending = new Uint8Array(0); // unparsed leading bytes (markers + tail)
+    let full: Uint8Array;
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        refreshTimeout();
-        chunks.push(value);
-        // Parse any complete markers visible at the head of the stream so far.
-        const merged = concatBytes([pending, value]);
-        const { markers, consumed } = parseProgressMarkers(merged, 0);
-        for (const m of markers) {
-          if (m.runId && onRunId) onRunId(m.runId);
-          // A `canceled` marker means the backend aborted and freed its memory;
-          // there is no frame to decode. Surface it as a typed abort so callers
-          // can distinguish a user cancel from a real failure.
-          if (m.canceled) throw new ScanCanceledError();
-          // An `error` marker means the worker raised after the 200 was already
-          // committed. Throw the backend's own message rather than falling
-          // through to decode a frame that was never written.
-          if (m.error) throw new Error(m.error);
-          onProgress(m.progress, m.message);
-        }
-        pending = merged.subarray(consumed);
-      }
+      full = await drainMarkerStream(reader, refreshTimeout, (m) => {
+        if (m.runId && onRunId) onRunId(m.runId);
+        // A `canceled` marker means the backend aborted and freed its memory;
+        // there is no frame to decode. Surface it as a typed abort so callers
+        // can distinguish a user cancel from a real failure.
+        if (m.canceled) throw new ScanCanceledError();
+        // An `error` marker means the worker raised after the 200 was already
+        // committed. Throw the backend's own message rather than falling
+        // through to decode a frame that was never written.
+        if (m.error) throw new Error(m.error);
+        onProgress(m.progress, m.message);
+      });
     } finally {
       reader.cancel().catch(() => {});
       clearTimeout(timeoutId);
     }
-    const full = concatBytes(chunks);
-    return decodeBinaryFrame(full.buffer.slice(full.byteOffset, full.byteOffset + full.byteLength));
+    // concatBytes returns a fresh, exactly-sized buffer: decode it in place.
+    return decodeBinaryFrame(full.byteOffset === 0 && full.byteLength === full.buffer.byteLength
+      ? full.buffer as ArrayBuffer
+      : full.slice().buffer);
   } catch (error) {
     clearTimeout(timeoutId);
     throw error;
@@ -4057,27 +4145,19 @@ export async function fetchJsonWithProgress<T>(
     // Streaming path: accumulate bytes, draining leading PHP1 markers as they
     // arrive; whatever remains after the leading markers is the JSON payload.
     const reader = response.body.getReader();
-    let pending = new Uint8Array(0); // unparsed leading bytes (markers + JSON tail)
+    let tail: Uint8Array;
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        refreshTimeout();
-        const merged = concatBytes([pending, value]);
-        const { markers, consumed } = parseProgressMarkers(merged, 0);
-        for (const m of markers) {
-          if (m.runId && onRunId) onRunId(m.runId);
-          if (m.canceled) throw new ScanCanceledError();
-          if (m.error) throw new Error(m.error);
-          if (onProgress) onProgress(m.progress, m.message);
-        }
-        pending = merged.subarray(consumed);
-      }
+      tail = await drainMarkerStream(reader, refreshTimeout, (m) => {
+        if (m.runId && onRunId) onRunId(m.runId);
+        if (m.canceled) throw new ScanCanceledError();
+        if (m.error) throw new Error(m.error);
+        if (onProgress) onProgress(m.progress, m.message);
+      });
     } finally {
       reader.cancel().catch(() => {});
       clearTimeout(timeoutId);
     }
-    return JSON.parse(new TextDecoder().decode(pending)) as T;
+    return JSON.parse(new TextDecoder().decode(tail)) as T;
   } catch (error) {
     clearTimeout(timeoutId);
     throw error;
@@ -4132,8 +4212,36 @@ export async function importPointCloudLasLaz(
 export interface AlignmentDistanceRequest {
   points?: number[];      // Flattened [x, y, z, ...] — omit when `source` is set
   source?: BackendPointSource;  // octree-backed clouds read from disk
-  mesh_vertices: number[];  // Flattened [x, y, z, ...] mesh vertices
-  mesh_indices: number[];   // Triangle indices [i, j, k, ...]
+  // JSON fields; the app sends these as a PHB1 frame instead (MeshToCloudBuffers).
+  mesh_vertices?: number[];  // Flattened [x, y, z, ...] mesh vertices
+  mesh_indices?: number[];   // Triangle indices [i, j, k, ...]
+}
+
+/**
+ * A cloud-to-mesh request's big arrays, sent as a PHB1 frame rather than JSON
+ * numbers. The mesh can be a full-resolution Helios triangulation, and as JSON
+ * one past ~11.7 M triangles is a body V8 refuses to build (536,870,888 chars).
+ * The vertices are float32 RELATIVE to `meshVertexOrigin` (the mesh's own frame
+ * offset, lib/meshFrame.ts), which the backend adds back in double precision:
+ * float32 world coordinates of a georeferenced mesh snap to 0.5 m.
+ */
+export interface MeshToCloudBuffers {
+  meshVertices: Float32Array;
+  meshVertexOrigin: [number, number, number];
+  meshIndices: Uint32Array;
+  /** A flat cloud's inline hit points (float32 already). Omit for a `source`. */
+  points?: Float32Array;
+}
+
+function meshToCloudFrame(request: object, buffers: MeshToCloudBuffers): Uint8Array {
+  return encodeBinaryFrame(
+    { ...(request as Record<string, unknown>), mesh_vertex_origin: buffers.meshVertexOrigin },
+    [
+      { name: 'mesh_vertices', data: buffers.meshVertices },
+      { name: 'mesh_indices', data: buffers.meshIndices },
+      ...(buffers.points ? [{ name: 'points', data: buffers.points }] : []),
+    ],
+  );
 }
 
 export interface AlignmentDistanceResponse {
@@ -4166,14 +4274,15 @@ export async function computeAlignmentDistance(
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  buffers?: MeshToCloudBuffers | null,
 ): Promise<AlignmentDistanceResponse> {
-  console.log('Alignment distance - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'vertices:', request.mesh_vertices.length / 3);
   // The response streams PHP1 progress markers ahead of the JSON result so the
   // renderer shows a cancelable pill; fetchJsonWithProgress owns its own
   // per-chunk-refreshed timeout. See computeLAD for the template.
   try {
     return await fetchJsonWithProgress<AlignmentDistanceResponse>(
-      '/api/c2m/distance', request, signal, 120000, onProgress, onRunId);
+      '/api/c2m/distance', request, signal, 120000, onProgress, onRunId,
+      buffers ? meshToCloudFrame(request, buffers) : undefined);
   } catch (error) {
     console.error('Alignment distance computation failed:', error);
     throw error;
@@ -4185,8 +4294,9 @@ export async function computeAlignmentDistance(
 export interface ICPRegistrationRequest {
   points?: number[];         // Flattened [x, y, z, ...] (TARGET - stays fixed); omit when `source` is set
   source?: BackendPointSource;  // octree-backed TARGET cloud read from disk
-  mesh_vertices: number[];   // Flattened [x, y, z, ...] mesh vertices (SOURCE - to be moved)
-  mesh_indices: number[];    // Triangle indices [i, j, k, ...]
+  // JSON fields; the app sends these as a PHB1 frame instead (MeshToCloudBuffers).
+  mesh_vertices?: number[];  // Flattened [x, y, z, ...] mesh vertices (SOURCE - to be moved)
+  mesh_indices?: number[];   // Triangle indices [i, j, k, ...]
   max_correspondence_distance?: number;  // Optional max correspondence distance
   max_iterations?: number;   // Optional max iterations (default 50)
 }
@@ -4220,12 +4330,13 @@ export async function icpRegisterMeshToCloud(
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  buffers?: MeshToCloudBuffers | null,
 ): Promise<ICPRegistrationResponse> {
-  console.log('ICP registration - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'mesh vertices:', request.mesh_vertices.length / 3);
   // Streams PHP1 progress markers ahead of the JSON result (cancelable pill).
   try {
     return await fetchJsonWithProgress<ICPRegistrationResponse>(
-      '/api/c2m/icp-register', request, signal, 120000, onProgress, onRunId);
+      '/api/c2m/icp-register', request, signal, 120000, onProgress, onRunId,
+      buffers ? meshToCloudFrame(request, buffers) : undefined);
   } catch (error) {
     console.error('ICP registration failed:', error);
     throw error;

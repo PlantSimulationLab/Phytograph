@@ -2275,6 +2275,48 @@ class TestCullToGridTerrainOffsets:
         assert list(a) == list(b)
 
 
+class TestCullToGridRotation:
+    """A rotated grid's beam cull must test the ROTATED box. Testing the
+    unrotated one dropped hits inside the grid while keeping the beams that
+    crossed those voxels, so those voxels inverted toward zero LAD."""
+
+    def _row(self):
+        import numpy as np
+        # A 20x2x3 m row grid rotated 30 degrees; scanner standing beside the row.
+        gc, gs, rot = [0.0, 0.0, 1.0], [20.0, 2.0, 3.0], 30.0
+        rng = np.random.default_rng(7)
+        local = rng.uniform(-0.5, 0.5, size=(4000, 3)) * np.array(gs)
+        th = np.radians(rot)
+        pts = np.c_[local[:, 0] * np.cos(th) - local[:, 1] * np.sin(th),
+                    local[:, 0] * np.sin(th) + local[:, 1] * np.cos(th),
+                    local[:, 2] + gc[2]]
+        origin = np.array([0.0, -5.0, 1.5])
+        return pts, origin, gc, gs, rot
+
+    def test_every_hit_inside_the_rotated_grid_is_kept(self):
+        pts, origin, gc, gs, rot = self._row()
+        keep = main._cull_to_grid(pts, origin, gc, gs, rotation_deg=rot)
+        assert keep.all()
+        # The unrotated box really does miss many of them, so the rotation is
+        # what keeps them (a sanity check that this test can fail).
+        assert not main._cull_to_grid(pts, origin, gc, gs).all()
+
+    def test_a_beam_that_never_crosses_the_rotated_grid_is_culled(self):
+        import numpy as np
+        _pts, origin, gc, gs, rot = self._row()
+        # Along y = -5 from the scanner: below the rotated row at every x.
+        far = np.array([[8.0, -5.0, 1.5]])
+        assert not main._cull_to_grid(far, origin, gc, gs, rotation_deg=rot).any()
+
+    def test_per_beam_origins_rotate_too(self):
+        import numpy as np
+        pts, origin, gc, gs, rot = self._row()
+        per_beam = np.repeat(origin[None, :], len(pts), axis=0)
+        np.testing.assert_array_equal(
+            main._cull_to_grid(pts, per_beam, gc, gs, rotation_deg=rot),
+            main._cull_to_grid(pts, origin, gc, gs, rotation_deg=rot))
+
+
 class TestLADTerrainFollow:
     """Request-path tests with pyhelios stubbed."""
 

@@ -57,6 +57,8 @@ TOOLS = [
         "crop_box": "frame-sensitive app feature (crop to the LAD grid); use Cloud.extract(box=)",
         "crop_box_rotation_deg": "goes with crop_box",
         "grid": "pins the mesh to a LAD grid for reuse: app only",
+        "frame_origin": "the renderer's stored-frame choice; the client adds the returned "
+                        "vertex_origin back in float64, so any frame gives world coordinates",
     }),
     (pg.Cloud.fit_crown, main.CrownFitRequest, {}, {"source": "the client sends its session"}),
     (pg.Cloud.register_to, main.CloudToCloudICPRequest, {}, {

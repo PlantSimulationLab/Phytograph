@@ -490,3 +490,40 @@ def test_metrics_report_mesh_size(shape):
     assert m["num_vertices"] == len(res["vertices"])
     assert m["num_triangles"] == len(res["triangles"])
     assert m["num_vertices"] > 0 and m["num_triangles"] > 0
+
+
+UTM = np.array([512_345.0, 4_271_234.0, 87.0])
+
+
+@pytest.mark.parametrize("stored", ["shifted", "raw"])
+@pytest.mark.parametrize("shape", ["ellipsoid", "prism", "cone", "alpha"])
+def test_a_utm_crown_fits_exactly_as_it_does_near_the_origin(shape, stored):
+    """The same tree at UTM coordinates, stored with the import shift or raw
+    (imported without one), must give the same crown, moved by the offset.
+    Crowns are fit in a local frame; Qhull, behind the alpha shape and the hull
+    volume, scales its tolerances to the coordinates, not to the tree."""
+    near = _make_session(session_id=f"crown-near-{shape}-{stored}")
+    far = _make_session(session_id=f"crown-far-{shape}-{stored}")
+    if stored == "shifted":
+        far.world_shift = UTM.copy()            # stored near 0, world = stored + UTM
+    else:
+        far.positions = far.positions + UTM     # stored AT UTM, no shift
+    _register(near)
+    _register(far)
+    body = dict(shape=shape, strictness=0.5, use_leaf_only=True,
+                tree_instance_ids=[1], ground_baseline="ground_class")
+    a, b = _run(near.session_id, **body), _run(far.session_id, **body)
+    assert a["success"] and b["success"], (a, b)
+    ma, mb = a["crowns"][0]["metrics"], b["crowns"][0]["metrics"]
+    for key in ("crown_volume_m3", "surface_area_m2", "tree_height_m"):
+        assert mb[key] == pytest.approx(ma[key], rel=1e-4), key
+    np.testing.assert_allclose(mb["crown_dims_m"], ma["crown_dims_m"], rtol=1e-4)
+    np.testing.assert_allclose(np.asarray(mb["crown_center"]) - UTM, ma["crown_center"], atol=1e-6)
+    assert mb["crown_top_z"] - UTM[2] == pytest.approx(ma["crown_top_z"], abs=1e-6)
+    va = np.asarray(a["crowns"][0]["vertices"]).reshape(-1, 3)
+    vb = np.asarray(b["crowns"][0]["vertices"]).reshape(-1, 3)
+    assert va.shape == vb.shape
+    # Same vertices; an alpha hull may list them in another order.
+    from scipy.spatial import cKDTree
+    gap, _ = cKDTree(va).query(vb - UTM)
+    assert gap.max() < 1e-6, f"vertices moved up to {gap.max():.3g} m"

@@ -121,6 +121,7 @@ export function PlantGrowthPanel({
               -1
             </button>
             <button
+              data-testid="plant-age-plus-1"
               onClick={() => onAdvanceAge(1)}
               disabled={isAdvancingAge}
               className="flex-1 px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"

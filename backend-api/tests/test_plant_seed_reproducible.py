@@ -70,3 +70,16 @@ def test_seeded_canopy_is_reproducible():
 def test_seeded_stream_is_reproducible():
     req = dict(mode="single", plant_type="bean", age=20, random_seed=3)
     _assert_same_mesh(_stream(**req), _stream(**req))
+
+
+def test_a_seeded_session_regrows_the_plant_the_stream_generated():
+    """Age stepping rebuilds a plant as a new session at the target age from the
+    plant's recorded seed, and the renderer counts on that being the SAME plant
+    the generation stream built: same seed, same age, identical vertices."""
+    generated = _stream(mode="single", plant_type="bean", age=15, random_seed=4242)
+    r = main.create_plant_session(main.PlantSessionCreateRequest(
+        plant_type="bean", initial_age=15, random_seed=4242))
+    assert r.success, r.error
+    regrown = main.advance_plant_session(r.session_id, main.PlantSessionAdvanceRequest(dt=0))
+    assert regrown.success, regrown.error
+    _assert_same_mesh(generated, regrown)

@@ -36,9 +36,12 @@ background.
    grid of plants instead of one. See
    [Generate a canopy](#generate-a-canopy) below.
 
-6. **Advanced Options → Use Random Seed** — off by default, meaning **no seed
-   is sent** and each run produces a different plant. Tick it and enter a seed
-   to pin the result so the same species/age/seed regenerates identically.
+6. **Advanced Options → Use Random Seed** — off by default, meaning each run
+   picks a fresh random seed and so produces a different plant. Tick it and
+   enter a seed to pin the result so the same species/age/seed regenerates
+   identically. Either way the plant remembers the seed it was grown from,
+   which is what lets the Plant Growth panel regrow the same plant at another
+   age.
 
 7. **Advanced Options → Leaf angles** — **Model default** keeps the species'
    own procedural leaf angles. Pick a de Wit distribution (**Planophile**,
@@ -84,6 +87,11 @@ re-running Generate:
 The panel also has a **Growth Animation** section: set a start and end age,
 then **Start** to play the plant's development, or **Make GIF** to record it
 (with background and camera-view options). **Stop** ends it early.
+
+Stepping back (or forward after reopening a project, which does not save the
+plant's growth session) rebuilds the plant at that age from its seed: it is
+the same plant, not a new random one, so `+1` then `-1` returns exactly the
+plant you started with.
 
 Changing a plant's age is **not undoable** — it recreates the backend session,
 so it clears the undo history for that plant.

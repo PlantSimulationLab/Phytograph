@@ -297,3 +297,68 @@ test('recovers an EDITED cloud from its live session, not from its source file',
     await close();
   }
 });
+
+// An ERASE leaves the octree alone until "Apply deletions" (the scan row's count
+// drops behind clip boxes), so nothing used to mark the cloud as edited. A lost
+// octree was then rebuilt from the SOURCE FILE into a fresh session holding
+// every erased point: the clip boxes kept hiding them, so the count looked
+// right, while compute and export silently used them again. The recovery must
+// take the edited path and rebuild from the live session.
+test('recovers an ERASED cloud from its live session, not from its source file', async () => {
+  const { app, page, octreeCacheRoot, close } = await launchApp();
+  try {
+    await importFiles(app, page, 'import-point-cloud', SCALARS);
+    await completeImportWizard(page);
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    await expect(cloudRow).toHaveAttribute('data-point-count', '60');
+    await expect.poll(() => cloudRow.getAttribute('data-octree-cache-id'), { timeout: 30_000 }).not.toBeNull();
+    const cacheId = (await cloudRow.getAttribute('data-octree-cache-id'))!;
+    await page.waitForFunction((id) => !!(window as any).__octreePositions?.[id], cacheId, { timeout: 30_000 });
+
+    // Erase part of the cloud (instant session delete, no octree rebuild).
+    await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+    await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+    await page.getByTestId('tool-erase').click();
+    const panel = page.getByTestId('erase-panel');
+    await page.getByTestId('erase-mode-toggle').click();
+    await expect(panel).toHaveAttribute('data-erase-active', 'true');
+    await page.waitForTimeout(300);
+    const slider = panel.locator('input[type="range"]');
+    const maxPx = await slider.getAttribute('max');
+    await slider.evaluate((el, v) => {
+      const input = el as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(input, v);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, maxPx ?? '150');
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+    await expect.poll(async () => Number(await panel.getAttribute('data-stamp-count'))).toBeGreaterThan(0);
+    await page.getByTestId('erase-apply').click();
+    await expect.poll(async () => Number(await cloudRow.getAttribute('data-point-count')), { timeout: 8_000 })
+      .toBeLessThan(60);
+    const afterErase = await cloudRow.getAttribute('data-point-count');
+    // Unapplied: the octree is still the imported one.
+    expect(await cloudRow.getAttribute('data-octree-cache-id')).toBe(cacheId);
+
+    // The cache loss, then a remount through the real UI.
+    await rm(join(octreeCacheRoot, cacheId), { recursive: true, force: true });
+    await page.evaluate((id) => { delete (window as any).__octreePositions?.[id]; }, cacheId);
+    await page.getByRole('button', { name: 'Display' }).click();
+    const colorMode = page.getByTestId('display-color-mode');
+    await expect(colorMode).toBeVisible();
+    await colorMode.selectOption('height');
+
+    const logPath = await page.evaluate(() => (window as any).electronAPI.logs.getPath() as Promise<string>);
+    let log = '';
+    await expect.poll(async () => {
+      log = await readFile(logPath, 'utf-8').catch(() => '');
+      return /\[octree-recovery\] "scalars[^"]*" \([^)]*edited=(true|false)\): octree missing/.test(log);
+    }, { timeout: 30_000 }).toBe(true);
+    expect(log).toMatch(/\[octree-recovery\] "scalars[^"]*" \(session [0-9a-f]+, octree [0-9a-f]{40}, edited=true\): octree missing; rebuilding it from the session/);
+    expect(log).not.toMatch(/octree missing; rebuilding it from the source file/);
+    await expect(cloudRow).toHaveAttribute('data-point-count', afterErase!);
+  } finally {
+    await close();
+  }
+});

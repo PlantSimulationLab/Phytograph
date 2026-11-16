@@ -267,3 +267,49 @@ class TestFillOccluded:
         pos, layers, _, obs, var, occ, edge = self._case(n=8)
         fills, method = lad_kriging.fill_occluded(pos, obs, var, occ, layers, edge)
         assert method == "kriging" and fills
+
+
+class TestDonorNeighborhoods:
+    """Past `MAX_DONORS`, each occluded voxel must be kriged from donors near IT.
+    The cap used to keep the donors nearest the centroid of ALL occluded voxels,
+    so occluded voxels in two opposite corners got the mean of the middle."""
+
+    def _two_corners(self):
+        vs = 0.5
+        xs = np.arange(30) * vs + vs / 2
+        zs = np.arange(6) * vs + vs / 2
+        X, Y, Z = np.meshgrid(xs, xs, zs, indexing="ij")
+        pos = np.c_[X.ravel(), Y.ravel(), Z.ravel()]
+        rng = np.random.default_rng(1)
+        truth = 1.0 + pos[:, 0] / 15.0 + 0.5 * pos[:, 1] / 15.0 + rng.normal(0, 0.03, len(pos))
+        layers = (pos[:, 2] / vs).astype(int)
+        a = (pos[:, 0] < 2.0) & (pos[:, 1] < 2.0)
+        b = (pos[:, 0] > 13.0) & (pos[:, 1] > 13.0)
+        occ = a | b
+        lad = np.where(occ, 0.0, truth)
+        return pos, lad, truth, occ, layers, vs, a, b
+
+    def test_far_apart_occluded_voxels_are_filled_from_their_own_surroundings(self):
+        pos, lad, truth, occ, layers, vs, a, b = self._two_corners()
+        assert (~occ).sum() > lad_kriging.MAX_DONORS   # the cap is in play
+        fills, method = lad_kriging.fill_occluded(pos, lad, [1e-3] * len(pos), occ, layers, vs)
+        assert method == "kriging"
+        for corner in (a, b):
+            idx = np.where(corner)[0]
+            got = np.mean([fills[int(i)] for i in idx])
+            # Was 1.305 against 1.104 and 2.181 against 2.400.
+            assert got == pytest.approx(truth[idx].mean(), abs=0.03)
+
+    def test_no_system_holds_more_than_the_cap(self, monkeypatch):
+        pos, lad, _truth, occ, layers, vs, _a, _b = self._two_corners()
+        sizes = []
+        real = lad_kriging._krige_group
+
+        def spy(P, Z, V, T, cov):
+            sizes.append(len(P))
+            return real(P, Z, V, T, cov)
+        monkeypatch.setattr(lad_kriging, "_krige_group", spy)
+        monkeypatch.setattr(lad_kriging, "MAX_DONORS", 500)
+        fills, method = lad_kriging.fill_occluded(pos, lad, [1e-3] * len(pos), occ, layers, vs)
+        assert method == "kriging" and len(fills) == int(occ.sum())
+        assert len(sizes) >= 2 and max(sizes) <= 500

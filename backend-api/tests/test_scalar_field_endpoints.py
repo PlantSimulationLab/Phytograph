@@ -288,6 +288,33 @@ def test_rename_preserves_values_and_order(client, sess):
     assert sess.derived_fields["twice"] == "intensity_col * 2"
 
 
+def test_renaming_on_a_split_child_leaves_the_parent_alone(client, sess, tmp_path):
+    """Split, extract and duplicate build the child with
+    `_session_subset_by_indices_locked`, which shared the parent's meta DICTS
+    through a shallow list copy. Renaming on the child then renamed the parent's
+    meta while its `extras` kept the old key: its next rebuild raised KeyError
+    and its export silently dropped the column."""
+    import laspy
+    with main._cloud_session_lock:
+        child = main._session_subset_by_indices_locked(sess, np.arange(4))
+    try:
+        res = manage(client, child, action="rename", slug="intensity_col",
+                     new_slug="brightness", new_label="Brightness")
+        assert res.status_code == 200, res.text
+        assert [ed["slug"] for ed in sess.extra_dims_meta] == ["intensity_col", main._MISS_SLUG]
+        assert sess.extra_dims_meta[0]["label"] == "Intensity Col"
+        assert [ed["slug"] for ed in child.extra_dims_meta][0] == "brightness"
+        # The parent still exports the column under its own name.
+        out = tmp_path / "parent.las"
+        main._session_to_las(sess, out)
+        las = laspy.read(str(out))
+        names = {d.lower() for d in las.point_format.extra_dimension_names}
+        assert "intensity_col" in names and "brightness" not in names
+        np.testing.assert_allclose(np.asarray(las["intensity_col"])[:6], [1, 2, 3, 4, 5, 6])
+    finally:
+        main._cloud_sessions.pop(child.session_id, None)
+
+
 def test_delete_removes_from_both_dicts(client, sess):
     compute(client, sess, "z * 1", "tmp")
     res = manage(client, sess, action="delete", slug="tmp")

@@ -1128,6 +1128,30 @@ describe('alignment / ICP', () => {
     expect(url).toBe('http://127.0.0.1:8008/api/c2m/icp-register');
   });
 
+  it.each([
+    ['computeAlignmentDistance', computeAlignmentDistance],
+    ['icpRegisterMeshToCloud', icpRegisterMeshToCloud],
+  ] as const)('%s sends the mesh as a PHB1 frame relative to its origin', async (_name, fn) => {
+    // JSON numbers for a full-resolution triangulation exceed V8's max string
+    // length; and float32 WORLD vertices at a UTM northing snap to 0.5 m, so the
+    // offset rides in meta as a double and the backend adds it back.
+    const spy = mockFetchOk({ success: true });
+    const source = { source_path: '', session_id: 's1' } as never;
+    await fn({ source }, undefined, undefined, undefined, {
+      meshVertices: new Float32Array([0.25, -0.5, 1, 2, 3, 4]),
+      meshVertexOrigin: [512345.125, 4271234.5, 87],
+      meshIndices: new Uint32Array([0, 1, 0]),
+      points: new Float32Array([7, 8, 9]),
+    });
+    const [, init] = spy.mock.calls[0];
+    const frame = decodeBinaryFrame(init?.body as ArrayBuffer);
+    expect(frame.meta.mesh_vertex_origin).toEqual([512345.125, 4271234.5, 87]);
+    expect(frame.meta.source).toEqual(source);
+    expect(Array.from(frame.buffers.mesh_vertices as Float32Array)).toEqual([0.25, -0.5, 1, 2, 3, 4]);
+    expect(Array.from(frame.buffers.mesh_indices as Uint32Array)).toEqual([0, 1, 0]);
+    expect(Array.from(frame.buffers.points as Float32Array)).toEqual([7, 8, 9]);
+  });
+
   it('icpRegisterMeshToCloud surfaces error', async () => {
     mockFetchError(500, { detail: 'icp diverged' });
     await expect(icpRegisterMeshToCloud(c2mReq)).rejects.toThrow('icp diverged');

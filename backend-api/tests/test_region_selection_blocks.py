@@ -82,6 +82,40 @@ def test_block_boundaries_do_not_change_the_selection(region, small_blocks):
     assert 0 < main._region_mask(positions, region).sum() < len(positions)
 
 
+def _perspective_region(points):
+    """A three.js PerspectiveCamera at the origin looking down -z (fov 60,
+    800x600), flattened column-major the way the renderer sends it."""
+    near, far, f, aspect = 0.1, 1000.0, 1.0 / np.tan(np.radians(30.0)), 800 / 600
+    proj = np.array([
+        [f / aspect, 0, 0, 0],
+        [0, f, 0, 0],
+        [0, 0, (far + near) / (near - far), 2 * far * near / (near - far)],
+        [0, 0, -1, 0],
+    ], dtype=np.float64)
+    return {"kind": "polygon", "points": points,
+            "projection": proj.flatten(order="F").tolist(),
+            "view": np.eye(4).flatten(order="F").tolist(),
+            "canvas": {"width": 800, "height": 600}}
+
+
+def test_a_perspective_selection_never_takes_points_behind_the_camera():
+    # A point 5 m in front lands at pixel (451.96, 274.02). Its reflection
+    # through the eye, 5 m BEHIND, divides through by a negative w onto the very
+    # same pixel. The renderer's preview drops it (`cw <= 0`), so the backend
+    # must too, or "delete inside" removes a cone of points nobody saw selected.
+    region = _perspective_region([[400, 220], [500, 220], [500, 320], [400, 320]])
+    front, behind = [0.5, 0.25, -5.0], [-0.5, -0.25, 5.0]
+    positions = np.array([front, behind])
+    pixels = main._project_block_to_pixel(
+        positions, np.asarray(region["projection"]), np.asarray(region["view"]), 800, 600)
+    np.testing.assert_allclose(pixels[0], [451.96, 274.02], atol=0.01)
+    np.testing.assert_array_equal(main._region_mask(positions, region), [True, False])
+    # Keep-inside (invert) deletes what is outside the lasso, which the point
+    # behind the camera is: the same verdict the renderer's preview gives it.
+    np.testing.assert_array_equal(
+        main._region_mask(positions, {**region, "invert": True}), [False, True])
+
+
 def test_project_world_to_pixel_blocks_agree_with_one_block(small_blocks):
     positions = np.random.default_rng(2).uniform(-1, 1, size=(4321, 3))
     region = _camera_region("polygon", points=POLYGONS["triangle"])

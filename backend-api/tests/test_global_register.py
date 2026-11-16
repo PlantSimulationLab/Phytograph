@@ -992,3 +992,36 @@ def test_a_confident_heading_prior_is_kept_without_a_second_search(monkeypatch):
     assert result["confident"], result
     assert calls == [0.0]
     assert not result.get("heading_prior_rejected")
+
+
+def test_a_georeferenced_pair_registers_as_it_does_near_the_origin():
+    """The same two views moved to UTM coordinates must give the same pose. Far
+    from the origin Open3D's ranking ICP found no correspondences, so the
+    shortlist was never ranked and the top raster peak went back unchecked."""
+    utm = np.array([512_345.0, 4_271_234.0, 87.0])
+    scene = _with_ground(_realistic_planting(seed=21))
+    applied = _rigid(_rot_z(35.0), [2.0, -1.5, 0.0])
+    target, source = _independent_views(scene, applied, seed=11)
+    near = _register(target, source)
+    far = _register(target + utm, source + utm)
+    assert near["success"] and far["success"], (near.get("error"), far.get("error"))
+    M_near = np.asarray(near["transformation_matrix"]).reshape(4, 4)
+    M_far = np.asarray(far["transformation_matrix"]).reshape(4, 4)
+    # Both put the source where the planting is. Compared by the points: the
+    # translation column is where a pose sends the coordinate ORIGIN, 4.3e6 m
+    # away, so a 2e-5 rad difference in rotation moves it ~90 m.
+    moved_far = _apply(source + utm, M_far) - utm
+    moved_near = _apply(source, M_near)
+    assert float(np.mean(np.linalg.norm(moved_far - moved_near, axis=1))) < 0.05
+    rot_err, trans_err = _pose_error(_frame_shift_back(M_far, utm).ravel(), applied)
+    assert rot_err < 3.0 and trans_err < 0.6, (rot_err, trans_err)
+    assert far["confident"] == near["confident"]
+    assert bool(far.get("ambiguous")) == bool(near.get("ambiguous"))
+
+
+def _frame_shift_back(M, offset):
+    """A world-frame matrix for clouds moved by `offset`, as the matrix for the
+    clouds where they started: T(-offset) . M . T(offset)."""
+    out = np.asarray(M, dtype=np.float64).copy()
+    out[:3, 3] = M[:3, 3] - offset + M[:3, :3] @ offset
+    return out

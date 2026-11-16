@@ -39,6 +39,56 @@ export function shiftToStored(
   return [ws[0] - o[0], ws[1] - o[1], ws[2] - o[2]];
 }
 
+/**
+ * The translation the viewer subtracts from a mesh's vertices to draw it in the
+ * frame clouds render in (its source cloud's STORED frame). One rule for the
+ * render loop, the crop matrix and the Transformation tool, so a mesh is drawn,
+ * cut and moved in the same place.
+ *  - A DEM is built in the stored frame already: nothing.
+ *  - A mesh with a `vertexOffset` (Helios, Open3D triangulation): what is left
+ *    between that offset and its source cloud's shift, zero when they agree.
+ *    With no source cloud (a Helios mesh of several scans) its own frame is the
+ *    scene's, so nothing.
+ *  - A legacy world-frame mesh: its source cloud's whole worldShift.
+ */
+export function meshRenderShift(
+  mesh: { method?: string; vertexOffset?: readonly number[] | null },
+  sourceWorldShift: readonly number[] | null | undefined,
+): Vec3 {
+  if (mesh.method === 'dem') return [0, 0, 0];
+  if (mesh.vertexOffset) return sourceWorldShift ? shiftToStored(mesh, sourceWorldShift) : [0, 0, 0];
+  const ws = sourceWorldShift ?? ZERO;
+  return [ws[0], ws[1], ws[2]];
+}
+
+/**
+ * Float32 xyz triples for `values` -- float64 WORLD coordinates, such as a JSON
+ * array from the backend -- relative to `origin`, subtracted in double precision
+ * before the cast. `Float32Array.from(world)` snapped a georeferenced mesh to
+ * the 0.5 m float32 lattice of a UTM northing.
+ */
+export function vec3sRelativeTo(values: ArrayLike<number>, origin: readonly number[]): Float32Array {
+  const [ox, oy, oz] = origin;
+  const out = new Float32Array(values.length);
+  for (let i = 0; i + 2 < values.length; i += 3) {
+    out[i] = values[i] - ox;
+    out[i + 1] = values[i + 1] - oy;
+    out[i + 2] = values[i + 2] - oz;
+  }
+  return out;
+}
+
+/**
+ * Whole metres near `point`, or zero when every coordinate is small enough that
+ * float32 already resolves it to better than 0.1 mm -- the frame to keep a mesh
+ * in when it has no cloud frame to borrow. Mirrors the backend's
+ * `_helios_local_origin`.
+ */
+export function nearbyOrigin(point: readonly number[]): Vec3 {
+  if (!point.every(Number.isFinite) || Math.max(...point.map(Math.abs)) < 1e3) return [0, 0, 0];
+  return [Math.floor(point[0]), Math.floor(point[1]), Math.floor(point[2])];
+}
+
 export function isZero(v: readonly number[]): boolean {
   return v[0] === 0 && v[1] === 0 && v[2] === 0;
 }

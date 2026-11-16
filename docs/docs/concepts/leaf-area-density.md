@@ -441,7 +441,9 @@ filling — just not to detect occlusion in the first place.
 Occluded voxels can optionally be estimated from the reliable ones by
 **LAD-kriging** (Soma et al. 2020), a kriging variant that treats each donor
 voxel's own sampling variance as a known measurement error, so better-measured
-neighbors count for more. Filled voxels stay marked as interpolations and
+neighbors count for more. On a large grid each occluded region is kriged from
+the measured voxels around it, so a region at one edge of the canopy is never
+filled from the middle. Filled voxels stay marked as interpolations and
 their leaf area is reported apart from the measured total — treating a fill as
 data is the very bias the screening exists to remove.
 

@@ -58,7 +58,7 @@ describe('no compute path serializes raw positions', () => {
     // The per-cloud worker (handleOrganSegment loops it over the selection).
     const start = src.indexOf('const segmentOneOrganCloud = useCallback');
     expect(start).toBeGreaterThan(-1);
-    const end = src.indexOf('}, [buildPointSource, onUpdateCloud]);', start);
+    const end = src.indexOf('}, [buildPointSource, onUpdateCloud, writeFlatColumns]);', start);
     expect(end).toBeGreaterThan(start);
     const block = src.slice(start, end);
     // A miss ~1 km out would make units="auto" read the plant as millimeters.
@@ -75,8 +75,10 @@ describe('no compute path serializes raw positions', () => {
     // of 1.47 m and the ICP centroid sat 5 km off in Z -- confident wrong
     // answers rather than a hang.
     expect(src).not.toContain('points: Array.from(ps.data.positions)');
-    const hitSends = src.match(/points:\s*ps\.hits\.points\.flat\(\)/g) ?? [];
+    // Both now travel in a binary frame (MeshToCloudBuffers), still hits only.
+    const hitSends = src.match(/points:\s*flatFloat32\(ps\.hits\.points\)/g) ?? [];
     expect(hitSends.length).toBe(2);
+    expect(src).not.toMatch(/points:\s*flatFloat32\(ps\.data/);
   });
 
   it('QSM decimates HITS, not the raw array', async () => {

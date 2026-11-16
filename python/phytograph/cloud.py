@@ -286,7 +286,9 @@ class Cloud:
             bbox: Optional[Sequence[float]] = None) -> "DEM":
         """A terrain (``surface="dtm"``) or surface (``"dsm"``) model, using
         ``ground_class`` when present (ground is segmented first otherwise).
-        ``add_height_column=True`` also writes ``height_above_ground``."""
+        ``add_height_column=True`` also writes ``height_above_ground``.
+        ``bbox`` ([minx, miny, maxx, maxy], world coordinates) sets the grid;
+        points outside it are ignored."""
         from .results import DEM, Mesh
         body: Dict[str, Any] = {
             "cell_size": cell_size if cell_size is not None else self.defaults()["dem"]["cell_size"],
@@ -752,7 +754,11 @@ class Cloud:
         meta, bufs = self._t.post_stream("/api/triangulate", body)
         if not meta.get("success", True):
             raise PhytographError(f"triangulate failed: {meta.get('error')}", detail=meta)
-        return Mesh._from_frame(meta, bufs)
+        # Vertices arrive as float32 relative to `vertex_origin`; adding it back in
+        # float64 keeps a georeferenced mesh's world coordinates sub-millimetre.
+        origin = meta.get("vertex_origin")
+        return Mesh._from_frame(
+            meta, bufs, None if origin is None else np.asarray(origin, dtype=np.float64))
 
     _CROWN_BY_SHAPE = {"ellipsoid": (), "prism": (), "cone": (), "alpha": ("alpha",)}
 

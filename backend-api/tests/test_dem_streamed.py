@@ -196,3 +196,25 @@ def test_a_transform_during_the_dem_writes_no_height_column(stubs, monkeypatch, 
         assert main.HEIGHT_ABOVE_GROUND_SLUG not in sess.extras
     finally:
         main._cloud_sessions.pop(sess.session_id, None)
+
+
+@pytest.mark.parametrize("surface", ["dtm", "dsm", "chm"])
+@pytest.mark.parametrize("streamed", [False, True])
+def test_a_bbox_gives_the_dem_of_the_points_inside_it(stubs, monkeypatch, surface, streamed):
+    """A session DEM over a bbox smaller than the cloud must be the DEM of the
+    points inside it: deleting everything beyond the bbox first changes nothing.
+    Points beyond it used to be clipped into the edge cells."""
+    scene = _scene()
+    pts = scene[0]
+    req = main.SessionDemRequest(surface_type=surface, cell_size=0.5, method="tin",
+                                 ground_percentile=10.0, auto_segment_ground=False,
+                                 bbox=[0.0, 0.0, 10.0, 14.0])
+    full = _session(scene)
+    cut = _session(scene)
+    cut.deleted = cut.deleted | (pts[:, 0] > 10.0) | (pts[:, 1] > 14.0) | (pts[:, 0] < 0) | (pts[:, 1] < 0)
+    a = _run(monkeypatch, full, req, streamed=streamed)
+    b = _run(monkeypatch, cut, req, streamed=streamed)
+    assert a["success"] and b["success"], (a.get("error"), b.get("error"))
+    np.testing.assert_array_equal(a["grid_z"], b["grid_z"])
+    for name in a.get("layers", {}):
+        np.testing.assert_array_equal(a["layers"][name]["grid"], b["layers"][name]["grid"], err_msg=name)

@@ -78,6 +78,8 @@ def test_stitching_recovers_every_tree_exactly(monkeypatch, tile_m, buffer_m):
     assert meta["trees_truncated"] == 0
     # Dense ids 1..16, in spatial order (x, then y).
     assert sorted(np.unique(labels).tolist()) == list(range(1, 17))
+    cx = np.array([pts[labels == g, 0].mean() for g in range(1, 17)])
+    assert np.all(np.diff(cx) >= 0), "ids must follow the trees' x order"
 
 
 def test_a_narrow_buffer_is_reported(monkeypatch):
@@ -175,3 +177,24 @@ def test_cost_warning_still_asks_but_says_it_will_tile(monkeypatch):
     assert "cancel" in w_tiled["message"].lower()
     w_off = main._treeiso_cost_warning(pts, {"tiling": "off"})
     assert w_off is not None and "15 minutes" in w_off["message"]
+
+
+def test_anchors_match_the_per_tree_definition():
+    """`_anchors` groups by one sort; it must give each tree the same anchor the
+    per-tree pass did (x, y centroid of its lowest ANCHOR_BASE_M of points)."""
+    import numpy as np
+    import tiled_trees
+    rng = np.random.default_rng(9)
+    chunk = rng.uniform(0, 30, (20_000, 3))
+    labels = rng.integers(-1, 60, 20_000)
+    got = tiled_trees._anchors(chunk, labels)
+    want = {}
+    for k in np.unique(labels):
+        if k <= 0:
+            continue
+        pts = chunk[labels == k]
+        base = pts[pts[:, 2] <= pts[:, 2].min() + tiled_trees.ANCHOR_BASE_M]
+        want[int(k)] = base[:, :2].mean(axis=0)
+    assert got.keys() == want.keys()
+    for k in want:
+        np.testing.assert_allclose(got[k], want[k])

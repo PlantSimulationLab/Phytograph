@@ -3,9 +3,48 @@ import * as THREE from 'three';
 
 import {
   IDENTITY_DELTA, conjugateByShift, isIdentityDelta, isUniformScale, rotationQuat, toRowMajor, transformNormalFields,
-  transformScanParamsToWorld, verticalityOf,
+  transformScanParamsToWorld, verticalityOf, worldToStoredMatrix,
 } from './affineDelta';
 import { poseToMatrix } from './octreePoseCompose';
+import { poseFromMatrix } from './octreePoseDecompose';
+
+describe('worldToStoredMatrix', () => {
+  const shift: [number, number, number] = [512_345, 4_271_234, 87];
+  // A registration result: TRUE-WORLD, as the backend computes it.
+  const Mw = new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(0.4))
+    .setPosition(new THREE.Vector3(12.5, -3.25, 0.5));
+
+  it('moves a stored point to where the world matrix moves the real point', () => {
+    const stored = new THREE.Vector3(10, 20, 5);
+    const viaStored = stored.clone().applyMatrix4(worldToStoredMatrix(Mw, shift));
+    const viaWorld = stored.clone().add(new THREE.Vector3(...shift)).applyMatrix4(Mw)
+      .sub(new THREE.Vector3(...shift));
+    expect(viaStored.distanceTo(viaWorld)).toBeLessThan(1e-6);
+  });
+
+  it('draws the octree pose on the data, where the raw world matrix missed by kilometers', () => {
+    // What the registration commit does: decompose about a STORED-frame pivot
+    // and draw the octree with that pose.
+    const pivot = { x: 3, y: 4, z: 1 };
+    const stored = new THREE.Vector3(10, 20, 5);
+    const truth = stored.clone().add(new THREE.Vector3(...shift)).applyMatrix4(Mw)
+      .sub(new THREE.Vector3(...shift));
+    const drawn = (m: THREE.Matrix4) => {
+      const p = poseFromMatrix(m, pivot);
+      return stored.clone().applyMatrix4(poseToMatrix(p.translation, p.rotation, pivot));
+    };
+    expect(drawn(worldToStoredMatrix(Mw, shift)).distanceTo(truth)).toBeLessThan(1e-4);
+    // (R − I)·shift at 0.4 degrees and a 4.27e6 m northing: about 30 km.
+    expect(drawn(Mw).distanceTo(truth)).toBeGreaterThan(20_000);
+  });
+
+  it('inverts conjugateByShift and is the identity map for an unshifted cloud', () => {
+    const back = conjugateByShift(worldToStoredMatrix(Mw, shift), shift);
+    back.elements.forEach((v, i) => expect(v).toBeCloseTo(Mw.elements[i], 6));
+    expect(worldToStoredMatrix(Mw, null).equals(Mw)).toBe(true);
+    expect(worldToStoredMatrix(Mw, [0, 0, 0]).equals(Mw)).toBe(true);
+  });
+});
 import type { ScanParameters } from './scanParameters';
 
 describe('transformScanParamsToWorld', () => {

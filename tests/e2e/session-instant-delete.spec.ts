@@ -7,6 +7,8 @@ import { resetToFreshScene } from './helpers/resetApp';
 import { clickCanvasAt } from './helpers/canvasClick';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
+// 20-cell structured scan: 15 hits + 5 sky misses (see import-e57-misses.spec.ts).
+const E57 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'structured-scan.e57');
 
 // Family-1 mutable cloud model — instant erase + permanently-apply (bake).
 //
@@ -112,6 +114,66 @@ test('erase masks instantly (count drops with no rebuild), then bake applies', a
   // ...and the button is usable again once the rebuild lands (or gone, since it
   // only shows while deletions are pending).
   await expect(bakeBtn).toHaveCount(0);
+});
+
+// "Permanently apply deletions" rebuilds the octree, and the cloud's SCAN-LEVEL
+// facts (does it carry misses, where was the scanner, which octree holds the
+// miss shell) must survive that rebuild. The bake used to hand-build its octree
+// metadata and dropped them: the misses toggle vanished and LAD refused to
+// compute until the recorded misses were replaced by synthesized ones.
+test('applying deletions keeps the scan\'s misses', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-auto', E57);
+  await completeImportWizard(page);
+
+  const row = page.getByTestId('scan-row').first();
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await expect(row).toHaveAttribute('data-point-count', '15');
+  await expect(row).toHaveAttribute('data-selected', 'true');
+  const scanId = await row.getAttribute('data-scan-id');
+  const missToggle = page.getByTestId(`scan-toggle-misses-${scanId}`);
+  await expect(missToggle).toBeVisible();
+
+  // Erase part of the scan with a small brush (the whole scan is 15 points).
+  await page.getByRole('button', { name: 'Top View' }).click();
+  await page.getByTestId('tool-erase').click();
+  const panel = page.getByTestId('erase-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('erase-mode-toggle').click();
+  await expect(panel).toHaveAttribute('data-erase-active', 'true');
+  await page.waitForTimeout(300);
+  const box = (await page.locator('canvas').first().boundingBox())!;
+  await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
+  await expect
+    .poll(async () => Number(await panel.getAttribute('data-stamp-count')), { timeout: 5_000 })
+    .toBeGreaterThan(0);
+  await page.getByTestId('erase-apply').click();
+  await expect
+    .poll(async () => Number(await row.getAttribute('data-point-count')), { timeout: 8_000 })
+    .toBeLessThan(15);
+  const afterErase = Number(await row.getAttribute('data-point-count'));
+  expect(afterErase).toBeGreaterThan(0);
+
+  // Permanently apply: a full octree rebuild from the survivors.
+  const bakeBtn = page.getByTestId('erase-bake');
+  await bakeBtn.click();
+  await expect(bakeBtn).toHaveCount(0, { timeout: 60_000 });
+  await expect(row).toHaveAttribute('data-point-count', String(afterErase));
+
+  // The scan still carries its misses: the toggle is offered, and turning it on
+  // streams the miss shell from the octree the bake rebuilt.
+  await expect(missToggle).toBeVisible();
+  await missToggle.click();
+  await expect(missToggle).toHaveAttribute('title', 'Hide sky/miss points');
+  await page.getByRole('button', { name: 'Top View' }).click();
+  await expect
+    .poll(() => page.evaluate(() => {
+      const reg = (window as unknown as { __missOctrees?: Record<string, boolean> }).__missOctrees;
+      return reg ? Object.keys(reg).length : 0;
+    }), { timeout: 15_000 })
+    .toBeGreaterThan(0);
+  await missToggle.click();
 });
 
 // Undo: a committed (unbaked) erase can be undone, restoring the point count —

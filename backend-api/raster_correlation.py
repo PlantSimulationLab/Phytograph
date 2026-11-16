@@ -408,9 +408,18 @@ def _best_by_icp(candidates, target, source):
     # while a WRONG olive pair sits at 0.215 m, so no absolute threshold can
     # separate them. Measured across both datasets, every correct result scored
     # >= 0.063 and every wrong one <= 0.014.
+    #
+    # "Same pose" is judged by where the two poses put the SOURCE CLOUD, not by
+    # their translation columns. A translation column is the image of the
+    # coordinate origin, so two poses that place the cloud identically but
+    # differ by a hair of rotation sit d x (distance to the origin) apart in it:
+    # hundreds of metres at a UTM northing, which made converged candidates
+    # read as rivals and flagged every georeferenced pair ambiguous.
     rival = None
+    center = np.asarray(src.points).mean(axis=0)
+    best_at = best_M[:3, :3] @ center + best_M[:3, 3]
     for rmse, _, M2 in scored[1:]:
-        if np.linalg.norm(M2[:2, 3] - best_M[:2, 3]) > _SAME_POSE_M:
+        if np.linalg.norm((M2[:3, :3] @ center + M2[:3, 3] - best_at)[:2]) > _SAME_POSE_M:
             rival = rmse
             break
     if rival is None:

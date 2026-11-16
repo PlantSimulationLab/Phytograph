@@ -931,6 +931,17 @@ budget is advisory for a lone job and a hard cap only on concurrency, because
 paging is recoverable and a refused export is not. Refusing or prompting
 happens *before* the work is committed to, via the cost advisory.
 
+A **nested** admission (from a thread that already holds one) never waits: it
+is admitted at once, still counted against every other thread, and logged when
+it takes the total over budget. Split, extract, duplicate, merge and the DEM's
+height column all build an octree, which admits itself, inside their own
+admission, and a thread holding admitted memory cannot free any of it by
+waiting. When the inner request did not fit beside the outer one it waited for
+it forever, with no error. An admission entered on one thread and held while
+that thread does other work (`_run_killable` enters it on a pool thread for
+async code) passes `thread_owned=False`, so that thread's later, unrelated
+requests still queue.
+
 Two more families were outside the gate until recently, which is worse than it
 sounds: `Admission._acquire` admits freely whenever nothing is in flight, so
 unadmitted work is **arithmetically invisible** — it neither waits for a running

@@ -323,3 +323,77 @@ describe('a committed transform keeps render pose and geometry in step', () => {
     }
   });
 });
+
+describe('georeferenced frames: world matrices and float32 meshes', () => {
+  it('draws a registration result in the stored frame, never decomposing the world matrix', async () => {
+    const src = await viewerSource();
+    // Registration (ICP / Auto-Register / multi-scan, all through
+    // handleCloudToCloudICP) and Reset Registration hold TRUE-WORLD matrices,
+    // which is right for session_transform. The octree, its bounds and the
+    // pivot are STORED-frame, so the drawn pose must take the matrix
+    // re-expressed there: decomposing the world matrix drew a rotated
+    // UTM-shifted scan (R − I)·shift away, about 7 km per 0.1°.
+    expect(src).toMatch(/poseFromMatrix\(\s*worldToStoredMatrix\(sessionMatrix, sourceOctree\.worldShift\), pivot\)/);
+    expect(src).toMatch(/poseFromMatrix\(worldToStoredMatrix\(inv, octreeInfo\.worldShift\), pivot\)/);
+    // Every pose decomposition goes through the conversion.
+    const calls = src.match(/poseFromMatrix\(/g) ?? [];
+    const converted = src.match(/poseFromMatrix\(\s*worldToStoredMatrix\(/g) ?? [];
+    expect(converted.length).toBe(calls.length);
+  });
+
+  it('keeps an Open3D mesh in its cloud\'s stored frame and draws every mesh by one rule', async () => {
+    const src = await viewerSource();
+    // Float32 world vertices of a georeferenced cloud snap to a 0.5 m lattice,
+    // so the triangulation asks for the cloud's frame and tags the mesh with it
+    // (both the merged and the per-scan branch).
+    const start = src.indexOf('const handleTriangulateOpen3D = useCallback');
+    const end = src.indexOf("title: 'Triangulation Failed'", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const handler = src.slice(start, end);
+    expect((handler.match(/\.\.\.\(frame \? \{ frame_origin: frame \} : \{\}\)/g) ?? []).length).toBe(2);
+    expect((handler.match(/rebaseVec3s\(response\.vertices, response\.vertexOrigin, frame \?\? \[0, 0, 0\]\)/g) ?? []).length).toBe(2);
+    expect((handler.match(/\.\.\.\(frame \? \{ vertexOffset: frame \} : \{\}\)/g) ?? []).length).toBe(2);
+    // A mesh with a vertexOffset must not have its cloud's shift subtracted
+    // again: the render loop, the crop matrix and the Transformation tool all
+    // ask meshRenderShift, and none re-derives the old `method === 'dem'` rule.
+    expect((src.match(/meshRenderShift\(mesh, sourceCloud\?\.data\?\.octree\?\.worldShift\)/g) ?? []).length).toBe(3);
+    expect(src).not.toMatch(/mesh\.method === 'dem'\s*\?\s*(?:\[0, 0, 0\]|null)\s*:\s*\(sourceCloud/);
+  });
+});
+
+describe('a rebuilt octree keeps what the cloud IS', () => {
+  it('builds every session rebuild through buildSessionOctreeData', async () => {
+    const src = await viewerSource();
+    // buildSessionOctreeData carries the scan-level facts a rebuild response
+    // does not repeat (hasMisses, scanOrigin, scanParams, the miss octree id,
+    // source units, overlay columns). "Apply deletions" built its octree data
+    // by hand and dropped all of them: the misses toggle vanished and LAD
+    // blocked until the recorded misses were replaced. So the viewer calls
+    // buildPointCloudFromOctree in exactly one place, inside that helper.
+    const calls = src.match(/buildPointCloudFromOctree\(/g) ?? [];
+    expect(calls.length).toBe(1);
+    const helper = src.indexOf('const buildSessionOctreeData = useCallback');
+    expect(helper).toBeGreaterThan(-1);
+    const call = src.indexOf('buildPointCloudFromOctree(');
+    expect(call).toBeGreaterThan(helper);
+    expect(call - helper).toBeLessThan(800);
+  });
+});
+
+describe('a fitted crown keeps its precision', () => {
+  it('never packs world coordinates into float32, on screen or in an exported mesh', async () => {
+    const src = await viewerSource();
+    // The crown arrives as float64 world coordinates. `Float32Array.from` of
+    // them snapped a georeferenced crown to the 0.5 m lattice of a UTM northing.
+    expect(src).not.toMatch(/Float32Array\.from\(crown\.vertices\)/);
+    expect(src).toMatch(/const vertices = vec3sRelativeTo\(crown\.vertices, frame\)/);
+    // On screen: kept in the cloud's stored frame and tagged with it.
+    expect(src).toMatch(/data: crownToMeshData\(crown, frame \?\? \[0, 0, 0\]\),\s*\.\.\.\(frame \? \{ vertexOffset: frame \} : \{\}\)/);
+    // Exported alpha crowns: relative to a nearby origin the serializers add back.
+    expect(src).toMatch(/const data = crownToMeshData\(r\.crown, origin\)/);
+    expect(src).toMatch(/serializeMeshPly\(data, \{ origin \}\)/);
+    expect(src).toMatch(/serializeMeshStl\(data, \{ origin \}\)/);
+    expect(src).toMatch(/serializeMeshObj\(data, \{ baseName: [^}]*, origin \}\)/);
+  });
+});

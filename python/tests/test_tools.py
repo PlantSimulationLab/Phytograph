@@ -313,6 +313,25 @@ def test_every_tool_reports_world_coordinates_under_a_large_shift(backend, fores
         np.testing.assert_allclose(shifted[key], plain[key], atol=0.02, err_msg=key)
 
 
+def test_a_mesh_of_utm_coordinates_keeps_its_vertices_on_the_points(backend):
+    """Mesh vertices travel as float32, which resolves only 0.5 m at a UTM
+    northing. `triangulate` must hand back world coordinates at full precision
+    for a georeferenced cloud, not snapped to that lattice. (The test above
+    cannot see this: its WORLD coordinates are small, and comparing a mesh's
+    mean vertex averages the snapping away.)"""
+    utm = np.array([512_345.0, 4_271_234.0, 87.0])
+    g = np.linspace(0.0, 1.0, 20)
+    xs, ys = np.meshgrid(g, g)
+    pts = np.c_[xs.ravel(), ys.ravel(), 0.05 * np.sin(6 * xs.ravel()) * np.cos(6 * ys.ravel())] + utm
+    for shift in (None, utm.tolist()):
+        with backend.from_numpy(pts, world_shift=shift) as c:
+            mesh = c.triangulate(method="ball_pivoting")
+        assert len(mesh.faces) > 100
+        # Ball Pivoting keeps the input points as its vertices.
+        gap = np.min(np.linalg.norm(mesh.vertices[:, None, :] - pts[None, :, :], axis=2), axis=1)
+        assert gap.max() < 0.002, f"world_shift={shift}: vertices moved up to {gap.max():.3f} m"
+
+
 @pytest.mark.skipif(__import__("sys").platform == "win32", reason="sends SIGINT to itself")
 def test_ctrl_c_during_a_tool_cancels_it_in_the_engine(backend, forest_plot):
     """Ground/trees/wood/normals/denoise answer with no progress stream; the

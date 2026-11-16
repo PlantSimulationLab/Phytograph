@@ -69,9 +69,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 # Kriging solves a dense (n+1)x(n+1) system per prediction batch, which is O(n^3) in
-# the donor count. Beyond this many donors we keep the nearest ones to the occluded
-# set's centroid: distant voxels carry almost no kriging weight at any realistic
-# variogram range, so the cap costs accuracy far more slowly than it saves time.
+# the donor count, so no system holds more than this many donors. Beyond it the
+# occluded voxels are grouped and each group is kriged from the donors nearest IT
+# (see `_target_groups`): distant voxels carry almost no kriging weight at any
+# realistic variogram range, so a local neighborhood costs little accuracy.
 MAX_DONORS = 2000
 
 # Below this many donors a variogram cannot be estimated meaningfully; fall back.
@@ -219,12 +220,14 @@ def fill_occluded(
         return fallback, ("layer_mean" if fallback else "none")
 
     di = np.where(donor)[0]
+    # The variogram describes the FIELD, so it is fit on donors spread across the
+    # whole grid: all of them up to the cap, else a fixed random sample of the cap's
+    # size (random, not strided, so it cannot alias with the grid's own layout).
     if n_donor > MAX_DONORS:
-        # Keep the donors nearest the occluded set -- those carry the weight.
-        c = pos[targets].mean(axis=0)
-        di = di[np.argsort(((pos[di] - c) ** 2).sum(-1))[:MAX_DONORS]]
-
-    P, Z, V = pos[di], z[di], v[di]
+        var_di = np.sort(np.random.default_rng(0).choice(di, MAX_DONORS, replace=False))
+    else:
+        var_di = di
+    P, Z, V = pos[var_di], z[var_di], v[var_di]
 
     # Bin lags from the donors' OWN nearest-neighbor spacing rather than the nominal
     # voxel size. On a terrain-following grid whole columns are dropped, so the cells
@@ -251,6 +254,95 @@ def fill_occluded(
     def cov(h: np.ndarray) -> np.ndarray:
         return sill - _exponential_model(h, nugget, sill, rng)
 
+    fills: Dict[int, float] = {}
+    kriged_any = False
+    for g_targets, g_donors in _target_groups(pos, targets, di, voxel_size):
+        Zg = z[g_donors]
+        est = _krige_group(pos[g_donors], Zg, v[g_donors], pos[g_targets], cov)
+        if est is None:
+            # This group's system failed (singular / non-finite): its voxels take
+            # the layer mean rather than poisoning the other groups.
+            for t in g_targets:
+                if int(t) in fallback:
+                    fills[int(t)] = fallback[int(t)]
+            continue
+        kriged_any = True
+        # Ordinary-kriging weights sum to 1 but individual weights may be large and
+        # of either sign, so an ill-conditioned system or an extrapolation far
+        # outside the donor hull can produce an estimate wildly beyond anything
+        # observed. Since the value flows straight into leaf area, bound the damage.
+        #
+        # The band is deliberately GENEROUS rather than the exact donor range: a
+        # sound interpolation across a sharp edge legitimately overshoots a little
+        # (Gibbs-like ringing), and rejecting those would discard good predictions
+        # in favor of a layer mean that is usually worse. What must be caught is the
+        # pathological case -- an estimate orders of magnitude beyond the data -- so
+        # allow one full donor range of headroom on each side and refuse only what
+        # leaves it.
+        lo, hi = float(Zg.min()), float(Zg.max())
+        span = max(hi - lo, 1e-9)
+        lo_ok, hi_ok = lo - span, hi + span
+        for col, t in enumerate(g_targets):
+            v_est = float(est[col])
+            if lo_ok <= v_est <= hi_ok:
+                fills[int(t)] = min(max(v_est, 0.0), hi)   # a density, and never above
+                                                           # the largest value measured
+            elif int(t) in fallback:
+                fills[int(t)] = fallback[int(t)]
+
+    if not fills or not kriged_any:
+        return fallback, ("layer_mean" if fallback else "none")
+    return fills, "kriging"
+
+
+# At most this many target groups, i.e. donor-system factorizations, per grid. Each
+# is an O(MAX_DONORS^3) LU (~0.1-0.2 s at the cap); past this the groups grow
+# instead of multiplying.
+_MAX_TARGET_GROUPS = 64
+
+
+def _target_groups(pos: np.ndarray, targets: np.ndarray, di: np.ndarray,
+                   voxel_size: float) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Pair the occluded voxels with the donors each should be kriged from.
+
+    Up to `MAX_DONORS` donors, one system holds them all. Beyond it every target
+    needs donors near ITSELF: the cap used to keep the donors nearest the centroid
+    of ALL occluded voxels, so an occluded voxel far from that centroid, beyond the
+    variogram range of every donor kept, got the GLS mean of the central donors and
+    reported it as a kriging fill (measured 18% high and 9% low on two opposite
+    corners of a gradient field). So targets are grouped into tiles half the radius
+    that holds `MAX_DONORS` donors, and each tile is solved against the donors
+    nearest its own centroid: every target then has donors around it on all sides
+    out to at least half that radius, and each system is still at most the cap."""
+    if len(di) <= MAX_DONORS:
+        return [(targets, di)]
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(pos[di])
+    probe = targets[np.linspace(0, len(targets) - 1, min(len(targets), 64)).astype(int)]
+    dk, _ = tree.query(pos[probe], k=MAX_DONORS)
+    reach = float(np.median(dk[:, -1]))     # radius holding MAX_DONORS donors
+    side = max(reach / 2.0, float(voxel_size), 1e-9)
+    tp = pos[targets]
+    lo = tp.min(axis=0)
+    while True:
+        keys = np.floor((tp - lo) / side).astype(np.int64)
+        uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+        inv = np.asarray(inv).ravel()
+        if len(uniq) <= _MAX_TARGET_GROUPS:
+            break
+        side *= 1.5
+    groups = []
+    for g in range(len(uniq)):
+        members = targets[inv == g]
+        _, nn = tree.query(pos[members].mean(axis=0), k=MAX_DONORS)
+        groups.append((members, di[np.sort(np.asarray(nn).ravel())]))
+    return groups
+
+
+def _krige_group(P: np.ndarray, Z: np.ndarray, V: np.ndarray, T: np.ndarray, cov):
+    """Ordinary-kriging estimates at target positions `T` from donors `P` (values
+    `Z`, measurement variances `V`), or None when the system cannot be solved."""
     n = len(Z)
     dd = np.sqrt(((P[:, None, :] - P[None, :, :]) ** 2).sum(-1))
     mean_err = float(np.nanmean(V)) if np.isfinite(V).any() else 0.0
@@ -278,45 +370,18 @@ def fill_occluded(
     except Exception:
         lu_piv = None      # fall back to a plain solve per chunk
 
-    est = np.empty(len(targets), dtype=float)
-    for start in range(0, len(targets), _TARGET_CHUNK):
-        block = targets[start:start + _TARGET_CHUNK]
+    est = np.empty(len(T), dtype=float)
+    for start in range(0, len(T), _TARGET_CHUNK):
+        block = T[start:start + _TARGET_CHUNK]
         B = np.empty((n + 1, len(block)), dtype=float)
         for col, t in enumerate(block):
-            B[:n, col] = cov(np.sqrt(((P - pos[t]) ** 2).sum(-1)))
+            B[:n, col] = cov(np.sqrt(((P - t) ** 2).sum(-1)))
         B[n, :] = 1.0
         try:
             W = lu_solve(lu_piv, B) if lu_piv is not None else np.linalg.solve(A, B)
         except (np.linalg.LinAlgError, ValueError):
-            return fallback, ("layer_mean" if fallback else "none")
+            return None
         est[start:start + len(block)] = Z @ W[:n, :]
-
     if not np.all(np.isfinite(est)):
-        return fallback, ("layer_mean" if fallback else "none")
-
-    # Ordinary-kriging weights sum to 1 but individual weights may be large and of
-    # either sign, so an ill-conditioned system or an extrapolation far outside the
-    # donor hull can produce an estimate wildly beyond anything observed. Since the
-    # value flows straight into leaf area, bound the damage.
-    #
-    # The band is deliberately GENEROUS rather than the exact donor range: a sound
-    # interpolation across a sharp edge legitimately overshoots a little (Gibbs-like
-    # ringing), and rejecting those would discard good predictions in favor of a
-    # layer mean that is usually worse. What must be caught is the pathological case
-    # -- an estimate orders of magnitude beyond the data -- so allow one full donor
-    # range of headroom on each side and refuse only what leaves it.
-    lo, hi = float(Z.min()), float(Z.max())
-    span = max(hi - lo, 1e-9)
-    lo_ok, hi_ok = lo - span, hi + span
-    fills: Dict[int, float] = {}
-    for col, t in enumerate(targets):
-        v_est = float(est[col])
-        if lo_ok <= v_est <= hi_ok:
-            fills[int(t)] = min(max(v_est, 0.0), hi)   # a density, and never above
-                                                       # the largest value measured
-        elif int(t) in fallback:
-            fills[int(t)] = fallback[int(t)]
-
-    if not fills:
-        return fallback, ("layer_mean" if fallback else "none")
-    return fills, "kriging"
+        return None
+    return est

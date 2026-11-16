@@ -89,10 +89,17 @@ def plan_tiles(points: np.ndarray, nodes_total: int, *, buffer_m: float,
 def _anchors(chunk: np.ndarray, labels: np.ndarray) -> Dict[int, np.ndarray]:
     """{local id: x, y centroid of its lowest ANCHOR_BASE_M of points}."""
     out: Dict[int, np.ndarray] = {}
-    for k in np.unique(labels):
+    # Group by one sort rather than a `chunk[labels == k]` pass per tree, which
+    # is O(points x trees) on a tile.
+    order = np.argsort(labels, kind="stable")
+    sorted_labels = labels[order]
+    starts = np.flatnonzero(np.r_[True, sorted_labels[1:] != sorted_labels[:-1]])
+    ends = np.r_[starts[1:], len(sorted_labels)]
+    for a, b in zip(starts, ends):
+        k = sorted_labels[a]
         if k <= 0:
             continue
-        pts = chunk[labels == k]
+        pts = chunk[order[a:b]]
         base = pts[pts[:, 2] <= pts[:, 2].min() + ANCHOR_BASE_M]
         out[int(k)] = base[:, :2].mean(axis=0)
     return out
@@ -226,7 +233,13 @@ def segment_tiled(points: np.ndarray, params: dict, seeds: Optional[np.ndarray],
         # Renumber densely in spatial order, so ids do not depend on which tile
         # finished first in the pool.
         ids = np.unique(out[out > 0])
-        cen = np.array([points[out == g, :2].mean(axis=0) for g in ids])
+        # Centroids by bincount, one pass for every tree: a per-tree
+        # `points[out == g]` is a full pass each, 23 ms per tree at 10 M points,
+        # i.e. 46 s for 2000 trees spent after the segmentation had finished.
+        counts = np.bincount(out, minlength=int(ids.max()) + 1).astype(np.float64)
+        cx = np.bincount(out, weights=points[:, 0], minlength=counts.size)
+        cy = np.bincount(out, weights=points[:, 1], minlength=counts.size)
+        cen = np.c_[cx[ids] / counts[ids], cy[ids] / counts[ids]]
         order = np.lexsort((cen[:, 1], cen[:, 0]))
         remap = np.zeros(int(ids.max()) + 1, dtype=np.int64)
         remap[ids[order]] = np.arange(1, len(ids) + 1)

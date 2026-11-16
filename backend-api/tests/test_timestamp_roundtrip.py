@@ -256,3 +256,25 @@ def test_merge_with_an_untimed_input_keeps_the_timed_clock():
         np.testing.assert_array_equal(out.timestamps[10:], 0.0)
     finally:
         main._cloud_sessions.pop(out.session_id, None)
+
+
+def test_ply_export_keeps_every_pulse_time_through_reimport(tmp_path):
+    """The Export window's PLY declared every scalar `float` and printed 9
+    significant digits, so GPS week-seconds 3.3 us apart (a 300 kHz scanner)
+    all came out as `345678`: one timestamp for a second's pulses, and pulse
+    grouping (multi-return LAD, backfill) gone on re-import."""
+    ts = 345678.0 + np.arange(5) * 3.3e-6
+    labels = np.array([1, 2, 1, 2, 2], dtype=np.uint8)
+    name, blob = _export("ply", timestamp=ts, ground_class=labels)
+    header = blob.split(b"end_header")[0].decode()
+    assert "property double timestamp" in header
+    assert "property int ground_class" in header
+    p = tmp_path / name
+    p.write_bytes(blob)
+
+    out = tmp_path / "reimported.las"
+    main._ply_to_las(p, out)
+    r = main._read_las_into_arrays(out)
+    assert r.timestamps is not None
+    np.testing.assert_array_equal(r.timestamps, ts)
+    assert len(np.unique(r.timestamps)) == 5

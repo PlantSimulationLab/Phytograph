@@ -285,3 +285,42 @@ test('steers a plant toward a chosen leaf angle distribution, and keeps it on re
   const rebuilt = await plantMeanLeafInclination(page);
   expect(rebuilt).toBeLessThan(38);
 });
+
+// A plant regrown at an earlier age must be the SAME plant. Age −1 builds a new
+// plant session at that age from the plant's recorded seed, so two things have
+// to hold: the plant was generated with the seed it records (the popup leaves
+// the seed blank by default, and the old code recorded a random seed AFTER a
+// time-seeded build), and the session is created with that seed. Compared on
+// the geometry's extent: two random plants of one species can share a triangle
+// count while their shapes differ.
+test('stepping a plant forward then back regrows the same plant', async () => {
+  const { page } = session;
+  await page.getByTestId('tool-plant-generate').click();
+  const popup = page.getByTestId('plant-generation-popup');
+  await expect(popup).toBeVisible();
+  await expect(page.getByTestId('plant-species-select').locator('option')).not.toHaveCount(0);
+  await page.getByTestId('plant-age-input').fill('15');
+  await page.getByTestId('plant-generate-button').click();
+
+  const meshRow = page.getByTestId('mesh-row').first();
+  await expect(meshRow).toBeVisible({ timeout: 120_000 });
+  await expect(meshRow).toHaveAttribute('data-mesh-name', /15d/);
+  const extent15 = await meshRow.getAttribute('data-mesh-extent');
+  const triangles15 = await meshRow.getAttribute('data-triangle-count');
+  expect(extent15).toMatch(/^-?\d/);
+
+  if ((await meshRow.getAttribute('data-selected')) !== 'true') await meshRow.click();
+  await expect(meshRow).toHaveAttribute('data-selected', 'true');
+  await (await paletteRow(page, 'Plant Growth', 'plant-growth')).click();
+  const panel = page.getByTestId('plant-growth-panel');
+  await expect(panel).toBeVisible();
+
+  await panel.getByTestId('plant-age-plus-1').click();
+  await expect(panel.getByTestId('plant-growth-age')).toHaveText('16 days', { timeout: 120_000 });
+  await expect(meshRow).not.toHaveAttribute('data-mesh-extent', extent15!);
+
+  await panel.getByTestId('plant-age-minus-1').click();
+  await expect(panel.getByTestId('plant-growth-age')).toHaveText('15 days', { timeout: 120_000 });
+  await expect(meshRow).toHaveAttribute('data-triangle-count', triangles15!);
+  await expect(meshRow).toHaveAttribute('data-mesh-extent', extent15!);
+});

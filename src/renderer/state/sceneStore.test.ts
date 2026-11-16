@@ -583,6 +583,53 @@ describe('history cap + session eviction', () => {
     expect(freeSession).not.toHaveBeenCalled();
   });
 
+  it('keeps the session of a deleted cloud while its delete can still be undone', () => {
+    // Import, work past the history cap, then delete: the import's add is
+    // evicted while the scan is off screen, but the delete is still in `past`.
+    // Freeing on the add's eviction handed the undo a cloud with no session.
+    const freeSession = vi.fn();
+    const filler = (i: number) => ({
+      c: 'commit' as const,
+      tx: tx(`n${i}`, [{ t: 'add', kind: 'mesh', id: `m${i}`, object: makeMesh(`m${i}`) }]),
+    });
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-u') }, { freeSession });
+    for (let i = 0; i < MAX_HISTORY - 2; i++) s = sceneReducer(s, filler(i), { freeSession });
+    s = sceneReducer(s, { c: 'commit', tx: tx('del s1', [{
+      t: 'remove', kind: 'scan', id: 's1', index: 0,
+      object: scanWithSession('s1', 'sess-u'), sessionId: 'sess-u',
+    }]) }, { freeSession });
+    // Two more commits evict the import (and one filler); the delete stays.
+    for (let i = 0; i < 2; i++) s = sceneReducer(s, filler(1000 + i), { freeSession });
+    expect(s.past.some((t) => t.label === 'import s1')).toBe(false);
+    expect(freeSession).not.toHaveBeenCalled();
+
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });  // undo the last filler
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });  // undo the delete
+    expect(s.scans.map((x) => x.id)).toContain('s1');
+    expect(freeSession).not.toHaveBeenCalled();
+  });
+
+  it('frees the deleted cloud once its delete scrolls off too', () => {
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-v') }, { freeSession });
+    s = sceneReducer(s, { c: 'commit', tx: tx('del s1', [{
+      t: 'remove', kind: 'scan', id: 's1', index: 0,
+      object: scanWithSession('s1', 'sess-v'), sessionId: 'sess-v',
+    }]) }, { freeSession });
+    for (let i = 0; i < MAX_HISTORY; i++) {
+      s = sceneReducer(s, { c: 'commit', tx: tx(`n${i}`, [
+        { t: 'add', kind: 'mesh', id: `m${i}`, object: makeMesh(`m${i}`) }]) }, { freeSession });
+      // Nothing is freed while the delete is still undoable.
+      if (s.past.some((t) => t.label === 'del s1')) expect(freeSession).not.toHaveBeenCalled();
+    }
+    expect(s.past.some((t) => t.label === 'del s1')).toBe(false);
+    expect(freeSession).toHaveBeenCalledTimes(1);
+    expect(freeSession).toHaveBeenCalledWith('sess-v');
+  });
+
   it('frees a session only once even when several evicted txs reference it', () => {
     const freeSession = vi.fn();
     let s = makeInitialSceneState();

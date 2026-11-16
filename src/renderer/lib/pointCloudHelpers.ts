@@ -254,6 +254,18 @@ export function computeBoundsFromPositions(positions: Float32Array, count: numbe
 // arrays are shorter than `pointCount`, so writing them back directly would
 // misalign every scalar field. Pass any per-point arrays that must stay in
 // lockstep via `aligned`; each is filtered with the same mask.
+/** `[[x, y, z], ...]` as one flat Float32Array, for a binary request frame. */
+export function flatFloat32(points: ArrayLike<ArrayLike<number>>): Float32Array {
+  const out = new Float32Array(points.length * 3);
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    out[i * 3] = p[0];
+    out[i * 3 + 1] = p[1];
+    out[i * 3 + 2] = p[2];
+  }
+  return out;
+}
+
 export function collectHitPoints(
   data: PointCloudData,
   aligned?: AlignedArrays,

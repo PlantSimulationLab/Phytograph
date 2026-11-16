@@ -157,6 +157,37 @@ class TestBinPointsToCellsTerrain:
                                           kept_columns=[True, False])
         assert ids.tolist() == [0, -1]
 
+    def test_rotation_applies_to_a_flat_grid(self):
+        # A row grid 20x2x3 m rotated 30 degrees, no column offsets. Points along
+        # the rotated row are in it; points along the UNROTATED row are not. Only
+        # snapped grids used to honor the rotation, so the triangulation crop
+        # kept about 20% of this grid's points.
+        import numpy as np
+        from qsm.grid import bin_points_to_cells_terrain
+        th = np.radians(30.0)
+        along = np.linspace(-9.0, 9.0, 37)
+        on_rotated = np.c_[along * np.cos(th), along * np.sin(th), np.zeros_like(along)]
+        on_unrotated = np.c_[along, np.zeros_like(along), np.zeros_like(along)]
+        far = np.abs(along) > 3.0   # near the center the two rows overlap
+        for offsets in (None, []):
+            ids = bin_points_to_cells_terrain(
+                np.vstack([on_rotated, on_unrotated[far]]), [0, 0, 0], [20, 2, 3],
+                4, 1, 1, column_offsets=offsets, rotation_deg=30.0)
+            n = len(on_rotated)
+            assert (ids[:n] >= 0).all()
+            assert (ids[n:] == -1).all()
+            # Cells follow the rotated row's own axis: 4 cells of 5 m along it.
+            np.testing.assert_array_equal(
+                ids[:n], np.clip(np.floor((along + 10.0) / 5.0), 0, 3).astype(int))
+
+    def test_dropped_column_excluded_on_a_flat_grid(self):
+        from qsm.grid import bin_points_to_cells_terrain
+        pts = [[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]]
+        ids = bin_points_to_cells_terrain(pts, [0, 0, 0], [2, 1, 1], 2, 1, 1,
+                                          column_offsets=None,
+                                          kept_columns=[True, False])
+        assert ids.tolist() == [0, -1]
+
 
 # ---------------------------------------------------------------------------
 # _generate_helios_xml
@@ -378,6 +409,22 @@ class TestDoHeliosComputationShaping:
         assert captured_xml["grid_nxyz"] == (2, 2, 3)
         assert captured_xml["grid_rotation_deg"] == 0.0  # default when absent
 
+    def test_rotated_flat_grid_crops_to_the_rotated_box(self, captured_xml):
+        # The pre-crop decides which points Helios ever sees. Along a 30-degree
+        # row, a point inside the rotated grid must survive and a point inside
+        # only the unrotated box must not.
+        import numpy as np
+        th = np.radians(30.0)
+        inside = [8 * np.cos(th), 8 * np.sin(th), 1.0]
+        outside = [8.0, 0.0, 1.0]
+        req = main.HeliosTriangulationRequest(
+            scans=[_points_scan([inside, outside], origin=[0, 0, 5])],
+            grid=main.HeliosGrid(center=[0, 0, 1], size=[20, 2, 3], rotation=30.0),
+        )
+        main._do_helios_computation(req)
+        xyz = np.asarray(captured_xml["scans_info"][0]["arrays"]["xyz"])
+        np.testing.assert_allclose(xyz, [inside], atol=1e-9)
+
     def test_grid_rotation_is_passed_through(self, captured_xml):
         # Regression: HeliosGrid.rotation was dropped by the model, so a rotated
         # UI grid cropped its axis-aligned extent and leaked points past the
@@ -434,6 +481,51 @@ class TestHeliosSnappedGridDropsOutOfGrid:
         fake.LiDARCloud = _Cloud
         fake.Context = _Cloud
         monkeypatch.setitem(sys.modules, "pyhelios", fake)
+
+    def test_rotated_flat_grid_keeps_triangles_inside_the_rotated_box(self, monkeypatch):
+        # One triangle 8 m along a 30-degree row (inside the rotated grid, outside
+        # its unrotated box) and one 8 m along +x (the reverse). Binning against
+        # the unrotated box kept the wrong one.
+        import sys, types
+        import numpy as np
+        th = np.radians(30.0)
+        a = np.array([8 * np.cos(th), 8 * np.sin(th), 1.0])
+        b = np.array([8.0, 0.0, 1.0])
+        tri = np.array([[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.1, 0.0]])
+        tris = np.vstack([(tri + a).reshape(-1), (tri + b).reshape(-1)])
+
+        class _Cloud:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def disableMessages(self): pass
+            def loadXML(self, p): pass
+            def addScan(self, **k): return 0
+            def reserveHitPoints(self, n): pass
+            def addHitPointsBulk(self, sid, xyz, **k): pass
+            def addGrid(self, **k): pass
+            def triangulateHitPoints(self, l, a): pass
+            def getTriangleCount(self): return tris.shape[0]
+            def getTriangulationStats(self):
+                return {"candidates": tris.shape[0], "dropped_lmax": 0,
+                        "dropped_aspect": 0, "dropped_degenerate": 0}
+            def getTriangleVerticesAll(self):
+                return tris.reshape(-1).copy(), None
+
+        fake = types.ModuleType("pyhelios")
+        fake.LiDARCloud = _Cloud
+        fake.Context = _Cloud
+        monkeypatch.setitem(sys.modules, "pyhelios", fake)
+        req = main.HeliosTriangulationRequest(
+            scans=[_points_scan([a.tolist()], origin=[0, 0, 5])],
+            grid=main.HeliosGrid(center=[0, 0, 1], size=[20, 2, 3], rotation=30.0),
+            lmax=1e9, max_aspect_ratio=1e9,
+        )
+        result = main._do_helios_computation(req)
+        assert result["success"] is True, result.get("error")
+        assert result["num_triangles"] == 1
+        verts = np.asarray(result["vertices"])
+        kept = np.asarray(result["triangles"])[0]
+        np.testing.assert_allclose(verts[kept].mean(axis=0), (tri + a).mean(axis=0), atol=1e-6)
 
     def test_ground_under_lifted_column_is_dropped(self, stub_triangles):
         import numpy as np

@@ -254,7 +254,11 @@ so a conversion never drops the dir it just wrote.
     session arrays, and nothing ever rewrites the file. The cloud has
     **diverged**, and octree recovery (`handleOctreeMissing`) correctly refuses
     to rebuild it from that stale file, because doing so would silently restore
-    deleted points and undo baked transforms.
+    deleted points and undo baked transforms. The flag is set when the edit
+    COMMITS, including edits that leave the octree alone until later (an erase
+    or a label stroke before "Apply", deferred normals or scalar fields): see
+    `handleMarkScanEdited` in `App.tsx`. Waiting for the next octree rebuild
+    left a window in which recovery restored every erased point.
 
     So for a diverged cloud, deleting the octree dir is not reclaiming a cache —
     it is deleting rendered work that exists nowhere else. `keep` never covered
@@ -409,6 +413,16 @@ chose and the handlers reject anything else, so a renderer compromise can't read
   scan-import resolver find `scene.xyz` next to it). **Writes** are permitted to
   a save target and to direct children of a chosen export directory. Neither
   recurses into subdirectories.
+
+File → Import reads only the first 64 KB of each picked file
+(`fs.readBinary(path, maxBytes)`, `src/main/readFileHead.ts`): every
+path-backed import is read by path in the backend, and the renderer only sniffs
+a header (a PLY's face count, a CSV's QSM columns). The import handlers get a
+header-only `File`; the few imports that parse in the renderer (skeletons, STL
+and other local mesh formats, the no-backend mesh fallback) fetch the rest
+through `wholeFile` (`lib/headerOnlyFile.ts`). A whole-file read here held a
+copy of every selected file for the whole import, and Node's `readFile` refuses
+files over 2 GiB, so large scans failed to import from the menu.
 
 ## Custom protocols & data transport
 

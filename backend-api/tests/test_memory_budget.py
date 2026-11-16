@@ -155,6 +155,77 @@ def test_a_job_bigger_than_the_budget_is_admitted_alone_and_logged():
     assert any("exceeds" in m and "running it alone" in m for m in logs), logs
 
 
+def _finishes(fn, timeout=5.0) -> bool:
+    """Run `fn` on a daemon thread; True when it returns within `timeout`. A
+    deadlocked admission would otherwise hang the whole suite."""
+    t = threading.Thread(target=fn, daemon=True)
+    t.start()
+    t.join(timeout)
+    return not t.is_alive()
+
+
+def test_a_nested_admission_never_waits_on_its_own_thread():
+    """DEM's height column, split, extract, duplicate and merge all build an
+    octree (which admits itself) INSIDE their own admission. When the two did
+    not fit together, the inner one waited for the outer one forever."""
+    logs = []
+    adm = mb.Admission(lambda: 100, log=logs.append, log_after_s=0.05)
+    seen = []
+
+    def outer_then_inner():
+        with adm.admit(80, "outer"):
+            with adm.admit(50, "inner"):
+                seen.append(adm.admitted_bytes())
+
+    assert _finishes(outer_then_inner), "the nested admission deadlocked"
+    assert seen == [130]                       # counted, not waved through
+    assert any("nested" in m for m in logs), logs
+    assert adm.in_flight() == []
+
+
+def test_a_nested_admission_still_counts_against_other_threads():
+    adm = mb.Admission(lambda: 100, log_after_s=0.05)
+    inner_held, release = threading.Event(), threading.Event()
+    order = []
+
+    def holder():
+        with adm.admit(30, "outer"):
+            with adm.admit(50, "inner"):
+                inner_held.set()
+                release.wait(5)
+        order.append("holder-out")
+
+    def other():
+        inner_held.wait(5)
+        with adm.admit(30, "other"):           # 30 + 50 + 30 > 100: must wait
+            order.append("other-in")
+
+    th, to = threading.Thread(target=holder), threading.Thread(target=other)
+    th.start(); to.start()
+    inner_held.wait(5)
+    time.sleep(0.2)
+    assert order == []
+    release.set()
+    th.join(5); to.join(5)
+    assert order == ["holder-out", "other-in"]
+
+
+def test_an_admission_not_owned_by_its_thread_does_not_make_later_work_nested():
+    """`_run_killable` enters its admission on a pool thread that then serves
+    other requests. Those must queue as usual, not skip it as 'nested'."""
+    from concurrent.futures import ThreadPoolExecutor
+    adm = mb.Admission(lambda: 100, log_after_s=0.05)
+    held = adm.admit(80, "seg worker", thread_owned=False)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(held.__enter__).result(5)
+        unrelated = pool.submit(lambda: adm.admit(50, "unrelated").__enter__())
+        time.sleep(0.3)
+        assert not unrelated.done(), "an unrelated request skipped the queue"
+        held.__exit__(None, None, None)
+        unrelated.result(5).__exit__(None, None, None)
+    assert adm.in_flight() == []
+
+
 def test_fmt_bytes_is_human():
     assert mb.fmt_bytes(3 * mb.GiB) == "3.0 GB"
     assert mb.fmt_bytes(200 * 1024 ** 2) == "200 MB"
