@@ -2637,6 +2637,12 @@ def riegl_project_extract(
 
     run_id, cancel_event = _new_cancel_token()
 
+    # Session ids of the positions built so far. A run that is canceled or
+    # fails part-way (a reader crash, a stalled container) returns none of them,
+    # and neither does a finished result nobody collects, so each stayed
+    # resident until quit. Discarded on those paths.
+    produced: List[str] = []
+
     def build_frame(progress):
         # Reclaim the transport directory on EVERY exit path. Cleanup used to
         # sit at the end of the success path only, so a failed or canceled
@@ -2644,6 +2650,9 @@ def riegl_project_extract(
         # the NEXT import more likely to fail for lack of space.
         try:
             return _build_riegl_frame(progress)
+        except BaseException:
+            _discard_multi_import_sessions(produced)
+            raise
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
 
@@ -2731,6 +2740,8 @@ def riegl_project_extract(
                         sop=sop,
                     ),
                 )
+                if info["session"].get("session_id"):
+                    produced.append(info["session"]["session_id"])
             except (ScanCanceled, MemoryError):
                 # A cancel must unwind; out-of-memory is not a per-position
                 # condition and continuing would fail every later one anyway.
@@ -2783,6 +2794,7 @@ def riegl_project_extract(
     return _bin_frame_streaming_response(
         build_frame, request=http_request, cancel_event=cancel_event,
         run_id=run_id,
+        on_abandoned=lambda _frame: _discard_multi_import_sessions(produced),
     )
 
 
@@ -3200,18 +3212,22 @@ def _run_riegl_container_once(
                 log_handle.close()
                 out_handle.close()
 
-        started = time.time()
+        # An IDLE deadline (see _riegl_activity): output still growing is work.
+        seen, last_activity = _riegl_activity(log_path, out_path), time.time()
         while proc.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 _kill_riegl_container(container_name, proc)
                 raise ScanCanceled()
-            if time.time() - started > timeout_s:
+            now_seen = _riegl_activity(log_path, out_path)
+            if now_seen != seen:
+                seen, last_activity = now_seen, time.time()
+            elif time.time() - last_activity > timeout_s:
                 _kill_riegl_container(container_name, proc)
                 raise HTTPException(
                     status_code=504,
                     detail=(
-                        f"RIEGL extraction exceeded {timeout_s:.0f}s and was "
-                        "stopped."
+                        f"RIEGL extraction made no progress for {timeout_s:.0f}s "
+                        "and was stopped."
                     ),
                 )
             time.sleep(poll)
@@ -3296,7 +3312,6 @@ def _stream_riegl_container_once(
         log_path = logf.name
 
     proc = None
-    started = time.time()
     header: dict = {}
     results: List[Any] = []
     trailer: List[dict] = []
@@ -3370,15 +3385,20 @@ def _stream_riegl_container_once(
                     else:
                         results.append(arrays)
 
+            seen, last_activity = _riegl_activity(log_path, out_dir), time.time()
             while proc.poll() is None:
                 if cancel_event is not None and cancel_event.is_set():
                     _kill_riegl_container(container_name, proc)
                     raise ScanCanceled()
-                if time.time() - started > timeout_s:
+                now_seen = _riegl_activity(log_path, out_dir)
+                if now_seen != seen:
+                    seen, last_activity = now_seen, time.time()
+                elif time.time() - last_activity > timeout_s:
                     _kill_riegl_container(container_name, proc)
                     raise HTTPException(
                         status_code=504,
-                        detail=f"RIEGL extraction exceeded {timeout_s:.0f}s.",
+                        detail=(f"RIEGL extraction made no progress for "
+                                f"{timeout_s:.0f}s and was stopped."),
                     )
                 drain()
                 time.sleep(0.25)
@@ -3415,6 +3435,38 @@ def _stream_riegl_container_once(
             os.unlink(log_path)
         except Exception:
             pass
+
+
+def _riegl_activity(*paths) -> tuple:
+    """A cheap fingerprint of the reader's output so far: the size of each file,
+    and the total bytes under each directory (the per-position arrays land in
+    the transport directory as they decode). Any change means it is working.
+
+    Both container loops use it so their `timeout_s` is an IDLE deadline. It used
+    to be measured from the start of the run, so a long project (thirty
+    positions are an hour of emulated decoding) was killed at one hour however
+    steadily it was progressing, which the project's no-whole-request-deadline
+    rule forbids."""
+    out = []
+    for p in paths:
+        if p is None:
+            continue
+        p = _Path(p)
+        try:
+            if p.is_dir():
+                total = 0
+                for root, _dirs, files in os.walk(p):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+                out.append(total)
+            else:
+                out.append(p.stat().st_size)
+        except OSError:
+            out.append(-1)
+    return tuple(out)
 
 
 def _tail_json_lines(log_path: str) -> List[dict]:
@@ -12346,6 +12398,29 @@ def _lad_labels_vals(column_getter, n: int, strip_rounded_timestamps: bool = Fal
     return labels, vals, flags
 
 
+def _lad_source_snapshot_locked(sess: "CloudSession"):
+    """What `_session_to_lad_arrays` and `_deleted_hit_grid_masks` read from a
+    session, captured under the lock so both can run with it RELEASED: a copy
+    of the deletion mask (deletes edit it in place) and references to the
+    arrays (a transform or a compaction replaces them rather than mutating
+    them). Both used to run inside the global lock, gathering every survivor
+    and computing a direction per return while every other request on every
+    cloud waited. Caller holds `_cloud_session_lock`."""
+    import types
+    bf = sess.backfilled_misses
+    return types.SimpleNamespace(
+        deleted=np.array(sess.deleted, dtype=bool, copy=True),
+        positions=sess.positions,
+        timestamps=sess.timestamps,
+        extras=dict(sess.extras),
+        beam_origins=getattr(sess, "beam_origins", None),
+        # A transform reassigns this dict's entries in place, so copy the dict.
+        backfilled_misses=dict(bf) if bf is not None else None,
+        backfilled_misses_stale=bool(getattr(sess, "backfilled_misses_stale", False)),
+        backfilled_misses_moved=bool(getattr(sess, "backfilled_misses_moved", False)),
+    )
+
+
 def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: bool = True,
                            restore_mask: "Optional[np.ndarray]" = None,
                            strip_rounded_timestamps: bool = False,
@@ -13653,21 +13728,23 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
 
             if sess is not None:
                 with _cloud_session_lock:
-                    # Deleted hits outside the grid go back into the inversion
-                    # (a crop to the grid must not delete the transmitted beams
-                    # that crossed it); deleted hits inside it are warned about.
-                    _del_inside, _del_outside = _deleted_hit_grid_masks(sess, request.grid)
-                    # A static scan with rounded timestamps inverts each return
-                    # as its own pulse; a moving one keeps them for the
-                    # trajectory join (see `_lad_labels_vals`).
-                    xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(
-                        sess, origin, restore_mask=_del_outside,
-                        strip_rounded_timestamps=(
-                            scan_entry.trajectory is None
-                            and getattr(sess, "beam_origins", None) is None),
-                        wood_split=request.wood_split)
-                    n_deleted_in_grid = int(_del_inside.sum())
+                    lad_src = _lad_source_snapshot_locked(sess)
                     n_unrestorable = int(getattr(sess, "unrestorable_hit_count", 0) or 0)
+                # From the snapshot, with the global lock released.
+                # Deleted hits outside the grid go back into the inversion
+                # (a crop to the grid must not delete the transmitted beams
+                # that crossed it); deleted hits inside it are warned about.
+                _del_inside, _del_outside = _deleted_hit_grid_masks(lad_src, request.grid)
+                # A static scan with rounded timestamps inverts each return
+                # as its own pulse; a moving one keeps them for the
+                # trajectory join (see `_lad_labels_vals`).
+                xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(
+                    lad_src, origin, restore_mask=_del_outside,
+                    strip_rounded_timestamps=(
+                        scan_entry.trajectory is None
+                        and lad_src.beam_origins is None),
+                    wood_split=request.wood_split)
+                n_deleted_in_grid = int(_del_inside.sum())
                 if n_deleted_in_grid == 0 and n_unrestorable == 0:
                     # Every deletion was restored, so a miss buffer computed
                     # before the crop still matches the hits it sees. (A moved
@@ -17590,7 +17667,8 @@ def _apply_return_mode(lidar, scan_id: int, s: "LidarScanScanner",
             lidar.setScanSingleReturnSelection(scan_id, sel)
 
 
-def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
+def _do_lidar_scan(request: LidarScanRequest, progress=None,
+                   produced: "Optional[List[str]]" = None) -> dict:
     """
     Perform a true ray-traced synthetic LiDAR scan of the supplied geometry.
 
@@ -17614,6 +17692,13 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 
     def _ckpt():
         _cancel_checkpoint(progress)
+
+    # Session ids of the scanners already built. A scan canceled or failing
+    # after some were built returns none of them, so each stayed resident;
+    # discarded below. The endpoint passes its own list for the same reason
+    # when a finished result is never collected.
+    if produced is None:
+        produced = []
 
     try:
         if not request.meshes:
@@ -18147,6 +18232,8 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             }
             if session is not None:
                 entry["session"] = session
+                if session.get("session_id"):
+                    produced.append(session["session_id"])
             out.append(entry)
             # `entry` now owns the arrays it needs (the has_misses branch copied via
             # `keep`; the no-miss branch shares them — both keep `r`'s arrays alive
@@ -18177,10 +18264,12 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         # Cancellation is not a failure — let it propagate so the streaming
         # wrapper emits the canceled marker (the `with` blocks already unwound,
         # freeing C++/numpy memory).
+        _discard_multi_import_sessions(produced)
         raise
     except Exception as e:
         import traceback
         traceback.print_exc()
+        _discard_multi_import_sessions(produced)
         return {"success": False, "error": f"Synthetic LiDAR scan failed: {str(e)}"}
 
 
@@ -18382,9 +18471,12 @@ def lidar_scan(request: LidarScanRequest, http_request: Request):
     """Ray-traced synthetic LiDAR scan. Returns a PHB1 binary frame (points +
     scalars per scanner can be millions of values)."""
     run_id, cancel_event = _new_cancel_token()
+    produced: List[str] = []   # per-scanner session ids, for an uncollected result
     return _bin_frame_streaming_response(
-        lambda progress: _pack_lidar_scan(_do_lidar_scan(request, progress=progress)),
-        request=http_request, cancel_event=cancel_event, run_id=run_id)
+        lambda progress: _pack_lidar_scan(_do_lidar_scan(request, progress=progress,
+                                                         produced=produced)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id,
+        on_abandoned=lambda _frame: _discard_multi_import_sessions(produced))
 
 
 @app.post("/api/cancel/{run_id}")
@@ -28984,51 +29076,70 @@ def _read_points_and_extras(
     extras: Dict[str, np.ndarray] = {}
     if src.session_id is not None:
         sess = _get_cloud_session(src.session_id)
+        # Under the GLOBAL session lock only what must be consistent: a fresh
+        # copy of the deletion mask (deletes edit `sess.deleted` in place) and
+        # references to the arrays. Everything here used to be gathered under
+        # the lock, every column of the whole cloud with positions copied twice,
+        # before a `max_points` stride kept ~20k of them; every request on every
+        # cloud waited meanwhile. The references stay valid outside the lock
+        # because a transform or a compaction REPLACES a session's arrays rather
+        # than mutating them (see the merge). A label stroke does write a column
+        # in place, so the extras are re-read under the lock if one landed.
         with _cloud_session_lock:
-            keep = ~sess.deleted
-            if not src.include_misses and _MISS_SLUG in sess.extras:
-                keep = keep & (sess.extras[_MISS_SLUG] == 0)
-            positions = sess.positions[keep].copy()
+            deleted = np.array(sess.deleted, dtype=bool, copy=True)
+            pos_ref = sess.positions
+            miss_ref = None if src.include_misses else sess.extras.get(_MISS_SLUG)
             session_world_shift = sess.world_shift
-            # Extras ride the SAME `keep` mask as positions, inside the same lock
-            # hold, so a concurrent delete can't land between the two and desync
-            # their lengths. Order follows `extra_dims_meta` (the session's own
-            # column order) rather than dict order, so an export's column layout
-            # is stable across runs; any extra not in the meta list is appended.
-            if src.want_extras:
-                ordered = [m.get("slug") for m in (sess.extra_dims_meta or [])]
-                for slug in ordered + [s for s in sess.extras if s not in ordered]:
-                    col = sess.extras.get(slug) if slug else None
-                    if col is None:
-                        continue
-                    extras[slug] = np.asarray(col[keep])
-                # `timestamp` lives on its own float64 field, OUTSIDE `extras`
-                # (a float32 cast has a 62 ms step at full GPS week-seconds and
-                # would destroy multi-return pulse grouping), so the loop above
-                # cannot see it. Surface it here under the canonical slug or an
-                # export silently drops the column: `_resolve_export_columns`
-                # builds its `available` map from `extras` alone and quietly
-                # discards any requested slug it can't find.
-                #
-                # Rides the SAME `keep` mask as positions, inside the same lock
-                # hold, for the reason given above.
-                if (sess.timestamps is not None
-                        and 'timestamp' not in extras
-                        and sess.timestamps.shape[0] == sess.positions.shape[0]):
-                    extras['timestamp'] = np.asarray(sess.timestamps[keep])
-            # Surface colors/intensity only when asked (export does; the compute
-            # consumers don't need them and skip the copy). The session stores
-            # both at LAS uint16 scale, but every consumer of this function's
-            # return — `_format_points_as_text`, the LAS writer's `* 65535` — wants
-            # 0-1 floats, matching the file branch below (which divides by 65535).
-            if src.want_colors and sess.colors is not None:
-                colors = (np.asarray(sess.colors[keep], dtype=np.float32) / 65535.0)
-            else:
-                colors = None
-            if src.want_colors and sess.intensity is not None:
-                intensity = (np.asarray(sess.intensity[keep], dtype=np.float32) / 65535.0)
-            else:
-                intensity = None
+            ordered = [m.get("slug") for m in (sess.extra_dims_meta or [])]
+            extra_refs = ({slug: sess.extras[slug]
+                           for slug in ordered + [s for s in sess.extras if s not in ordered]
+                           if slug and sess.extras.get(slug) is not None}
+                          if src.want_extras else {})
+            ts_ref = (sess.timestamps if src.want_extras and sess.timestamps is not None
+                      and sess.timestamps.shape[0] == sess.positions.shape[0] else None)
+            colors_ref = sess.colors if src.want_colors else None
+            intensity_ref = sess.intensity if src.want_colors else None
+            write_gen = getattr(sess, "column_write_gen", 0)
+        keep = ~deleted
+        if miss_ref is not None:
+            keep &= (np.asarray(miss_ref) == 0)
+        rows = np.flatnonzero(keep)
+        # Stride the ROW INDICES, before any column is gathered. Same rows the
+        # shared stride below would keep, which then finds nothing to do.
+        if src.max_points is not None and src.max_points > 0 and len(rows) > src.max_points:
+            rows = rows[::int(math.ceil(len(rows) / src.max_points))]
+        positions = np.asarray(pos_ref[rows])
+
+        def _gather_extras() -> Dict[str, np.ndarray]:
+            # Order follows `extra_dims_meta` (the session's own column order)
+            # rather than dict order, so an export's column layout is stable
+            # across runs; any extra not in the meta list is appended.
+            out = {slug: np.asarray(col[rows]) for slug, col in extra_refs.items()}
+            # `timestamp` lives on its own float64 field, OUTSIDE `extras` (a
+            # float32 cast has a 62 ms step at full GPS week-seconds and would
+            # destroy multi-return pulse grouping), so the loop above cannot see
+            # it. Surface it here under the canonical slug or an export silently
+            # drops the column: `_resolve_export_columns` builds its `available`
+            # map from `extras` alone and quietly discards any requested slug it
+            # can't find.
+            if ts_ref is not None and 'timestamp' not in out:
+                out['timestamp'] = np.asarray(ts_ref[rows])
+            return out
+
+        extras = _gather_extras()
+        if extra_refs:
+            with _cloud_session_lock:
+                if getattr(sess, "column_write_gen", 0) != write_gen:
+                    extras = _gather_extras()
+        # Surface colors/intensity only when asked (export does; the compute
+        # consumers don't need them and skip the copy). The session stores
+        # both at LAS uint16 scale, but every consumer of this function's
+        # return — `_format_points_as_text`, the LAS writer's `* 65535` — wants
+        # 0-1 floats, matching the file branch below (which divides by 65535).
+        colors = (np.asarray(colors_ref[rows], dtype=np.float32) / 65535.0
+                  if colors_ref is not None else None)
+        intensity = (np.asarray(intensity_ref[rows], dtype=np.float32) / 65535.0
+                     if intensity_ref is not None else None)
         # Restore true world coordinates: the session stored points with the
         # import-time global shift SUBTRACTED, so add it back here — the single
         # chokepoint every downstream op (triangulate/skeleton/LAD/export) reads
@@ -37385,33 +37496,14 @@ def _gather_miss_positions(sess: "CloudSession",
     float64 array, which undid the point of writing the merge itself to disk.
     The caller owns `scratch_dir` and must drop the array before removing it.
     """
+    # Under the global session lock only a copy of the deletion mask (deletes
+    # edit it in place) and references to the arrays (a transform or a
+    # compaction replaces them rather than mutating them). The gather itself,
+    # which on a stitched cloud copies 100 M+ misses into a file, used to run
+    # inside the lock and stalled every request on every cloud meanwhile.
     with _cloud_session_lock:
-        keep = ~sess.deleted
+        keep = np.array(sess.deleted, dtype=bool, copy=True)
         miss_arr = sess.extras.get(_MISS_SLUG)
-        backfilled_rows = 0
-        if sess.backfilled_misses is not None and sess.backfilled_misses.get("positions") is not None:
-            backfilled_rows = int(len(sess.backfilled_misses["positions"]))
-        if (miss_arr is not None and origin is None and scratch_dir is not None
-                and backfilled_rows == 0):
-            is_miss = (np.asarray(miss_arr) != 0) & keep
-            n_miss = int(np.count_nonzero(is_miss))
-            if _session_should_use_store(n_miss):
-                rows = np.flatnonzero(is_miss)
-                del is_miss
-                out = np.lib.format.open_memmap(
-                    str(_Path(scratch_dir) / "miss_positions.npy"), mode="w+",
-                    dtype=np.float64, shape=(n_miss, 3))
-                src = np.asarray(sess.positions)
-                for a, b in session_store.iter_ranges(n_miss):
-                    out[a:b] = src[rows[a:b]]
-                return out, 0.0
-        if miss_arr is not None:
-            is_miss = (miss_arr != 0) & keep
-            hits = (~(miss_arr != 0)) & keep
-            miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
-        else:
-            hits = keep.copy()
-            miss_pos = np.empty((0, 3), np.float64)
         # The hits are wanted for ONE SCALAR — the farthest hit distance — and
         # only when an origin was supplied. So keep the mask and a REFERENCE to
         # the array rather than a materialized copy of every hit: see
@@ -37419,12 +37511,37 @@ def _gather_miss_positions(sess: "CloudSession",
         # path below from building a 447 MB array it then returns without ever
         # reading.
         hit_positions = sess.positions
-        any_hits = bool(hits.any())
         backfilled = sess.backfilled_misses
-        if backfilled is not None and backfilled.get("positions") is not None:
-            bf = np.ascontiguousarray(backfilled["positions"], dtype=np.float64)
-            if bf.shape[0] > 0:
-                miss_pos = np.vstack([miss_pos, bf]) if miss_pos.shape[0] else bf
+        bf_ref = backfilled.get("positions") if backfilled is not None else None
+    np.logical_not(keep, out=keep)
+    backfilled_rows = int(len(bf_ref)) if bf_ref is not None else 0
+    if (miss_arr is not None and origin is None and scratch_dir is not None
+            and backfilled_rows == 0):
+        is_miss = (np.asarray(miss_arr) != 0) & keep
+        n_miss = int(np.count_nonzero(is_miss))
+        if _session_should_use_store(n_miss):
+            rows = np.flatnonzero(is_miss)
+            del is_miss
+            out = np.lib.format.open_memmap(
+                str(_Path(scratch_dir) / "miss_positions.npy"), mode="w+",
+                dtype=np.float64, shape=(n_miss, 3))
+            src = np.asarray(hit_positions)
+            for a, b in session_store.iter_ranges(n_miss):
+                out[a:b] = src[rows[a:b]]
+            return out, 0.0
+    if miss_arr is not None:
+        miss_bool = np.asarray(miss_arr) != 0
+        is_miss = miss_bool & keep
+        hits = ~miss_bool & keep
+        miss_pos = np.ascontiguousarray(np.asarray(hit_positions)[is_miss], dtype=np.float64)
+    else:
+        hits = keep
+        miss_pos = np.empty((0, 3), np.float64)
+    any_hits = bool(hits.any())
+    if bf_ref is not None:
+        bf = np.ascontiguousarray(bf_ref, dtype=np.float64)
+        if bf.shape[0] > 0:
+            miss_pos = np.vstack([miss_pos, bf]) if miss_pos.shape[0] else bf
 
     if miss_pos.shape[0] == 0:
         return np.empty((0, 3), np.float64), 0.0
@@ -38532,12 +38649,15 @@ def create_cloud_session(request: CloudSessionCreateRequest, http_request: Reque
         raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
 
     run_id, cancel_event = _new_cancel_token()
+    produced: List[str] = []   # the session id, for a result nobody collects
 
     def _build(progress):
         try:
-            return json.dumps(_do_create_cloud_session(
-                request, source_path, progress=progress, cancel_event=cancel_event,
-            )).encode("utf-8")
+            result = _do_create_cloud_session(
+                request, source_path, progress=progress, cancel_event=cancel_event)
+            if result.get("session_id"):
+                produced.append(result["session_id"])
+            return json.dumps(result).encode("utf-8")
         except ScanCanceled:
             raise
         except BaseException as exc:
@@ -38551,11 +38671,13 @@ def create_cloud_session(request: CloudSessionCreateRequest, http_request: Reque
             return json.dumps({"error": str(detail)}).encode("utf-8")
 
     return _bin_frame_streaming_response(
-        _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
+        _build, request=http_request, cancel_event=cancel_event, run_id=run_id,
+        on_abandoned=lambda _frame: _discard_multi_import_sessions(produced))
 
 
 def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
-                                   progress=None, cancel_event=None) -> dict:
+                                   progress=None, cancel_event=None,
+                                   produced: "Optional[List[str]]" = None) -> dict:
     """Build ONE SESSION PER SCAN POSITION for a multi-scan source.
 
     A scan is defined by its pose. A multi-scan E57 or multi-block PTX holds
@@ -38658,6 +38780,10 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
             # whole block resident across the loop.
             del pre, pre_meta
         except ScanCanceled:
+            # The positions already imported are registered sessions, and a
+            # canceled request returns no ids for them, so nothing could ever
+            # free them: each stayed resident (RAM or a disk store) until quit.
+            _discard_multi_import_sessions(out)
             raise
         except BaseException as exc:
             logger.exception("multi-scan import failed for %s scan %d",
@@ -38665,9 +38791,23 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
             entry["error"] = str(getattr(exc, "detail", None) or exc
                                  or exc.__class__.__name__)
         out.append(entry)
+        if produced is not None and entry.get("session", {}).get("session_id"):
+            produced.append(entry["session"]["session_id"])
     if progress is not None:
         progress(1.0, "Import complete.")
     return {"scans": out, "scan_count": n}
+
+
+def _discard_multi_import_sessions(entries) -> None:
+    """Discard the sessions a create-multi import made for a result nobody will
+    receive (canceled part-way, or finished but never collected). Takes the
+    `scans` entries or bare session ids."""
+    for e in entries:
+        sid = e if isinstance(e, str) else (e.get("session") or {}).get("session_id")
+        if sid:
+            logger.info("import session %s belongs to a result nobody collected; "
+                        "discarding it", sid)
+            _discard_cloud_session(sid, release_arrays=True)
 
 
 @app.post("/api/cloud/session/create-multi")
@@ -38684,21 +38824,26 @@ def create_multi_cloud_session(request: CloudSessionCreateRequest, http_request:
         raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
 
     run_id, cancel_event = _new_cancel_token()
+    produced: List[str] = []   # session ids, for a result nobody collects
 
     def _build(progress):
         try:
             return json.dumps(_do_create_multi_cloud_session(
                 request, source_path, progress=progress, cancel_event=cancel_event,
+                produced=produced,
             )).encode("utf-8")
         except ScanCanceled:
             raise
         except BaseException as exc:
             logger.exception("create_multi_cloud_session failed for %s", request.source_path)
+            # The positions imported before the failure are in no response.
+            _discard_multi_import_sessions(produced)
             detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
             return json.dumps({"error": str(detail)}).encode("utf-8")
 
     return _bin_frame_streaming_response(
-        _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
+        _build, request=http_request, cancel_event=cancel_event, run_id=run_id,
+        on_abandoned=lambda _frame: _discard_multi_import_sessions(produced))
 
 
 def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None,
@@ -39042,23 +39187,25 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
         # cloud; the raster is a property of the instrument, and this buffer
         # describes the latter. (`_session_to_lad_arrays` tags none of these as
         # hits for LAD — the buffer it produces holds only synthesized misses.)
-        _deleted = getattr(sess, "deleted", None)
-        _restore = (np.asarray(_deleted, dtype=bool)
-                    if _deleted is not None and _deleted.shape[0] == len(sess.positions)
-                    else None)
+        lad_src = _lad_source_snapshot_locked(sess)
+        # The snapshot's own copy of the mask: the live one is edited in place,
+        # and the arrays below are gathered with the lock released.
+        _restore = (lad_src.deleted
+                    if lad_src.deleted.shape[0] == len(lad_src.positions) else None)
         n_restored = int(_restore.sum()) if _restore is not None else 0
         edit_mark = _session_edit_mark_locked(sess)
         unrestorable0 = int(getattr(sess, "unrestorable_hit_count", 0) or 0)
-        # A static scan's rounded timestamps are dropped rather than used: a
-        # pulse clock built from them is the rounding step, and helios-core
-        # refuses them. The returns are then placed through their row/column
-        # indices, or by direction on the declared raster. A moving scan keeps
-        # them -- its beam origins are joined by time, and nothing replaces that.
-        xyz, dirs, labels, vals, flags = _session_to_lad_arrays(
-            sess, origin, include_backfilled=False, restore_mask=_restore,
-            strip_rounded_timestamps=(
-                request.trajectory is None
-                and getattr(sess, "beam_origins", None) is None))
+    # A static scan's rounded timestamps are dropped rather than used: a
+    # pulse clock built from them is the rounding step, and helios-core
+    # refuses them. The returns are then placed through their row/column
+    # indices, or by direction on the declared raster. A moving scan keeps
+    # them -- its beam origins are joined by time, and nothing replaces that.
+    # Gathered from the snapshot with the global lock released.
+    xyz, dirs, labels, vals, flags = _session_to_lad_arrays(
+        lad_src, origin, include_backfilled=False, restore_mask=_restore,
+        strip_rounded_timestamps=(
+            request.trajectory is None
+            and lad_src.beam_origins is None))
 
     # Already carries real misses (E57 / structured PLY): nothing to recover. A
     # trivial no-op — return a plain JSON response (no streaming needed).
@@ -41011,22 +41158,40 @@ def _copy_extra_dims_meta(meta) -> "List[dict]":
     return _copy.deepcopy(list(meta or []))
 
 
-def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) -> "CloudSession":
-    """Build a NEW session from the rows `take` (ABSOLUTE indices into `sess`'s
-    arrays, already survivor-filtered by the caller) and register it. The CALLER
-    MUST HOLD `_cloud_session_lock` — this reads `sess`'s arrays and inserts the
-    new session into the registry without taking the lock itself, so it can be
-    composed inside a larger locked critical section (e.g. split's commit). The
-    octree is NOT built here (caller rebuilds, outside the lock).
+def _subset_snapshot_locked(sess: "CloudSession") -> dict:
+    """What `_build_subset_session` needs from `sess`, captured under the lock:
+    references to its arrays (valid after the lock is released, since a
+    transform or a compaction REPLACES arrays rather than mutating them) and
+    copies of its small metadata. Caller holds `_cloud_session_lock`."""
+    return {
+        "extras": dict(sess.extras),
+        "positions": sess.positions, "colors": sess.colors, "intensity": sess.intensity,
+        "timestamps": sess.timestamps, "beam_origins": sess.beam_origins,
+        "extra_dims_meta": _copy_extra_dims_meta(sess.extra_dims_meta),
+        "source_path": sess.source_path, "ascii_format": sess.ascii_format,
+        "column_plan": sess.column_plan,
+        "gps_time_encoding": getattr(sess, "gps_time_encoding", None),
+        "world_shift": sess.world_shift.copy() if sess.world_shift is not None else None,
+        "crs_epsg": sess.crs_epsg,
+        "source_units": getattr(sess, "source_units", None),
+        "source_unit_scale": getattr(sess, "source_unit_scale", None),
+        "unrestorable_hit_count": int(getattr(sess, "unrestorable_hit_count", 0) or 0),
+        "column_write_gen": getattr(sess, "column_write_gen", 0),
+    }
+
+
+def _build_subset_session(snap: dict, take: np.ndarray) -> "CloudSession":
+    """Gather the rows `take` (ABSOLUTE indices into the snapshot's arrays) into
+    a NEW, UNREGISTERED session. Needs no lock: it reads only the references in
+    `snap` (see `_subset_snapshot_locked`), so a caller can run this whole-column
+    gather with the global session lock released and register the result after.
 
     Index-based rather than mask-based because of the K-way split: the obvious
     `sess.positions[~sess.deleted][keep]` materializes the ENTIRE survivor array
     before narrowing it, so slicing K subsets out of an N-point cloud moved
-    O(K x N) bytes per attribute column. On a multi-million-point plot split into
-    a few dozen trees that was tens of seconds of pure memcpy under the global
-    lock — the dominant cost of "split into one cloud per tree". Gathering by
-    absolute index touches only the subset's own rows, making the whole split
-    O(N) total across all K children."""
+    O(K x N) bytes per attribute column. Gathering by absolute index touches only
+    the subset's own rows, making the whole split O(N) total across all K
+    children."""
     import time
     new_id = uuid.uuid4().hex[:8]
     take = np.asarray(take)
@@ -41052,7 +41217,7 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
 
     try:
         extras = {}
-        for k, v in sess.extras.items():
+        for k, v in snap["extras"].items():
             col = f"x{len(extra_cols)}"
             extra_cols[col] = k
             extras[k] = _gather(col, v)
@@ -41061,27 +41226,37 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         if store is not None:
             store.set_attr("extras", extra_cols)
             store.set_attr("extras_order", list(extras.keys()))
-        positions = _gather("positions", sess.positions)
-        colors = _gather("colors", sess.colors)
-        intensity = _gather("intensity", sess.intensity)
-        timestamps = _gather("timestamps", sess.timestamps)
-        beam_origins = _gather("beam_origins", sess.beam_origins, dtype=np.float64)
+        positions = _gather("positions", snap["positions"])
+        colors = _gather("colors", snap["colors"])
+        intensity = _gather("intensity", snap["intensity"])
+        timestamps = _gather("timestamps", snap["timestamps"])
+        beam_origins = _gather("beam_origins", snap["beam_origins"], dtype=np.float64)
     except BaseException:
         if store is not None:
             root = store.root
             store.close()
             _delete_session_store_dir(root)
         raise
+    # Every parent hit the child does not take (a sibling tree, the ground a
+    # split moved away, rows the parent had deleted) is a return LAD on the
+    # child can no longer restore, on top of what the parent had already lost.
+    miss_col = snap["extras"].get(_MISS_SLUG)
+    n_rows = int(len(snap["positions"]))
+    if miss_col is None:
+        hits_all, hits_taken = n_rows, n_take
+    else:
+        miss = np.asarray(miss_col)
+        hits_all, hits_taken = int((miss == 0).sum()), int((miss[take] == 0).sum())
     new_sess = CloudSession(
         session_id=new_id,
-        source_path=sess.source_path,  # provenance label only
-        ascii_format=sess.ascii_format,
-        column_plan=sess.column_plan,
+        source_path=snap["source_path"],  # provenance label only
+        ascii_format=snap["ascii_format"],
+        column_plan=snap["column_plan"],
         positions=positions,
         colors=colors,
         intensity=intensity,
         extras=extras,
-        extra_dims_meta=_copy_extra_dims_meta(sess.extra_dims_meta),
+        extra_dims_meta=_copy_extra_dims_meta(snap["extra_dims_meta"]),
         # Carry the float64 timestamps onto the subset so the moving-platform LAD
         # join key survives a split/crop with full precision (and stays aligned).
         timestamps=timestamps,
@@ -41090,30 +41265,65 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         # them silently downgraded a split/extract/duplicate of a moving-platform
         # scan to the less-accurate join (or to a static origin) with no warning.
         beam_origins=beam_origins,
-        gps_time_encoding=getattr(sess, "gps_time_encoding", None),
+        gps_time_encoding=snap["gps_time_encoding"],
         # Inherit the parent's import shift so the subset's stored positions stay
         # in the same (shifted) space and still restore to world coords on read.
-        world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
-        crs_epsg=sess.crs_epsg,  # subsets keep the parent's CRS for DEM georeferencing
+        world_shift=(snap["world_shift"].copy() if snap["world_shift"] is not None else None),
+        crs_epsg=snap["crs_epsg"],  # subsets keep the parent's CRS for DEM georeferencing
         # A subset is the SAME points, already converted — it inherits the
         # parent's provenance rather than losing it. (Nothing is re-scaled here:
         # the positions it copies are meters already.)
-        source_units=getattr(sess, "source_units", None),
-        source_unit_scale=getattr(sess, "source_unit_scale", None),
+        source_units=snap["source_units"],
+        source_unit_scale=snap["source_unit_scale"],
         deleted=deleted,
         deleted_history=[],
         octree_cache_id=None,
-        # Every parent hit the child does not take (a sibling tree, the ground a
-        # split moved away, rows the parent had deleted) is a return LAD on the
-        # child can no longer restore, on top of what the parent had already lost.
-        unrestorable_hit_count=(int(getattr(sess, "unrestorable_hit_count", 0) or 0)
-                                + _hit_row_count_locked(sess)
-                                - _hit_row_count_locked(sess, take)),
+        unrestorable_hit_count=snap["unrestorable_hit_count"] + hits_all - hits_taken,
         created_at=time.time(),
         last_accessed=time.time(),
     )
     new_sess.store = store
-    _cloud_sessions[new_id] = new_sess
+    return new_sess
+
+
+def _drop_unregistered_session(new_sess: "CloudSession") -> None:
+    """Release a session `_build_subset_session` made that will not be
+    registered (its store, if it got one)."""
+    store = getattr(new_sess, "store", None)
+    if store is not None:
+        root = store.root
+        store.close()
+        _delete_session_store_dir(root)
+
+
+def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) -> "CloudSession":
+    """Build a NEW session from the rows `take` (ABSOLUTE indices into `sess`'s
+    arrays, already survivor-filtered by the caller) and register it, all under
+    the lock the CALLER MUST HOLD. The octree is NOT built here (caller rebuilds,
+    outside the lock). Prefer `_session_subset_by_indices`, which gathers with
+    the lock released; this form is for a caller that must compose the subset
+    into a larger critical section."""
+    new_sess = _build_subset_session(_subset_snapshot_locked(sess), take)
+    _cloud_sessions[new_sess.session_id] = new_sess
+    return new_sess
+
+
+def _session_subset_by_indices(sess: "CloudSession", take: np.ndarray) -> "CloudSession":
+    """`_session_subset_by_indices_locked` with the whole-column gather OUTSIDE
+    the global session lock, which it used to hold throughout, stalling every
+    request on every cloud for as long as a large subset took to copy.
+
+    A label stroke writes a column in place (bumping `column_write_gen`), so a
+    child gathered across one could hold half a stroke: it is then rebuilt
+    under the lock instead. Caller must NOT hold the lock."""
+    with _cloud_session_lock:
+        snap = _subset_snapshot_locked(sess)
+    new_sess = _build_subset_session(snap, take)
+    with _cloud_session_lock:
+        if getattr(sess, "column_write_gen", 0) != snap["column_write_gen"]:
+            _drop_unregistered_session(new_sess)
+            return _session_subset_by_indices_locked(sess, take)
+        _cloud_sessions[new_sess.session_id] = new_sess
     return new_sess
 
 
@@ -41246,6 +41456,17 @@ def _undo_split(undo: dict) -> None:
             # a compaction since then renumbers them.
             if sess.positions is undo.get("positions") and len(sess.deleted) == undo.get("n"):
                 sess.deleted[rows] = False
+                # The commit also made the post-split mask, moved rows included,
+                # the floor erase-undo replays onto, and ended the erase and label
+                # undo histories. Un-deleting the rows alone left that floor, so
+                # the next erase-undo re-deleted the half just given back. Put
+                # the prior state back when nothing was recorded since the split;
+                # otherwise at least take the moved rows out of the floor.
+                prior = undo.get("prior_undo")
+                if prior is not None and not sess.deleted_history and not sess.label_history:
+                    sess.deleted_history, sess.deleted_base, sess.label_history = prior
+                elif sess.deleted_base is not None:
+                    sess.deleted_base[rows] = False
                 _mark_octree_stale_locked(sess)
             else:
                 restored = False
@@ -41351,12 +41572,37 @@ def _do_session_split(session_id: str, request: SessionSplitRequest, undo: dict)
                 }
 
             leftover_mask = ~keep
-            leftover = _session_subset_locked(sess, leftover_mask) if bool(leftover_mask.any()) else None
+            idx_surv = np.where(surv)[0]
+            moved_rows = idx_surv[leftover_mask]
+            snap = _subset_snapshot_locked(sess) if moved_rows.size else None
+            mark = _session_edit_mark_locked(sess)
+
+        # Gather the leftover with the global lock RELEASED. It used to be built
+        # inside the lock, so splitting a large cloud stalled every request on
+        # every cloud for the length of the copy. The commit below happens only
+        # if the parent is exactly as it was when `moved_rows` was computed;
+        # otherwise nothing has been committed and the split is refused, the
+        # rule the ML/geometry tools follow (`_raise_if_session_edited_locked`).
+        leftover = _build_subset_session(snap, moved_rows) if snap is not None else None
+        with _cloud_session_lock:
+            if (sess.geometry_gen != mark.geometry_gen
+                    or not np.array_equal(sess.deleted, mark.deleted)
+                    or (snap is not None
+                        and getattr(sess, "column_write_gen", 0) != snap["column_write_gen"])):
+                if leftover is not None:
+                    _drop_unregistered_session(leftover)
+                raise HTTPException(
+                    status_code=409,
+                    detail="The cloud was edited while it was being split; split it again.")
+            if leftover is not None:
+                _cloud_sessions[leftover.session_id] = leftover
             # Commit the leftover deletion on the parent using the SAME snapshot.
             # Split is a non-undoable commit (renderer clears its erase undo stack),
             # so reset the undo history to keep both sides in lock-step.
-            idx_surv = np.where(surv)[0]
-            moved_rows = idx_surv[leftover_mask]
+            # The undo state the commit is about to end, for `_undo_split`.
+            # `_commit_delete_history_locked` REPLACES these objects, so holding
+            # the old ones keeps them intact.
+            prior_undo = (sess.deleted_history, sess.deleted_base, sess.label_history)
             sess.deleted[moved_rows] = True
             if leftover_mask.any():
                 _mark_normals_stale_locked(sess)
@@ -41366,7 +41612,7 @@ def _do_session_split(session_id: str, request: SessionSplitRequest, undo: dict)
             sess.octree_pose = None    # see the invariant note in delete_cloud_region
             # What `_undo_split` needs to put this back.
             undo.update(sess=sess, rows=moved_rows, positions=sess.positions,
-                        n=len(sess.deleted),
+                        n=len(sess.deleted), prior_undo=prior_undo,
                         leftover_id=leftover.session_id if leftover is not None else None)
 
     try:
@@ -41476,10 +41722,15 @@ def _do_session_extract(session_id: str, request: SessionExtractRequest, created
             if miss_arr is not None:
                 hits_selected = bool((sel & (miss_arr[surv] == 0)).any())
                 sel = sel | (miss_arr[surv] != 0)
+            # ABSOLUTE rows, fixed against the survivors `sel` was computed over.
+            # The subset used to be taken after the lock was released, by a call
+            # that recomputed the survivors: a delete in between shifted every
+            # selected row onto its neighbor.
+            take = np.flatnonzero(surv)[sel]
 
     if not hits_selected:
         return {"session_id": session_id, "extracted": None}
-    child = _session_subset(sess, sel)
+    child = _session_subset_by_indices(sess, take)   # gathers with the lock released
     ck, ccd, cmeta = _build_child_or_discard(child, created)
     return {
         "session_id": session_id,
@@ -41532,7 +41783,7 @@ _EXTRACT_BUILD_POOL = thread_cap.pool_size(min(8, max(2, thread_cap.cpu_count())
 def _slice_children_by_column(sess: "CloudSession", slug: str, exclude: set,
                               include_misses: bool = False) -> "list[tuple[int, CloudSession]]":
     """Register one child session per distinct integer value of `slug`, in value
-    order. Takes `_cloud_session_lock` itself; builds NO octrees.
+    order. Takes `_cloud_session_lock` itself, briefly; builds NO octrees.
 
     With `include_misses`, each child additionally gets the parent's sky/miss
     rows (see the request model) -- unioned into its index array so the gather
@@ -41542,13 +41793,23 @@ def _slice_children_by_column(sess: "CloudSession", slug: str, exclude: set,
     value: the per-value scan is O(values x survivors) of boolean work, which on
     a multi-million-point plot with dozens of trees costs more than the sort. The
     stable sort also leaves each group's absolute row indices ascending, so the
-    per-child gather in `_session_subset_by_indices_locked` reads the parent
-    arrays in order."""
+    per-child gather reads the parent arrays in order.
+
+    The sort and every child's gather run with the global session lock RELEASED
+    (they used to run inside it: "split into one cloud per tree" on a large plot
+    stalled every request on every cloud for the whole copy). The lock covers
+    only the snapshot and the registration; if a label stroke wrote a column in
+    the meantime, the children are rebuilt under the lock instead."""
     with _cloud_session_lock:
         if slug not in sess.extras:
             raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {slug!r}.")
         surv_idx = np.flatnonzero(~sess.deleted)
-        col = np.rint(sess.extras[slug][surv_idx]).astype(np.int64)
+        col_ref = sess.extras[slug]
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        snap = _subset_snapshot_locked(sess)
+
+    def _groups():
+        col = np.rint(np.asarray(col_ref)[surv_idx]).astype(np.int64)
         if col.size == 0:
             return []
         order = np.argsort(col, kind="stable")
@@ -41556,13 +41817,12 @@ def _slice_children_by_column(sess: "CloudSession", slug: str, exclude: set,
         # Start offset of each run of equal values in the sorted column.
         starts = np.flatnonzero(np.concatenate(([True], ordered[1:] != ordered[:-1])))
         ends = np.concatenate((starts[1:], [ordered.size]))
-        miss_arr = sess.extras.get(_MISS_SLUG)
         miss_abs = None
         if include_misses and miss_arr is not None:
-            miss_abs = surv_idx[miss_arr[surv_idx] != 0]
+            miss_abs = surv_idx[np.asarray(miss_arr)[surv_idx] != 0]
             if miss_abs.size == 0:
                 miss_abs = None
-        children: "list[tuple[int, CloudSession]]" = []
+        out = []
         for value, start, end in zip(ordered[starts], starts, ends):
             v = int(value)
             if v in exclude:
@@ -41574,15 +41834,37 @@ def _slice_children_by_column(sess: "CloudSession", slug: str, exclude: set,
             # today's class columns (misses always carry 0, which `exclude`
             # drops), but `extract`'s `hits_selected` guard exists for exactly
             # this and the batch form needs the same one.
-            if miss_arr is not None and not np.any(miss_arr[hits] == 0):
+            if miss_arr is not None and not np.any(np.asarray(miss_arr)[hits] == 0):
                 continue
             take = hits
             # union1d sorts and de-duplicates, which is exactly the ascending,
             # overlap-free index array the gather wants.
             if miss_abs is not None:
                 take = np.union1d(take, miss_abs)
-            children.append((v, _session_subset_by_indices_locked(sess, take)))
-    return children
+            out.append((v, take))
+        return out
+
+    groups = _groups()
+    built: "list[tuple[int, CloudSession]]" = []
+    try:
+        for v, take in groups:
+            built.append((v, _build_subset_session(snap, take)))
+    except BaseException:
+        for _v, child in built:
+            _drop_unregistered_session(child)
+        raise
+    with _cloud_session_lock:
+        if getattr(sess, "column_write_gen", 0) == snap["column_write_gen"]:
+            for _v, child in built:
+                _cloud_sessions[child.session_id] = child
+            return built
+        for _v, child in built:
+            _drop_unregistered_session(child)
+        # A stroke landed mid-gather: rebuild from what the session holds now.
+        surv_idx = np.flatnonzero(~sess.deleted)
+        col_ref = sess.extras[slug]
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        return [(v, _session_subset_by_indices_locked(sess, take)) for v, take in _groups()]
 
 
 def _do_session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
@@ -42229,10 +42511,10 @@ def _do_session_duplicate(session_id: str, created: dict) -> dict:
         else _session_mutation_bytes([sess]))
     with _ADMISSION.admit(copy_bytes, f"duplicate {session_id}"):
         with _cloud_session_lock:
-            # `_session_subset_locked` keeps `surv[keep]`; an all-true keep over
-            # the survivors copies the whole surviving cloud.
-            keep = np.ones(int((~sess.deleted).sum()), dtype=bool)
-            child = _session_subset_locked(sess, keep)
+            take = np.flatnonzero(~sess.deleted)   # the whole surviving cloud
+        # The copy itself runs with the global lock released (it used to hold
+        # it for the whole copy of the cloud).
+        child = _session_subset_by_indices(sess, take)
     ck, ccd, cmeta = _build_child_or_discard(child, created)
     return {
         "session_id": session_id,
@@ -46244,22 +46526,87 @@ def _do_session_transform(session_id: str, request: SessionTransformRequest):
     # deleted rows too (they keep their coordinates for undo). Admitted outside
     # `_cloud_session_lock` — admission sleeps while it waits, and the session
     # lock must never be held across that.
+    def _transform_normals(nx, ny, nz):
+        """Rotated (x, y, z) normal columns and the recomputed verticality."""
+        _n = np.column_stack([nx, ny, nz]).astype(np.float64)
+        # Rows that never received a normal (deleted/miss, zero-filled) stay
+        # zero: transforming a zero vector is a no-op. Row-vector form of
+        # n' = L⁻ᵀ n is n'ᵀ = nᵀ L⁻¹; renormalize every live row, since a
+        # scale changes the length (rigid: a no-op up to rounding).
+        _was_live = np.linalg.norm(_n, axis=1) > 0.5
+        _n = _n @ R.T if is_rigid else _n @ np.linalg.inv(R)
+        if not is_rigid:
+            _len = np.linalg.norm(_n[_was_live], axis=1, keepdims=True)
+            _n[_was_live] = _n[_was_live] / _len
+        cols = [_n[:, _i].astype(np.float32) for _i in range(3)]
+        _norm = np.linalg.norm(_n, axis=1)
+        _live = _norm > 0.5
+        _vert = np.zeros(len(_n), dtype=np.float32)
+        _vert[_live] = np.degrees(np.arccos(
+            np.clip(np.abs(_n[_live, 2]) / _norm[_live], 0.0, 1.0)))
+        return cols, _vert
+
+    _NORMAL_SLUGS = (normals_mod.NORMAL_X_SLUG, normals_mod.NORMAL_Y_SLUG,
+                     normals_mod.NORMAL_Z_SLUG)
+
+    def _normal_refs(s):
+        if s.extras.get(normals_mod.NORMAL_X_SLUG) is None or not all(
+                c in s.extras for c, _ in normals_mod.COLUMNS):
+            return None
+        return tuple(s.extras[c] for c in _NORMAL_SLUGS)
+
     _n_all = int(len(sess.positions))
-    with _ADMISSION.admit(
+    import contextlib as _contextlib
+    with _contextlib.ExitStack() as _held:
+        _held.enter_context(_ADMISSION.admit(
             _session_mutation_bytes([sess], out_points=_n_all, copies=2.0),
-            f"transform {_n_all:,} pts"), _cloud_session_lock:
+            f"transform {_n_all:,} pts"))
+        # The whole-cloud arithmetic runs BEFORE the global session lock is
+        # taken, from references captured under a brief hold: it used to run
+        # inside it, so a transform of a large cloud stalled every request on
+        # every cloud. The locked block below installs each result only if its
+        # source array is still the same object (a transform or a compaction
+        # REPLACES arrays, never mutates them) and the frame has not moved;
+        # otherwise it computes that one inline, as before.
+        with _cloud_session_lock:
+            _pre_shift = np.asarray(sess.world_shift if sess.world_shift is not None
+                                    else np.zeros(3), dtype=np.float64)
+            _pre_pos, _pre_bo = sess.positions, sess.beam_origins
+            _pre_normals = _normal_refs(sess)
+            _pre_dist = sess.extras.get("distance")
+        _pre: dict = {"positions": (_pre_pos, _apply(_pre_pos, _pre_shift))}
+        if _pre_bo is not None:
+            _pre["beam_origins"] = (_pre_bo, _apply(_pre_bo, _pre_shift))
+        if _pre_normals is not None:
+            _pre["normals"] = (_pre_normals, _transform_normals(*_pre_normals))
+        if uniform_scale is not None and not is_rigid and _pre_dist is not None:
+            _pre["distance"] = (_pre_dist, (np.asarray(_pre_dist, dtype=np.float64)
+                                            * uniform_scale).astype(np.float32))
+
+        def _computed(key, src, compute):
+            hit = _pre.get(key)
+            if hit is not None and (hit[0] is src if not isinstance(src, tuple)
+                                    else all(a is b for a, b in zip(hit[0], src))):
+                return hit[1]
+            return compute()
+
+        _held.enter_context(_cloud_session_lock)
         shift = sess.world_shift if sess.world_shift is not None else np.zeros(3, dtype=np.float64)
         shift = np.asarray(shift, dtype=np.float64)
+        if not np.array_equal(shift, _pre_shift):
+            _pre.clear()                      # the frame moved meanwhile: recompute
 
         # Hits + interleaved misses: real coordinates, all move with the cloud.
         # (The hits octree rebuild still excludes is_miss rows via exclude_misses.)
-        sess.positions = _apply(sess.positions, shift)
+        _src_pos = sess.positions
+        sess.positions = _computed("positions", _src_pos, lambda: _apply(_src_pos, shift))
         sess.geometry_gen += 1
 
         # Session-level per-pulse emission points (moving-platform scans), stored
         # in the session frame — same conjugation as positions.
         if sess.beam_origins is not None:
-            sess.beam_origins = _apply(sess.beam_origins, shift)
+            _src_bo = sess.beam_origins
+            sess.beam_origins = _computed("beam_origins", _src_bo, lambda: _apply(_src_bo, shift))
 
         # Stored normals are DIRECTIONS, so they rotate but must not translate:
         # `L⁻ᵀ n` (just `R n` when rigid), not `_apply` (which adds t and the
@@ -46274,30 +46621,12 @@ def _do_session_transform(session_id: str, request: SessionTransformRequest):
         # eigenvalues) and is left alone then; a NON-uniform scale changes the
         # neighborhood's shape, so the normals are flagged stale below.
         # `verticality` is recomputed from the transformed Z component.
-        _nx = sess.extras.get(normals_mod.NORMAL_X_SLUG)
-        if _nx is not None and all(s in sess.extras for s, _ in normals_mod.COLUMNS):
-            _n = np.column_stack([
-                sess.extras[normals_mod.NORMAL_X_SLUG],
-                sess.extras[normals_mod.NORMAL_Y_SLUG],
-                sess.extras[normals_mod.NORMAL_Z_SLUG],
-            ]).astype(np.float64)
-            # Rows that never received a normal (deleted/miss, zero-filled) stay
-            # zero: transforming a zero vector is a no-op. Row-vector form of
-            # n' = L⁻ᵀ n is n'ᵀ = nᵀ L⁻¹; renormalize every live row, since a
-            # scale changes the length (rigid: a no-op up to rounding).
-            _was_live = np.linalg.norm(_n, axis=1) > 0.5
-            _n = _n @ R.T if is_rigid else _n @ np.linalg.inv(R)
-            if not is_rigid:
-                _len = np.linalg.norm(_n[_was_live], axis=1, keepdims=True)
-                _n[_was_live] = _n[_was_live] / _len
-            for _i, _slug in enumerate((normals_mod.NORMAL_X_SLUG, normals_mod.NORMAL_Y_SLUG,
-                                        normals_mod.NORMAL_Z_SLUG)):
-                _session_put_column_locked(sess, _slug, _n[:, _i].astype(np.float32))
-            _norm = np.linalg.norm(_n, axis=1)
-            _live = _norm > 0.5
-            _vert = np.zeros(len(_n), dtype=np.float32)
-            _vert[_live] = np.degrees(np.arccos(
-                np.clip(np.abs(_n[_live, 2]) / _norm[_live], 0.0, 1.0)))
+        _src_normals = _normal_refs(sess)
+        if _src_normals is not None:
+            _cols, _vert = _computed("normals", _src_normals,
+                                     lambda: _transform_normals(*_src_normals))
+            for _slug, _col in zip(_NORMAL_SLUGS, _cols):
+                _session_put_column_locked(sess, _slug, _col)
             _session_put_column_locked(sess, normals_mod.VERTICALITY_SLUG, _vert)
         if not is_similarity:
             _mark_normals_stale_locked(sess)
@@ -46307,9 +46636,11 @@ def _do_session_transform(session_id: str, request: SessionTransformRequest):
         # direction), so the column is left as recorded — the Transformation
         # tool warns that range-derived results stop being physical then.
         if uniform_scale is not None and not is_rigid and "distance" in sess.extras:
+            _src_dist = sess.extras["distance"]
             _session_put_column_locked(
                 sess, "distance",
-                (np.asarray(sess.extras["distance"], dtype=np.float64) * uniform_scale).astype(np.float32))
+                _computed("distance", _src_dist, lambda: (
+                    np.asarray(_src_dist, dtype=np.float64) * uniform_scale).astype(np.float32)))
 
         # Separate backfilled-miss buffer (session frame). Its `positions` and
         # per-pulse `origins` are geometry and move; `directions` are LAD beam
@@ -46349,11 +46680,15 @@ def _do_session_transform(session_id: str, request: SessionTransformRequest):
         # default scene origin. Only the Z column of the surviving hits is copied
         # here (misses sit ~1 km out along the beam and would drag the percentile);
         # the percentile itself runs after the lock is released.
+        # (The mask is a fresh array; the gather from the positions this
+        # transform just installed happens after the lock is released.)
         _gz_keep = ~sess.deleted
         _gz_miss = sess.extras.get(_MISS_SLUG)
-        if _gz_miss is not None:
-            _gz_keep &= (np.asarray(_gz_miss) == 0)
-        _gz_column = np.asarray(sess.positions[_gz_keep, 2])
+        _gz_pos = sess.positions
+
+    if _gz_miss is not None:
+        _gz_keep &= (np.asarray(_gz_miss) == 0)
+    _gz_column = np.asarray(_gz_pos[_gz_keep, 2])
 
     # Recomputed rather than left to the renderer to carry the import-time value
     # through the matrix: that works for a tilt but not for a flip. Rotating a
@@ -46709,17 +47044,26 @@ def session_resample(session_id: str, request: SessionResampleRequest):
     the caller rebuilds the octree with /bake. Returns the surviving hit count
     before and after, plus the usual remaining/pending counts on a commit."""
     sess = _get_cloud_session(session_id)
+    # The thinning (a gather of every hit plus a voxel or spacing pass over
+    # them) runs with the global session lock RELEASED; it used to run inside
+    # it, stalling every request on every cloud. The commit below checks that
+    # the cloud is exactly as it was, else nothing is committed (409), the rule
+    # the other unlocked tools follow.
     with _cloud_session_lock:
-        surv = ~sess.deleted
+        mark = _session_edit_mark_locked(sess)
+        pos_ref = sess.positions
         miss_arr = sess.extras.get(_MISS_SLUG)
-        hit = surv if miss_arr is None else (surv & (np.asarray(miss_arr) == 0))
-        idx_hit = np.where(hit)[0]
-        keep_hit = _resample_keep_mask(sess.positions[idx_hit], request)
-        hits_before = int(len(idx_hit))
-        hits_after = int(keep_hit.sum())
-        if request.dry_run or hits_after == hits_before:
-            return {"session_id": session_id, "hits_before": hits_before, "hits_after": hits_after,
-                    "committed": False}
+    surv = ~mark.deleted
+    hit = surv if miss_arr is None else (surv & (np.asarray(miss_arr) == 0))
+    idx_hit = np.where(hit)[0]
+    keep_hit = _resample_keep_mask(np.asarray(pos_ref[idx_hit]), request)
+    hits_before = int(len(idx_hit))
+    hits_after = int(keep_hit.sum())
+    if request.dry_run or hits_after == hits_before:
+        return {"session_id": session_id, "hits_before": hits_before, "hits_after": hits_after,
+                "committed": False}
+    with _cloud_session_lock:
+        _raise_if_session_edited_locked(sess, mark, "resample")
         sess.deleted[idx_hit[~keep_hit]] = True
         _mark_normals_stale_locked(sess)
         _commit_delete_history_locked(sess)

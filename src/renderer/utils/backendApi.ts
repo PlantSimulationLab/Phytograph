@@ -862,8 +862,9 @@ export async function extractRieglProject(
     },
     options?.signal,
     // ~14 M points per position, plus LAS writing, under x86 emulation: a
-    // six-position project runs into the minutes. The backend enforces its own
-    // one-hour ceiling.
+    // six-position project runs into the minutes. An IDLE deadline (restarted
+    // by every progress chunk), as is the backend's: it stops the reader only
+    // after an hour with no progress, however long the whole project takes.
     60 * 60 * 1000,
     options?.onProgress,
     options?.onRunId,

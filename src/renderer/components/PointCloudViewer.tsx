@@ -2017,10 +2017,20 @@ export default function PointCloudViewer({
         }
         newScans.push(scan);
       }
+      // All-or-nothing means the scans loaded before a cancel or a failure are
+      // never added, so their backend sessions are reachable by nothing: free
+      // them, or each stays resident in the sidecar until quit.
+      const discardLoaded = () => {
+        for (const s of newScans) {
+          const sid = s.data?.octree?.sessionId;
+          if (sid) void deleteCloudSession(sid);
+        }
+      };
       // Canceled: this pathway is all-or-nothing, so add NOTHING and return
       // quietly. The modal closing is the feedback; no toast (nothing happened).
-      if (bulkImportCanceledRef.current) return;
+      if (bulkImportCanceledRef.current) { discardLoaded(); return; }
       if (failures.length > 0) {
+        discardLoaded();
         const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
         const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
         throw new Error(

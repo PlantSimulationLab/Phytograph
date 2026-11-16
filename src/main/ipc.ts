@@ -20,6 +20,7 @@ import { EXPECTED_BACKEND_VERSION } from '../shared/constants.js';
 import { getBackendPort } from './backend.js';
 import { getBackendToken } from './backendToken.js';
 import { allowPath, isPathAllowed, isWriteAllowed } from './fsAllowlist.js';
+import { isAllowedExternalUrl } from './externalUrl.js';
 import { grant as browserGrant, listDir, listPlaces } from './fileBrowser.js';
 import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
 import { readFileHead } from './readFileHead.js';
@@ -69,7 +70,14 @@ export function registerIpc(): void {
 
   // Open an https: URL in the browser or a mailto: link in the default mail
   // client. The feedback dialog uses this for both its GitHub and email paths.
-  ipcMain.handle(IPC.ShellOpenExternal, (_e, url: string) => shell.openExternal(url));
+  ipcMain.handle(IPC.ShellOpenExternal, (_e, url: string) => {
+    // https: and mailto: only (see externalUrl.ts): any other scheme can open
+    // local files or run protocol handlers.
+    if (!isAllowedExternalUrl(url)) {
+      throw new Error('openExternal refused: only https: and mailto: links can be opened');
+    }
+    return shell.openExternal(url);
+  });
 
   // Session logs ----------------------------------------------------------
   // One-way forward of a renderer console/error line into the unified log file.
@@ -88,6 +96,12 @@ export function registerIpc(): void {
     IPC.LogsExport,
     async (_e, destPath: string | null): Promise<LogExportResult> => {
       if (!destPath) return { savedPath: null };
+      // The same rule as every fs write: only a path a save dialog returned
+      // (the renderer gets this one from dialog.save). It used to write
+      // wherever it was told.
+      if (!isWriteAllowed(destPath)) {
+        throw new Error(`log export denied: "${destPath}" is not a user-selected path`);
+      }
       await copySessionLogTo(destPath);
       // Reveal the written file in the OS file manager so the user can drag it
       // into a GitHub issue / email. SKIP under E2E: on a headless CI runner
@@ -158,7 +172,9 @@ export function registerIpc(): void {
   // <input type=file> (resolved via webUtils.getPathForFile in preload). That's
   // a genuine user selection, so allowlist it before the renderer reads it.
   ipcMain.on(IPC.FsAllowPath, (_e, path: string) => {
-    if (typeof path === 'string') allowPath(path);
+    // Read-only: the renderer can report any path through this, so it must
+    // not be able to make one writable (see allowPath 'reportedFile').
+    if (typeof path === 'string') allowPath(path, 'reportedFile');
   });
 
   // In-app file browser (File -> Import). Listing exposes names and metadata

@@ -73,4 +73,24 @@ describe('fsAllowlist writes', () => {
     allowPath(join(dir, 'out.las'), 'saveFile');
     expect(isPathAllowed(join(dir, 'neighbor.txt'))).toBe(false);
   });
+
+  it('opening a file lets its siblings be READ, not overwritten', () => {
+    // The companion-data allowance (a Helios XML finding its scans) used to
+    // count for writes too: open scene.xml and scene.xyz became overwritable.
+    allowPath(fileA, 'file');
+    expect(isPathAllowed(fileB)).toBe(true);
+    expect(isWriteAllowed(fileB)).toBe(false);
+    expect(isWriteAllowed(join(dir, 'new.las'))).toBe(false);
+    expect(isWriteAllowed(fileA)).toBe(true);   // the picked file itself, as before
+  });
+
+  it('a path the renderer only REPORTED is readable, never writable', () => {
+    // FsAllowPath (drag-drop / <input type=file>) takes whatever path the
+    // renderer names, so it must not be able to make one writable.
+    allowPath(fileA, 'reportedFile');
+    expect(isPathAllowed(fileA)).toBe(true);
+    expect(isPathAllowed(fileB)).toBe(true);    // companion data, as a pick
+    expect(isWriteAllowed(fileA)).toBe(false);
+    expect(isWriteAllowed(fileB)).toBe(false);
+  });
 });

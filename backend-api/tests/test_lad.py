@@ -458,6 +458,26 @@ class TestLADRequestShaping:
         assert len(w) == 1
         assert "1 deleted" in w[0]
 
+    def test_session_arrays_are_gathered_outside_the_global_lock(self, stub_pyhelios, monkeypatch):
+        """The per-return gather, directions and label columns used to run
+        inside `_cloud_session_lock`, stalling every request on every cloud for
+        a large scan. They now run on a snapshot with the lock released."""
+        seen = []
+        real = main._session_to_lad_arrays
+
+        def watched(*a, **k):
+            seen.append(main._cloud_session_lock.locked())
+            return real(*a, **k)
+
+        monkeypatch.setattr(main, "_session_to_lad_arrays", watched)
+        self._session_with_deletions("lad-lock", deleted_rows=[3])
+        try:
+            result = main._do_lad_computation(self._session_request("lad-lock"))
+        finally:
+            main._cloud_sessions.pop("lad-lock", None)
+        assert result["success"] is True, result.get("error")
+        assert seen == [False]
+
     def test_deleted_points_outside_grid_do_not_warn(self, stub_pyhelios):
         # Cropping to the grid is the case the inference handles exactly.
         self._session_with_deletions("lad-del-out", deleted_rows=[3])

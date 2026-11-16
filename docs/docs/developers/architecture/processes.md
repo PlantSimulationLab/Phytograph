@@ -408,11 +408,18 @@ chose and the handlers reject anything else, so a renderer compromise can't read
 - An open/save **dialog** result is allowlisted when it's returned.
 - A **drag-drop / `<input type=file>`** path is allowlisted by preload right
   after `webUtils.getPathForFile` resolves it (one-way `fs:allowPath` IPC).
+  That IPC accepts whatever path the renderer names, so its grant is
+  **read-only** (`allowPath(p, 'reportedFile')`).
 - **Reads** are permitted for an explicitly-selected file *and its direct
   siblings* (companion-file allowance — selecting `scene.xml` lets the
   scan-import resolver find `scene.xyz` next to it). **Writes** are permitted to
-  a save target and to direct children of a chosen export directory. Neither
-  recurses into subdirectories.
+  a file a dialog returned, to the siblings of a **save** target, and to direct
+  children of a chosen export directory, never to the siblings of a file that
+  was only opened or dropped (they used to be writable too). Neither recurses
+  into subdirectories. `logs:export` follows the same write rule.
+- `shell:openExternal` opens only `https:` and `mailto:` URLs
+  (`src/main/externalUrl.ts`); any other scheme can open local files or run
+  protocol handlers.
 
 File → Import reads only the first 64 KB of each picked file
 (`fs.readBinary(path, maxBytes)`, `src/main/readFileHead.ts`): every

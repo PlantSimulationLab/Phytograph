@@ -33,6 +33,11 @@ const allowedImportDirs = new Set<string>();
 // Files the in-app browser granted. Read-only: kept apart from `allowed`,
 // which isWriteAllowed also honors.
 const allowedImportFiles = new Set<string>();
+// Files the RENDERER reported (drag-drop, <input type=file>) through
+// FsAllowPath. Readable, with their siblings, as a native pick is; never
+// writable, because the renderer can report any path at all and nothing writes
+// back to a dropped file through the bridge.
+const allowedReportedFiles = new Set<string>();
 
 const IMPORTABLE = new Set<string>(IMPORTABLE_EXTENSIONS);
 
@@ -76,10 +81,17 @@ function realOrNorm(p: string): string {
  */
 export function allowPath(
   p: string | null | undefined,
-  kind: 'file' | 'saveFile' | 'directory' | 'importFile' = 'file',
+  kind: 'file' | 'saveFile' | 'directory' | 'importFile' | 'reportedFile' = 'file',
 ): void {
   if (!p) return;
   const n = norm(p);
+  if (kind === 'reportedFile') {
+    allowedReportedFiles.add(n);
+    const real = realOrNorm(p);
+    if (real !== n) allowedReportedFiles.add(real);
+    allowedReadDirs.add(dirname(n));
+    return;
+  }
   if (kind === 'importFile') {
     // The in-app browser's grant: the renderer named this path, so it gets
     // only what an import needs — the file, and its importable siblings (a
@@ -126,22 +138,29 @@ export function isPathAllowed(p: string): boolean {
 // grants are deliberately not part of it.
 function isSelectedPath(p: string): boolean {
   const n = norm(p);
-  if (allowed.has(n)) return true;
+  if (allowed.has(n) || allowedReportedFiles.has(n)) return true;
   // A read may arrive for a symlink whose normalized form wasn't stored but
   // whose target was (or vice-versa); check the resolved form too.
-  if (allowed.has(realOrNorm(p))) return true;
+  const real = realOrNorm(p);
+  if (allowed.has(real) || allowedReportedFiles.has(real)) return true;
   return allowedReadDirs.has(dirname(n));
 }
 
 /**
- * True if `p` may be WRITTEN: either explicitly allowlisted, or a direct child
- * of a directory the user authorized for writes (save-dialog parent / chosen
- * export folder). Direct-child only — no recursive descent — so an authorized
- * folder can't be used to write into arbitrary nested paths.
+ * True if `p` may be WRITTEN: a path a native dialog returned, or a direct
+ * child of a directory the user authorized for writes (save-dialog parent /
+ * chosen export folder). Direct-child only — no recursive descent — so an
+ * authorized folder can't be used to write into arbitrary nested paths.
+ *
+ * NOT a sibling of a selected file: that allowance exists to READ companion
+ * data (a Helios XML finding its scans). It used to count for writes too, so
+ * opening or dropping one file made every file beside it overwritable. Nor a
+ * file the renderer merely reported (FsAllowPath).
  */
 export function isWriteAllowed(p: string): boolean {
-  if (isSelectedPath(p)) return true;
-  return allowedWriteDirs.has(dirname(norm(p)));
+  const n = norm(p);
+  if (allowed.has(n) || allowed.has(realOrNorm(p))) return true;
+  return allowedWriteDirs.has(dirname(n));
 }
 
 /** Test-only: clear the allowlist between cases. */
@@ -151,6 +170,7 @@ export function _resetAllowlist(): void {
   allowedReadDirs.clear();
   allowedImportDirs.clear();
   allowedImportFiles.clear();
+  allowedReportedFiles.clear();
 }
 
 // E2E seam: Playwright helpers stub `dialog:open`/`dialog:save` (replacing the

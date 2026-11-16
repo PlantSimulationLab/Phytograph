@@ -184,6 +184,56 @@ def test_a_split_that_fails_after_its_commit_is_undone(isolated, monkeypatch):
     assert set(main._cloud_sessions) == before_sessions, "the leftover session was left behind"
 
 
+def test_an_undone_split_gives_back_the_undo_state_it_ended(isolated, monkeypatch):
+    """The split commit makes the post-split mask (moved rows included) the
+    floor erase-undo replays onto, and ends the erase/label undo history.
+    Undoing the split un-deleted the rows but kept that floor, so the next
+    erase-undo re-deleted the half that had just been given back."""
+    sid = _cloud("a")
+    sess = main._cloud_sessions[sid]
+    whole = _survivors(sid)
+    pos = np.asarray(sess.positions)
+    lo, hi = pos.min(axis=0) - 1.0, pos.max(axis=0) + 1.0
+    hi[0] = np.quantile(pos[:, 0], 0.2)          # erase the lowest-x fifth
+    main.delete_cloud_region(sid, main.DeleteRegionRequest(
+        region={"kind": "box", "min": lo.tolist(), "max": hi.tolist()}))
+    erased = whole - _survivors(sid)
+    assert erased > 0 and len(sess.deleted_history) == 1
+
+    monkeypatch.setattr(main, "_session_rebuild",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("converter exploded")))
+    with pytest.raises(RuntimeError):
+        main.session_split(sid, main.SessionSplitRequest(**HALF))
+    assert _survivors(sid) == whole - erased, "the split was not undone"
+    assert len(sess.deleted_history) == 1, "the erase's undo step was not given back"
+
+    main.reset_cloud_edits(sid, main.ResetCloudEditsRequest(edit_count=0))   # undo the erase
+    assert _survivors(sid) == whole, "erase-undo re-deleted the rows the split gave back"
+
+
+def test_an_undone_split_never_replays_its_moved_rows_after_a_later_erase(isolated, monkeypatch):
+    """If an erase was recorded after the split (so its prior undo state cannot
+    simply be put back), the moved rows must at least leave the replay floor."""
+    _install_fake_converter(monkeypatch)
+    sid = _cloud("a")
+    sess = main._cloud_sessions[sid]
+    whole = _survivors(sid)
+    undo: dict = {}
+    main._do_session_split(sid, main.SessionSplitRequest(**HALF), undo)
+    moved = len(undo["rows"])
+    pos = np.asarray(sess.positions)
+    live = np.flatnonzero(~sess.deleted)
+    target = pos[live[0]]
+    main.delete_cloud_region(sid, main.DeleteRegionRequest(region={
+        "kind": "box", "min": (target - 1e-6).tolist(), "max": (target + 1e-6).tolist()}))
+    assert sess.deleted_history, "the later erase recorded nothing"
+
+    main._undo_split(undo)
+    assert _survivors(sid) == whole - 1
+    main.reset_cloud_edits(sid, main.ResetCloudEditsRequest(edit_count=0))
+    assert moved > 0 and _survivors(sid) == whole
+
+
 def test_a_successful_split_is_not_undone(client, isolated, monkeypatch):
     _install_fake_converter(monkeypatch)
     sid = _cloud("a")
