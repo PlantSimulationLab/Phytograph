@@ -135,6 +135,10 @@ A comparison produces 1 where it holds and 0 where it does not, so
 `ifelse(curvature > 0.1, 1, 2)` builds a two-class column you can then color
 by or filter on.
 
+All arithmetic is done in double precision, whole numbers included, so
+`2 ** -1` is 0.5 and `10 ** 30` is 1e30 (the stored field is single
+precision).
+
 ### Whole-field values
 
 `mean`, `std`, `median`, `sum`, `count` and `percentile` take a whole field and

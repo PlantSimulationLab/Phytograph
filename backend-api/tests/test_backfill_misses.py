@@ -1156,3 +1156,21 @@ def test_an_undisturbed_gapfill_still_clears_the_loss_count(stub_pyhelios):
     _call(sess.session_id, origin=[0, 0, 5])
     assert sess.unrestorable_hit_count == 0
     assert sess.backfilled_misses_stale is False
+
+
+def test_mismatched_getters_recover_nothing_instead_of_crashing():
+    """The defensive early return (the bulk getters disagree on the hit count)
+    returned three values where every caller unpacks four, so 'recover nothing'
+    raised instead. It must be the same shape as the normal return."""
+    class Mismatched:
+        def gapfillMisses(self):
+            pass
+
+        def getHitMissArray(self):
+            return [0, 1, 1]
+
+        def getHitsXYZRGBArrays(self):
+            return np.zeros((2, 3)), np.zeros((2, 3))
+
+    synth_xyz, count, grid, ts = main._run_gapfill_extract(Mismatched())
+    assert synth_xyz.shape == (0, 3) and count == 0 and grid is None and ts is None

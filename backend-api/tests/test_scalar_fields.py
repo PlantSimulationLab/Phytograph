@@ -38,6 +38,26 @@ def test_operator_precedence_follows_python(cols):
     np.testing.assert_allclose(values, 1 + cols["z"] * 4, rtol=1e-6)
 
 
+@pytest.mark.parametrize("expr, expect", [
+    ("z * 0 + 2 ** -1", 0.5),        # was: ValueError from NumPy -> HTTP 500
+    ("z * 0 + 10 ** 30", 1e30),      # was: int64 overflow -> 5.08e18, silently
+    ("z * 0 + 7 // 2", 3.0),
+    ("z * 0 + 7 % 4", 3.0),
+])
+def test_integer_literals_evaluate_as_floats(cols, expr, expect):
+    values, _ = ev(expr, cols)
+    np.testing.assert_allclose(values, np.full(5, expect, dtype=np.float32), rtol=1e-6)
+
+
+def test_a_numpy_refusal_is_an_expression_error(cols, monkeypatch):
+    """Whatever NumPy refuses is the expression's fault: a 400 with a reason,
+    never a bare ValueError the endpoint turns into a 500."""
+    monkeypatch.setitem(sf._BIN_OPS, sf.ast.Pow, lambda a, b: (_ for _ in ()).throw(
+        ValueError("Integers to negative integer powers are not allowed.")))
+    with pytest.raises(sf.ExpressionError, match="negative integer powers"):
+        ev("z ** -1", cols)
+
+
 def test_two_columns(cols):
     values, _ = ev("intensity / (z + 1)", cols)
     np.testing.assert_allclose(

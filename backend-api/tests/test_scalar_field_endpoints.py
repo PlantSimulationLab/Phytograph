@@ -211,6 +211,13 @@ def test_dangerous_expressions_are_400_not_500(client, sess, expr):
     assert "evil" not in sess.extras
 
 
+def test_a_negative_integer_power_computes_instead_of_500(client, sess):
+    # NumPy refuses int ** negative-int; the literal used to reach it as an int.
+    res = compute(client, sess, "z * 0 + 2 ** -1", "half")
+    assert res.status_code == 200, res.text
+    np.testing.assert_allclose(sess.extras["half"][:6], 0.5)
+
+
 def test_expression_error_carries_a_column_offset(client, sess):
     res = compute(client, sess, "z + bogus", "x1")
     assert res.status_code == 400

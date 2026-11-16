@@ -491,7 +491,14 @@ def evaluate(parsed: ParsedExpr,
             env: Dict[str, object] = dict(env_scalars)
             for slug in parsed.variables:
                 env[slug] = np.asarray(columns[slug][start:stop], dtype=np.float64)
-            chunk = _eval_node(parsed.tree.body, env, parsed)
+            try:
+                chunk = _eval_node(parsed.tree.body, env, parsed)
+            except ExpressionError:
+                raise
+            except (ValueError, TypeError, ArithmeticError) as exc:
+                # A NumPy refusal is still the expression's fault, not the
+                # server's: say what it was rather than answer 500.
+                raise ExpressionError(f"The expression could not be evaluated: {exc}") from None
             out[start:stop] = np.asarray(
                 np.broadcast_to(chunk, (stop - start,)), dtype=np.float32)
 
@@ -525,6 +532,12 @@ def _column_length(columns: Dict[str, np.ndarray]) -> int:
 def _eval_node(node: ast.AST, env: Dict[str, object], parsed: ParsedExpr):
     """Recursively evaluate a whitelisted node against `env`."""
     if isinstance(node, ast.Constant):
+        # Numeric literals as float64, like every column. Left as Python ints,
+        # NumPy took them as int64: `2 ** -1` raised a bare ValueError
+        # ("Integers to negative integer powers are not allowed"), which reached
+        # the user as a 500, and `10 ** 30` silently overflowed to 5.08e18.
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            return float(node.value)
         return node.value
 
     if isinstance(node, ast.Name):

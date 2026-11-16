@@ -9639,6 +9639,11 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             )
 
         ti_params_for_cost = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+        # The tiling choice too, as the session endpoint and the worker get it.
+        # Without it both gates read tiling as "off": the inline path applied
+        # the untiled point limit and cost estimate to a run that tiles (the
+        # request's default is "auto").
+        ti_params_for_cost.update(tiling=request.tiling, tile_buffer_m=request.tile_buffer_m)
         size_error = _treeiso_size_error(pts, ti_params_for_cost)
         if size_error:
             return TreeSegmentationResponse(
@@ -12996,8 +13001,10 @@ def _run_gapfill_extract(cloud):
     xyz = np.asarray(xyz, dtype=np.float64)
     if miss_flag.shape[0] != xyz.shape[0]:
         # Defensive: bulk getters must agree on hit count. If they don't, recover
-        # nothing rather than mis-slice.
-        return np.empty((0, 3), np.float64), 0, None
+        # nothing rather than mis-slice. The same FOUR values as the main return
+        # (positions, count, grid, timestamps): with three, every caller's
+        # unpack raised, so "recover nothing" became a crash.
+        return np.empty((0, 3), np.float64), 0, None, None
     mask = miss_flag != 0
     synth_xyz = np.ascontiguousarray(xyz[mask], dtype=np.float64)
 
@@ -22724,6 +22731,11 @@ def create_plant_session(request: PlantSessionCreateRequest):
     """
     import time
 
+    # Released in `except` unless the session took ownership: a failure after
+    # these were entered (an unknown model, a build or leaf-angle error) used to
+    # return an error and leave both native objects allocated for good.
+    context = plantarch = None
+    registered = False
     try:
         from pyhelios import Context, PlantArchitecture
         from pyhelios.wrappers.DataTypes import vec3
@@ -22805,6 +22817,7 @@ def create_plant_session(request: PlantSessionCreateRequest):
         _sweep_plant_sessions()
         with _session_lock:
             _plant_sessions[session_id] = session
+        registered = True
 
         print(f"[Plant Session] Created session {session_id}: age={current_age:.1f}, height={height:.3f}m")
 
@@ -22820,12 +22833,26 @@ def create_plant_session(request: PlantSessionCreateRequest):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if not registered:
+            _close_plant_handles(plantarch, context)
         return PlantSessionCreateResponse(
             success=False,
             plant_type=request.plant_type,
             current_age=0,
             error=str(e)
         )
+
+
+def _close_plant_handles(plantarch, context) -> None:
+    """Best-effort release of a PlantArchitecture and its Context that no
+    session took ownership of (plantarch first: it holds the context)."""
+    for handle in (plantarch, context):
+        if handle is None:
+            continue
+        try:
+            handle.__exit__(None, None, None)
+        except Exception:
+            logger.exception("releasing an unowned plant handle failed")
 
 
 @app.post("/api/plant/session/{session_id}/advance", response_model=PlantSessionAdvanceResponse)
@@ -23220,6 +23247,8 @@ def morph_plant(request: PlantMorphRequest):
     import tempfile
     import os
 
+    context = plantarch = None
+    registered = False
     try:
         from pyhelios import Context, PlantArchitecture
 
@@ -23296,6 +23325,7 @@ def morph_plant(request: PlantMorphRequest):
         # Store session
         with _session_lock:
             _plant_sessions[session_id] = session
+        registered = True
         _sweep_plant_sessions()
 
         print(f"[Morph] Rebuilt plant {session_id}: age={current_age:.1f}, height={height:.3f}m, {vertex_count} vertices")
@@ -23322,11 +23352,11 @@ def morph_plant(request: PlantMorphRequest):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        try:
-            plantarch.__exit__(None, None, None)
-            context.__exit__(None, None, None)
-        except:
-            pass
+        # Only handles no session owns. This used to exit them unconditionally:
+        # a failure after registration freed the registered session's own
+        # Context, and a failure before `plantarch` existed skipped the context.
+        if not registered:
+            _close_plant_handles(plantarch, context)
         return PlantMorphResponse(
             success=False,
             error=str(e),
@@ -24157,11 +24187,8 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                 pass
             # Tear down pyhelios resources unless a session owns them now.
             if not keep_session:
-                try:
-                    plantarch.__exit__(None, None, None)
-                    context.__exit__(None, None, None)
-                except Exception:
-                    pass
+                # Each released on its own: one failing must not skip the other.
+                _close_plant_handles(plantarch, context)
 
     async def event_generator():
         loop = asyncio.get_event_loop()

@@ -81,7 +81,11 @@ def test_rss_includes_children_only_when_asked():
     solo = mb.rss_bytes()
     with_children = mb.rss_bytes(include_children=True)
     assert solo > 0
-    assert with_children >= solo
+    # Two separate readings: this process's own RSS can shrink between them
+    # (macOS compresses pages under memory pressure; it failed by 147 KB in a
+    # loaded full-suite run). Children are added, never subtracted, so the
+    # with-children reading may trail only by that drift.
+    assert with_children >= solo - 8 * 1024 * 1024
 
 
 def test_bytes_per_point_matches_the_session_dtypes():

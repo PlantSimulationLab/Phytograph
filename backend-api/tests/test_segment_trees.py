@@ -218,11 +218,26 @@ def test_oversize_cloud_rejected_with_actionable_error(client, monkeypatch):
     not an apparent hang. Lower the cap so the test stays tiny."""
     monkeypatch.setattr(main, "_TREEISO_MAX_POINTS", 50)
     points, _ = _load_fixture()
-    res = client.post("/api/segment/trees", json={"points": points[:200].tolist()})
+    res = client.post("/api/segment/trees",
+                      json={"points": points[:200].tolist(), "tiling": "off"})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["success"] is False
-    assert "exceeds" in body["error"] and "limit" in body["error"]
+    assert "exceeds" in body["error"] and "the 50-point limit" in body["error"]
+
+
+def test_a_tiled_inline_run_is_held_to_the_tiled_limit(client, monkeypatch):
+    """The inline endpoint never passed `tiling` to the size gate, which then
+    read it as "off" and applied the untiled limit to a run that tiles (the
+    default is "auto"). The session endpoint always passed it."""
+    monkeypatch.setattr(main, "_TREEISO_MAX_POINTS", 50)
+    monkeypatch.setattr(main, "_TREEISO_MAX_POINTS_TILED", 100)
+    points, _ = _load_fixture()
+    res = client.post("/api/segment/trees",
+                      json={"points": points[:200].tolist(), "tiling": "on"})
+    body = res.json()
+    assert body["success"] is False
+    assert "the 100-point limit" in body["error"], body["error"]
 
 
 # --- Node-count cost gate ---------------------------------------------------
