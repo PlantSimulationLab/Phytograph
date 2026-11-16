@@ -4847,7 +4847,7 @@ export default function PointCloudViewer({
     const label = duplicateScanName(scanDisplayName(src), scans.map(scanDisplayName));
     // Give the copy a fresh unused color rather than inheriting the source's,
     // so the two scans are visually distinct in the viewer/list.
-    const color = allocateScanColor(new Set(scans.map(s => s.color)));
+    const color = allocateScanColor(scans.map(s => s.color));
     const params = src.params
       ? { ...src.params, origin: { ...src.params.origin } }
       : undefined;
@@ -30917,7 +30917,7 @@ export default function PointCloudViewer({
           } else {
             // Create a params-only scan. Allocate a color from the same
             // palette as data-bearing scans so the dot is consistent.
-            const nextColor = allocateScanColor(new Set(scans.map(s => s.color)));
+            const nextColor = allocateScanColor(scans.map(s => s.color));
             const id = crypto.randomUUID();
 
             // Frame-mismatch check: a trajectory/scan imported in a projected CRS

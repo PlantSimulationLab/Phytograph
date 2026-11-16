@@ -473,29 +473,38 @@ const SCAN_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#e
 // the bug this replaced. Seed it with the colors already on the scene and call
 // it once per new scan.
 //
-// Past exhaustion it cycles on a MONOTONIC cursor rather than on `used.size`.
-// That distinction is load-bearing: the set cannot grow beyond the palette, so a
-// size-based fallback freezes on one color from the 9th allocation onward —
-// reintroducing the identical-swatch bug for any source with more than 8
-// positions. The cursor keeps advancing, so colors keep varying.
+// Past exhaustion it hands out the LEAST-USED palette color (ties broken by
+// palette order), counting duplicates already on the scene. Every import builds
+// a fresh allocator, so any per-allocator cursor restarts at the head of the
+// palette and, with one scan imported at a time, gives every later scan blue.
+// Deriving the choice from the scene's own colors makes the cycle persist across
+// imports: the 9th scan gets blue, the 10th green, and so on, and it stays
+// balanced when scans are deleted. While a color is still free this reduces to
+// "first unused entry".
 export function createScanColorAllocator(usedColors: Iterable<string> = []): () => string {
-  const used = new Set(usedColors);
-  let cursor = 0;
+  const counts = new Map<string, number>(SCAN_PALETTE.map(c => [c, 0]));
+  for (const c of usedColors) {
+    if (counts.has(c)) counts.set(c, counts.get(c)! + 1);
+  }
   return () => {
-    const free = SCAN_PALETTE.find(c => !used.has(c));
-    if (free !== undefined) {
-      used.add(free);
-      return free;
+    let best = SCAN_PALETTE[0];
+    for (const c of SCAN_PALETTE) {
+      if (counts.get(c)! < counts.get(best)!) best = c;
     }
-    return SCAN_PALETTE[cursor++ % SCAN_PALETTE.length];
+    counts.set(best, counts.get(best)! + 1);
+    return best;
   };
 }
 
-// One-shot form of {@link createScanColorAllocator}: the first palette color
-// not already in `usedColors`. Use this only where a SINGLE scan is created (a
+// One-shot form of {@link createScanColorAllocator}: the least-used palette
+// color given `usedColors`. Use this only where a SINGLE scan is created (a
 // duplicate, a params-only scan); anything creating several in a row needs the
 // allocator, or they all come out the same color.
-export function allocateScanColor(usedColors: Set<string>): string {
+//
+// Pass the colors as they are, DUPLICATES INCLUDED (`scans.map(s => s.color)`).
+// It took a Set, which keeps one of each: once every palette color was in use,
+// every count read 1 and every duplicate came out the first color.
+export function allocateScanColor(usedColors: Iterable<string>): string {
   return createScanColorAllocator(usedColors)();
 }
 

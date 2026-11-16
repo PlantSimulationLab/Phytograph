@@ -780,6 +780,19 @@ describe('allocateScanColor / createScanColorAllocator', () => {
   const RED = '#ef4444';
   const PALETTE_SIZE = 8;
 
+  it('keeps cycling when single scans are duplicated past exhaustion', () => {
+    // The one-shot form used to take a Set, which keeps one of each color, so
+    // once the palette was full every duplicate came out blue.
+    const scene = Array.from({ length: PALETTE_SIZE }, createScanColorAllocator([]));
+    const picked: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const c = allocateScanColor(scene);
+      picked.push(c);
+      scene.push(c);
+    }
+    expect(picked).toEqual([BLUE, GREEN, AMBER]);
+  });
+
   it('picks the first palette color not already on the scene', () => {
     expect(allocateScanColor(new Set())).toBe(BLUE);
     expect(allocateScanColor(new Set([BLUE]))).toBe(GREEN);
@@ -824,8 +837,22 @@ describe('allocateScanColor / createScanColorAllocator', () => {
     expect(twelve.slice(8, 12)).toEqual([BLUE, GREEN, AMBER, RED]);
   });
 
-  // Each import creates its own allocator, so one import's cursor never leaks
-  // into the next.
+  // The reported bug: once the palette is full, importing one scan at a time
+  // gave every new scan blue, because each import's allocator restarted its
+  // cursor. The choice must follow what is already on the scene.
+  it('keeps cycling across separate single-scan imports past exhaustion', () => {
+    const PALETTE = Array.from({ length: PALETTE_SIZE }, createScanColorAllocator([]));
+    const scene = [...PALETTE];
+    const picked: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const c = createScanColorAllocator(scene)();
+      picked.push(c);
+      scene.push(c);
+    }
+    expect(picked).toEqual(PALETTE.slice(0, 4));
+  });
+
+  // Each import creates its own allocator; the same seed gives the same sequence.
   it('gives independent instances the same sequence from the same seed', () => {
     const a = createScanColorAllocator([BLUE]);
     const b = createScanColorAllocator([BLUE]);
