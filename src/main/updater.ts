@@ -38,6 +38,23 @@ export function setInstallConfirm(fn: ConfirmInstall | null): void {
   confirmInstall = fn;
 }
 
+/**
+ * Told when an install the user approved did not happen and the app is still
+ * running: `quitAndInstall()` threw, the updater reported an error mid-install,
+ * or the process is still alive long after it should have quit. Approving the
+ * install also answered "discard unsaved work?" (see ConfirmInstall), and main
+ * latches that answer; left latched, the NEXT ordinary close skipped the
+ * prompt and threw the session away. Main un-latches it here.
+ */
+let installAborted: (() => void) | null = null;
+
+export function setInstallAborted(fn: (() => void) | null): void {
+  installAborted = fn;
+}
+
+// An install that has not quit the app after this long has failed.
+export const INSTALL_GIVE_UP_MS = 120_000;
+
 // How long the install+relaunch typically takes, quoted in the restart prompt.
 // The bundle is large (PyInstaller sidecar + native libs), so the app is gone
 // for ~30s and the user otherwise has no idea whether it's working.
@@ -90,10 +107,25 @@ function registerListeners(getWindow: GetWindow): void {
     updaterLog.info(`update available: v${info.version}`);
   });
   autoUpdater.on('update-not-available', () => updaterLog.info('already up to date.'));
+  // Set from the moment quitAndInstall is called until the process quits (or
+  // the install is given up on): see setInstallAborted.
+  let installing = false;
+  let installTimer: ReturnType<typeof setTimeout> | null = null;
+  const abortInstall = (reason: string): void => {
+    if (!installing) return;
+    installing = false;
+    if (installTimer) clearTimeout(installTimer);
+    installTimer = null;
+    updaterLog.error(`install did not complete (${reason}); the app keeps running`);
+    emit({ status: 'error' });
+    installAborted?.();
+  };
+
   autoUpdater.on('error', (err) => {
     updaterLog.error('error:', err);
     // Clear the pill — otherwise a failed download leaves it spinning forever.
     emit({ status: 'error' });
+    abortInstall('the updater reported an error');
   });
   autoUpdater.on('download-progress', (p) => {
     updaterLog.info(`download ${p.percent.toFixed(1)}% (${(p.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s)`);
@@ -144,7 +176,15 @@ function registerListeners(getWindow: GetWindow): void {
     emit({ status: 'installing', version: info.version });
     await waitForPaintAck();
 
-    autoUpdater.quitAndInstall();
+    installing = true;
+    installTimer = setTimeout(() => abortInstall('the app did not quit'), INSTALL_GIVE_UP_MS);
+    installTimer.unref?.();
+    try {
+      autoUpdater.quitAndInstall();
+    } catch (err) {
+      updaterLog.error('quitAndInstall threw:', err);
+      abortInstall('quitAndInstall threw');
+    }
   });
 }
 

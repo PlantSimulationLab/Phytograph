@@ -123,6 +123,14 @@ describe('quit confirmation wiring', () => {
   // cache-root contract test does.
   const src = () => readFileSync(resolve(__dirname, 'main.ts'), 'utf8');
 
+  it('a failed update install un-latches the discard approval', () => {
+    // Approving an install also approves discarding the session (it latches
+    // quitConfirmed so the install's own quit does not ask twice). If the
+    // install fails and the app keeps running, the next ordinary close must
+    // ask again rather than throw the session away.
+    expect(src()).toMatch(/setInstallAborted\(\(\) => \{\s*quitConfirmed = false;\s*\}\)/);
+  });
+
   it('guards BOTH window close and before-quit', () => {
     const s = src();
     // Two distinct gestures that never share a code path: on macOS a window

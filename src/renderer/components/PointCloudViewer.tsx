@@ -115,6 +115,7 @@ import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction, SceneAction } from '../state/sceneActions';
+import { orderRemovesForUndo } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
 import { getUnlabeledClusters, getLabelExtent, segmentPick, isOpen3dLoadingMessage, type UnlabeledCluster } from '../utils/backendApi';
 import { screenStrokeTileTest } from '../lib/strokeTileTest';
@@ -549,7 +550,8 @@ interface PointCloudViewerProps {
   // let the "clear mesh on cloud-select" effect drop back to single-cloud mode,
   // not deselect everything.
   onToggleSelection: (id: string, additive: boolean, range: boolean, allowDeselect?: boolean) => void;
-  onRemoveScan: (id: string) => void;
+  /** Several clouds as ONE undoable step. */
+  onRemoveScans: (ids: string[]) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
   // Replace the scan selection outright (see handleSetScanSelection in App).
@@ -705,7 +707,7 @@ export default function PointCloudViewer({
   onHideScan,
   onToggleMisses,
   onToggleSelection,
-  onRemoveScan,
+  onRemoveScans,
   onSelectAll,
   onDeselectAll,
   onSetScanSelection,
@@ -802,7 +804,8 @@ export default function PointCloudViewer({
       .filter((a): a is NonNullable<typeof a> => a !== null);
     if (actions.length === 0) return;
     const noun = kind === 'lad' ? 'LAD result' : kind;
-    scene.commit({ label: ids.length > 1 ? `Delete ${ids.length} ${noun}s` : `Delete ${noun}`, actions });
+    scene.commit({ label: ids.length > 1 ? `Delete ${ids.length} ${noun}s` : `Delete ${noun}`,
+      actions: orderRemovesForUndo(actions) });
   }, [scene]);
 
   // Undoable add/remove for skeletons (position-only transform), QSMs and LAD
@@ -862,7 +865,6 @@ export default function PointCloudViewer({
   // existing tool-panel logic only ever asks "is this cloud id selected", and
   // those ids never collide with params-only scan ids.
   const selectedIds = selectedScanIds;
-  const onRemoveCloud = onRemoveScan;
 
   const onUpdateCloud = onUpdateScanData;
   const onAddCloud = useMemo(() => {
@@ -19555,9 +19557,10 @@ export default function PointCloudViewer({
       // `settleAll` (used on close) waiting forever. `cancel` also releases
       // anything already blocked on this cloud's barrier.
       ids.forEach(id => bakeQueueRef.current?.cancel(id));
-      // onRemoveCloud === App's handleRemoveScan: it frees each scan's backend
-      // session and prunes selectedScanIds, so looping here frees every session.
-      ids.forEach(id => onRemoveCloud(id));
+      // ONE undoable step for the whole selection, like the other kinds above.
+      // Looping onRemoveCloud committed a transaction per cloud from one
+      // stale snapshot: N undos, and the clouds came back out of order.
+      onRemoveScans(ids);
     } else if (type === 'qsm') {
       removeObjects('qsm', ids);
       setSelectedQSMIds(prev => {
@@ -19568,7 +19571,7 @@ export default function PointCloudViewer({
     }
 
     setDeleteConfirm(null);
-  }, [deleteConfirm, removeObjects, onRemoveCloud, deleteMeshGroups]);
+  }, [deleteConfirm, removeObjects, onRemoveScans, deleteMeshGroups]);
 
   // Toggle skeleton visibility
   const handleToggleSkeletonVisibility = useCallback((skeletonId: string) => {

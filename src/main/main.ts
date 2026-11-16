@@ -5,7 +5,7 @@ import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHand
 import { registerIpc } from './ipc.js';
 import { authorizeOpenPaths, extractFilePathsFromArgv } from './openPaths.js';
 import { installApplicationMenu, applyMenuState } from './menu.js';
-import { setupAutoUpdater, setInstallConfirm } from './updater.js';
+import { setupAutoUpdater, setInstallConfirm, setInstallAborted } from './updater.js';
 import { IPC, type FileDropPayload, type MenuStatePayload, type SceneDirtyPayload } from '../shared/ipc.js';
 import { setSceneDirty, resetSceneDirty, shouldAllowClose, currentSceneDirty } from './quitConfirm.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
@@ -599,6 +599,11 @@ app.whenReady().then(async () => {
     if (!shouldAllowClose(showQuitConfirm, saveProjectFromQuit)) return false;
     quitConfirmed = true;
     return true;
+  });
+  // The install that answer was for failed and the app is still running: the
+  // discard approval no longer applies, so the next close must ask again.
+  setInstallAborted(() => {
+    quitConfirmed = false;
   });
 });
 

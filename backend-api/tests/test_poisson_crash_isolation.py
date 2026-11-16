@@ -143,6 +143,41 @@ def test_worker_crash_becomes_an_error_not_a_dead_backend(client, monkeypatch):
     assert body["success"] is True, body.get("error")
 
 
+def test_cancel_kills_the_poisson_child(monkeypatch):
+    """Cancel used to do nothing to a running reconstruction: the helper sat in
+    `proc.wait()`, so the child ran to completion at full CPU and memory after
+    the user had moved on. A child that would run for a minute must be killed
+    within a moment of the cancel."""
+    import subprocess
+    import sys
+    import time
+    procs = []
+
+    def spawn(env, log):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             start_new_session=True)
+        procs.append(p)
+        return p
+
+    class CancelSoon:
+        def __init__(self):
+            self.t0 = time.monotonic()
+
+        def __call__(self, fraction, message=""):
+            pass
+
+        def should_cancel(self):
+            return time.monotonic() - self.t0 > 0.3
+
+    monkeypatch.setattr(main, "_spawn_seg_worker", spawn)
+    t0 = time.monotonic()
+    with pytest.raises(main.ScanCanceled):
+        main._run_poisson_isolated(_sphere(), None, 8, progress=CancelSoon())
+    assert time.monotonic() - t0 < 10, "the cancel did not stop the wait"
+    procs[0].wait(timeout=10)
+    assert procs[0].returncode is not None and procs[0].returncode != 0, "the child was not killed"
+
+
 def test_worker_that_exits_clean_without_writing_a_mesh_is_still_an_error(monkeypatch):
     """Success is judged by the OUTPUTS, not the exit code.
 

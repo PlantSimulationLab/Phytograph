@@ -177,6 +177,28 @@ def test_admission_is_acquired_before_the_session_lock_not_under_it(
 
 # ---- the estimators ----------------------------------------------------------
 
+def test_triangulation_is_admitted_while_it_meshes(client, observe_in_flight):
+    """Alpha shape and Poisson peak at 1.4-2.5 KB per point and were never
+    admitted: two concurrent runs were invisible to the budget."""
+    seen = observe_in_flight("_do_open3d_triangulation")
+    # Points on a SURFACE: ball pivoting on points filling a volume can explode
+    # combinatorially.
+    rng = np.random.default_rng(1)
+    u, v = rng.uniform(0, 2 * np.pi, 400), rng.uniform(0.2, np.pi - 0.2, 400)
+    pts = np.c_[np.cos(u) * np.sin(v), np.sin(u) * np.sin(v), np.cos(v)].tolist()
+    res = client.post("/api/triangulate", json={"points": pts, "method": "ball_pivoting"})
+    assert res.status_code == 200
+    assert any(label.startswith("triangulate") for label in seen), seen
+
+
+def test_triangulation_estimate_follows_the_method_and_the_cap():
+    pts = [[0.0, 0.0, 0.0]] * 1000
+    bp = main._triangulation_bytes(main.TriangulationRequest(points=pts, method="ball_pivoting"))
+    po = main._triangulation_bytes(main.TriangulationRequest(points=pts, method="poisson"))
+    assert bp == 1000 * main._TRIANGULATION_BYTES_PER_POINT["ball_pivoting"]
+    assert po > 10 * bp
+
+
 def test_mutation_estimate_follows_the_columns_a_session_carries():
     """A bare xyz cloud must not be charged for color it does not have."""
     class _S:

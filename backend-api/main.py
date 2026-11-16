@@ -472,9 +472,21 @@ class KeepaliveResponses:
                 message = await queue.get()
                 if message is not None and message["type"] == "http.response.body":
                     body += message.get("body", b"")
+            error = self._detail_text(body, status)
+            # An endpoint that RAISED (anything but an HTTPException) sent no
+            # response at all. Answered promptly, its exception propagates to
+            # uvicorn, which logs the traceback; here it used to be retrieved
+            # in `finally` and dropped, so a failure in any request slower than
+            # `first_wait` left nothing in the log and told the user only
+            # "HTTP 500". Log it, and say what it was.
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                exc = task.exception()
+                logger.error("Unhandled exception in %s %s (after keepalives began)",
+                             scope.get("method"), scope.get("path"),
+                             exc_info=(type(exc), exc, exc.__traceback__))
+                error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
             await send({"type": "http.response.body", "more_body": False,
-                        "body": _pack_progress_marker(
-                            None, "", error=self._detail_text(body, status))})
+                        "body": _pack_progress_marker(None, "", error=error)})
         finally:
             if not task.done():
                 task.cancel()
@@ -5513,6 +5525,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                 np.asarray(pcd.points),
                 np.asarray(pcd.normals) if pcd.has_normals() else None,
                 request.depth,
+                progress=progress,
             )
             mesh = o3d.geometry.TriangleMesh()
             mesh.vertices = o3d.utility.Vector3dVector(p_verts)
@@ -5716,13 +5729,50 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
     return _bin_frame_bytes(meta, buffers)
 
 
+# Peak working set per INPUT point of each Open3D method, measured (peak RSS,
+# 400 k points on a noisy sphere): the point cloud, normals and KD-tree it
+# builds, and the mesh. Poisson's figure adds its isolated child (~970 B/pt) to
+# the normal estimation and orientation done in this process (~1.4 KB/pt).
+_TRIANGULATION_BYTES_PER_POINT = {
+    "ball_pivoting": 150, "alpha_shape": 1450, "delaunay": 830, "poisson": 2450,
+}
+
+
+def _triangulation_bytes(request: "TriangulationRequest") -> int:
+    """Memory to admit for a triangulation, from the request alone. A source's
+    `max_points` caps it only without a crop: with one, the whole cloud is read
+    before it is cropped and then capped."""
+    cropping = request.crop_box is not None
+    n = 0
+    for src in (request.sources or ([request.source] if request.source else [])):
+        count = _source_point_count_estimate(src)
+        if src.max_points and not cropping:
+            count = min(count, int(src.max_points))
+        n += count
+    if not n and request.points:
+        n = len(request.points)
+    per = _TRIANGULATION_BYTES_PER_POINT.get(request.method, max(_TRIANGULATION_BYTES_PER_POINT.values()))
+    return int(n * per)
+
+
 @app.post("/api/triangulate")
 def triangulate_point_cloud(request: TriangulationRequest, http_request: Request):
-    """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame."""
+    """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame.
+
+    Admitted against the memory budget like every other heavy tool (it was not:
+    alpha shape and Poisson peak at 1.4-2.5 KB per point, so two concurrent runs
+    on a few million points could exhaust the machine unseen by the budget).
+    Admitted around the worker call, as Snap to Fit is: the lambda runs in the
+    streaming response's thread."""
     run_id, cancel_event = _new_cancel_token()
+    est = _triangulation_bytes(request)
+
+    def _run(progress):
+        with _ADMISSION.admit(est, f"triangulate ({request.method})"):
+            return _pack_mesh_frame(_do_open3d_triangulation(request, progress=progress))
+
     return _bin_frame_streaming_response(
-        lambda progress: _pack_mesh_frame(_do_open3d_triangulation(request, progress=progress)),
-        request=http_request, cancel_event=cancel_event, run_id=run_id)
+        _run, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 # ==================== CROWN FITTING ====================
@@ -28108,7 +28158,29 @@ def reap_seg_workers() -> None:
 atexit.register(reap_seg_workers)
 
 
-def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
+def _worker_still_running(proc) -> bool:
+    """Whether a worker child is still alive, for a poll loop that must not spin
+    forever. `poll()` alone is not enough: a pid already reaped elsewhere (the
+    shutdown reaper, a racing poll) never reports an exit through it, so on
+    POSIX the process's existence is checked too. Not on Windows, where signal
+    0 is CTRL_C_EVENT; there the worker is a Popen, whose poll is reliable."""
+    try:
+        if proc.poll() is not None:
+            return False
+    except ChildProcessError:
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        os.kill(proc.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _run_poisson_isolated(points: "np.ndarray", normals, depth: int, progress=None):
     """Run Open3D's Poisson reconstruction in a CHILD PROCESS and return
     `(vertices, triangles, densities)` as numpy arrays.
 
@@ -28153,7 +28225,20 @@ def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
         with _SEG_WORKERS_LOCK:
             _SEG_WORKERS[proc.pid] = proc
         try:
-            proc.wait()
+            # Poll rather than wait, so a Cancel (or the client leaving, which
+            # sets the same flag) KILLS the child. A bare `proc.wait()` let a
+            # canceled reconstruction run to completion at full CPU and memory
+            # long after the user had moved on.
+            while _worker_still_running(proc):
+                if progress is not None and getattr(progress, "should_cancel", None) \
+                        and progress.should_cancel():
+                    _kill_seg_worker(proc)
+                    raise ScanCanceled()
+                time.sleep(0.1)
+            try:
+                proc.wait()
+            except ChildProcessError:
+                pass     # reaped elsewhere; the outputs decide success below
         finally:
             with _SEG_WORKERS_LOCK:
                 _SEG_WORKERS.pop(proc.pid, None)

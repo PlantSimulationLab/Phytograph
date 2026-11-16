@@ -26,11 +26,11 @@
 
 import { app, crashReporter, dialog, shell, BrowserWindow } from 'electron';
 import { join } from 'node:path';
-import { existsSync, readdirSync, statSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { EXPECTED_BACKEND_VERSION, FEEDBACK_EMAIL } from '../shared/constants.js';
 import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
 import { buildIssueBody, buildGithubUrl, buildMailtoUrl, type Diagnostics } from '../renderer/lib/feedback.js';
-import { getLogFilePath, log } from './logger.js';
+import { getLogDir, getLogFilePath, log } from './logger.js';
 
 const pmLog = log.scope('crash');
 
@@ -75,10 +75,43 @@ export function initCrashReporter(): void {
  */
 export function markSessionStarted(): void {
   try {
-    writeFileSync(markerPath(), new Date().toISOString(), 'utf-8');
+    // The marker names THIS session's log. Logs are per session
+    // (main-<tag>.log), and the recovery dialog runs in the NEXT session, so
+    // without this it revealed and named the new session's log, which holds
+    // nothing about the crash.
+    writeFileSync(markerPath(),
+      JSON.stringify({ started: new Date().toISOString(), log: getLogFilePathSafe() }), 'utf-8');
   } catch (e) {
     pmLog.error('Failed to write clean-shutdown marker:', e);
   }
+}
+
+/**
+ * The log of the session that left `marker`: the path it recorded, or, for a
+ * marker written by an older version (a bare timestamp), the newest other
+ * session log in the log directory. Null when neither is found.
+ */
+export function previousSessionLog(markerText: string, currentLog: string | null, logDir: string | null): string | null {
+  try {
+    const parsed = JSON.parse(markerText) as { log?: unknown };
+    if (typeof parsed?.log === 'string' && existsSync(parsed.log)) return parsed.log;
+  } catch {
+    /* an older marker: a bare ISO timestamp */
+  }
+  if (!logDir || !existsSync(logDir)) return null;
+  let best: { path: string; mtime: number } | null = null;
+  for (const name of readdirSync(logDir)) {
+    if (!/^main-.*\.log$/.test(name) || name.endsWith('.old.log')) continue;
+    const p = join(logDir, name);
+    if (currentLog && p === currentLog) continue;
+    try {
+      const m = statSync(p).mtimeMs;
+      if (!best || m > best.mtime) best = { path: p, mtime: m };
+    } catch {
+      /* unreadable — skip */
+    }
+  }
+  return best?.path ?? null;
 }
 
 /**
@@ -189,16 +222,30 @@ export function checkPreviousSession(): boolean {
     /* marker unreadable — use the fallback window */
   }
   const dump = newestDumpSince(sinceMs);
+  let markerText = '';
+  try {
+    markerText = readFileSync(marker, 'utf-8');
+  } catch {
+    /* unreadable — previousSessionLog falls back to the log directory */
+  }
+  let logDir: string | null = null;
+  try {
+    logDir = getLogDir();
+  } catch {
+    /* no log dir */
+  }
+  const prevLog = previousSessionLog(markerText, getLogFilePathSafe(), logDir);
 
   pmLog.warn(
-    `Previous session did not exit cleanly (marker=${uncleanExit}, dump=${dump ?? 'none'}).`,
+    `Previous session did not exit cleanly (marker=${uncleanExit}, dump=${dump ?? 'none'}, ` +
+    `log=${prevLog ?? 'not found'}).`,
   );
-  showRecoveryDialog(dump);
+  showRecoveryDialog(dump, prevLog);
   return true;
 }
 
 /** The post-mortem recovery dialog. Non-fatal: the app keeps launching normally. */
-function showRecoveryDialog(dumpPath: string | null): void {
+function showRecoveryDialog(dumpPath: string | null, logPath: string | null): void {
   // This runs before the main window exists, so the dialog is parentless and —
   // on macOS — can open BEHIND whatever app the user is now looking at, leaving
   // a launch silently blocked on a modal they can't see. Force the app to the
@@ -234,12 +281,12 @@ function showRecoveryDialog(dumpPath: string | null): void {
     };
     const choice = win ? dialog.showMessageBoxSync(win, opts) : dialog.showMessageBoxSync(opts);
     if (choice === 1) {
-      revealCrashArtifacts(dumpPath);
+      revealCrashArtifacts(dumpPath, logPath);
       continue;
     }
     if (choice === 2) {
-      revealCrashArtifacts(dumpPath);
-      openReport(reportContext, dumpPath);
+      revealCrashArtifacts(dumpPath, logPath);
+      openReport(reportContext, dumpPath, logPath);
       continue;
     }
     break; // Dismiss
@@ -247,9 +294,10 @@ function showRecoveryDialog(dumpPath: string | null): void {
 }
 
 /** Reveal the session log and the minidump (if any) in the OS file manager. */
-function revealCrashArtifacts(dumpPath: string | null): void {
+function revealCrashArtifacts(dumpPath: string | null, logPath: string | null): void {
   try {
-    shell.showItemInFolder(getLogFilePath());
+    // The CRASHED session's log; this session's is the fallback when it is gone.
+    shell.showItemInFolder(logPath ?? getLogFilePath());
   } catch (e) {
     pmLog.error('Failed to reveal log:', e);
   }
@@ -263,8 +311,8 @@ function revealCrashArtifacts(dumpPath: string | null): void {
 }
 
 /** Open a pre-filled GitHub bug report (email fallback), naming files to attach. */
-function openReport(context: string, dumpPath: string | null): void {
-  const logName = getLogFilePathSafe()?.split(/[\\/]/).pop();
+function openReport(context: string, dumpPath: string | null, logPath: string | null): void {
+  const logName = (logPath ?? getLogFilePathSafe())?.split(/[\\/]/).pop();
   const dumpName = dumpPath?.split(/[\\/]/).pop();
   const description =
     `**Phytograph crashed (detected on next launch).**\n\n${context}\n\n` +

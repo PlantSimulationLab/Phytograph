@@ -370,6 +370,59 @@ describe('install confirmation gate', () => {
     expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
   });
 
+  // Approving the install also answered "discard unsaved work?", and main
+  // latches it. If the install then fails with the app still running, the next
+  // ordinary close must ask again: setInstallAborted is how main finds out.
+  it('reports an install the updater errors out of', async () => {
+    const mod = await loadUpdater();
+    const aborted = vi.fn();
+    mod.setInstallAborted(aborted);
+    await restartNow(mod, () => true);
+    expect(aborted).not.toHaveBeenCalled();
+    handlers.get('error')!(new Error('signature mismatch'));
+    expect(aborted).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a quitAndInstall that throws', async () => {
+    const mod = await loadUpdater();
+    const aborted = vi.fn();
+    mod.setInstallAborted(aborted);
+    autoUpdater.quitAndInstall.mockImplementationOnce(() => { throw new Error('EPERM'); });
+    await restartNow(mod, () => true);
+    expect(aborted).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an install that never quits the app', async () => {
+    const mod = await loadUpdater();
+    const aborted = vi.fn();
+    mod.setInstallAborted(aborted);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      mod.setInstallConfirm(() => true);
+      mod.setupAutoUpdater(getWindow);
+      showMessageBox.mockResolvedValue({ response: 0 } as any);
+      const done = handlers.get('update-downloaded')!({ version: '0.58.0' });
+      await vi.advanceTimersByTimeAsync(1_000);     // past the paint-ack wait
+      await done;
+      expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(mod.INSTALL_GIVE_UP_MS - 2_000);
+      expect(aborted).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(aborted).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not report an error that is not during an install', async () => {
+    const mod = await loadUpdater();
+    const aborted = vi.fn();
+    mod.setInstallAborted(aborted);
+    mod.setupAutoUpdater(getWindow);
+    handlers.get('error')!(new Error('offline'));      // a failed check/download
+    expect(aborted).not.toHaveBeenCalled();
+  });
+
   it('installs when no confirm is registered', async () => {
     const mod = await loadUpdater();
     await restartNow(mod, null);

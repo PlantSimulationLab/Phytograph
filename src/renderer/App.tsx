@@ -42,7 +42,8 @@ function isImportCancel(err: unknown, signal?: AbortSignal): boolean {
     || signal?.aborted === true
     || (err instanceof Error && err.name === 'AbortError');
 }
-import { useScene } from "./state/sceneStore";
+import { useScene, sessionsHeldByScene } from "./state/sceneStore";
+import { orderRemovesForUndo } from "./state/sceneActions";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { FileBrowserDialog, type BrowserMenuHandler, type FileBrowserResult } from "./components/fileBrowser/FileBrowserDialog";
 import { registerCategoricalSlug, registerContinuousSlug } from "./lib/classification";
@@ -190,19 +191,28 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       sessionId: s.data?.octree?.sessionId ?? null,
     })) });
   }, [scene]);
-  const removeScanTx = useCallback((id: string) => {
+  // Remove several scans as ONE undoable step. Deleting a selection used to
+  // commit one transaction per cloud, all built from the same pre-delete
+  // snapshot: N undos to get them back, and stale indices that put them back
+  // in the wrong places. Ordered by `orderRemovesForUndo` so undo restores the
+  // original order.
+  const removeScansTx = useCallback((ids: string[]) => {
     const s = scene.state;
-    const index = s.scans.findIndex(sc => sc.id === id);
-    if (index < 0) return;
-    const scan = s.scans[index];
-    scene.commit({
-      label: 'Delete scan',
-      actions: [{
-        t: 'remove', kind: 'scan', id, index, object: scan,
+    const actions = ids.flatMap((id) => {
+      const index = s.scans.findIndex(sc => sc.id === id);
+      if (index < 0) return [];
+      const scan = s.scans[index];
+      return [{
+        t: 'remove' as const, kind: 'scan' as const, id, index, object: scan,
         editState: s.editStates.get(id),
         filters: s.cloudFilters.get(id),
         sessionId: scan.data?.octree?.sessionId ?? null,
-      }],
+      }];
+    });
+    if (actions.length === 0) return;
+    scene.commit({
+      label: actions.length > 1 ? `Delete ${actions.length} scans` : 'Delete scan',
+      actions: orderRemovesForUndo(actions),
     });
   }, [scene]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
@@ -1394,17 +1404,18 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     multiple: true, // Allow multiple files
   });
 
-  const handleRemoveScan = useCallback((id: string) => {
-    // Undoable remove. The octree backend session is NOT freed here — it's freed
-    // by the store when this remove is evicted/purged (deferred-free), so undo
-    // can resurrect the scan with its session + unbaked edits intact.
-    removeScanTx(id);
+  // Undoable remove of one or more clouds, as ONE step. The octree backend
+  // sessions are NOT freed here — the store frees them when this remove is
+  // evicted/purged (deferred-free), so undo can resurrect the scans with their
+  // sessions + unbaked edits intact.
+  const handleRemoveScans = useCallback((ids: string[]) => {
+    removeScansTx(ids);
     setSelectedScanIds(prev => {
       const next = new Set(prev);
-      next.delete(id);
+      ids.forEach(id => next.delete(id));
       return next;
     });
-  }, [removeScanTx]);
+  }, [removeScansTx]);
 
   const handleToggleScanVisibility = useCallback((id: string) => {
     setScans(prev => prev.map(s =>
@@ -1852,7 +1863,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           // the id, the store's free check never sees that session and a stitch
           // that's undone and then superseded by another edit leaks it into the
           // sidecar until quit. (Deleting the merged scan normally is already
-          // covered — removeScanTx reads the id off the scan itself.)
+          // covered — removeScansTx reads the id off the scan itself.)
           {
             t: 'add', kind: 'scan', id: newScan.id, object: newScan,
             sessionId: newData.octree?.sessionId ?? null,
@@ -2186,15 +2197,14 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // long-lived sidecar would otherwise leak that RAM. Best-effort — each delete
   // swallows its own errors — then remount regardless.
   const handleResetToNew = useCallback(async () => {
-    const s = scene.state;
-    const deletions: Promise<unknown>[] = [];
-    for (const scan of s.scans) {
-      const sessionId = scan.data?.octree?.sessionId;
-      if (sessionId) deletions.push(deleteCloudSession(sessionId));
-    }
-    for (const mesh of s.meshes) {
-      if (mesh.plantSessionId) deletions.push(deletePlantSession(mesh.plantSessionId));
-    }
+    // Every session the scene holds, including those only undo/redo history can
+    // still reach (a deleted cloud, an undone import): the reset discards that
+    // history, so freeing just the clouds on screen leaked the rest.
+    const held = sessionsHeldByScene(scene.state);
+    const deletions: Promise<unknown>[] = [
+      ...[...held.clouds].map((sid) => deleteCloudSession(sid)),
+      ...[...held.plants].map((sid) => deletePlantSession(sid)),
+    ];
     await Promise.allSettled(deletions);
     // Overlay columns fetched for those sessions (tens of MB each on a large
     // cloud) would otherwise outlive the scene that showed them.
@@ -2507,7 +2517,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onHideScan={handleHideScan}
           onToggleMisses={handleToggleScanMisses}
           onToggleSelection={handleToggleScanSelection}
-          onRemoveScan={handleRemoveScan}
+          onRemoveScans={handleRemoveScans}
           onSelectAll={handleSelectAll}
           onDeselectAll={handleDeselectAll}
           onSetScanSelection={handleSetScanSelection}

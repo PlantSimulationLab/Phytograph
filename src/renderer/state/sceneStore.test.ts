@@ -3,9 +3,11 @@ import {
   sceneReducer,
   makeInitialSceneState,
   MAX_HISTORY,
+  sessionsHeldByScene,
   type SceneState,
 } from './sceneStore';
 import type { HistoryTransaction, SceneAction } from './sceneActions';
+import { orderRemovesForUndo } from './sceneActions';
 import type {
   CloudEditState, LabelEditState, LabelStroke, MeshEntry,
 } from '../lib/pointCloudTypes';
@@ -630,6 +632,27 @@ describe('history cap + session eviction', () => {
     expect(freeSession).toHaveBeenCalledWith('sess-v');
   });
 
+  it('sessionsHeldByScene names every session on screen or in undo/redo', () => {
+    // File → New freed only the clouds on screen; these others were orphaned.
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('live', 'sess-live') });
+    s = sceneReducer(s, { c: 'commit', tx: importTx('gone', 'sess-deleted') });
+    s = sceneReducer(s, { c: 'commit', tx: tx('del gone', [{
+      t: 'remove', kind: 'scan', id: 'gone', index: 1,
+      object: scanWithSession('gone', 'sess-deleted'), sessionId: 'sess-deleted',
+    }]) });
+    const plant = makeMesh('p1', { plantSessionId: 'plant-1' } as Partial<MeshEntry>);
+    s = sceneReducer(s, { c: 'commit', tx: tx('add plant', [{ t: 'add', kind: 'mesh', id: 'p1', object: plant }]) });
+    s = sceneReducer(s, { c: 'commit', tx: tx('del plant', [{ t: 'remove', kind: 'mesh', id: 'p1', index: 0, object: plant }]) });
+    s = sceneReducer(s, { c: 'commit', tx: importTx('undone', 'sess-undone') });
+    s = sceneReducer(s, { c: 'undo' });          // the import now waits in redo
+
+    expect(s.scans.map((x) => x.id)).toEqual(['live']);
+    const held = sessionsHeldByScene(s);
+    expect([...held.clouds].sort()).toEqual(['sess-deleted', 'sess-live', 'sess-undone']);
+    expect([...held.plants]).toEqual(['plant-1']);
+  });
+
   it('frees a session only once even when several evicted txs reference it', () => {
     const freeSession = vi.fn();
     let s = makeInitialSceneState();
@@ -647,6 +670,28 @@ describe('history cap + session eviction', () => {
 
     expect(freeSession).toHaveBeenCalledTimes(1);
     expect(freeSession).toHaveBeenCalledWith('sess-d');
+  });
+});
+
+// ── deleting several objects ────────────────────────────────────────────────
+describe('one undo restores a multi-delete in its original order', () => {
+  it.each([
+    [['a', 'c']],
+    [['c', 'a']],
+    [['d', 'a', 'c']],
+  ])('deleting %j', (ids) => {
+    let s = makeInitialSceneState();
+    for (const id of ['a', 'b', 'c', 'd']) {
+      s = sceneReducer(s, { c: 'commit', tx: tx(`add ${id}`, [{ t: 'add', kind: 'scan', id, object: makeScan(id) }]) });
+    }
+    const removes = ids.map((id) => ({
+      t: 'remove' as const, kind: 'scan' as const, id,
+      index: s.scans.findIndex((x) => x.id === id), object: s.scans.find((x) => x.id === id)!,
+    }));
+    s = sceneReducer(s, { c: 'commit', tx: tx('delete', orderRemovesForUndo(removes)) });
+    expect(s.scans.map((x) => x.id)).toEqual(['a', 'b', 'c', 'd'].filter((x) => !ids.includes(x)));
+    s = sceneReducer(s, { c: 'undo' });
+    expect(s.scans.map((x) => x.id)).toEqual(['a', 'b', 'c', 'd']);
   });
 });
 

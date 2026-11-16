@@ -264,6 +264,18 @@ export function invert(action: SceneAction): SceneAction {
 
 // Invert a whole transaction: reverse the action order and invert each. This is
 // what undo replays. (Redo replays the original transaction forward.)
+/**
+ * Several removes of one kind, ordered so that undo puts every object back
+ * where it was. Each remove records the object's index in the list as it was
+ * BEFORE the transaction, and undo re-inserts in REVERSE action order. Those
+ * indices are right only if the re-inserts run in ascending index, so the
+ * removes must be recorded in descending index. Recorded in selection order,
+ * deleting A (0) and C (2) from [A, B, C, D] came back as [A, B, D, C].
+ */
+export function orderRemovesForUndo<T extends { index: number }>(actions: T[]): T[] {
+  return [...actions].sort((a, b) => b.index - a.index);
+}
+
 export function invertTransaction(tx: HistoryTransaction): HistoryTransaction {
   return {
     label: tx.label,

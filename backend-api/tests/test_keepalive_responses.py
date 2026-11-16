@@ -58,6 +58,11 @@ def slow_app(monkeypatch):
         time.sleep(delay)
         raise HTTPException(status_code=code, detail="The worker ran out of memory.")
 
+    @app.post("/crashes")
+    def crashes(delay: float = 0.0):
+        time.sleep(delay)
+        raise ValueError("kaboom in the worker")
+
     @app.post("/cost")
     def cost():
         raise HTTPException(status_code=409, detail={
@@ -126,6 +131,22 @@ def test_a_slow_failure_is_reported_in_the_stream_with_its_detail(slow_app):
     assert res.status_code == 200                         # already committed
     errors = [m["error"] for m in decode_progress_markers(res.content) if m.get("error")]
     assert errors == ["The worker ran out of memory."]
+
+
+def test_a_slow_crash_is_logged_and_named_in_the_stream(slow_app, caplog):
+    """An endpoint that RAISES sends no response. Answered promptly, uvicorn
+    logs the traceback; after keepalives began the middleware used to retrieve
+    and drop the exception: nothing in the log, and only 'HTTP 500' for the user."""
+    import logging
+    client, _ = slow_app
+    with caplog.at_level(logging.ERROR):
+        res = client.post("/crashes?keepalive=1&delay=0.4")
+    assert res.status_code == 200
+    errors = [m["error"] for m in decode_progress_markers(res.content) if m.get("error")]
+    assert errors == ["ValueError: kaboom in the worker"]
+    logged = [r for r in caplog.records if r.exc_info and "kaboom" in str(r.exc_info[1])]
+    assert logged, "the traceback never reached the log"
+    assert "/crashes" in logged[0].getMessage()
 
 
 def test_without_the_flag_a_slow_answer_is_plain(slow_app):

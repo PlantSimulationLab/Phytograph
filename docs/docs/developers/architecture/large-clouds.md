@@ -922,9 +922,11 @@ Heavy paths declare their working set to `_ADMISSION.admit(bytes, label)`
 before allocating it: the import read (the session's columns plus one
 chunk), the killable segmentation workers (parent copy + worker copy +
 labels), export (a copy of every surviving column), every PotreeConverter
-run (72 B/pt, measured), and the session DEM (`_DEM_BYTES_PER_POINT` =
+run (72 B/pt, measured), the session DEM (`_DEM_BYTES_PER_POINT` =
 112 B/pt: the hits plus the ground and first-return subsets, measured at
-10 M points).
+10 M points), and Open3D triangulation (`_TRIANGULATION_BYTES_PER_POINT`, per
+method, measured at 400 k points: ball pivoting 150, Delaunay 830, alpha shape
+1450 and Poisson 2450 B/pt, the last including its isolated child).
 A job waits until it fits beside what is already running; a job larger than
 the whole budget is admitted **alone** and logged rather than refused. The
 budget is advisory for a lone job and a hard cap only on concurrency, because

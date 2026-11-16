@@ -363,6 +363,38 @@ function sessionIdsOf(action: SceneAction): string[] {
   return ids;
 }
 
+/**
+ * Every backend session the scene still holds: on screen, or reachable by an
+ * undo or redo. File → New used to free only the clouds on screen, so a deleted
+ * cloud whose delete could still be undone, or an undone import waiting in
+ * redo, kept a session nothing could reach after the reset.
+ */
+export function sessionsHeldByScene(state: SceneState): { clouds: Set<string>; plants: Set<string> } {
+  const clouds = new Set<string>();
+  const plants = new Set<string>();
+  const plantOf = (o: unknown) => (o as MeshEntry | undefined)?.plantSessionId;
+  for (const s of state.scans) {
+    const sid = s.data?.octree?.sessionId;
+    if (sid) clouds.add(sid);
+  }
+  for (const m of state.meshes) if (m.plantSessionId) plants.add(m.plantSessionId);
+  for (const tx of [...state.past, ...state.future]) {
+    for (const a of tx.actions) {
+      for (const sid of sessionIdsOf(a)) clouds.add(sid);
+      if ((a.t === 'add' || a.t === 'remove') && a.kind === 'mesh') {
+        const p = plantOf(a.object);
+        if (p) plants.add(p);
+      } else if (a.t === 'replaceObject' && a.kind === 'mesh') {
+        for (const o of [a.before, a.after]) {
+          const p = plantOf(o);
+          if (p) plants.add(p);
+        }
+      }
+    }
+  }
+  return { clouds, plants };
+}
+
 function freeEvictedSessions(
   evicted: HistoryTransaction[],
   freeSession: SessionFreeFn | undefined,
