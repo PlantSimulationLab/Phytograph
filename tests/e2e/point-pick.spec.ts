@@ -127,7 +127,38 @@ test.describe('point picker', () => {
   // yield a frame, then press and release. The picker's drag guard measures
   // press→release travel, so press and release must be at the same pixel.
   let lastClick: { x: number; y: number; under: string | null } | null = null;
+  // Diagnostics for a Linux-only failure (CI, 2026-11-19): the middle of three
+  // clicks dropped no label, and the camera's drag-rotate fired during that
+  // click although the test never moves with a button held. Each click records
+  // the camera before and after it and every pointer event the window saw
+  // (capture phase, so nothing can hide one), read-only: nothing here drives
+  // the app. "accumulates labels" prints it on every run, so a passing run on
+  // Linux still shows whether a click moves the camera.
+  type ClickTrace = { at: [number, number]; under: string | null; camBefore: unknown; camAfter: unknown; events: unknown[] };
+  let clickTrace: ClickTrace[] = [];
+  const cameraBrief = () => session.page.evaluate(() => {
+    const c = (window as any).__getCameraState?.();
+    const r = (v: number[] | undefined) => v?.map((n) => +n.toFixed(4));
+    return c ? { pos: r(c.position), target: r(c.target), moveAt: Math.round(c.lastUserMoveAt) } : null;
+  });
+  async function installPointerLog() {
+    await session.page.evaluate(() => {
+      const w = window as any;
+      w.__ptrLog = [];
+      if (w.__ptrLogInstalled) return;
+      w.__ptrLogInstalled = true;
+      for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+        window.addEventListener(type, (e: Event) => {
+          const p = e as PointerEvent;
+          const t = p.target as HTMLElement | null;
+          w.__ptrLog.push([type.slice(7), +p.clientX.toFixed(2), +p.clientY.toFixed(2), p.buttons,
+            Math.round(performance.now()), t ? `${t.tagName.toLowerCase()}${t.dataset?.testid ? `#${t.dataset.testid}` : ''}` : null]);
+        }, true);
+      }
+    });
+  }
   async function clickViewport(x: number, y: number) {
+    const camBefore = await cameraBrief();
     await session.page.mouse.move(x, y);
     const under = await session.page.evaluate(
       (p) => new Promise<string | null>((r) => requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -139,6 +170,14 @@ test.describe('point picker', () => {
     lastClick = { x, y, under };
     await session.page.mouse.down();
     await session.page.mouse.up();
+    const camAfter = await cameraBrief();
+    const events = await session.page.evaluate(() => {
+      const w = window as any;
+      const log = w.__ptrLog ?? [];
+      w.__ptrLog = [];
+      return log;
+    });
+    clickTrace.push({ at: [+x.toFixed(2), +y.toFixed(2)], under, camBefore, camAfter, events });
   }
 
   const labels = () => session.page.getByTestId('picked-point-label');
@@ -162,6 +201,7 @@ test.describe('point picker', () => {
       }, click);
       throw new Error(
         `${(err as Error).message}\n\n` +
+        `clicks: ${JSON.stringify(clickTrace)}\n` +
         `click: ${JSON.stringify(click)}\n` +
         `picker: ${JSON.stringify(state.picker)}\n` +
         `under pointer now: ${state.underPointerNow}\n` +
@@ -410,11 +450,14 @@ test.describe('point picker', () => {
   test('accumulates labels, dismisses one, and clears all', async () => {
     await importScalars();
     await armPicker();
+    await installPointerLog();
+    clickTrace = [];
 
     for (const world of [[0.2, 0, 0.15], [0.4, 0, 0.3], [0.6, 0, 0.45]] as [number, number, number][]) {
       const px = await worldToScreenPx(world);
       await clickViewport(px.x, px.y);
     }
+    console.log(`[point-pick] click trace: ${JSON.stringify(clickTrace)}`);
     await expectLabels(3);
     await expect(session.page.getByTestId('point-picker-panel'))
       .toHaveAttribute('data-picked-count', '3');
