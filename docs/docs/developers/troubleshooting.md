@@ -107,6 +107,20 @@ returns that cached value. If requests are going to the wrong place, the
 resolution step is what to inspect — don't edit `getBackendUrl()`. To pin a
 specific port for both ends, set `PHYTOGRAPH_BACKEND_PORT`.
 
+If the window stays blank (or the splash never clears) and the backend log
+shows no requests from the renderer at all, the renderer never started. The
+main log's `[window]` lines (`src/main/rendererDiagnostics.ts`, written in every
+mode, E2E included) say which stage failed:
+
+| Line | Meaning |
+|---|---|
+| `[window] renderer page loaded` | The page loaded. Its **absence** means it never did. |
+| `[window] renderer page failed to load: …` | The main frame failed to load, with Chromium's error and URL. |
+| `[window] preload script threw (…)` | The preload failed, so `window.electronAPI` is missing. |
+| `[window] Uncaught …` | An exception the renderer's own forwarding cannot see, such as one thrown while the bundle evaluates. |
+| `[window] renderer is unresponsive` | The renderer stopped responding (and `… responsive again` if it recovers). |
+| `[window] renderer process gone: …` / `child process gone: …` | A renderer or GPU process died. Under E2E only; elsewhere the crash handlers log it. |
+
 ## A tool fails with "… timed out. The backend did not respond within …"
 
 Every request the renderer makes carries a client-side deadline (2 min for an

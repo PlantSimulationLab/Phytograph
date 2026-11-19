@@ -12,6 +12,7 @@ import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
 import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler, log } from './logger.js';
 import { installCrashHandlers, showBackendFailedDialog, showFatalMainErrorDialog } from './crashDialog.js';
+import { installRendererDiagnostics } from './rendererDiagnostics.js';
 import {
   initCrashReporter,
   checkPreviousSession,
@@ -367,6 +368,11 @@ function createWindow(): void {
   }
 
   if (shouldMaximize) mainWindow.maximize();
+
+  // Before the load starts, so a page that fails to load is logged. Only logs,
+  // so E2E gets it too; the crash lines come from installCrashHandlers below
+  // except under E2E, where that is skipped. See rendererDiagnostics.ts.
+  installRendererDiagnostics(mainWindow.webContents, app, log, { logCrashes: isE2E });
 
   // Under E2E, the Vite dev server isn't running — load the prebuilt
   // renderer from dist-renderer just like production would. (npm run
