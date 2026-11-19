@@ -18,7 +18,8 @@ background.
       sprawl, unilateral cordon)
     - **Cereals** — maize, rice, sorghum, wheat
     - **Vegetables** — asparagus, bean, butter lettuce, capsicum, cherry
-      tomato, cowpea, soybean, strawberry, sugarbeet, tomato
+      tomato, cowpea, cucumber (high-wire greenhouse), soybean,
+      strawberry, sugarbeet, tomato
     - **Weeds** — bindweed, cheeseweed, ground cherry weed, puncturevine
 
     A sixth **Other** group appears if the backend offers a model that isn't
