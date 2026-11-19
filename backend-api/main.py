@@ -47802,7 +47802,7 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
     return reg_result, total_iterations
 
 
-def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
+def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None, sample_seed: int = 0) -> dict:
     """Worker for /api/c2m/icp-register. Returns the ICPRegistrationResponse dict.
 
     See _do_c2m_distance for the streaming/cancel/error contract."""
@@ -47868,10 +47868,12 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
         # target cloud starve the source: a 60-point cloud sampled the mesh with
         # 60 points, and ICP then converged to a different pose on every run
         # (residuals wandering ~20-190 mm on the same inputs) because the draw,
-        # not the geometry, decided the correspondence. The target cloud still
-        # caps the useful count, so keep it as an upper bound alongside 50k.
-        num_samples = min(50000, max(len(mesh.vertices) * 10, 1000))
-        source_pcd = mesh.sample_points_uniformly(number_of_points=num_samples)
+        # not the geometry, decided the correspondence. The floor is 5000, as in
+        # _do_m2m_icp: at 1000, 300 seeds on the 60-vertex E2E cylinder put the
+        # post-snap RMSE at 3-58 mm (median 20); at 5000, 3-30 mm (median 12).
+        # The draw is seeded (`_sample_mesh_surface`), so a click is repeatable.
+        num_samples = min(50000, max(len(mesh.vertices) * 10, 5000))
+        source_pcd = _sample_mesh_surface(vertices, triangles, num_samples, seed=sample_seed)
 
         # --- STEP 1: Center alignment (move source centroid to target centroid) ---
         target_center = target_pcd.get_center()
@@ -49205,6 +49207,43 @@ _INGEST_WORKERS = thread_cap.pool_size(3)
 _FINE_ALIGN_WORKERS = thread_cap.pool_size(2)
 
 
+def _sample_mesh_surface(vertices: "np.ndarray", triangles: "np.ndarray",
+                         n: int, seed: int = 0):
+    """`n` points drawn uniformly over a mesh's surface, as an Open3D cloud.
+
+    The same draw as `TriangleMesh.sample_points_uniformly` (a triangle picked
+    in proportion to its area, then a uniform barycentric point in it), but
+    from a SEEDED generator. Open3D's sampler reads a process-global RNG, so
+    mesh ICP gave a different pose on every click: on the 60-point E2E cylinder
+    the post-snap RMSE spread 5-47 mm over 40 identical runs, reached 62 mm
+    once in the E2E suite, and failed its 54 mm limit. A local generator also keeps concurrent
+    requests from consuming each other's draws, which reseeding Open3D's global
+    RNG would not. Callers vary `seed` to test that no single draw is lucky."""
+    o3d = open3d_warmup.get_open3d()
+    V = np.asarray(vertices, dtype=np.float64).reshape(-1, 3)
+    T = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    pcd = o3d.geometry.PointCloud()
+    if len(T) == 0 or n <= 0:
+        return pcd
+    a, b, c = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
+    area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    total = float(area.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        # Every face degenerate: there is no surface to sample, so fall back
+        # to the vertices themselves rather than divide by zero.
+        pcd.points = o3d.utility.Vector3dVector(V)
+        return pcd
+    rng = np.random.default_rng(seed)
+    face = rng.choice(len(T), size=n, p=area / total)
+    r1 = np.sqrt(rng.random(n))
+    r2 = rng.random(n)
+    pts = ((1.0 - r1)[:, None] * a[face]
+           + (r1 * (1.0 - r2))[:, None] * b[face]
+           + (r1 * r2)[:, None] * c[face])
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    return pcd
+
+
 def _registration_frame_origin(X: "np.ndarray") -> "np.ndarray":
     """Whole metres near a scan's median: the local frame multi-scan
     registration works in. Zero for small coordinates (see `_helios_local_origin`).
@@ -49964,7 +50003,7 @@ def _m2m_orientation_search(source_pcd, target_pcd, diagonal: float,
     return best[3].copy()
 
 
-def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
+def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None, sample_seed: int = 0) -> dict:
     """Worker for /api/m2m/icp-register. Returns the ICPRegistrationResponse dict.
 
     See _do_c2m_distance for the streaming/cancel/error contract."""
@@ -50013,8 +50052,10 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         # an 8-vertex box sampled with 80 points left both ICP and the
         # orientation search ranking poses on the draw rather than the shape.
         num_samples = min(50000, max(max(len(target_verts), len(source_verts)) * 10, 5000))
-        target_pcd = target_mesh.sample_points_uniformly(number_of_points=num_samples)
-        source_pcd = source_mesh.sample_points_uniformly(number_of_points=num_samples)
+        # Two seeds, so two identical meshes are not sampled at identical
+        # surface points (which would make the fit trivially exact).
+        target_pcd = _sample_mesh_surface(target_verts, target_tris, num_samples, seed=2 * sample_seed)
+        source_pcd = _sample_mesh_surface(source_verts, source_tris, num_samples, seed=2 * sample_seed + 1)
 
         # --- STEP 1: Center alignment (move source centroid to target centroid) ---
         target_center = target_pcd.get_center()

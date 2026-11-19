@@ -369,6 +369,16 @@ test('generates a DEM for every checked cloud', async () => {
   await expect(page.getByTestId('dem-grid-estimate')).toContainText(/Estimated grid: [\d,]+ × [\d,]+ cells/);
   await page.getByTestId('dem-cell-size').fill('0.5');
   await page.getByTestId('dem-run-button').click();
+  // One summary names both clouds. A success toast clears itself 4 s after it
+  // appears, which is the moment the run ends and the meshes land, so watch
+  // for it from the click on: checked after the mesh assertions below, a
+  // loaded machine spent those 4 s on them and the toast was already gone.
+  const toast = page.getByTestId('toast-success').filter({ hasText: 'for 2 clouds' }).last();
+  const summarySeen = Promise.all([
+    expect(toast).toContainText('ground_plants:', { timeout: 120_000 }),
+    expect(toast).toContainText('ground_plants_sparse:', { timeout: 120_000 }),
+  ]);
+  summarySeen.catch(() => {});  // awaited below; don't report it twice if a mesh check fails first
 
   const demA = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
   const demB = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants_sparse DEM"]');
@@ -378,9 +388,7 @@ test('generates a DEM for every checked cloud', async () => {
   const trisB = parseInt((await demB.getAttribute('data-triangle-count')) ?? '0', 10);
   expect(trisA).toBeGreaterThan(0);
   expect(trisB, 'the same ground grid must make the same terrain').toBe(trisA);
-  // A clean run closes the panel, and one summary names both clouds.
+  // A clean run closes the panel, and one summary named both clouds.
   await expect(panel).toHaveCount(0);
-  const toast = page.getByTestId('toast-success').filter({ hasText: 'for 2 clouds' }).last();
-  await expect(toast).toContainText('ground_plants:');
-  await expect(toast).toContainText('ground_plants_sparse:');
+  await summarySeen;
 });

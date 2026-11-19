@@ -35,17 +35,6 @@ def _cube_cloud(n_side: int = 8) -> np.ndarray:
     return np.column_stack([xs.ravel(), ys.ravel(), zs.ravel()]).astype(np.float64)
 
 
-def _seed_open3d(seed: int) -> None:
-    """Pin Open3D's global RNG so mesh-surface sampling is reproducible.
-    A no-op on builds without the seed API (the test then keeps its old,
-    slightly flaky behavior rather than erroring)."""
-    try:
-        import open3d as o3d
-        o3d.utility.random.seed(seed)
-    except Exception:
-        pass
-
-
 def _cube_mesh():
     """An asymmetric box (2×1×0.5) as (vertices flat, indices flat) for the
     mesh-side workers. Asymmetry removes the rotational ambiguity a perfect cube
@@ -91,10 +80,6 @@ def test_c2c_worker_recovers_known_offset():
 
 
 def test_m2m_worker_recovers_known_offset():
-    # Seed Open3D's RNG: the m2m worker samples the mesh surface with
-    # `sample_points_uniformly`. Seeding pins the sample so a failure here
-    # means a real registration regression rather than an unlucky draw.
-    _seed_open3d(0)
     verts, tris = _cube_mesh()
     offset = np.array([0.3, 0.2, -0.2])
     src_verts = (np.array(verts).reshape(-1, 3) + offset).ravel().tolist()
@@ -115,8 +100,8 @@ def test_m2m_worker_recovers_known_offset():
     moved = m @ np.array([*src_centroid, 1.0])
     residual = np.linalg.norm(moved[:3] - tgt_centroid)
     # The offset was ~0.41; the recovered residual must be a small fraction of it
-    # (~0.06 here — floored by the random surface-sampling spacing on a coarse
-    # 8-vertex box, not by a registration error).
+    # (floored by the surface-sampling spacing on a coarse 8-vertex box, not
+    # by a registration error).
     assert residual < 0.15, f"residual {residual:.4f} vs offset {np.linalg.norm(offset):.4f}"
 
 
@@ -143,7 +128,6 @@ def test_m2m_worker_recovers_a_quarter_turn():
     wrong pose and reports ~0.9 fitness for it. `_m2m_orientation_search` is
     what recovers the turn, and this fails without it."""
     from scipy.spatial.transform import Rotation
-    _seed_open3d(0)
     verts, tris = _lumpy_mesh()
     R = Rotation.from_rotvec(np.radians(90.0) * np.array([1.0, 2.0, 2.0]) / 3.0).as_matrix()
     center = verts.mean(axis=0)
@@ -167,7 +151,6 @@ def test_m2m_orientation_search_leaves_an_aligned_symmetric_mesh_alone():
     """A box fits itself equally well turned 180 degrees. The search must not
     flip a mesh that already sits on its target just because a rotated start
     scores the same -- that is what `_M2M_ORIENTATION_MARGIN` is for."""
-    _seed_open3d(0)
     verts, tris = _cube_mesh()
     src = (np.array(verts).reshape(-1, 3) + np.array([0.05, 0.0, 0.0])).ravel().tolist()
     req = main.MeshToMeshICPRequest(
@@ -180,56 +163,99 @@ def test_m2m_orientation_search_leaves_an_aligned_symmetric_mesh_alone():
     assert _rotation_angle_deg(m[:3, :3]) < 20.0
 
 
-def test_c2m_worker_recovers_known_offset_from_a_sparse_cloud():
-    """Cloud→mesh ICP pulls an offset mesh back onto a SPARSE target cloud.
-
-    The sparse target is the point: the mesh-surface sample count is driven by
-    the mesh's own complexity, not by `len(points)`. When it was tied to the
-    cloud, a 60-point target sampled the mesh with only 60 points and ICP
-    converged to a different pose on every run (residuals wandering ~20-190 mm
-    on identical inputs) — the random draw, not the geometry, chose the
-    correspondence. This is the c2m analog of the c2c/m2m recovery tests,
-    which the suite previously had no equivalent of.
-
-    Deliberately NOT seeded: the whole contract is that the result no longer
-    depends on the sampling draw, so a seed would hide a regression here.
-    """
-    # The same structured cylinder as tests/e2e/fixtures/tiny.xyz: 5 rings of 12
-    # points, r=0.3, h=1.5. Regular rings (not a random draw) are what lets ball
-    # pivoting mesh a 60-point cloud cleanly, so this exercises the real path.
+def _c2m_cylinder_case():
+    """The structured cylinder of tests/e2e/fixtures/tiny.xyz (5 rings of 12
+    points, r=0.3, h=1.5), its ball-pivoted mesh, and a known 0.15 m X offset.
+    Regular rings (not a random draw) are what lets ball pivoting mesh a
+    60-point cloud cleanly, so this exercises the real path."""
     ring = np.arange(12) * (2 * np.pi / 12)
     cloud = np.array([
         [0.3 * np.cos(t), 0.3 * np.sin(t), z]
         for z in np.linspace(0.0, 1.5, 5)
         for t in ring
     ])
-
-    # Mesh the cloud, then rigidly offset that mesh by a known 0.15 m along X.
     tri = main._do_open3d_triangulation(
         main.TriangulationRequest(method="ball_pivoting", points=cloud.tolist())
     )
     verts = np.asarray(tri["vertices"], dtype=np.float64).reshape(-1, 3)
     tris = np.asarray(tri["triangles"], dtype=np.int32).reshape(-1, 3)
     offset = np.array([0.15, 0.0, 0.0])
-
-    result = main._do_c2m_icp(
-        main.ICPRegistrationRequest(
-            points=cloud.ravel().tolist(),
-            mesh_vertices=(verts + offset).ravel().tolist(),
-            mesh_indices=tris.ravel().tolist(),
-        ),
-        progress=None,
+    req = main.ICPRegistrationRequest(
+        points=cloud.ravel().tolist(),
+        mesh_vertices=(verts + offset).ravel().tolist(),
+        mesh_indices=tris.ravel().tolist(),
     )
-    assert result["success"] is True, result.get("error")
+    return req, offset
 
-    # Reproduce what the renderer does with the matrix: newPos = R*currentPos + t.
-    m = np.array(result["transformation_matrix"], dtype=np.float64).reshape(4, 4)
-    new_pos = m[:3, :3] @ offset + m[:3, 3]
-    residual = float(np.linalg.norm(new_pos))
-    # The 150 mm offset must be largely removed. Observed ~8-21 mm across runs;
-    # 80 mm is decisively below the offset while leaving margin for the draw.
-    assert residual < 0.08, f"residual {residual:.4f} m vs 0.15 m offset"
 
+def test_c2m_worker_recovers_known_offset_from_a_sparse_cloud():
+    """Cloud→mesh ICP pulls an offset mesh back onto a SPARSE target cloud,
+    whatever the surface-sampling draw.
+
+    The mesh-surface sample count is driven by the mesh's own complexity, not
+    by `len(points)`. When it was tied to the cloud, a 60-point target sampled
+    the mesh with only 60 points and ICP converged to a different pose on
+    every run (residuals wandering ~20-190 mm on identical inputs). The draw
+    is now seeded, so one seed would only prove one draw is good: the test
+    sweeps seeds, which is what "does not depend on the draw" means.
+    """
+    req, offset = _c2m_cylinder_case()
+    residuals = []
+    for seed in range(12):
+        result = main._do_c2m_icp(req, progress=None, sample_seed=seed)
+        assert result["success"] is True, result.get("error")
+        # What the renderer does with the matrix: newPos = R*currentPos + t.
+        m = np.array(result["transformation_matrix"], dtype=np.float64).reshape(4, 4)
+        residuals.append(float(np.linalg.norm(m[:3, :3] @ offset + m[:3, 3])))
+    # The 150 mm offset must be largely removed on every draw. Measured over
+    # 300 seeds: 3-18 mm. 50 mm is decisively below the offset with margin.
+    worst = max(residuals)
+    assert worst < 0.05, f"worst residual {worst:.4f} m vs 0.15 m offset: {residuals}"
+
+
+def test_c2m_and_m2m_snap_is_repeatable():
+    """The same inputs give the same pose. The surface sample used to come
+    from Open3D's process-global RNG, so clicking Snap to Fit twice moved the
+    mesh to two different places (position residual 4-26 mm over 40 runs on
+    the E2E cylinder)."""
+    req, _ = _c2m_cylinder_case()
+    # Same pose, not same bits: Open3D's threaded reductions differ in the
+    # last ulp, and another platform's BLAS may differ more. 1e-6 is still
+    # four orders below the old spread of tens of millimeters.
+    a = main._do_c2m_icp(req, progress=None)["transformation_matrix"]
+    b = main._do_c2m_icp(req, progress=None)["transformation_matrix"]
+    assert np.allclose(a, b, rtol=0, atol=1e-6), f"{a}\n!=\n{b}"
+
+    verts, tris = _cube_mesh()
+    src = (np.array(verts).reshape(-1, 3) + np.array([0.3, 0.2, -0.2])).ravel().tolist()
+    m2m = main.MeshToMeshICPRequest(
+        target_vertices=verts, target_indices=tris,
+        source_vertices=src, source_indices=tris,
+    )
+    a = main._do_m2m_icp(m2m, progress=None)["transformation_matrix"]
+    b = main._do_m2m_icp(m2m, progress=None)["transformation_matrix"]
+    assert np.allclose(a, b, rtol=0, atol=1e-6), f"{a}\n!=\n{b}"
+
+
+def test_mesh_surface_sample_is_uniform_by_area():
+    """`_sample_mesh_surface` stands in for Open3D's sampler, so it must keep
+    its distribution: points on the surface, in proportion to face area."""
+    # Two triangles in z=0: one of area 0.5, one of area 1.5 (3x larger).
+    V = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0],
+                  [2, 0, 0], [5, 0, 0], [2, 1, 0]], dtype=np.float64)
+    T = np.array([[0, 1, 2], [3, 4, 5]])
+    pts = np.asarray(main._sample_mesh_surface(V, T, 40_000, seed=3).points)
+    assert pts.shape == (40_000, 3)
+    assert np.all(pts[:, 2] == 0.0)
+    in_big = pts[:, 0] >= 2.0
+    assert abs(in_big.mean() - 0.75) < 0.01
+    # Inside the small triangle: x, y >= 0 and x + y <= 1.
+    small = pts[~in_big]
+    assert np.all(small[:, :2] >= 0) and np.all(small.sum(axis=1) <= 1.0 + 1e-12)
+    # Seeded: the same seed is the same draw, a different seed is not.
+    again = np.asarray(main._sample_mesh_surface(V, T, 40_000, seed=3).points)
+    other = np.asarray(main._sample_mesh_surface(V, T, 40_000, seed=4).points)
+    assert np.array_equal(pts, again) and not np.array_equal(pts, other)
 
 def test_c2m_distance_worker_zero_for_points_on_mesh():
     """Points sampled ON the cube's surface have ~zero distance to the mesh."""
@@ -473,7 +499,6 @@ def _m2m_result(client, *, body=None, frame=None) -> dict:
 
 
 def test_m2m_endpoint_accepts_a_binary_frame(client):
-    _seed_open3d(0)
     verts, tris = _cube_mesh()
     offset = np.array([0.3, 0.2, -0.2])
     src = (np.array(verts).reshape(-1, 3) + offset).ravel().tolist()
@@ -492,12 +517,10 @@ def test_m2m_binary_and_json_transports_agree(client):
     offset = np.array([0.3, 0.2, -0.2])
     src = (np.array(verts).reshape(-1, 3) + offset).ravel().tolist()
 
-    _seed_open3d(0)
     via_json = _m2m_result(client, body={
         "target_vertices": verts, "target_indices": tris,
         "source_vertices": src, "source_indices": tris,
     })
-    _seed_open3d(0)
     via_bin = _m2m_result(client, frame=_m2m_frame({}, verts, tris, src, tris))
 
     assert via_json["success"] and via_bin["success"]

@@ -238,8 +238,13 @@ test('re-running the segmentation retires hand corrections to wood_class', async
     await page.getByTestId('wood-method').selectOption('sota');
     await page.getByTestId('wood-mode').selectOption('label');
     await page.getByTestId('wood-segment-run-button').click();
+    // Wait for THIS run to finish: a clean run closes the panel. The legend
+    // alone cannot say so on the re-run, because it already reads wood_class
+    // from the first run, so the helper returned at once and the test read
+    // the label counts while the re-run was still going (a failure under load).
+    await expect(page.getByTestId('wood-segment-panel')).toHaveCount(0, { timeout: 60_000 });
     await expect(page.getByTestId('class-legend'))
-      .toHaveAttribute('data-legend-attribute', 'wood_class', { timeout: 60_000 });
+      .toHaveAttribute('data-legend-attribute', 'wood_class');
   };
   await segment();
 

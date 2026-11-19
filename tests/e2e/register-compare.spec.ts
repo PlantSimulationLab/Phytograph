@@ -221,7 +221,7 @@ test('Snap to Fit (ICP) REMOVES a known cloud↔mesh offset', async () => {
   await expect(snap).toBeEnabled();  // works with nothing selected (remembered inputs)
   await snap.click();
   // ICP finished — either toast counts. On this deliberately coarse 60-point
-  // cylinder the residual (~40-65 mm, see below) is >2% of the fixture's ~1.5 m
+  // cylinder the residual (~3-30 mm, see below) can be >2% of the fixture's ~1.5 m
   // extent, so the backend attaches a `quality_warning` and the renderer raises
   // a WARNING toast ("Snap to Fit — Check Result") instead of the success one.
   // That is correct behavior for a sparse fixture, not a failure — the real
@@ -234,10 +234,10 @@ test('Snap to Fit (ICP) REMOVES a known cloud↔mesh offset', async () => {
 
   // ICP must have pulled the mesh back toward the cloud: the 0.15 m offset is
   // substantially removed (residual well under half of it). On this coarse
-  // 60-point fixture the surface-sampled ICP converges to ~40-65 mm, not exactly
-  // 0 — so assert < 80 mm, which is decisively below the introduced offset while
-  // leaving margin above the observed residual. (The distance-drop check below is
-  // the independent correctness signal.)
+  // 60-point fixture the surface-sampled ICP converges a few cm short of 0
+  // (position residual 3-18 mm over 300 sampling seeds; the backend uses one
+  // fixed seed) — so assert < 80 mm, decisively below the introduced offset.
+  // (The distance-drop check below is the independent correctness signal.)
   await expect
     .poll(async () => dist(parsePos(await meshRow.getAttribute('data-mesh-position')), [0, 0, 0]), { timeout: 20_000 })
     .toBeLessThan(0.08);
@@ -248,6 +248,9 @@ test('Snap to Fit (ICP) REMOVES a known cloud↔mesh offset', async () => {
   await deselectAll(page);
   await computeDistance(page);
   const afterMm = await readRmseMm(page);
+  // ~91 mm before; 3-30 mm after over 300 sampling seeds. With the unseeded
+  // sampler and a 1000-sample floor this replaced, seeds reached 58 mm, and one
+  // suite run read 62 mm and failed here.
   expect(afterMm).toBeLessThan(beforeMm * 0.6);  // distance decisively reduced
 });
 
