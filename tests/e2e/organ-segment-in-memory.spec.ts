@@ -87,14 +87,18 @@ test('labels an in-memory synthetic scan of a generated bean', async () => {
   // Every point of the in-memory cloud was labeled, and only once.
   expect(r.soil + r.stem + r.leaf).toBe(total);
   // A bean from above with no ground in the scene: nearly all leaf, some
-  // stem, next to no soil. Helios builds this 25-day bean with 95 leaflets
-  // (PlantArchitecture.getPlantLeafObjectIDs); a single overhead view hides
-  // some under others, and the model finds ~85.
+  // stem, next to no soil. The plant is unseeded, so every run is a new one.
+  // helios-core 1.3.97's bush bean has 41-68 leaflets at 25 days over 30
+  // seeds (PlantArchitecture.getPlantLeafObjectIDs; the older model had 95).
+  // A single overhead view hides some under others, and the model sometimes
+  // splits one: it found 47-72 over 8 local runs, and 48 on Linux CI. The
+  // bounds catch the failures that matter (no leaflets found, or hundreds)
+  // without depending on which plant was drawn.
   expect(r.leaf).toBeGreaterThan(0.7 * total);
   expect(r.stem).toBeGreaterThan(0);
   expect(r.soil).toBeLessThan(0.05 * total);
-  expect(r.leaflets).toBeGreaterThanOrEqual(50);
-  expect(r.leaflets).toBeLessThanOrEqual(115);
+  expect(r.leaflets).toBeGreaterThanOrEqual(30);
+  expect(r.leaflets).toBeLessThanOrEqual(100);
 
   // Both columns landed on the in-memory cloud, which is still in memory.
   const legend = page.getByTestId('class-legend');

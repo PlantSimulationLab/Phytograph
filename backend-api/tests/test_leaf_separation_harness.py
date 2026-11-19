@@ -20,7 +20,6 @@ import sys
 
 import numpy as np
 import pytest
-from scipy.spatial import cKDTree
 
 # The harness lives under backend-api/research/, which isn't on the default test path.
 _RESEARCH_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "research")
@@ -94,37 +93,34 @@ def test_leaflet_granularity_is_per_object():
     """Ground-truth granularity sanity for compound (trifoliate) leaves like bean: the
     labeling groups by Helios compound object, and each leaflet is its OWN object (the
     leaf prototype is built once per leaflet -- see label_organs() docstring). So a
-    trifoliate plant must yield many distinct leaf objects, several of which sit at nearly
-    the same base point (the three leaflets of one compound leaf radiating from a shared
-    petiole tip). If leaflets were ever merged into a single object that pattern would
-    vanish (one object per compound leaf instead of three).
+    trifoliate plant must yield about three leaf objects per petiole object. If leaflets
+    were ever merged into a single object the ratio would fall to about one.
 
-    This is a light, deterministic (seeded) sanity check -- not a full merge detector;
-    the authoritative guarantee is the Helios source cited in label_organs()."""
+    It used to look for three leaflet CENTROIDS within 2 cm of each other. helios-core
+    1.3.97 gave bean leaflets their own stalks (petiolules) and a new architecture, which
+    spreads the blades: that check failed on 21 of 30 seeds while every leaflet was still
+    its own object. Leaves per petiole measured 2.75-3.12 over 12 seeds (just under 3
+    because a bean's first true leaves are unifoliate), so 2.5 holds on any draw, and on
+    Linux, whose RNG stream differs from macOS's for the same seed.
+
+    The authoritative guarantee is the Helios source cited in label_organs()."""
     ctx = None
     try:
         ctx, uuids, n_org, _ = harness.build_labeled_plant(_MODEL, 30.0, seed=12345)
         u = np.array(uuids)
         labels = np.array([str(ctx.getPrimitiveData(int(x), "object_label")) for x in u])
         parents = np.array([ctx.getPrimitiveParentObjectID(int(x)) for x in u])
-        cent = np.array([
-            np.mean([[p.x, p.y, p.z] for p in ctx.getPrimitiveVertices(int(x))], axis=0)
-            for x in u
-        ])
     finally:
         harness.close_context(ctx)
 
     leaf_objs = np.unique(parents[labels == "leaf"])
+    petiole_objs = np.unique(parents[labels == "petiole"])
     assert len(leaf_objs) >= 10, "expected many distinct leaflet objects on a trifoliate plant"
-
-    # At least one cluster of >=3 leaf objects whose centroids nearly coincide (a compound
-    # leaf's leaflets sharing a base) -- impossible if the three leaflets were one object.
-    centroids = np.array([cent[parents == o].mean(0) for o in leaf_objs])
-    tree = cKDTree(centroids)
-    max_near = max(len(tree.query_ball_point(c, r=0.02)) for c in centroids)
-    assert max_near >= 3, (
-        "no cluster of >=3 coincident leaf objects found -- compound-leaf leaflets may be "
-        "merged into a single object rather than labeled separately")
+    assert len(petiole_objs) > 0, "expected petiole objects to count leaflets against"
+    per_petiole = len(leaf_objs) / len(petiole_objs)
+    assert per_petiole >= 2.5, (
+        f"{len(leaf_objs)} leaf objects on {len(petiole_objs)} petioles ({per_petiole:.2f} each) "
+        "-- compound-leaf leaflets may be merged into a single object rather than labeled separately")
 
 
 def test_statistics_return_sane_values():
