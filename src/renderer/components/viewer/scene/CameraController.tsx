@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { zoomLimits, clampDollyToSurface } from '../../../lib/cameraScale';
 import { noteRenderActivity } from '../../../lib/renderActivity';
+import { orbitDragMove, orbitDragStart, type OrbitDragState } from '../../../lib/orbitDrag';
 
 // View direction type
 export type ViewDirection = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
@@ -990,8 +991,9 @@ export function CameraController({
   useEffect(() => {
     const el = gl.domElement;
     const EPS = 1e-4;
-    let dragging = false;
-    let last = { x: 0, y: 0 };
+    // See lib/orbitDrag.ts: a move with the left button up ends the drag, so a
+    // pointerup that never arrived cannot leave hovering rotating the camera.
+    let drag: OrbitDragState = { dragging: false, last: { x: 0, y: 0 } };
 
     const rotateAboutPivot = (dx: number, dy: number) => {
       const controls = controlsRef.current;
@@ -1042,20 +1044,18 @@ export function CameraController({
       // Left button only, and never with a modifier: shift/ctrl/meta+left is
       // OrbitControls' pan, and alt+left is reserved.
       if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
-      dragging = true;
-      last = { x: e.clientX, y: e.clientY };
+      drag = orbitDragStart(e);
     };
     const onPointerMove = (e: PointerEvent) => {
-      if (!dragging) return;
-      if (!enabledRef.current) { dragging = false; return; }
-      const dx = e.clientX - last.x;
-      const dy = e.clientY - last.y;
-      if (dx === 0 && dy === 0) return;
-      last = { x: e.clientX, y: e.clientY };
+      if (!drag.dragging) return;
+      if (!enabledRef.current) { drag = { ...drag, dragging: false }; return; }
+      const step = orbitDragMove(drag, e);
+      drag = step.state;
+      if (!step.rotate) return;
       noteUserCamera();
-      rotateAboutPivot(dx, dy);
+      rotateAboutPivot(step.rotate.dx, step.rotate.dy);
     };
-    const onPointerUp = () => { dragging = false; };
+    const onPointerUp = () => { drag = { ...drag, dragging: false }; };
 
     // Down on the canvas only (so a click on a floating panel never orbits), but
     // move/up on the window so a drag that leaves the canvas still tracks —

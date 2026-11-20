@@ -21,9 +21,11 @@
  * `stallCheckMs` after navigation starts (15 s and 60 s by default), the
  * watchdog logs what the main process can still see: the webContents' own
  * state, every Electron process with its CPU and memory, and the GPU feature
- * status. Two snapshots, because Chromium measures CPU since the PREVIOUS
- * `getAppMetrics()` call: the first reads 0 %, and the second says whether the
- * renderer and GPU processes spent those 45 s spinning or idle.
+ * status. Chromium measures CPU since the PREVIOUS `getAppMetrics()` call, so
+ * the watchdog primes it when it arms: each snapshot's CPU covers the time
+ * since the one before. A window closed while its load is still pending gets
+ * a final snapshot on the way out, since a stalled test is often torn down
+ * before the 60 s check.
  *
  * Kept free of `electron` imports (the caller passes the webContents and app)
  * so it is unit-testable. The probes are optional on the interfaces, so a test
@@ -116,25 +118,41 @@ export function installRendererDiagnostics(
   // The stall watchdog: armed when a navigation starts (a crash-recovery
   // reload re-arms it), disarmed when that load finishes or the contents go.
   let stallTimers: ReturnType<typeof setTimeout>[] = [];
+  // When the load still pending began; null once it finished or failed.
+  let pendingSince: number | null = null;
   const disarm = () => {
     for (const t of stallTimers) clearTimeout(t);
     stallTimers = [];
+    pendingSince = null;
   };
+  const secondsPending = () => Math.round((Date.now() - (pendingSince ?? Date.now())) / 1000);
   webContents.on('did-start-loading', () => {
     disarm();
     log.info('[window] renderer navigation started');
-    const startedAt = Date.now();
+    pendingSince = Date.now();
+    // Prime Chromium's CPU accounting: each getAppMetrics() reports CPU since
+    // the previous call, so without this the 15 s snapshot always reads 0 %.
+    probe(app.getAppMetrics?.bind(app));
     stallTimers = stallCheckMs.map((ms) => {
       const t = setTimeout(() => {
-        const s = Math.round((Date.now() - startedAt) / 1000);
-        log.warn(`[window] renderer page not loaded after ${s}s: ${stallSnapshot(webContents, app)}`);
+        log.warn(`[window] renderer page not loaded after ${secondsPending()}s: ${stallSnapshot(webContents, app)}`);
       }, ms);
       // Never the reason the process stays alive.
       (t as { unref?: () => void }).unref?.();
       return t;
     });
   });
-  webContents.on('destroyed', disarm);
+  // A stalled window can be closed before any timer fires: the lad-wood stall
+  // on CI was torn down about 38 s after launch, before a 60 s check. Take the
+  // snapshot on the way out instead. `before-quit` comes while everything is
+  // still alive; `destroyed` is the fallback for a window closed on its own.
+  const closingSnapshot = () => {
+    if (pendingSince == null) return;
+    log.warn(`[window] renderer closing before its page loaded (after ${secondsPending()}s): ${stallSnapshot(webContents, app)}`);
+    disarm();
+  };
+  app.on('before-quit', closingSnapshot);
+  webContents.on('destroyed', closingSnapshot);
 
   // Between navigation start and page load: the HTML has been parsed.
   webContents.on('dom-ready', () => {

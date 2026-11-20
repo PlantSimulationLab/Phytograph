@@ -36,6 +36,9 @@ const platformOnly = process.env.PHYTOGRAPH_E2E_PLATFORM === '1';
 // never collide. See CLAUDE.md "Testing" for the rules.
 export default defineConfig({
   testDir: './tests/e2e',
+  // Archives the logs of sessions that never reached launchApp's close()
+  // (a timed-out test that launched its own app). CI only; see the helper.
+  globalTeardown: './tests/e2e/helpers/globalTeardown.ts',
   // Cold-start of the bundled backend is 10-40s (open3d + pyhelios + uvicorn).
   timeout: 180_000,
   expect: { timeout: 15_000 },

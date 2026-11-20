@@ -1089,9 +1089,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Through the guard, never a bare --clobber: once PyPI has this version
+        # its wheel pins the archives already on the release, and a re-run
+        # must not replace them (v0.99.0 needed 0.99.0.post1 for exactly that).
         run: |
           tag="v$(node -p "require('./package.json').version")"
-          gh release upload "$tag" backend-dist/* --clobber
+          node scripts/upload-backend-archives.mjs "$tag" backend-dist
 
       - name: Stash latest-mac.yml for merge (macOS)
         # Not in a dry_run: there is no release to merge a manifest into.
@@ -1449,7 +1452,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Collect backend digests
+      # The digests come from the RELEASE, which is what pip downloads from.
+      # The build artifacts describe what each job built, and a job re-run
+      # after PyPI published keeps the release's archive instead of uploading
+      # its own (scripts/upload-backend-archives.mjs), so only the release's
+      # .sha256 files are guaranteed to match. A dry_run has no release.
+      - name: Collect backend digests (from the release)
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          gh release download "$tag" --pattern '*.sha256' --dir backend-digests
+
+      - name: Collect backend digests (dry run, from the build artifacts)
+        if: ${{ inputs.dry_run }}
         uses: actions/download-artifact@v4
         with:
           pattern: backend-sha256-*

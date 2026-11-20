@@ -138,13 +138,26 @@ manifest contents above, and the job's own **Verify macOS notarization** and
 ### When the PyPI wheel pins the wrong archives
 
 `publish-pypi` runs once all four builds have succeeded, and embeds the digests
-of the backend archives those builds uploaded. A build re-run AFTER that
-rebuilds its archive and replaces it on the release (`--clobber`), but PyPI
-never replaces a file (`skip-existing`). The published wheel then pins an
-archive that no longer exists, and `python -m phytograph download` on that
-platform refuses with a checksum mismatch. v0.99.0 shipped this way for macOS.
-Compare `phytograph/_backend_manifest.json` in the PyPI wheel against the
-release's `*.sha256` files to check.
+of the backend archives on the release. PyPI never replaces a file
+(`skip-existing`), so a build re-run AFTER that must not replace those
+archives either. v0.99.0 shipped with this broken for macOS: its re-run
+rebuilt the archives and uploaded them with `--clobber`, the published wheel
+pinned archives that no longer existed, and `python -m phytograph download`
+refused them. Two things now prevent it:
+
+- `scripts/upload-backend-archives.mjs` uploads each job's archives. Once
+  PyPI has the version, it keeps any archive (and its `.sha256`) the release
+  already has, uploads only missing ones, and logs a warning for each one it
+  keeps. If PyPI can't say whether the version exists, the step fails rather
+  than guess.
+- `build-python-wheel` reads its digests from the release's `.sha256` files,
+  not from the build jobs' artifacts, so every wheel pins what pip will
+  actually download. A `dry_run` has no release and uses the artifacts.
+
+The guard's first real exercise is the next release that needs a re-run
+(`dry_run` skips the upload). To check a release by hand, compare
+`phytograph/_backend_manifest.json` in the PyPI wheel against the release's
+`*.sha256` files.
 
 PyPI never reuses a version, so the fix is a post-release: the same code
 against the same engine, with the right digests:

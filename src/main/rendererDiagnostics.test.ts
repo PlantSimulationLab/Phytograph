@@ -143,8 +143,8 @@ describe('the stall watchdog', () => {
     expect(w[0]).toContain('"gpu_compositing":"disabled_software"');
   });
 
-  it('stands down once the page loads, the main frame fails, or the contents go', () => {
-    for (const end of ['did-finish-load', 'did-fail-load', 'destroyed'] as const) {
+  it('stands down once the page loads or the main frame fails', () => {
+    for (const end of ['did-finish-load', 'did-fail-load'] as const) {
       resetRendererDiagnosticsForTest();
       const { webContents, warns } = stalled();
       webContents.emit('did-start-loading');
@@ -154,6 +154,41 @@ describe('the stall watchdog', () => {
       vi.advanceTimersByTime(120_000);
       expect(warns(), end).toEqual([]);
     }
+  });
+
+  it('primes the CPU baseline when it arms, so the first snapshot measures real CPU', () => {
+    const { webContents, app } = stalled();
+    let calls = 0;
+    const real = app.getAppMetrics;
+    app.getAppMetrics = () => { calls += 1; return real(); };
+    webContents.emit('did-start-loading');
+    expect(calls).toBe(1);
+    vi.advanceTimersByTime(15_000);
+    expect(calls).toBe(2);
+  });
+
+  it('snapshots a window closed while its load is still pending, once', () => {
+    for (const exit of ['before-quit', 'destroyed'] as const) {
+      resetRendererDiagnosticsForTest();
+      const { webContents, app, warns } = stalled();
+      webContents.emit('did-start-loading');
+      vi.advanceTimersByTime(8_000);
+      if (exit === 'before-quit') app.emit('before-quit');
+      else webContents.emit('destroyed');
+      webContents.emit('destroyed');            // the second exit path adds nothing
+      vi.advanceTimersByTime(120_000);           // and the 15 s / 60 s checks never fire
+      expect(warns(), exit).toHaveLength(1);
+      expect(warns()[0], exit).toMatch(/^\[window\] renderer closing before its page loaded \(after 8s\): state=/);
+    }
+  });
+
+  it('says nothing on the way out once the page has loaded', () => {
+    const { webContents, app, warns } = stalled();
+    webContents.emit('did-start-loading');
+    webContents.emit('did-finish-load');
+    app.emit('before-quit');
+    webContents.emit('destroyed');
+    expect(warns()).toEqual([]);
   });
 
   it('a reload re-arms it from the new start, without the old timers firing', () => {
