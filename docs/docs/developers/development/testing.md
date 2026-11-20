@@ -243,14 +243,18 @@ Playwright report under `test-results/app-logs/<profile>/`:
 
 - `PHYTOGRAPH_E2E_LOG_ARCHIVE=<dir>`: `launchApp`'s `close()` copies the
   session's `logs/` there first. The main log carries the renderer's console
-  too.
+  too, and `[window]` lines for the renderer's own startup and failures.
 - `PHYTOGRAPH_STACK_DUMP_SECS=<n>`: the backend writes every thread's stack
   every *n* seconds to `phytograph-backend-<session>.stacks.log` beside its
-  log (`faulthandler`), and the crashing traceback on a fatal signal such as
-  SIGSEGV. A request that never returns shows the line it was blocked on, and
-  a native crash shows the call it died in, on a runner nobody can attach a
-  debugger to. The file is appended, so a respawned backend keeps the crashed
-  one's dump.
+  log, and the crashing traceback on a fatal signal such as SIGSEGV
+  (`faulthandler`). A request that never returns shows the line it was
+  blocked on, and a native crash shows the call it died in, on a runner
+  nobody can attach a debugger to. The file is appended, so a respawned
+  backend keeps the crashed one's dump. The periodic dump comes from
+  `backend-api/stack_dumper.py`, which holds the GIL while it reads.
+  `faulthandler`'s own repeating dump read running threads' frames without
+  it, and on Windows it crashed the backend with an access violation. Don't
+  switch back to it.
 
 ## Profiling resource usage during E2E
 

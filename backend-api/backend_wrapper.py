@@ -259,7 +259,9 @@ logger = logging.getLogger(__name__)
 # al.). For hangs and native crashes on machines nobody can attach a debugger
 # to: ci.yml and platform.yml set it for E2E and upload the logs. Appended, not
 # truncated: a respawned backend reuses the session tag, and truncating erased
-# the dump of the process that crashed.
+# the dump of the process that crashed. The periodic dump is stack_dumper's,
+# which holds the GIL; faulthandler's own repeat dump read running threads'
+# frames without it and crashed the backend (see stack_dumper.py).
 _stack_dump_secs = os.environ.get("PHYTOGRAPH_STACK_DUMP_SECS")
 if _stack_dump_secs:
     import faulthandler
@@ -272,7 +274,8 @@ if _stack_dump_secs:
         _stack_file.write(f"=== backend pid {os.getpid()} ===\n")
         _stack_file.flush()
         faulthandler.enable(file=_stack_file, all_threads=True)
-        faulthandler.dump_traceback_later(float(_stack_dump_secs), repeat=True, file=_stack_file)
+        from stack_dumper import start_periodic_stack_dump
+        start_periodic_stack_dump(_stack_file, float(_stack_dump_secs))
         logger.info(f"Dumping thread stacks every {_stack_dump_secs}s to {_stack_path}")
     except (OSError, ValueError) as _e:
         logger.warning(f"PHYTOGRAPH_STACK_DUMP_SECS={_stack_dump_secs!r} ignored: {_e}")
