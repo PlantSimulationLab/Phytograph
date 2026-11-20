@@ -243,7 +243,12 @@ Playwright report under `test-results/app-logs/<profile>/`:
 
 - `PHYTOGRAPH_E2E_LOG_ARCHIVE=<dir>`: `launchApp`'s `close()` copies the
   session's `logs/` there first. The main log carries the renderer's console
-  too, and `[window]` lines for the renderer's own startup and failures.
+  too, and `[window]` lines for the renderer's own startup and failures. CI
+  sets it for every E2E job and uploads the folder as `app-logs-<job>` on
+  every passing run, as well as inside the failure report. That way a warning
+  a green run hides, such as a recovered startup stall, is still there to
+  read. A session that never reached `close()` (a timed-out test that
+  launched its own app) is swept up by the Playwright `globalTeardown`.
 - `PHYTOGRAPH_STACK_DUMP_SECS=<n>`: the backend writes every thread's stack
   every *n* seconds to `phytograph-backend-<session>.stacks.log` beside its
   log, and the crashing traceback on a fatal signal such as SIGSEGV

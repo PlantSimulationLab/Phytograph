@@ -576,6 +576,20 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # The app session logs on a PASSING run too. A failure's report above
+      # already carries them; this is for the warnings a green run hides, such
+      # as the renderer startup watchdog's snapshot of a stall that recovered
+      # (`[window] renderer page not loaded after …`, issue #9). Without it a
+      # stall left evidence only when it failed a test outright. A few MB.
+      - name: Upload app session logs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-logs-main-${{ matrix.shard }}
+          path: test-results/app-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # --------------------------------------------------------------------------
   # E2E, `heavy` project — its own job rather than a shard.
   #
@@ -643,6 +657,9 @@ jobs:
         run: npm run build
 
       - name: E2E tests (heavy project)
+        env:
+          # As the main shards: each session's logs, uploaded below.
+          PHYTOGRAPH_E2E_LOG_ARCHIVE: ${{ github.workspace }}/test-results/app-logs
         run: >
           xvfb-run -a -s "-screen 0 1920x1080x24"
           npm run test:e2e -- --project=heavy
@@ -655,6 +672,20 @@ jobs:
           path: |
             playwright-report/
             test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # The app session logs on a PASSING run too. A failure's report above
+      # already carries them; this is for the warnings a green run hides, such
+      # as the renderer startup watchdog's snapshot of a stall that recovered
+      # (`[window] renderer page not loaded after …`, issue #9). Without it a
+      # stall left evidence only when it failed a test outright. A few MB.
+      - name: Upload app session logs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-logs-heavy
+          path: test-results/app-logs/
           retention-days: 7
           if-no-files-found: ignore
 
