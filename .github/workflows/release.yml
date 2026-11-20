@@ -1042,6 +1042,16 @@ jobs:
           # makes it COPY the icon instead, sidestepping the double-link. Harmless
           # on Windows/Linux (they weren't hard-link-failing).
           USE_HARD_LINKS: 'false'
+          # electron-builder refuses to upload to an existing release that was
+          # published more than 2 hours ago, and says so only as a log line:
+          # the job still passes. The first platform to finish publishes the
+          # release, so re-running a failed job later (v0.99.0: Apple's
+          # notarization agreement had lapsed, both macOS jobs were re-run 13 h
+          # on) built, signed and notarized the installers, then dropped them,
+          # while merge-latest-mac (which uploads with `gh`) published a
+          # manifest naming files that were not there. Every Mac on 0.98.0 was
+          # offered an update it could not download.
+          EP_GH_IGNORE_TIME: 'true'
         # macOS: pin electron-builder to THIS job's architecture. package.json
         # deliberately lists no arch for the mac targets (defaulting to the host
         # arch), and the explicit flag makes it impossible for the arm64 job to

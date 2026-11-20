@@ -93,6 +93,20 @@ gh run rerun <run-id> --failed
 That re-runs only the failed job, leaves the successful jobs' already-uploaded
 assets untouched, and re-triggers the dependent `merge-latest-mac`.
 
+**A green re-run can still have uploaded nothing.** electron-builder will not
+add files to a release that was published more than 2 hours ago. It logs
+`skipped publishing … existing release published more than 2 hours ago` and
+the job passes. `release.yml` now sets `EP_GH_IGNORE_TIME` to turn that off.
+v0.99.0 hit it before that change: Apple's notarization agreement had lapsed,
+both macOS jobs were re-run 13 hours after Windows and Linux published, and
+`merge-latest-mac` published a manifest naming macOS files that were never
+uploaded. A tag cut before that commit still has the old behavior, because a
+re-run uses the workflow file at the tag. The way back without moving the tag
+is to make the release a draft (`gh release edit vX.Y.Z --draft=true`).
+electron-builder uploads to a draft with no age check. Re-run the jobs, check
+the assets, then publish again (`--draft=false --latest`). While it is a draft,
+the previous release is Latest, so every platform's updater waits.
+
 **Then check `latest-mac.yml` before calling the release done.** The merge job
 is `if: always()`, so on a partial macOS release it still runs — and
 electron-builder will already have uploaded a *single-arch* manifest from
