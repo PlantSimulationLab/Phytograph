@@ -55,3 +55,49 @@ def test_metadata_declares_the_runtime_dependencies(tmp_path):
         meta = z.read(f"phytograph-{pg.EXPECTED_BACKEND_VERSION}.dist-info/METADATA").decode()
     assert "Requires-Dist: httpx>=0.24" in meta and "Requires-Dist: numpy>=1.22" in meta
     assert 'Requires-Dist: tqdm; extra == "progress"' in meta
+
+
+def _digests() -> dict:
+    v = pg.EXPECTED_BACKEND_VERSION
+    names = ["linux-x64.tar.gz", "macos-arm64.tar.gz", "macos-x64.tar.gz", "windows-x64.zip"]
+    return {f"phytograph-backend-{v}-{n}": f"{i:064x}" for i, n in enumerate(names, 1)}
+
+
+def test_a_post_release_changes_only_the_distribution_version(tmp_path):
+    """0.99.0's PyPI wheel pinned macOS archives a later re-run replaced, and
+    PyPI never reuses a version. `post` rebuilds the same code as
+    <version>.postN; the manifest stays keyed on the ENGINE version, because
+    the client finds and verifies its engine by EXPECTED_BACKEND_VERSION."""
+    import json
+    v = pg.EXPECTED_BACKEND_VERSION
+    whl = build_wheel.build(tmp_path, backend_digests=_digests(), require_platforms=True, post=1)
+    assert whl.name == f"phytograph-{v}.post1-py3-none-any.whl"
+    with zipfile.ZipFile(whl) as z:
+        meta = z.read(f"phytograph-{v}.post1.dist-info/METADATA").decode()
+        manifest = json.loads(z.read("phytograph/_backend_manifest.json"))
+        version_py = z.read("phytograph/_version.py").decode()
+    assert f"Version: {v}.post1" in meta
+    assert manifest == {"version": v, "sha256": dict(sorted(_digests().items()))}
+    assert f'EXPECTED_BACKEND_VERSION = "{v}"' in version_py
+
+    # pip installs it under the post-release version, and the code inside
+    # still asks for the engine version.
+    site = tmp_path / "site"
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "--no-index",
+                        "--target", str(site), str(whl)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = subprocess.run([sys.executable, "-I", "-c",
+                        "import sys; sys.path.insert(0, sys.argv[1]); import phytograph as pg; "
+                        "print(pg.EXPECTED_BACKEND_VERSION)",
+                        str(site)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == v
+    assert (site / f"phytograph-{v}.post1.dist-info").is_dir()
+
+
+def test_a_post_release_needs_digests_and_a_positive_number(tmp_path):
+    with pytest.raises(SystemExit, match="needs --backend-digests"):
+        build_wheel.build(tmp_path, post=1)
+    with pytest.raises(SystemExit, match="1 or more"):
+        build_wheel.build(tmp_path, backend_digests=_digests(), post=0)
+

@@ -135,6 +135,34 @@ Verify a release by its artifacts, not by job status: assets present, the
 manifest contents above, and the job's own **Verify macOS notarization** and
 **Smoke-test packaged app** steps.
 
+### When the PyPI wheel pins the wrong archives
+
+`publish-pypi` runs once all four builds have succeeded, and embeds the digests
+of the backend archives those builds uploaded. A build re-run AFTER that
+rebuilds its archive and replaces it on the release (`--clobber`), but PyPI
+never replaces a file (`skip-existing`). The published wheel then pins an
+archive that no longer exists, and `python -m phytograph download` on that
+platform refuses with a checksum mismatch. v0.99.0 shipped this way for macOS.
+Compare `phytograph/_backend_manifest.json` in the PyPI wheel against the
+release's `*.sha256` files to check.
+
+PyPI never reuses a version, so the fix is a post-release: the same code
+against the same engine, with the right digests:
+
+```bash
+gh release download vX.Y.Z -p '*.sha256' -D digests
+python3 python/build_wheel.py --out dist --backend-digests digests \
+  --require-all-platforms --post 1
+twine check dist/*.whl && twine upload dist/*.whl    # a PyPI API token
+```
+
+Only the distribution's version changes (`X.Y.Z.post1`). The client finds and
+verifies its engine by `EXPECTED_BACKEND_VERSION`, so it still downloads the
+`vX.Y.Z` archives. Build it from the tagged code. Before uploading, check that
+its package files match the wheel attached to the release (only the dist-info
+should differ), then yank `X.Y.Z` on PyPI with a reason naming the
+post-release.
+
 ## Required GitHub Secrets
 
 | Secret | Purpose |

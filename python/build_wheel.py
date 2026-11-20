@@ -72,11 +72,28 @@ def read_digests(directory: Path) -> dict:
 
 
 def build(out_dir: Path, *, backend_digests: "dict | None" = None,
-          require_platforms: bool = False) -> Path:
+          require_platforms: bool = False, post: "int | None" = None) -> Path:
     """Build the wheel. `backend_digests` ({asset name: sha256}) is embedded as
     `phytograph/_backend_manifest.json`, pinning the archives a PyPI install
-    downloads; with `require_platforms` every published platform must be there."""
+    downloads; with `require_platforms` every published platform must be there.
+
+    `post` builds the PEP 440 post-release `<version>.post<N>`: the same code
+    against the same engine, for replacing a PyPI wheel that cannot be
+    replaced (PyPI never reuses a version). Only the distribution's version
+    changes (wheel name, METADATA, dist-info). The engine version, and so the
+    archive names the manifest is keyed on, stays `<version>`: the client
+    finds and verifies its engine by EXPECTED_BACKEND_VERSION, never by its
+    own package version. First used for 0.99.0, whose PyPI wheel pinned macOS
+    archives a later re-run had replaced."""
     p = _project()
+    engine_version = p["version"]
+    if post is not None:
+        if post < 1:
+            raise SystemExit(f"build_wheel: --post must be 1 or more, got {post}")
+        if backend_digests is None:
+            raise SystemExit("build_wheel: a post-release exists to fix a PyPI wheel, so it "
+                             "needs --backend-digests")
+        p = {**p, "version": f"{engine_version}.post{post}"}
     dist_info = f"{p['name']}-{p['version']}.dist-info"
     files = {}
     for src in sorted(PKG.rglob("*.py")):
@@ -94,7 +111,7 @@ def build(out_dir: Path, *, backend_digests: "dict | None" = None,
         sys.path.insert(0, str(HERE))
         import _stdlib_import   # the release runner's Python has no httpx/numpy
         _download = _stdlib_import.load("_download")
-        expected = {_download.asset_name(p["version"], o, a) for o, a in _download.SUPPORTED}
+        expected = {_download.asset_name(engine_version, o, a) for o, a in _download.SUPPORTED}
         unknown = set(backend_digests) - expected
         if unknown:
             raise SystemExit(f"build_wheel: digests for unexpected assets {sorted(unknown)}")
@@ -103,7 +120,7 @@ def build(out_dir: Path, *, backend_digests: "dict | None" = None,
             raise SystemExit(f"build_wheel: no backend digest for {sorted(missing)}; refusing to "
                              "publish a version some platforms could not download.")
         files["phytograph/_backend_manifest.json"] = json.dumps(
-            {"version": p["version"], "sha256": dict(sorted(backend_digests.items()))},
+            {"version": engine_version, "sha256": dict(sorted(backend_digests.items()))},
             indent=1).encode()
     files[f"{dist_info}/METADATA"] = _metadata(p).encode("utf-8")
     files[f"{dist_info}/WHEEL"] = (
@@ -134,11 +151,15 @@ def main(argv=None) -> int:
                     help="directory of <asset>.sha256 files to embed (the release's PyPI wheel)")
     ap.add_argument("--require-all-platforms", action="store_true",
                     help="fail unless every published platform has a digest")
+    ap.add_argument("--post", type=int,
+                    help="build the post-release <version>.post<N> (same code and engine; "
+                         "replaces a PyPI wheel that cannot be replaced)")
     args = ap.parse_args(argv)
     digests = read_digests(args.backend_digests) if args.backend_digests else None
     for old in args.out.glob("phytograph-*.whl") if args.out.is_dir() else []:
         old.unlink()   # one wheel, the current version, never a stale sibling
-    print(build(args.out, backend_digests=digests, require_platforms=args.require_all_platforms))
+    print(build(args.out, backend_digests=digests, require_platforms=args.require_all_platforms,
+                post=args.post))
     return 0
 
 
