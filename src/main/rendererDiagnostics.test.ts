@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { installRendererDiagnostics, resetRendererDiagnosticsForTest } from './rendererDiagnostics';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installRendererDiagnostics, resetRendererDiagnosticsForTest, stallSnapshot } from './rendererDiagnostics';
 
 function setup(logCrashes: boolean) {
   const webContents = new EventEmitter();
@@ -76,4 +76,108 @@ describe('installRendererDiagnostics', () => {
     installRendererDiagnostics(new EventEmitter(), app, log, { logCrashes: true });
     expect(app.listenerCount('child-process-gone')).toBe(1);
   });
+
+  it('marks navigation start and DOM ready, the two stages before a page load', () => {
+    const { webContents, lines } = setup(true);
+    webContents.emit('did-start-loading');
+    webContents.emit('dom-ready');
+    webContents.emit('did-finish-load');
+    expect(lines).toEqual([
+      ['info', '[window] renderer navigation started'],
+      ['info', '[window] renderer DOM ready'],
+      ['info', '[window] renderer page loaded'],
+    ]);
+  });
 });
+
+describe('the stall watchdog', () => {
+  beforeEach(() => {
+    resetRendererDiagnosticsForTest();
+    vi.useFakeTimers();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  function stalled() {
+    const webContents = Object.assign(new EventEmitter(), {
+      isLoading: () => true,
+      isLoadingMainFrame: () => true,
+      isWaitingForResponse: () => false,
+      isCrashed: () => false,
+      getOSProcessId: () => 4242,
+      getURL: () => 'file:///app/dist-renderer/index.html',
+    });
+    const app = Object.assign(new EventEmitter(), {
+      getAppMetrics: () => [
+        { type: 'Browser', pid: 100, cpu: { percentCPUUsage: 1.25, idleWakeupsPerSecond: 3 }, memory: { workingSetSize: 204800 } },
+        { type: 'Tab', pid: 4242, cpu: { percentCPUUsage: 99.5, idleWakeupsPerSecond: 0 }, memory: { workingSetSize: 51200 } },
+        { type: 'GPU', pid: 101 },
+      ],
+      getGPUFeatureStatus: () => ({ webgl: 'enabled', gpu_compositing: 'disabled_software' }),
+    });
+    const lines: Array<[string, string]> = [];
+    const log = {
+      info: (m: string) => lines.push(['info', m]),
+      warn: (m: string) => lines.push(['warn', m]),
+      error: (m: string) => lines.push(['error', m]),
+    };
+    installRendererDiagnostics(webContents, app, log, { logCrashes: true, stallCheckMs: [15_000, 60_000] });
+    return { webContents, app, warns: () => lines.filter(([lvl]) => lvl === 'warn').map(([, m]) => m) };
+  }
+
+  it('snapshots a load that never finishes at 15 s and again at 60 s', () => {
+    const { webContents, warns } = stalled();
+    webContents.emit('did-start-loading');
+    vi.advanceTimersByTime(14_999);
+    expect(warns()).toEqual([]);
+    vi.advanceTimersByTime(1);
+    vi.advanceTimersByTime(45_000);
+    const w = warns();
+    expect(w).toHaveLength(2);
+    expect(w[0]).toMatch(/^\[window\] renderer page not loaded after 15s: /);
+    expect(w[1]).toMatch(/^\[window\] renderer page not loaded after 60s: /);
+    expect(w[0]).toContain('"loading":true');
+    expect(w[0]).toContain('"rendererPid":4242');
+    expect(w[0]).toContain('Tab:4242 cpu=99.5% wakeups=0/s mem=50MB');
+    expect(w[0]).toContain('Browser:100 cpu=1.3% wakeups=3/s mem=200MB');
+    expect(w[0]).toContain('GPU:101 cpu=?% wakeups=?/s mem=?MB');
+    expect(w[0]).toContain('"gpu_compositing":"disabled_software"');
+  });
+
+  it('stands down once the page loads, the main frame fails, or the contents go', () => {
+    for (const end of ['did-finish-load', 'did-fail-load', 'destroyed'] as const) {
+      resetRendererDiagnosticsForTest();
+      const { webContents, warns } = stalled();
+      webContents.emit('did-start-loading');
+      vi.advanceTimersByTime(5_000);
+      if (end === 'did-fail-load') webContents.emit(end, {}, -6, 'ERR_FILE_NOT_FOUND', 'file:///x', true);
+      else webContents.emit(end);
+      vi.advanceTimersByTime(120_000);
+      expect(warns(), end).toEqual([]);
+    }
+  });
+
+  it('a reload re-arms it from the new start, without the old timers firing', () => {
+    const { webContents, warns } = stalled();
+    webContents.emit('did-start-loading');
+    vi.advanceTimersByTime(10_000);
+    webContents.emit('did-start-loading');
+    vi.advanceTimersByTime(14_999);
+    expect(warns()).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(warns()).toHaveLength(1);
+    expect(warns()[0]).toContain('after 15s');
+  });
+
+  it('a snapshot never throws, whatever a probe does', () => {
+    const webContents = Object.assign(new EventEmitter(), {
+      isLoading: () => { throw new Error('destroyed'); },
+    });
+    const app = Object.assign(new EventEmitter(), {
+      getAppMetrics: () => { throw new Error('no metrics'); },
+    });
+    const text = stallSnapshot(webContents, app);
+    expect(text).toContain('"loading":"error: destroyed"');
+    expect(text).toContain('processes=[error: no metrics]');
+  });
+});
+

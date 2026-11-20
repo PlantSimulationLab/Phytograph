@@ -114,7 +114,10 @@ mode, E2E included) say which stage failed:
 
 | Line | Meaning |
 |---|---|
+| `[window] renderer navigation started` | The main frame's load began. |
+| `[window] renderer DOM ready` | The HTML was parsed. Present without `page loaded`, the stall is in loading the bundle or its resources. |
 | `[window] renderer page loaded` | The page loaded. Its **absence** means it never did. |
+| `[window] renderer page not loaded after 15s: …` (and `60s`) | The load has neither finished nor failed. A snapshot follows: the webContents state (`loading`, `waitingForResponse`, `crashed`, the renderer's PID, the URL), every Electron process with its CPU, idle wakeups and memory, and the GPU feature status. CPU is measured since the previous snapshot, so the 15 s one reads 0 %. The 60 s one shows whether each process spent those 45 s busy or idle, and whether the renderer or GPU process is there at all. |
 | `[window] renderer page failed to load: …` | The main frame failed to load, with Chromium's error and URL. |
 | `[window] preload script threw (…)` | The preload failed, so `window.electronAPI` is missing. |
 | `[window] Uncaught …` | An exception the renderer's own forwarding cannot see, such as one thrown while the bundle evaluates. |
