@@ -62,6 +62,58 @@ export interface DiagnosticsApp {
   on(event: string, listener: (...args: any[]) => void): unknown;
   getAppMetrics?(): DiagnosticsProcessMetric[];
   getGPUFeatureStatus?(): unknown;
+  getGPUInfo?(infoType: 'basic' | 'complete'): Promise<unknown>;
+}
+
+/** How long the page-load GPU baseline waits for `getGPUInfo('basic')`. */
+const GPU_INFO_TIMEOUT_MS = 5_000;
+
+/** The GPU fields worth a log line, out of getGPUInfo('basic'). */
+function summarizeGpuInfo(info: unknown): string {
+  if (!info || typeof info !== 'object') return String(info);
+  const i = info as { auxAttributes?: Record<string, unknown>; gpuDevice?: unknown[] };
+  const aux = i.auxAttributes ?? {};
+  const pick = (k: string) => (k in aux ? aux[k] : undefined);
+  return JSON.stringify({
+    glRenderer: pick('glRenderer'),
+    glVendor: pick('glVendor'),
+    glVersion: pick('glVersion'),
+    glImplementationParts: pick('glImplementationParts'),
+    gpuDevice: i.gpuDevice,
+  });
+}
+
+/**
+ * One line per window at its first page load: the GPU feature status and the
+ * GL implementation the GPU process settled on. It is the healthy baseline
+ * the stall snapshot is read against (#9: a stalled CI window showed every
+ * feature off and a 0 MB GPU process, and nothing said what a working one
+ * shows). getGPUInfo needs the GPU process, so it is raced against a timeout
+ * and never called from the stall snapshot itself.
+ */
+export async function logGpuBaseline(app: DiagnosticsApp, log: DiagnosticsLogger): Promise<void> {
+  let features: string;
+  try {
+    features = JSON.stringify(app.getGPUFeatureStatus?.());
+  } catch (err) {
+    features = `error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  let info = 'unavailable';
+  if (app.getGPUInfo) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`no answer in ${GPU_INFO_TIMEOUT_MS} ms`)), GPU_INFO_TIMEOUT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    try {
+      info = summarizeGpuInfo(await Promise.race([app.getGPUInfo('basic'), timeout]));
+    } catch (err) {
+      info = `error: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  log.info(`[window] gpu at page load: features=${features} info=${info}`);
 }
 
 const CONSOLE_ERROR_LEVEL = 3;
@@ -160,9 +212,14 @@ export function installRendererDiagnostics(
   });
 
   // A positive marker, so a session log WITHOUT it says the page never loaded.
+  let gpuBaselineLogged = false;
   webContents.on('did-finish-load', () => {
     disarm();
     log.info('[window] renderer page loaded');
+    if (!gpuBaselineLogged) {
+      gpuBaselineLogged = true;
+      void logGpuBaseline(app, log);
+    }
   });
 
   webContents.on('did-fail-load', (_e: unknown, errorCode: number, errorDescription: string,

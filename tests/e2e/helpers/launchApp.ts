@@ -1,5 +1,5 @@
 import { _electron, type ElectronApplication, type Page } from '@playwright/test';
-import { existsSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { cp, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join, dirname } from 'node:path';
@@ -168,6 +168,14 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   // accessory policy still applies, we just get the flash back.
   const headlessElectron: string | null = await ensureHeadlessElectron();
 
+  // Where CI archives each session's logs (close() and the globalTeardown copy
+  // <userData>/logs). There, Chromium's own log goes to stderr
+  // (ELECTRON_ENABLE_LOGGING) and stderr is written into that folder: a GPU
+  // process that fails to start says why only there, and the startup stall in
+  // issue #9 showed a GPU process that never became usable. About 5 KB a
+  // session. Off macOS only, like the archive itself.
+  const captureStderr = !!process.env.PHYTOGRAPH_E2E_LOG_ARCHIVE && process.platform !== 'darwin';
+
   const app = await _electron.launch({
     ...(headlessElectron ? { executablePath: headlessElectron } : {}),
     args: ['.', `--user-data-dir=${userDataDir}`],
@@ -182,10 +190,18 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
       PHYTOGRAPH_BACKEND_PORT: String(backendPort),
       // Private octree cache for this launch (see comment above).
       PHYTOGRAPH_OCTREE_CACHE_ROOT: octreeCacheRoot,
+      ...(captureStderr ? { ELECTRON_ENABLE_LOGGING: '1' } : {}),
       // Per-test overrides last so a spec can tune backend thresholds.
       ...extraEnv,
     },
   });
+  if (captureStderr) {
+    const logs = join(userDataDir, 'logs');
+    mkdirSync(logs, { recursive: true });
+    // A listener beside Playwright's own, which reads stderr for its
+    // DevTools handshake; adding one doesn't take the stream from it.
+    app.process().stderr?.pipe(createWriteStream(join(logs, 'electron-stderr.log')));
+  }
   const page = await app.firstWindow();
 
   // Wait for the supervised backend to actually serve /version. The main

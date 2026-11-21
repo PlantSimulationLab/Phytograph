@@ -248,7 +248,11 @@ Playwright report under `test-results/app-logs/<profile>/`:
   every passing run, as well as inside the failure report. That way a warning
   a green run hides, such as a recovered startup stall, is still there to
   read. A session that never reached `close()` (a timed-out test that
-  launched its own app) is swept up by the Playwright `globalTeardown`.
+  launched its own app) is swept up by the Playwright `globalTeardown`. With
+  it set (off macOS), `launchApp` also turns on Chromium's own logging
+  (`ELECTRON_ENABLE_LOGGING`) and writes Electron's stderr to
+  `electron-stderr.log` in the same folder. That is where a GPU process that
+  fails to start says why.
 - `PHYTOGRAPH_STACK_DUMP_SECS=<n>`: the backend writes every thread's stack
   every *n* seconds to `phytograph-backend-<session>.stacks.log` beside its
   log, and the crashing traceback on a fatal signal such as SIGSEGV

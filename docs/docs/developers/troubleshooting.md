@@ -117,6 +117,7 @@ mode, E2E included) say which stage failed:
 | `[window] renderer navigation started` | The main frame's load began. |
 | `[window] renderer DOM ready` | The HTML was parsed. Present without `page loaded`, the stall is in loading the bundle or its resources. |
 | `[window] renderer page loaded` | The page loaded. Its **absence** means it never did. |
+| `[window] gpu at page load: features=… info=…` | Once per window, at its first load: the GPU feature status and the GL implementation (`glRenderer`, `glVendor`, …). It is the healthy baseline to read a stall snapshot against. |
 | `[window] renderer page not loaded after 15s: …` (and `60s`) | The load has neither finished nor failed. A snapshot follows: the webContents state (`loading`, `waitingForResponse`, `crashed`, the renderer's PID, the URL), every Electron process with its CPU, idle wakeups and memory, and the GPU feature status. CPU is measured since the previous snapshot (the watchdog primes it at navigation start), so each one shows whether each process was busy or idle since the last, and whether the renderer or GPU process is there at all. |
 | `[window] renderer closing before its page loaded (after Ns): …` | The same snapshot, taken when the app quits or the window goes away while the load is still pending. A stalled test is often torn down before the 60 s check. |
 | `[window] renderer page failed to load: …` | The main frame failed to load, with Chromium's error and URL. |

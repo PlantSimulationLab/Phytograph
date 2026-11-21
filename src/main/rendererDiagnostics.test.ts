@@ -1,13 +1,14 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { installRendererDiagnostics, resetRendererDiagnosticsForTest, stallSnapshot } from './rendererDiagnostics';
+import { installRendererDiagnostics, logGpuBaseline, resetRendererDiagnosticsForTest, stallSnapshot } from './rendererDiagnostics';
 
 function setup(logCrashes: boolean) {
   const webContents = new EventEmitter();
   const app = new EventEmitter();
   const lines: Array<[string, string]> = [];
   const log = {
-    info: (m: string) => lines.push(['info', m]),
+    // The page-load GPU baseline has its own tests below; leave it out here.
+    info: (m: string) => { if (!m.startsWith('[window] gpu at page load')) lines.push(['info', m]); },
     warn: (m: string) => lines.push(['warn', m]),
     error: (m: string) => lines.push(['error', m]),
   };
@@ -213,6 +214,52 @@ describe('the stall watchdog', () => {
     const text = stallSnapshot(webContents, app);
     expect(text).toContain('"loading":"error: destroyed"');
     expect(text).toContain('processes=[error: no metrics]');
+  });
+});
+
+describe('the GPU baseline at page load', () => {
+  function capture() {
+    const lines: string[] = [];
+    return { lines, log: { info: (m: string) => lines.push(m), warn: (m: string) => lines.push(m), error: (m: string) => lines.push(m) } };
+  }
+
+  it('logs the feature status and the GL implementation once per window', async () => {
+    resetRendererDiagnosticsForTest();
+    const { lines, log } = capture();
+    const webContents = new EventEmitter();
+    const app = Object.assign(new EventEmitter(), {
+      getGPUFeatureStatus: () => ({ webgl: 'enabled_on' }),
+      getGPUInfo: async () => ({
+        auxAttributes: { glRenderer: 'ANGLE (llvmpipe)', glVendor: 'Mesa', glVersion: '4.5', other: 'x' },
+        gpuDevice: [{ vendorId: 0, deviceId: 0, active: true }],
+      }),
+    });
+    installRendererDiagnostics(webContents, app, log, { logCrashes: true });
+    webContents.emit('did-finish-load');
+    webContents.emit('did-finish-load');   // a reload: no second baseline
+    await new Promise((r) => setTimeout(r, 0));
+    const baseline = lines.filter((l) => l.startsWith('[window] gpu at page load'));
+    expect(baseline).toHaveLength(1);
+    expect(baseline[0]).toContain('features={"webgl":"enabled_on"}');
+    expect(baseline[0]).toContain('"glRenderer":"ANGLE (llvmpipe)"');
+    expect(baseline[0]).not.toContain('other');
+  });
+
+  it('never waits on a GPU process that does not answer, and never throws', async () => {
+    vi.useFakeTimers();
+    try {
+      const { lines, log } = capture();
+      const app = Object.assign(new EventEmitter(), {
+        getGPUFeatureStatus: () => { throw new Error('gone'); },
+        getGPUInfo: () => new Promise<unknown>(() => {}),
+      });
+      const done = logGpuBaseline(app, log);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await done;
+      expect(lines[0]).toBe('[window] gpu at page load: features=error: gone info=error: no answer in 5000 ms');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
