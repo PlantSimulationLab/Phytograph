@@ -176,9 +176,23 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   // session. Off macOS only, like the archive itself.
   const captureStderr = !!process.env.PHYTOGRAPH_E2E_LOG_ARCHIVE && process.platform !== 'darwin';
 
+  // Linux (CI's Xvfb has no GL): start the GPU process on SwiftShader. Left to
+  // itself, Chromium tried a hardware GPU process on every launch, which
+  // failed ("Exiting GPU process due to errors during initialization", ~1.7
+  // times a session across all 171 sessions of one CI run), relaunched it,
+  // and only then fell back to SwiftShader. Now and then that dance left the
+  // renderer waiting forever on a GPU process stuck at 0 MB with every feature
+  // off, and the window never loaded (issue #9). SwiftShader is what CI
+  // rendered with anyway, so this skips the failed attempts, not any
+  // coverage. --enable-unsafe-swiftshader opts in to software WebGL, whose
+  // automatic fallback Chromium has deprecated.
+  const gpuArgs = process.platform === 'linux'
+    ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+    : [];
+
   const app = await _electron.launch({
     ...(headlessElectron ? { executablePath: headlessElectron } : {}),
-    args: ['.', `--user-data-dir=${userDataDir}`],
+    args: ['.', `--user-data-dir=${userDataDir}`, ...gpuArgs],
     cwd: repoRoot,
     timeout: 60_000,
     env: {
