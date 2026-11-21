@@ -176,18 +176,23 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   // session. Off macOS only, like the archive itself.
   const captureStderr = !!process.env.PHYTOGRAPH_E2E_LOG_ARCHIVE && process.platform !== 'darwin';
 
-  // Linux (CI's Xvfb has no GL): start the GPU process on SwiftShader. Left to
+  // Linux (CI's Xvfb has no GL): skip the hardware GPU attempt. Left to
   // itself, Chromium tried a hardware GPU process on every launch, which
   // failed ("Exiting GPU process due to errors during initialization", ~1.7
   // times a session across all 171 sessions of one CI run), relaunched it,
-  // and only then fell back to SwiftShader. Now and then that dance left the
-  // renderer waiting forever on a GPU process stuck at 0 MB with every feature
-  // off, and the window never loaded (issue #9). SwiftShader is what CI
-  // rendered with anyway, so this skips the failed attempts, not any
-  // coverage. --enable-unsafe-swiftshader opts in to software WebGL, whose
+  // and only then fell back to software. Now and then that left the renderer
+  // waiting forever on a GPU process stuck at 0 MB with every feature off, and
+  // the window never loaded (issue #9).
+  //
+  // --disable-gpu starts in the state the fallback ended in: compositing and
+  // rasterization in software, WebGL on SwiftShader (webgl
+  // "unavailable_software", as every healthy CI session reported). It is NOT
+  // --use-angle=swiftshader: that also moved compositing onto a software GPU,
+  // and the E2E shards ran ~50% slower (21-24 min to 31-45), with timing tests
+  // failing. --enable-unsafe-swiftshader opts in to software WebGL, whose
   // automatic fallback Chromium has deprecated.
   const gpuArgs = process.platform === 'linux'
-    ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+    ? ['--disable-gpu', '--enable-unsafe-swiftshader']
     : [];
 
   const app = await _electron.launch({

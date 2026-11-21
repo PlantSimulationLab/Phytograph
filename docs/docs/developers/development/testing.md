@@ -254,10 +254,14 @@ Playwright report under `test-results/app-logs/<profile>/`:
   `electron-stderr.log` in the same folder. That is where a GPU process that
   fails to start says why.
 - On Linux, `launchApp` starts Electron with
-  `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader`.
-  Xvfb has no GL, so without it every launch first tried a hardware GPU
-  process, which failed and was relaunched before Chromium fell back to
-  SwiftShader. Occasionally that left the window waiting forever (issue #9).
+  `--disable-gpu --enable-unsafe-swiftshader`. Xvfb has no GL, so without it
+  every launch first tried a hardware GPU process, which failed and was
+  relaunched before Chromium fell back to software. Occasionally that left
+  the window waiting forever (issue #9). These flags start in the state the
+  fallback ended in: software compositing, with WebGL on SwiftShader. Don't
+  use `--use-angle=swiftshader` instead. It also puts compositing on a
+  software GPU, and the E2E shards ran about 50% slower, with timing tests
+  failing.
 - `PHYTOGRAPH_STACK_DUMP_SECS=<n>`: the backend writes every thread's stack
   every *n* seconds to `phytograph-backend-<session>.stacks.log` beside its
   log, and the crashing traceback on a fatal signal such as SIGSEGV
